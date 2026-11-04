@@ -24,7 +24,7 @@ build-backend = "hatchling.build"
 packages = ["src/talent"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pyinstaller>=6.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
