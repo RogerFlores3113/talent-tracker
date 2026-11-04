@@ -1,6 +1,6 @@
 # Talent Search: design
 
-Status: v0.1 slice built (candidate store, search page, MCP server, desktop packaging).
+Status: v0.0.1 slice built (candidate store, search page, MCP server, desktop packaging).
 Last updated: 2026-11-04.
 
 ## 1. What it is
