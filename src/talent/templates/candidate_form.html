@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>{{ 'Edit ' ~ c.name if c.id else 'Add a candidate' }}</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form class="form" method="post" action="{{ '/candidates/' ~ c.id if c.id else '/candidates' }}">
+  {% for f, label, kind in [
+      ('name','Name','text'), ('current_title','Current title','text'), ('current_company','Company','text'),
+      ('location','Location','text'), ('email','Email','email'), ('phone','Phone','tel'),
+      ('linkedin_url','LinkedIn URL','url'), ('website','Website','text'), ('tags','Tags (comma separated)','text'),
+      ('source','Where you found them','text')] %}
+  <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ c[f] or '' }}" {{ 'required' if f == 'name' }}></label>
+  {% endfor %}
+  <label class="wide">About (what search looks at most)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
+  <div class="actions"><button class="btn primary" type="submit">Save</button>
+    <a class="btn" href="{{ '/candidates/' ~ c.id if c.id else '/' }}">Cancel</a></div>
+</form>
+{% endblock %}

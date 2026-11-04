@@ -1,0 +1,7 @@
+{% if ok %}
+<p class="ok">Done. Quit and reopen {{ 'Claude' if target == 'claude' else 'Codex' }}, then look for Talent Search in its tools.</p>
+{% if result.backup %}<p class="fine">Your previous settings were saved as a backup next to the original file.</p>{% endif %}
+{% else %}
+<p class="error">That didn't work: {{ error }}</p>
+<p class="fine">You can still connect by hand with the snippet below.</p>
+{% endif %}

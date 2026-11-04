@@ -1,0 +1,31 @@
+{% if total_all == 0 %}
+<div class="empty">
+  <h2>No candidates yet</h2>
+  <p>Connect Claude or Codex, then ask it something like
+    <em>“Save this person as a candidate”</em> with a profile pasted in.</p>
+  <p class="actions">
+    <a class="btn primary" href="/connect">Connect an AI app</a>
+    <a class="btn" href="/candidates/new">Add one by hand</a>
+  </p>
+  <form method="post" action="/sample-data"><button class="link" type="submit">Or load sample candidates to try it out</button></form>
+</div>
+{% else %}
+<p class="meta">
+  {% if q %}{{ result.total }} match{{ '' if result.total == 1 else 'es' }}{% else %}{{ result.total }} candidate{{ '' if result.total == 1 else 's' }}, most recently updated first{% endif %}
+</p>
+{% if not result.hits %}
+<p class="none">No one matches that yet. Try fewer words.</p>
+{% endif %}
+<ul class="cards">
+  {% for h in result.hits %}{% set c = h.candidate %}
+  <li>
+    <a class="card" href="/candidates/{{ c.id }}">
+      <div class="row1"><strong>{{ c.name }}</strong><span class="when">Updated {{ c.updated_at | date }}</span></div>
+      <div class="row2">{{ c.current_title or '' }}{% if c.current_company %} at {{ c.current_company }}{% endif %}{% if c.location %} · {{ c.location }}{% endif %}</div>
+      {% if h.snippet %}<div class="snip">{{ h.snippet | snippet | safe }}</div>
+      {% elif c.about %}<div class="snip">{{ c.about[:180] }}{{ '…' if c.about|length > 180 }}</div>{% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

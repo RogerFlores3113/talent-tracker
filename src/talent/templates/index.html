@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block body %}
+<form class="searchbar" action="/" method="get"
+      hx-get="/" hx-target="#results" hx-push-url="true"
+      hx-trigger="input delay:120ms, submit">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search skills, companies, titles, names…" autofocus autocomplete="off" aria-label="Search candidates">
+  <div class="filters">
+    <input type="text" name="title" value="{{ title }}" placeholder="Title contains" aria-label="Title filter">
+    <input type="text" name="location" value="{{ location }}" placeholder="Location contains" aria-label="Location filter">
+  </div>
+</form>
+<section id="results">{% include "_results.html" %}</section>
+{% endblock %}

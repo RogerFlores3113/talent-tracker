@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ c.name }} · Talent Search{% endblock %}
+{% block body %}
+<article class="profile">
+  <div class="head">
+    <div>
+      <h1>{{ c.name }}</h1>
+      <p class="sub">{{ c.current_title or '' }}{% if c.current_company %} at {{ c.current_company }}{% endif %}{% if c.location %} · {{ c.location }}{% endif %}</p>
+    </div>
+    <a class="btn" href="/candidates/{{ c.id }}?edit=1">Edit</a>
+  </div>
+  {% if c.about %}<p class="about">{{ c.about }}</p>{% endif %}
+  <dl class="facts">
+    {% if c.email %}<dt>Email</dt><dd><a href="mailto:{{ c.email }}">{{ c.email }}</a></dd>{% endif %}
+    {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
+    {% if c.linkedin_url %}<dt>LinkedIn</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') }}</a></dd>{% endif %}
+    {% if c.website %}<dt>Website</dt><dd>{{ c.website }}</dd>{% endif %}
+    {% if c.tags %}<dt>Tags</dt><dd>{{ c.tags }}</dd>{% endif %}
+    {% if c.source %}<dt>Found via</dt><dd>{{ c.source }}</dd>{% endif %}
+    <dt>Last updated</dt><dd>{{ c.updated_at | date }}</dd>
+    <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
+  </dl>
+  {% if pipelines %}
+  <h2>Jobs</h2>
+  <ul class="plain">{% for a in pipelines %}<li>{{ a.job_title }}{% if a.job_company %} ({{ a.job_company }}){% endif %}: <span class="stage">{{ a.stage }}</span> since {{ a.stage_changed_at | date }}</li>{% endfor %}</ul>
+  {% endif %}
+  <form method="post" action="/candidates/{{ c.id }}/delete" onsubmit="return confirm('Delete this candidate for good?')">
+    <button class="link danger" type="submit">Delete candidate</button>
+  </form>
+</article>
+{% endblock %}

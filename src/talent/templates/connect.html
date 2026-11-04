@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Connect AI · Talent Search{% endblock %}
+{% block body %}
+<h1>Connect your AI app</h1>
+<p class="lead">Once connected, you can ask your AI app to find, save and update candidates here, in plain English.</p>
+
+<div class="connect-grid">
+  <section class="panel">
+    <h2>Claude Desktop</h2>
+    <p>{% if claude_on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}Adds Talent Search to Claude's tools.{% endif %}</p>
+    <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result">Connect to Claude</button>
+    <div id="claude-result"></div>
+  </section>
+  <section class="panel">
+    <h2>Codex</h2>
+    <p>{% if codex_on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}Works for the Codex app and command line.{% endif %}</p>
+    <button class="btn primary" hx-post="/connect/codex" hx-target="#codex-result">Connect to Codex</button>
+    <div id="codex-result"></div>
+  </section>
+</div>
+
+<section class="panel">
+  <h2>Try asking</h2>
+  <ul class="plain">
+    <li>“Save this person as a candidate:” and paste a LinkedIn profile or resume.</li>
+    <li>“Who do I have in Austin with Rust experience?”</li>
+    <li>“Create a Senior Backend Engineer job and add my three best Go candidates to it.”</li>
+    <li>“Move Priya to interviewing for the Data Lead role.”</li>
+  </ul>
+</section>
+
+<details class="panel">
+  <summary>Using a different AI app?</summary>
+  <p>Most apps that support MCP (Cursor, LM Studio and others) accept this. Paste it into the app's MCP settings.</p>
+  <pre class="code" id="json-snip">{{ json_snippet }}</pre>
+  <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('json-snip').innerText);this.textContent='Copied'">Copy</button>
+  <p>Codex settings (config.toml):</p>
+  <pre class="code" id="codex-snip">{{ codex_snippet }}</pre>
+  <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('codex-snip').innerText);this.textContent='Copied'">Copy</button>
+</details>
+{% endblock %}

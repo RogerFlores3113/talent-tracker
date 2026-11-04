@@ -1,0 +1,30 @@
+[project]
+name = "talent-search"
+version = "0.1.0"
+description = "Local-first candidate database for recruiters, searchable from a web UI and from any MCP client."
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "mcp>=1.9,<2",
+    "platformdirs>=4.0",
+]
+
+[project.scripts]
+talent = "talent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/talent"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
