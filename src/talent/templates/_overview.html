@@ -13,8 +13,8 @@
   {% for x in i.sessions %}
     <li><span class="fine">{{ x.at | local(IV_TIME) }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}
       {% if i.kind == 'interview_outcome' and x.status == 'scheduled' and x.started %}
-      <span class="session-acts">{% for value, word in interview_outcomes.items() %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ x.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}</span>
-      {% elif x.status in interview_outcomes %}<span class="badge">{{ interview_outcomes[x.status] }}</span>
+      <span class="session-acts">{% for value, word in interview_choices %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ x.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}</span>
+      {% elif x.status in interview_outcomes %}<span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>
       {% else %}<a class="link small" href="{{ x.href }}">Reschedule</a>{% endif %}
     </li>
   {% endfor %}
@@ -90,11 +90,13 @@
           {% elif i.kind == 'interview_out' %}
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="cancel"><button class="btn small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview{{ 's' if i.interview_ids | length > 1 }}</button></form>
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="keep"><button class="link small" type="submit" title="Stop asking. It shows on Today as a normal interview.">Keep it</button></form>
+          {% elif i.kind == 'interview_result' and i.verdict == 'mixed' %}
+          <a class="btn small" href="{{ i.href }}">Compare finalists</a>
           {% elif i.kind == 'interview_result' and i.next_stage %}
           <form method="post" action="/actions/advance"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="stage" value="{{ i.next_stage }}">{% if i.notes %}<input type="hidden" name="notes" value="{{ i.notes }}">{% endif %}<button class="btn small" type="submit">Move to {{ i.next_stage }}</button></form>
           {% elif i.kind == 'interview_outcome' and i.loop %}
           {% elif i.kind == 'interview_outcome' %}
-          {% for value, word in interview_outcomes.items() %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ i.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}
+          {% for value, word in interview_choices %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ i.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}
           <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}" title="It didn't happen: move it to a new time">Reschedule</a>
           {% elif i.kind == 'interview' and i.loop %}
           {% elif i.kind == 'interview' %}

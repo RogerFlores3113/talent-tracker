@@ -145,10 +145,12 @@ def test_update_interview_takes_verdict_words_and_lists_the_enum(store):
     server = build_server(store)
     out = call(server, "update_interview", interview_id=iv["id"], outcome="strong yes", note="Loved the takehome")
     got = store.get_interview(iv["id"])
-    assert got["status"] == "passed" and got["data"]["outcome_note"] == "Strong yes. Loved the takehome"
-    assert "as Passed" in text(out)
+    # Cycle 5 re-review: the verdict is kept on its own (data.verdict), not folded into the note.
+    assert got["status"] == "passed" and got["data"]["outcome_note"] == "Loved the takehome"
+    assert got["data"]["verdict"] == "strong_yes" and "as Strong yes" in text(out)
     store.update_interview(iv["id"], outcome="Mixed")
-    assert store.get_interview(iv["id"])["data"]["outcome_note"] == "Mixed. Strong yes. Loved the takehome"
+    got = store.get_interview(iv["id"])
+    assert got["status"] == "mixed" and got["data"]["outcome_note"] == "Loved the takehome"
     with pytest.raises(ValueError, match="Outcome must be one of: passed, not passed, no show"):
         store.update_interview(iv["id"], outcome="great")
     tools = {t.name: t for t in anyio.run(server.list_tools)}

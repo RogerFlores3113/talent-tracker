@@ -32,7 +32,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import decide, interviews
-from .store import INTERVIEW_OUTCOME_CHOICES
+from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
 from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
@@ -486,7 +486,8 @@ def _interview_bits(t: dict[str, Any]) -> dict[str, Any]:
     """An interview's interviewer, outcome note and feedback, from a timeline row or its slim copy."""
     d = t.get("data") if isinstance(t.get("data"), dict) else {}
     return {"interviewer": t.get("interviewer") or d.get("interviewer"),
-            "outcome_note": t.get("outcome_note") or d.get("outcome_note"),
+            "outcome_note": t.get("outcome_note") or interview_note(d),
+            "result": t.get("result") or interview_label(d),
             "feedback": t.get("feedback") or [f for f in d.get("feedback") or [] if isinstance(f, dict)]}
 
 
@@ -500,13 +501,13 @@ def _timeline_line(t: dict[str, Any]) -> str:
         line = f"moved to {t.get('body') or 'a stage'}{job}"
     elif t["kind"] == "interview":  # who ran it and what they said: the AI needs both to compare finalists
         b = _interview_bits(t)
-        status = INTERVIEW_OUTCOME_LABELS.get(t.get("status") or "", t.get("status") or "scheduled")
+        status = b["result"] or INTERVIEW_OUTCOME_LABELS.get(t.get("status") or "", t.get("status") or "scheduled")
         line = f"interview{job} (interview id {t['id']}, {status.lower()}"
         line += (f", with {b['interviewer']})" if b["interviewer"] else ")")
         line += f": {t['body']}" if t.get("body") else ""
-        if b["outcome_note"]:
-            line += f". How it went: {b['outcome_note']}"
-        line += "".join(f". {_feedback_text(f)}" for f in b["feedback"])
+        parts = ([f"How it went: {b['outcome_note']}"] if b["outcome_note"] else []) + [
+            _feedback_text(f) for f in b["feedback"]]
+        line += "".join(f". {p.rstrip(' .') if k < len(parts) - 1 else p}" for k, p in enumerate(parts))  # no ".."
     else:
         line = t["kind"] + job + (f": {t['body']}" if t.get("body") else "")
     return f"{_local(t['at'])} {line}"
@@ -948,9 +949,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         interview_id is the id log_activity returned (logged.id), or an interview's id in get_candidate's
         timeline. `when` reschedules it (with time zone, as in log_activity). cancel=true marks it cancelled: it
         stays on the timeline but leaves the dashboard and status updates. `reason` says why it moved or was
-        cancelled. outcome records how it went: passed, not passed or no show, with an optional note; it's
-        refused while the interview is still in the future. An interviewer's verdict works too: strong yes, yes
-        and mixed count as passed, no and strong no as not passed, and the word is kept at the start of the note.
+        cancelled. outcome records how it went, with an optional note: the interviewer's verdict (strong yes,
+        yes, mixed, no, strong no) is kept as said, or passed, not passed or no show; it's refused while the
+        interview is still in the future. Strong yes and yes count as passed, no and strong no as not passed,
+        and mixed as neither.
         For what each interviewer said, use add_interview_feedback. `interviewer` names who runs it ("" clears it).
         keep=true, only when the recruiter says so, keeps an interview whose candidate is out of the job (or
         hired), so the dashboard stops asking to cancel it. The recruiter sees every change on the timeline.
@@ -964,7 +966,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         out: dict[str, Any] = {"data_note": DATA_NOTE, "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
             "job_id": iv.get("job_id"), "at": iv["at"], "at_local": _local(iv["at"]), "summary": iv.get("body"),
-            "status": iv["status"], "interviewer": data.get("interviewer"), "outcome_note": data.get("outcome_note"),
+            "status": iv["status"], "result": interview_label(data), "interviewer": data.get("interviewer"),
+            "outcome_note": interview_note(data),
             "reschedule_note": data.get("reschedule_note"), "rescheduled_from": data.get("rescheduled_from")})}
         whose = f"{iv['candidate_name']}'s interview" + (f" ({actions.interview_name(iv)})" if actions.interview_name(iv)
                                                          else "")
@@ -974,7 +977,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         elif when and iv["at"] != before["at"]:
             done.append(f"Moved {whose} to {_local(iv['at'])} (was {_local(before['at'])})")
         if outcome is not None:
-            done.append(f"Recorded {whose} {_when_words(iv['at'])} as {INTERVIEW_OUTCOME_LABELS.get(iv['status'], iv['status'])}")
+            done.append(f"Recorded {whose} {_when_words(iv['at'])} as {interview_label(data) or iv['status']}")
         if interviewer is not None:
             done.append(f"Interviewer for {whose}: {data['interviewer']}" if data.get("interviewer")
                         else f"Cleared the interviewer on {whose}")
@@ -1088,7 +1091,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                    min_active: int | None = None, stage_set: str | None = None,
                    stages_from_job_id: int | None = None) -> CallToolResult:
         """Create a job the recruiter is hiring for. The default stages are
-        Sourced, Contacted, Screening, Interviewing, Offer, Hired, Rejected, Withdrawn.
+        Sourced, Contacted, Screening, Interviewing, Offer, Hired, Rejected, Withdrawn, or the "inhouse" set when
+        the recruiter said they hire for their own company.
 
         Prefer a built-in stage_set over making up stage names: "agency" (Sourced, Screened, Submitted, Client
         interview, Offer, Placed, Client passed, Withdrawn) for a recruiter hiring for clients, "inhouse"
@@ -1103,11 +1107,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         openings is the headcount (default 1); min_active is how many active candidates this job should have
         before the dashboard asks for more."""
         twins = store.similar_open_jobs(title, company)
+        if not stages and stage_set in (None, "") and stages_from_job_id in (None, ""):
+            stage_set = actions.default_stage_set(store)  # in-house mode: the in-house stages
         stages = actions.new_job_stages(store, stages, stage_set, stages_from_job_id)
         stages, out_note = actions.with_out_stages(stages)  # every job gets an Out stage
         job = store.add_job(title, company, location, description, stages=stages, by="ai", **_given(
             hiring_manager=hiring_manager, hiring_manager_email=hiring_manager_email, openings=openings,
             target_date=target_date, min_active=min_active))
+        if stage_set not in (None, ""):
+            actions.apply_set_groups(store, job["id"], stage_set)
         out = {**_job_out(_slim(job)), **_stage_info(store, job["id"]), **({"note": out_note} if out_note else {})}
         if twins:
             ids = ", ".join(str(j["id"]) for j in twins)
@@ -1151,6 +1159,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if new.get("status") in ("closed", "on_hold"):
             out["note"] = "The recruiter is asked on Today to confirm this."
         return _said(_job_update_sentence(out, given), out)
+
+    @mcp.tool(annotations=EDIT)
+    def close_job(job_id: int) -> CallToolResult:
+        """Close a job (the same as update_job with status closed). Nothing is deleted, and the recruiter is asked
+        on Today to confirm it. Only when the recruiter says the job is filled or off."""
+        return update_job(job_id, status="closed")
 
     @mcp.tool(annotations=EDIT)
     def edit_job_stages(job_id: int, rename: dict[str, str | dict[str, str]] | None = None,
@@ -1773,7 +1787,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     + (" Ask the recruiter how it went, then record it with update_interview outcome."
                        if i["kind"] == "interview_outcome" else "")
                     + (f" Ask the recruiter whether to move them to {i['next_stage']} (move_stage)."
-                       if i["kind"] == "interview_result" and i.get("next_stage") else ""))
+                       if i["kind"] == "interview_result" and i.get("next_stage") else "")
+                    + (" Mixed: help the recruiter weigh it with compare_finalists."
+                       if i["kind"] == "interview_result" and i.get("verdict") == "mixed" else ""))
 
         if not items and not later:
             text = "Nothing needs attention right now."

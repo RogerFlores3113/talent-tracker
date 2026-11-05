@@ -1503,7 +1503,7 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_move":
         return f"Moved an interview with {name} to a new time{what}"
     if kind == "interview_outcome":
-        label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
+        label = interview_label(new.get("data")) or ""
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
     if kind == "interview_feedback":
         who = r.get("body") or ""
@@ -3005,17 +3005,18 @@ class Store:
             key = re.sub(r"[\s_-]+", " ", outcome.strip().lower()).strip(" .!")
             value = INTERVIEW_OUTCOMES.get(key) or INTERVIEW_VERDICTS.get(key)
             if value is None:
-                raise ValueError("Outcome must be one of: passed, not passed, no show. Words like strong yes and "
-                                 "mixed count as passed, and strong no as not passed; the word is kept in the note.")
-            if key in INTERVIEW_VERDICTS:  # "strong yes": recorded as passed, with the interviewer's word kept
-                word = key[:1].upper() + key[1:]
-                rest = _clean(note) if note is not None else _clean(data.get("outcome_note"))
-                if not (rest or "").lower().startswith(key):
-                    note = f"{word}. {rest}" if rest else f"{word}."
+                raise ValueError("Outcome must be one of: passed, not passed, no show, or the interviewer's word: "
+                                 "strong yes, yes, mixed, no, strong no.")
             if new_at > ts:
                 raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
                                  "went after it takes place, or change its time first.")
+            if data.get("verdict") is None and _legacy_verdict(data) and note is None:
+                data["outcome_note"] = interview_note(data)  # the old word leaves the note; the new outcome replaces it
             data["outcome"], data["outcome_at"] = value, ts
+            if key in INTERVIEW_VERDICTS:  # "strong yes": the interviewer's word is kept as the verdict
+                data["verdict"] = key.replace(" ", "_")
+            else:
+                data.pop("verdict", None)
             if data.get("status") == "cancelled":
                 data["status"] = "scheduled"
         if note is not None:
@@ -4018,23 +4019,73 @@ def _job_extras(data: dict[str, Any]) -> dict[str, Any]:
 # Interviews are timeline entries; their state lives in timeline.data. One with no data is scheduled.
 INTERVIEW_OUTCOMES = {"passed": "passed", "pass": "passed", "not passed": "not_passed", "failed": "not_passed",
                       "did not pass": "not_passed", "no show": "no_show", "noshow": "no_show"}
-INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show"}
-# How interviewers often say it. Each counts as an outcome, and the word itself is kept at the start of the note.
-INTERVIEW_VERDICTS = {"strong yes": "passed", "yes": "passed", "lean yes": "passed", "mixed": "passed",
+INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show", "mixed": "Mixed"}
+# How interviewers often say it. Each is kept as the interview's verdict (data.verdict, shown as its outcome) and
+# counts as a result: passed, not passed, or mixed (neither, so nothing moves on by itself).
+INTERVIEW_VERDICTS = {"strong yes": "passed", "yes": "passed", "lean yes": "passed", "mixed": "mixed",
                       "strong no": "not_passed", "no": "not_passed", "lean no": "not_passed"}
+VERDICT_LABELS = {"strong_yes": "Strong yes", "yes": "Yes", "lean_yes": "Lean yes", "mixed": "Mixed",
+                  "lean_no": "Lean no", "no": "No", "strong_no": "Strong no"}
 # The outcome values an AI app may send (update_interview lists these as its schema enum).
 INTERVIEW_OUTCOME_CHOICES = ("passed", "not passed", "no show", "strong yes", "yes", "mixed", "no", "strong no")
+# What the app offers when recording how an interview went (Today's buttons, the profile's menu): value, label.
+INTERVIEW_RESULT_CHOICES = (("strong yes", "Strong yes"), ("yes", "Yes"), ("mixed", "Mixed"), ("no", "No"),
+                            ("no show", "No show"))
+INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:4], ("strong no", "Strong no"), ("passed", "Passed"),
+                          ("not passed", "Not passed"), ("no show", "No show"))
 FEEDBACK_LIMIT = 4000  # one interviewer's feedback on one interview
 LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
                   " AND json_extract(t.data, '$.outcome') IS NULL")
 
 
 def interview_status(data: dict[str, Any] | None) -> str:
-    """'scheduled', 'cancelled', or the recorded outcome ('passed', 'not_passed', 'no_show')."""
+    """'scheduled', 'cancelled', or the recorded result ('passed', 'not_passed', 'mixed', 'no_show')."""
     data = data or {}
     if data.get("status") == "cancelled":
         return "cancelled"
-    return data.get("outcome") or "scheduled"
+    return interview_result(data) or "scheduled"
+
+
+def _legacy_verdict(data: dict[str, Any]) -> str | None:
+    """Before verdicts were kept on their own, 'mixed' was saved as passed with the word at the start of the note
+    ('Mixed.' or 'Strong yes. Loved the takehome'). Read that word back, so old interviews still say Mixed."""
+    m = re.match(r"\s*(strong yes|lean yes|yes|mixed|strong no|lean no|no)\s*(?:\.|$)", data.get("outcome_note") or "",
+                 re.I)
+    if not m or data.get("outcome") not in ("passed", "not_passed"):
+        return None
+    word = m.group(1).lower()
+    return word.replace(" ", "_") if {"mixed": "passed"}.get(word, INTERVIEW_VERDICTS[word]) == data["outcome"] else None
+
+
+def interview_verdict(data: dict[str, Any] | None) -> str | None:
+    """The interviewer's verdict (strong_yes, yes, lean_yes, mixed, lean_no, no, strong_no), or None."""
+    data = data or {}
+    if not data.get("outcome"):
+        return None
+    v = data.get("verdict")
+    return v if v in VERDICT_LABELS else _legacy_verdict(data)
+
+
+def interview_result(data: dict[str, Any] | None) -> str | None:
+    """How it went, as a result: passed, not_passed, mixed or no_show (None while it has no outcome)."""
+    data = data or {}
+    return "mixed" if interview_verdict(data) == "mixed" else data.get("outcome") or None
+
+
+def interview_label(data: dict[str, Any] | None) -> str | None:
+    """How it went, in the interviewer's word when there is one: 'Strong yes', 'Mixed', 'Passed', 'No show'."""
+    v = interview_verdict(data)
+    return VERDICT_LABELS[v] if v else INTERVIEW_OUTCOME_LABELS.get(interview_result(data) or "")
+
+
+def interview_note(data: dict[str, Any] | None) -> str | None:
+    """The outcome note without the verdict word an older save put at its start ('Yes. Loved it' -> 'Loved it')."""
+    data = data or {}
+    note = data.get("outcome_note") or None
+    v = interview_verdict(data)
+    if note and v and not data.get("verdict"):
+        note = re.sub(r"^\s*" + VERDICT_LABELS[v] + r"\s*\.?\s*", "", note, flags=re.I) or None
+    return note
 
 
 STAGE_NAME_LIMIT = 60

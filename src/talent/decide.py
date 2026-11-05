@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
 from . import actions
-from .store import INTERVIEW_OUTCOME_LABELS, NotFound, Store, _stage_key, quoted, to_dt
+from .store import NotFound, Store, _stage_key, interview_label, interview_note, interview_result, quoted, to_dt
 
 MAX_FINALISTS = 4
 DECISION_PREFIX = "decision:"  # settings key of one recorded decision, so Changes can undo it as one
 
 
 def referrer(source: str | None) -> str | None:
-    """'Referral from Alex' or 'Referral: Jen Park' -> the person who referred them, else None."""
-    m = re.match(r"\s*referr?(?:al|ed)?\s*(?:from|by)?\s*[:\-]?\s*(.+)", source or "", re.I)
+    """'Referral from Alex', 'Referred by Sam Lee' or 'Referral: Jen Park' -> the person who referred them.
+    A plain 'Referral' names nobody, so None (a from, by, via or colon has to come before the name)."""
+    m = re.match(r"\s*referr(?:al|ed)\b\s*(?:(?:from|by|via)\b\s*:?|:)\s*(\S.*)", source or "", re.I)
     who = (m.group(1).strip(" .") if m else "")
     return who or None
 
@@ -45,13 +47,13 @@ def _interviews(store: Store, candidate_id: int, job_id: int) -> list[dict[str, 
         d = json.loads(r["data"]) if r.get("data") else {}
         if d.get("status") == "cancelled":
             continue
-        status = d.get("outcome") or "scheduled"
+        status = interview_result(d) or "scheduled"
+        ahead = status == "scheduled" and r["at"] > _now()
         out.append({"interview_id": r["id"], "at": r["at"], "at_local": actions.local_time(r["at"], actions.IV_TIME),
                     "name": actions.interview_name(r) or "Interview", "summary": r.get("body"),
-                    "interviewer": d.get("interviewer"), "status": status,
-                    "outcome": INTERVIEW_OUTCOME_LABELS.get(status, "Not recorded yet" if r["at"] <= _now()
-                                                            else "Coming up"),
-                    "note": d.get("outcome_note"),
+                    "interviewer": d.get("interviewer"), "status": status, "upcoming": ahead,
+                    "outcome": interview_label(d) or ("Coming up" if ahead else "Not recorded yet"),
+                    "note": interview_note(d),
                     "feedback": [{"by": f.get("by"), "text": f.get("text"), "at": f.get("at"), "source": f.get("source")}
                                  for f in d.get("feedback") or [] if isinstance(f, dict) and f.get("text")]})
     return out
@@ -100,6 +102,7 @@ def finalists(store: Store, job_id: int, ids: list[int] | None = None, now: date
             "days_in_stage": actions.local_days(to_dt(a["stage_changed_at"]), now) if a.get("stage_changed_at") else None,
             "source": c.get("source"), "referrer": referrer(c.get("source")),
             "interviews": _interviews(store, c["id"], job_id),
+            "still_to_come": len(actions.upcoming_for(store, c["id"], job_id, now)),
             "todos": [{"text": s["text"], "due_on": s.get("due_on")} for s in todos if s.get("candidate_id") == c["id"]],
         })
     out_stage, out_reason = actions.pass_stage(store, job_id)
@@ -117,6 +120,11 @@ def _fenced(text: Any) -> str:
     return " ".join(str(text or "").replace(END, "END-CANDIDATE-DATA").split())
 
 
+def still_to_come(n: int) -> str:
+    """'4 interviews still to come'."""
+    return f"{n} interview{'' if n == 1 else 's'} still to come"
+
+
 def finalists_text(d: dict[str, Any]) -> str:
     """compare_finalists' text: what to do with it first, then every finalist inside one data fence."""
     job = d["job"]
@@ -124,9 +132,10 @@ def finalists_text(d: dict[str, Any]) -> str:
     if not d["people"]:
         return (f"Nobody on {name} has interviewed or reached a late stage yet, so there are no finalists to "
                 "compare.")
+    token = secrets.token_hex(4)  # a fresh mark per reply, so candidate text can't fake the end of the data
     lines = [f"Finalists for {name} (job id {job['id']}): {len(d['people'])}. Compare them using the interviewers' own "
              "words below. The recruiter records the decision in the app (Decide view), or you can move each "
-             "person with move_stage.", BEGIN]
+             f"person with move_stage. Candidate data sits between the two lines marked [{token}].", f"{BEGIN} [{token}]"]
     for p in d["people"]:
         role = " at ".join(x for x in (p.get("current_title"), p.get("current_company")) if x)
         lines.append(f"## {_fenced(p['name'])} (candidate id {p['candidate_id']}), {_fenced(p['stage'])}"
@@ -138,6 +147,8 @@ def finalists_text(d: dict[str, Any]) -> str:
             bits.append(f"source: {_fenced(p['source'])}")
         if p.get("referrer"):
             bits.append(f"referred by {_fenced(p['referrer'])}")
+        if p.get("still_to_come"):
+            bits.append(still_to_come(p["still_to_come"]))
         if bits:
             lines.append("; ".join(bits))
         if not p["interviews"]:
@@ -147,12 +158,12 @@ def finalists_text(d: dict[str, Any]) -> str:
                                                                   else "") + f" (interview id {i['interview_id']}): "
                     + i["outcome"])
             if i.get("note"):
-                line += f". How it went: {_fenced(i['note'])}"
+                line += f". How it went: {_fenced(i['note']).rstrip(' .')}"
             lines.append(line)
             lines += [f"  Feedback from {_fenced(f['by'] or 'an interviewer')}: {_fenced(f['text'])}"
                       for f in i["feedback"]]
         lines += [f"- To-do: {_fenced(t['text'])}" for t in p["todos"]]
-    lines.append(END)
+    lines.append(f"{END} [{token}]")
     if d["more"]:
         lines.append("Also in late stages (pass candidate_ids to compare them): "
                      + ", ".join(f"{_fenced(m['name'])} [{m['candidate_id']}]" for m in d["more"]) + ".")
@@ -281,4 +292,4 @@ def undo_decision(store: Store, batch_id: int, by: str = "app") -> str:
 
 
 __all__ = ["MAX_FINALISTS", "decision_batches", "finalists", "finalists_text", "record_decision", "referrer",
-           "undo_decision"]
+           "still_to_come", "undo_decision"]

@@ -31,8 +31,10 @@ from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
-                    INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    HL_END, HL_START, Store, _labels, dropped_text, fold_name, snippet_html, split_tags, to_dt)
+                    INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
+                    JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
+                    HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
+                    split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -288,6 +290,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
+    env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
+    env.globals["interview_form_choices"] = INTERVIEW_FORM_CHOICES  # the profile's How it went menu
+    env.globals["interview_label"] = interview_label  # 'Strong yes', 'Mixed', 'Passed'
+    env.globals["interview_note"] = interview_note
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
@@ -642,11 +648,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 notice = "Interview back on the schedule."
             elif op == "outcome":
                 outcome = str(form.get("outcome") or "")
-                if outcome not in INTERVIEW_OUTCOME_LABELS:
+                if outcome not in INTERVIEW_OUTCOME_LABELS and outcome not in dict(INTERVIEW_FORM_CHOICES):
                     raise ValueError("Pick how the interview went.")
-                store.update_interview(entry_id, outcome=outcome, note=str(form.get("note") or ""),
-                                       candidate_id=candidate_id)
-                notice = f"Saved: {INTERVIEW_OUTCOME_LABELS[outcome]}."
+                iv = store.update_interview(entry_id, outcome=outcome, note=str(form.get("note") or ""),
+                                            candidate_id=candidate_id)
+                notice = f"Saved: {interview_label(iv['data']) or 'how it went'}."
             else:
                 raise ValueError("Couldn't change that interview. Reload the page and try again.")
         except NotFound:
@@ -1018,8 +1024,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
-        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS,
-                    copy_jobs=store.list_jobs(None))
+        return page(request, "job_form.html", j={"stage_set": actions.default_stage_set(store)}, error=None,
+                    stage_sets=actions.STAGE_SETS, copy_jobs=store.list_jobs(None))
 
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
@@ -1036,8 +1042,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 chosen = actions.new_job_stages(store, from_job_id=int(copy_from))
             else:
                 chosen = actions.stage_set(picked)
+            from_set = not stages and not copy_from.isdigit()
             stages, out_note = actions.with_out_stages(chosen)
             job = store.add_job(**data, stages=stages or None)
+            if from_set:
+                actions.apply_set_groups(store, job["id"], picked)
         except ValueError as exc:
             return page(request, "job_form.html", j={**data, "stages": str(form.get("stages") or ""),
                                                      "stage_set": picked, "copy_from": copy_from}, error=str(exc),

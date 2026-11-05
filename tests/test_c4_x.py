@@ -138,7 +138,8 @@ def test_today_asks_how_a_past_interview_went_and_records_it(store):
     client = local_client(store)
     page = client.get("/").text
     assert "How did it go" in page and f'action="/candidates/{ben["id"]}/interviews/{iv["id"]}"' in page
-    assert ">Passed</button>" in page and ">No show</button>" in page
+    # Cycle 5 re-review: Today offers the interviewer's word (Strong yes, Yes, Mixed, No) and No show.
+    assert ">Strong yes</button>" in page and ">Mixed</button>" in page and ">No show</button>" in page
     r = client.post(f"/candidates/{ben['id']}/interviews/{iv['id']}",
                     data={"op": "outcome", "outcome": "passed", "next": "/"}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith("/")
