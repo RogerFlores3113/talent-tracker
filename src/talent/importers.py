@@ -1324,12 +1324,104 @@ def _is_name(line: str) -> bool:
             and 1 <= len(line.split()) <= 5 and not any(ch.isdigit() for ch in line))
 
 
+_HEADER = re.compile(r"(?im)^\s*(from|to|cc|bcc|reply-to|sent|date|subject)\s*:\s*(.*)$")
+_INTRO_WORDS = re.compile(r"(?i)\b(intro(?:duc\w*)?|meet|connect(?:ing)? you)\b")
+_PERSON = r"([A-Z][\w'.-]*(?:[ \t]+[A-Z][\w'.-]*){0,3})"
+_MEET = re.compile(r"(?:\bmeet|\bintroduc(?:e|ing)(?: you)?(?: to)?|\bintro(?:ducing)?(?: you)? to|"
+                   r"\bconnect(?:ing)? you with)[ \t]+" + _PERSON)
+_ADDRESS = re.compile(r"\s*(?:\"?([^\"<>,;]*?)\"?\s*)?<?([\w.+'-]+@[\w-]+(?:\.[\w-]+)+)>?")
+
+
+def _addresses(value: str) -> list[tuple[str, str]]:
+    """'Jen Park <jen@x.vc>, bo@y.com' -> [('Jen Park', 'jen@x.vc'), ('', 'bo@y.com')]."""
+    out = []
+    for part in re.split(r"[,;](?![^<]*>)", value):
+        m = _ADDRESS.match(part)
+        if m and m.group(2):
+            out.append((" ".join((m.group(1) or "").strip(" '\"").split()), m.group(2).lower()))
+    return out
+
+
+def _same_first(a: str, b: str) -> bool:
+    return bool(a and b) and a.split()[0].lower() == b.split()[0].lower()
+
+
+def _intro_email(text: str) -> dict[str, Any] | None:
+    """An intro email ("Jen: Sam, meet Priya Natarajan (priya@x.com)") pasted or forwarded: the introduced
+    person's name and email, never the address of whoever wrote or got it, and the writer as the referrer."""
+    headers = [(m.group(1).lower(), m.group(2).strip()) for m in _HEADER.finditer(text)]
+    senders = [a for k, v in headers if k == "from" for a in _addresses(v)]
+    if not senders:
+        return None
+    body = "\n".join(l for l in text.splitlines() if not _HEADER.match(l) and not re.match(r"\s*-{3,}", l)).strip()
+    subject = next((v for k, v in reversed(headers) if k == "subject"), "")
+    if not (_INTRO_WORDS.search(subject) or _MEET.search(body)):
+        return None
+    referrer = senders[-1]  # in a forward, the innermost From wrote the intro
+    skip_mail = {a for k, v in headers if k in ("from", "to", "reply-to") for _, a in _addresses(v)}
+    skip_names = [n for k, v in headers if k in ("from", "to") for n, _ in _addresses(v) if n]
+    skip_names += [a.split("@")[0] for a in skip_mail]
+    ccs = [a for k, v in headers if k == "cc" for a in _addresses(v) if a[1] not in skip_mail]
+
+    def ours(name: str) -> bool:  # the writer, the reader or a signature, not the person introduced
+        return any(_same_first(name, n) for n in skip_names) or name.lower() in ("you", "everyone", "all")
+
+    name = ""
+    for m in _MEET.finditer(body):
+        cand = m.group(1).strip(" .,")
+        if not ours(cand):
+            name = cand
+            break
+    if not name and subject:
+        sides = re.split(r"\s*(?:<>|<->|/|\+|&|\bx\b|\band\b)\s*", re.sub(r"(?i)^\s*(?:(?:re|fwd?)\s*:\s*)*"
+                                                                        r"(?:intro(?:duction)?\s*:?)?", "", subject))
+        name = next((x.strip(" .,()") for x in sides if x.strip() and not ours(x.strip())
+                     and not re.search(r"\(", x)), "")
+    if not name:
+        name = next((n for n, _ in ccs if n and not ours(n)), "")
+    full = [n for n, _ in ccs if _same_first(n, name) and len(n.split()) > len(name.split())]
+    if name and len(name.split()) == 1:  # "meet Priya": the Cc line or the subject has her full name
+        full += [x.strip() for x in re.split(r"<>|/|\+|&|,", subject)
+                 if _same_first(x.strip(), name) and len(x.split()) > 1 and "(" not in x]
+    if full:
+        name = full[0]
+    email = None
+    if name:
+        near = re.search(re.escape(name.split()[0]) + r"[^\n@]{0,40}?[(<\[]\s*([\w.+'-]+@[\w-]+(?:\.[\w-]+)+)",
+                         body)
+        if near and near.group(1).lower() not in skip_mail:
+            email = near.group(1).lower()
+        email = email or next((a for n, a in ccs if _same_first(n, name)), None)
+    email = email or next((m.group(0).lower() for m in _EMAIL.finditer(body) if m.group(0).lower() not in skip_mail),
+                          None)
+    email = email or (ccs[0][1] if len(ccs) == 1 else None)
+    out: dict[str, Any] = {"source": "Referral" + (f" from {referrer[0]}" if referrer[0] else f" from {referrer[1]}")}
+    if name and _is_name(name):
+        out["name"] = name
+    if email:
+        out["email"] = email
+    out["about"] = body[:1500]
+    out["_skip"] = skip_mail
+    return out
+
+
 def quick_parse(text: str) -> dict[str, Any]:
-    """Pull the obvious bits out of pasted text without any AI. The recruiter reviews before saving."""
+    """Pull the obvious bits out of pasted text without any AI. The recruiter reviews before saving.
+    An intro email gives the introduced person (not its From or To) and "Referral from" its writer."""
     text = text.strip()
     out: dict[str, Any] = {}
     if not text:
         return out
+    intro = _intro_email(text)
+    if intro is not None:
+        skip = intro.pop("_skip")
+        if m := _LINKEDIN.search(text):
+            intro["linkedin_url"] = m.group(0)
+        site = _website(intro["about"])
+        if site and not any(site.lower().split("//")[-1].removeprefix("www.").startswith(a.split("@")[1])
+                            for a in skip):
+            intro["website"] = site
+        return intro
     if m := _EMAIL.search(text):
         out["email"] = m.group(0).lower()
     if m := _LINKEDIN.search(text):

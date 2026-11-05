@@ -12,13 +12,16 @@ import re
 from typing import Any, Callable
 
 from .actions import job_label
-from .store import NotFound, Store, fold_name, linkedin_slug_ok, normalize_linkedin, now_iso, quoted
+from .store import NotFound, Store, fold_name, linkedin_slug_ok, normalize_linkedin, now_iso, quoted, split_tags
 
 MAX_BATCH = 25
 STATUSES = ("proposed", "kept", "passed")
 LIMITS = {"name": 200, "title": 200, "company": 200, "location": 200, "fit": 1000, "source": 200}
 REASON_LIMIT = 300
 KEEP_PREFIX = "shortlist_keep:"  # settings key of one Keep or Keep all, so Changes can undo it as one
+# settings key of one proposed person's about, skills and work history, so Keep saves a full record
+EXTRA_PREFIX = "prospect_extra:"
+ABOUT_LIMIT, TAG_LIMIT, HISTORY_LIMIT = 5000, 30, 15
 SENTENCE_NAME = "the name reads like a sentence, not a person's name"
 _PROFILE = re.compile(r"^https://linkedin\.com/in/([^/?#]+)")
 
@@ -49,6 +52,46 @@ def profile_url(url: Any) -> tuple[str | None, str | None]:
     if not linkedin_slug_ok(raw):
         return None, "the link has no real profile name after /in/ (only dots, spaces or quotes)"
     return "https://linkedin.com/in/" + m.group(1), None
+
+
+def _extra_in(raw: dict[str, Any]) -> dict[str, Any]:
+    """The about, skills and work history the AI sent with a proposed person, cleaned and capped."""
+    out: dict[str, Any] = {}
+    about = " ".join(str(raw.get("about") or "").split())[:ABOUT_LIMIT].rstrip()
+    if about:
+        out["about"] = about
+    tags = raw.get("tags") or raw.get("skills")
+    tags = [t[:60] for t in split_tags(tags if isinstance(tags, (str, list, tuple)) else None)][:TAG_LIMIT]
+    if tags:
+        out["tags"] = tags
+    history = []
+    for e in raw.get("work_history") or []:
+        if not isinstance(e, dict):
+            continue
+        row = {k: _clip(e.get(k), 1000 if k == "summary" else 200) for k in ("title", "company", "start", "end",
+                                                                                "summary")}
+        if row["title"] or row["company"]:
+            history.append({k: v for k, v in row.items() if v})
+    if history:
+        out["work_history"] = history[:HISTORY_LIMIT]
+    return out
+
+
+def _attach_extras(store: Store, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add each row's about, tags and work_history from settings (only for the row it was written for)."""
+    if not rows:
+        return rows
+    keys = [f"{EXTRA_PREFIX}{r['id']}" for r in rows]
+    found = {r["key"]: r["value"] for r in store._rows(
+        f"SELECT key, value FROM settings WHERE key IN ({', '.join('?' * len(keys))})", tuple(keys))}
+    for r, k in zip(rows, keys):
+        try:
+            x = json.loads(found[k]) if k in found else None
+        except ValueError:
+            x = None
+        if isinstance(x, dict) and x.get("name") == r["name"] and x.get("created_at") == r["created_at"]:
+            r.update({f: x[f] for f in ("about", "tags", "work_history") if x.get(f)})
+    return rows
 
 
 def _sentence_like(name: str) -> bool:
@@ -107,9 +150,11 @@ def check_lines(c: dict[str, Any]) -> list[str]:
         lines.append(f"Already saved as {s['name']} (id {s['id']})" + ("" if s["same_name"] else ", a different name")
                      + (f". In {jobs}" if jobs else ". Not in any job"))
     for m in c.get("same_name") or []:
+        jobs = "; ".join(f"{p['job']}: {p['stage']}" for p in m.get("pipelines") or [])
         lines.append(f"Same name as saved {m['name']} (id {m['id']})"
                      + (f", {m['current_title']}" if m.get("current_title") else "")
-                     + (f" at {m['current_company']}" if m.get("current_company") else ""))
+                     + (f" at {m['current_company']}" if m.get("current_company") else "")
+                     + (f". In {jobs}" if jobs else ""))
     for x in c.get("passed_elsewhere") or []:
         lines.append(f"Passed on for {x['job']}" + (f": {x['reason']}" if x.get("reason") else ""))
     return lines
@@ -167,18 +212,22 @@ def propose(store: Store, job_id: int, people: list[dict[str, Any]], *, by: str 
         row = {"job_id": job_id, "linkedin_url": url, "name": name,
                **{k: _clip(raw.get(k), LIMITS[k]) for k in ("title", "company", "location", "fit", "source")}}
         row["source"] = row["source"] or ("LinkedIn" if url else None)
-        rows.append(row)
+        rows.append({**row, "_extra": _extra_in(raw)})
     added = []
     if rows:
         with store._write():
             ts = now_iso()
             for r in rows:
+                extra = r.pop("_extra")
                 pid = store._conn.execute(
                     "INSERT INTO prospects(job_id, linkedin_url, name, title, company, location, fit, source,"
                     " proposed_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (job_id, r["linkedin_url"], r["name"], r["title"], r["company"], r["location"], r["fit"],
                      r["source"], by, ts, ts)).lastrowid
-                added.append({"id": pid, **r})
+                if extra:
+                    store._conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (
+                        f"{EXTRA_PREFIX}{pid}", json.dumps({"name": r["name"], "created_at": ts, **extra})))
+                added.append({"id": pid, **r, **extra})
             if by == "ai":
                 ids = [a["id"] for a in added]
                 batch = store._log_ai("prospects_proposed", job_id=job_id, body=str(len(ids)),
@@ -208,12 +257,20 @@ def listed(store: Store, job_id: int, status: str | None = "proposed", with_chec
     if status not in (*STATUSES, "all"):
         raise ValueError("status is proposed, kept, passed or all.")
     order = "id" if status == "proposed" else "coalesce(decided_at, created_at) DESC, id DESC"
-    rows = store._rows(f"SELECT * FROM prospects WHERE job_id = ? AND (? = 'all' OR status = ?) ORDER BY {order}",
-                       (job_id, status, status))
+    rows = _attach_extras(store, store._rows(
+        f"SELECT * FROM prospects WHERE job_id = ? AND (? = 'all' OR status = ?) ORDER BY {order}",
+        (job_id, status, status)))
     if with_checks:
         for r in rows:
             if r["status"] == "proposed":
                 r["checks"] = checks(store, r)
+    kept = [r for r in rows if r["status"] == "kept" and r.get("candidate_id")]
+    if kept:  # where each kept person is now, and whether their record is still thin (no about, no skills)
+        now = {a["candidate_id"]: a["stage"] for a in store.pipeline(job_id)}
+        for r in kept:
+            c = store._row("SELECT about, tags FROM candidates WHERE id = ?", (r["candidate_id"],))
+            r["stage"] = now.get(r["candidate_id"])
+            r["thin"] = bool(c) and not (c.get("about") or c.get("tags"))
     return rows
 
 
@@ -221,7 +278,7 @@ def get(store: Store, job_id: int, prospect_id: int) -> dict[str, Any]:
     row = store._row("SELECT * FROM prospects WHERE id = ? AND job_id = ?", (prospect_id, job_id))
     if row is None:
         raise NotFound("That person is no longer on this Shortlist. Reload the page.")
-    return row
+    return _attach_extras(store, [row])[0]
 
 
 def _last_timeline_id(store: Store) -> int:
@@ -229,11 +286,12 @@ def _last_timeline_id(store: Store) -> int:
 
 
 def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = None,
-         as_new: bool = False, log: bool = True) -> dict[str, Any]:
+         as_new: bool = False, log: bool = True, via: str | None = None) -> dict[str, Any]:
     """The recruiter keeps someone: link the person already saved with this profile link (or the one they
     picked), or save them, then add them to the job's first stage. Returns {"candidate", "created", "stage",
     "already", "record"}. Raises NeedsChoice when someone with the same name is saved and the recruiter hasn't
-    chosen. With log, the keep is listed on Changes with its own Undo (keep_all logs its keeps as one)."""
+    chosen. With log, the keep is listed on Changes with its own Undo (keep_all logs its keeps as one).
+    Linking someone saved fills their blank fields from the Shortlist row. via="claude": pressed in Claude's view."""
     mark = _last_timeline_id(store)
     p = get(store, job_id, prospect_id)
     if p["status"] != "proposed":
@@ -247,17 +305,29 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
             raise NeedsChoice(p, same)
     created = target is None
     if created:
-        target = store.add_candidate(name=p["name"], linkedin_url=p["linkedin_url"], current_title=p["title"],
-                                     current_company=p["company"], location=p["location"], source=p["source"])
+        target = store.add_candidate(p.get("work_history"), name=p["name"], linkedin_url=p["linkedin_url"],
+                                     current_title=p["title"], current_company=p["company"], location=p["location"],
+                                     source=p["source"], about=p.get("about"),
+                                     tags=", ".join(p.get("tags") or []) or None)
     linked = None
-    if not created and p["linkedin_url"] and not target.get("linkedin_url"):
-        try:  # the recruiter said it's the same person: their empty LinkedIn takes this one
-            target = store.update_candidate(target["id"], linkedin_url=p["linkedin_url"])
+    if not created:  # the recruiter said it's the same person: their blank fields take what the row has
+        fill = {dst: p[src] for src, dst in (("linkedin_url", "linkedin_url"), ("title", "current_title"),
+                                             ("company", "current_company"), ("location", "location"),
+                                             ("about", "about")) if p.get(src) and not target.get(dst)}
+        if p.get("tags") and not target.get("tags"):
+            fill["tags"] = ", ".join(p["tags"])
+        history = p.get("work_history") if p.get("work_history") and not store.work_history(target["id"]) else None
+        for attempt in (fill, {k: v for k, v in fill.items() if k != "linkedin_url"}):
+            if not attempt and not history:
+                break
+            try:
+                target = store.update_candidate(target["id"], history, **attempt)
+            except ValueError:  # their LinkedIn link belongs to someone else: fill the rest
+                continue
             if target.get("_changed"):
                 linked = store._row("SELECT id FROM timeline WHERE candidate_id = ? AND kind = 'change' AND id > ?"
                                     " ORDER BY id DESC LIMIT 1", (target["id"], mark))
-        except ValueError:
-            pass
+            break
     already = next((a["stage"] for a in store.pipeline(job_id) if a["candidate_id"] == target["id"]), None)
     stage = already
     if not already:
@@ -274,7 +344,7 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
                                         (target["id"], mark))]
     record = {"prospect_id": prospect_id, "candidate_id": target["id"], "name": target["name"], "created": created,
               "stage": stage, "stage_entry": entry["id"] if entry else None, "linked": linked["id"] if linked else None,
-              "own": own}
+              "own": own, **({"via": via} if via else {})}
     if log:
         _log_keeps(store, job_id, [record])
     return {"candidate": target, "created": created, "stage": stage, "already": bool(already), "record": record}
@@ -329,7 +399,8 @@ def keep_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]
         who = quoted(kept[0]["name"]) if n == 1 else f"{n} people"
         stages = sorted({k["stage"] for k in kept if k.get("stage")})
         text = (f"Kept {who} from the Shortlist for {job_label(job['title'], job.get('company'))}"
-                + (f", in {' and '.join(stages)}" if stages else ""))
+                + (f", in {' and '.join(stages)}" if stages else "")
+                + (", in Claude" if kept and all(k.get("via") == "claude" for k in kept) else ""))
         out.append({**b, "id": int(bid), "job_title": job["title"], "text": text, "undoable": not b.get("undone_at"),
                     "note": b.get("undo_note")})
     return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)
@@ -466,8 +537,9 @@ def today_items(store: Store) -> list[dict[str, Any]]:
 
 def row_view(p: dict[str, Any]) -> dict[str, Any]:
     """One Shortlist row as the AI app and the in-chat view see it."""
-    out = {k: p.get(k) for k in ("id", "name", "linkedin_url", "title", "company", "location", "fit", "status",
-                                 "pass_reason", "candidate_id") if p.get(k) not in (None, "")}
+    out = {k: p.get(k) for k in ("id", "name", "linkedin_url", "title", "company", "location", "fit", "about",
+                                 "tags", "work_history", "status", "pass_reason", "candidate_id", "stage")
+           if p.get(k) not in (None, "", [])}
     if p.get("checks"):
         out["checks"] = p["checks"]
         out["check_lines"] = check_lines(p["checks"])

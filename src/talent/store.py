@@ -97,6 +97,9 @@ def normalize_outcome(value: str | None) -> str | None:
 # "last contacted" when they happened in the past.
 TIMELINE_KINDS = ("note", "call", "email", "message", "meeting", "interview", "stage")
 CONTACT_KINDS = {"call", "email", "message", "meeting", "interview"}
+# Other words for a timeline kind: an InMail, LinkedIn message or DM is logged as a message.
+KIND_ALIASES = {"inmail": "message", "linkedin": "message", "linkedin message": "message", "dm": "message",
+                "direct message": "message", "text": "message", "sms": "message"}
 # "change" entries are the audit trail: written only by the store itself when a
 # candidate's fields change (old values kept in timeline.data so they can be undone).
 # Nobody can log one by hand, so it is not in TIMELINE_KINDS.
@@ -891,6 +894,13 @@ def _names_line_up(ta: list[str], tb: list[str]) -> bool:
     # Both have a last name: it must be compatible, or appear among the other's later names
     # ('Ana Ruiz' and 'Ana Ruiz-Lopez'). A shared first name alone is not enough.
     return _compatible(ta[-1], tb[-1]) or ta[-1] in tb[1:] or tb[-1] in ta[1:]
+
+
+def looks_like_name(query: str | None) -> bool:
+    """A search shaped like a person's name: two to four capitalized words ("Dana Okafor", "Mary-Kate O'Neil")."""
+    words = (query or "").split()
+    return 2 <= len(words) <= 4 and all(re.fullmatch(r"[^\W\d_][\w'.-]*", w) and w[:1].isupper()
+                                         and not (len(w) > 2 and w.isupper()) for w in words)
 
 
 def same_person_name(a: str | None, b: str | None) -> bool:
@@ -2667,9 +2677,11 @@ class Store:
         Logging the same thing twice (same kind, time and text) is a no-op, so
         an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
         """
-        kind = (kind or "").strip().lower()
+        kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
+        kind = KIND_ALIASES.get(kind, kind)
         if kind not in TIMELINE_KINDS or kind in ("stage", CHANGE_KIND):
-            raise ValueError(f"kind must be one of {', '.join(k for k in TIMELINE_KINDS if k != 'stage')}")
+            raise ValueError(f"kind must be one of {', '.join(k for k in TIMELINE_KINDS if k != 'stage')} "
+                             "(an InMail, LinkedIn message or DM is a message)")
         body = _clean(body)
         if kind == "note" and not body:
             raise ValueError("A note needs some text.")
@@ -2697,6 +2709,9 @@ class Store:
                     (candidate_id, job_id, kind, body, when, now_iso(), _clean(source)),
                 ).lastrowid
                 if kind in CONTACT_KINDS and when <= now_iso():
+                    if self._contact_from_stamp(candidate_id):  # the real outreach replaces a move's stamp
+                        self._conn.execute("UPDATE candidates SET last_contacted_at = NULL WHERE id = ?",
+                                           (candidate_id,))
                     self._conn.execute(
                         "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
@@ -2902,6 +2917,17 @@ class Store:
         extras_by_term = [self._extra_matches(t) for t in terms]
         if fix_typos:
             fixes = self._spelling_fixes(terms, extras_by_term)
+            held, quiet = self._name_words(query, terms, fixes) if fixes else (set(), False)
+            if held:  # a name is never spell-corrected: "Dana Okafor" is not "data Okafor"
+                all_fixes, fixes = fixes, {w: f for w, f in fixes.items() if w not in held}
+                if not fixes and not quiet:
+                    fixed = query
+                    for word, fix in all_fixes.items():
+                        fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+                    res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
+                                                 limit=limit, offset=offset, fix_typos=False)
+                    res.suggestion = fixed
+                    return res
             if fixes:
                 fixed = query
                 for word, fix in fixes.items():
@@ -3041,6 +3067,26 @@ class Store:
         return [r["id"] for r in self._rows(
             f"SELECT c.id FROM candidates c WHERE {clause} ORDER BY c.updated_at DESC, c.id DESC",
             (json.dumps(keep), *params))]
+
+    def _name_words(self, query: str, terms: list[_Term], fixes: dict[str, str]) -> tuple[set[str], bool]:
+        """(the words of a fix that may be part of a person's name, whether to stay quiet about them).
+
+        A capitalized word in a query shaped like a name (two to four capitalized words), or next to a word
+        some saved person's name has, is a name: no fix, and no "Did you mean" either when the other word is
+        a saved name. In a short query with a saved name in it, a lowercase word gets "Did you mean" only."""
+        caps = {fold(w) for w in re.findall(r"[^\W\d_][\w'-]*", query or "")
+                if w[:1].isupper() and not (len(w) > 1 and w.isupper())}
+        named = self._named(terms, set(fixes))
+        held = {w for w in fixes if w in caps and (named or looks_like_name(query))}
+        if named and len((query or "").split()) <= 4:
+            return set(fixes), held == set(fixes)
+        return held, False
+
+    def _named(self, terms: list[_Term], skip: set[str]) -> bool:
+        """Whether another word of the query is in some saved person's name."""
+        return any(self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1",
+                             (f'name : "{t.form}"',))
+                   for t in terms if t.form not in skip and t.form.isalpha())
 
     def _spelling_fixes(self, terms: list[_Term], extras_by_term: list[dict]) -> dict[str, str]:
         """Query words nobody has -> the closest saved word, when one is close enough."""
@@ -3452,6 +3498,8 @@ class Store:
                 ).lastrowid
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, None, s["name"])
+                if s["name"].lower() == "contacted":
+                    self._stamp_contacted(candidate_id, ts)
                 if _clean(notes):
                     self._conn.execute(
                         "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
@@ -3459,6 +3507,24 @@ class Store:
                         (candidate_id, job_id, _clean(notes), ts, ts, AI_SOURCE if by == "ai" else None),
                     )
         return self.get_application(app_id)
+
+    def _stamp_contacted(self, candidate_id: int, ts: str) -> None:
+        """Someone went into Contacted. Last contacted comes from logged outreach; with none logged yet,
+        the move itself counts once. Call inside a transaction."""
+        self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ? AND last_contacted_at IS NULL",
+                           (ts, candidate_id))
+
+    def _contact_from_stamp(self, candidate_id: int) -> bool:
+        """Whether last contacted is only the time of a move into Contacted, with no logged outreach behind it."""
+        row = self._conn.execute("SELECT last_contacted_at AS at FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
+        if not row or not row["at"]:
+            return False
+        kinds = ", ".join("?" * len(CONTACT_KINDS))
+        if self._conn.execute(f"SELECT 1 FROM timeline WHERE candidate_id = ? AND at = ? AND kind IN ({kinds})",
+                              (candidate_id, row["at"], *sorted(CONTACT_KINDS))).fetchone():
+            return False
+        return bool(self._conn.execute("SELECT 1 FROM timeline WHERE candidate_id = ? AND at = ? AND kind = 'stage'"
+                                       " AND lower(body) = 'contacted'", (candidate_id, row["at"])).fetchone())
 
     def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None, *,
                    by: str | None = None) -> dict[str, Any]:
@@ -3488,9 +3554,7 @@ class Store:
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, app["stage"], s["name"])
                 if s["name"].lower() == "contacted":
-                    self._conn.execute(
-                        "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
-                        " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (ts, candidate_id, ts))
+                    self._stamp_contacted(candidate_id, ts)
             if _clean(notes):
                 self._conn.execute("UPDATE applications SET notes = ? WHERE id = ?", (_clean(notes), app["id"]))
                 self._conn.execute(
