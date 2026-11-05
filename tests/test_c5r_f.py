@@ -105,7 +105,7 @@ def test_cautious_update_client_fills_an_empty_day_but_holds_a_replaced_zone(sto
 def test_cautious_mark_update_sent_waits_and_a_stale_one_is_refused(store):
     server = build_server(store)
     c = _cautious(store)
-    _acme(store)
+    jid, cid = _acme(store)
     res = call(server, "mark_update_sent", client="acme")
     assert text(res).startswith("Waiting for the recruiter's review: Mark the update to \"Acme\" as sent")
     assert reports.client(store, "acme")["last_update_sent_at"] is None
@@ -114,6 +114,7 @@ def test_cautious_mark_update_sent_waits_and_a_stale_one_is_refused(store):
     assert reports.client(store, "acme")["last_update_sent_at"]
     # Queued, then the recruiter marked it sent themselves: keeping the old one doesn't mark it again.
     rid = data(call(server, "mark_update_sent", client="acme"))["pending_review"]["id"]
+    store.move_stage(cid, jid, "Client interview")  # something new, so the recruiter's own mark is a real send
     reports.mark_sent(store, "acme")
     r = c.post(f"/review/{rid}/keep", follow_redirects=False)
     assert "marked as sent since" in flash_of(r, "flash_error")

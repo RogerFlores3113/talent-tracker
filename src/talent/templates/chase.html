@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set own = inhouse() %}
+{% block title %}Waiting on feedback · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>Waiting on feedback</h1>
+  <a class="btn small no-print" href="/clients">All {{ 'reports' if own else 'clients' }}</a></div>
+<p class="lead">{% if groups %}{% set n = groups | sum(attribute='people', start=[]) | length %}{{ n }} {{ 'person has' if n == 1 else 'people have' }} waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage with no interview booked. One nudge per hiring manager: copy or email it, then mark them as chased.{% else %}Nobody has waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage. Nothing to chase.{% endif %}</p>
+
+{% for g in groups %}{% set tid = 'chase-text-' ~ loop.index %}
+<section class="panel report" id="chase-{{ slug(g.key) }}-{{ slug(g.manager_key) or 'none' }}">
+  <div class="sec-head"><h2><a href="/clients/{{ g.slug }}">{{ g.client }}</a>{% if g.manager %}: {{ g.manager }}{% endif %}</h2>
+    <span class="copy-status no-print">{% if g.chased_at %}<span class="fine">Last chased {{ g.chased_at | ago }}</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span></span></div>
+  <table class="dense">
+    <thead><tr><th>Person</th><th>Job</th><th>Stage</th><th>Waiting</th></tr></thead>
+    <tbody>{% for p in g.people %}
+    <tr><td><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a></td><td><a href="/jobs/{{ p.job_id }}">{{ p.job }}</a></td><td>{{ p.stage }}</td>
+      <td class="nowrap">{% if p.date_unknown %}<span class="muted">date unknown (imported)</span>{% else %}{{ p.days }} days <span class="muted">since {{ p.since | local('%b %-d') }}</span>{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  <pre class="code wrap" id="{{ tid }}">{{ g.text }}</pre>
+  <div class="actions-inline no-print">
+    {% if g.email %}<a class="btn small" href="{{ g.email.href }}">Email {{ g.email.to }}</a>{% if g.email.long %} <span class="fine">Too long to fill in by link: copy it first, then paste it in.</span>{% endif %}
+    {% else %}<span class="fine">No email saved for {{ g.manager or 'this client' }}. Add it on <a href="/clients/{{ g.slug }}#details">the client's page</a> or on the job.</span>{% endif %}
+    <form method="post" action="/clients/{{ g.slug }}/chased" class="inline"><input type="hidden" name="manager" value="{{ g.manager_key }}"><input type="hidden" name="manager_name" value="{{ g.manager or g.client }}">
+      <button class="btn small primary" type="submit">Mark as chased</button></form>
+  </div>
+</section>
+{% endfor %}
+
+<section class="panel no-print">
+  <form method="post" action="/clients/chase/days" class="tablebar">
+    <label class="inline-label">List people waiting at least <input type="number" name="days" min="1" max="90" value="{{ days }}"> days</label>
+    <button class="btn small" type="submit">Save</button>
+  </form>
+  <p class="fine">Waiting counts from the stage date (a file's own date after an import). Someone with an interview booked isn't waiting. Email opens your own mail app; nothing is sent from here. Marking a manager as chased keeps them off Today for {{ days }} days.</p>
+</section>
+{% endblock %}

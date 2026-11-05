@@ -589,6 +589,7 @@ AI_ACTION_KINDS = {
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
     "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
+    "client_create": "Added a client",
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
 }
@@ -1535,6 +1536,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
             f" ({new['manager']})" if new.get("manager") else "")
     if kind == "client_edit":
         return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
+    if kind == "client_create":
+        return f"Added the client {quoted(new.get('_client'))}"
     what = f": {new['summary']}" if new.get("summary") else ""
     if kind == "interview_cancel":
         return f"Cancelled an interview with {name}{what}"

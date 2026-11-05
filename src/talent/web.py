@@ -29,6 +29,7 @@ from starlette.background import BackgroundTask
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews
+from . import chase
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -1060,8 +1061,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(go + "?" + urlencode({"notice": notice}), status_code=303)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
-    def new_job(request: Request):
-        return page(request, "job_form.html", j={"stage_set": actions.default_stage_set(store)}, error=None,
+    def new_job(request: Request, company: str = ""):
+        # From a client's page: the company is filled in, so the new job lands on that client.
+        return page(request, "job_form.html", j={"stage_set": actions.default_stage_set(store),
+                                                 "company": company.strip()[:200] or None}, error=None,
                     stage_sets=actions.STAGE_SETS, copy_jobs=store.list_jobs(None))
 
     @app.post("/jobs", response_class=HTMLResponse)
@@ -1276,6 +1279,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}#pipeline", status_code=303)
         return back(request, f"/jobs/{job_id}", error=error or resubmit)
 
+    @app.get("/jobs/{job_id}/submit/{candidate_id}", response_class=HTMLResponse)
+    def submit_page(request: Request, job_id: int, candidate_id: int):
+        """Submit to client: what happens, any heads up, and the write-up draft to send from their own mail."""
+        job = job_or_404(job_id)
+        cand = cand_or_404(candidate_id)
+        app_row = next((p for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
+        if app_row is None:
+            raise HTTPException(404, "That person isn't on this job.")
+        target = chase.submit_stage(store, job_id)
+        done = bool(target) and app_row["stage"].lower() == target["name"].lower()
+        return page(request, "submit.html", job=job, cand=cand, stage=app_row["stage"], target=target, done=done,
+                    since=app_row["stage_changed_at"], draft=chase.writeup(store, candidate_id, job_id),
+                    warning=None if done else chase.earlier_to_client(store, candidate_id, job_id),
+                    elsewhere=chase.other_clients(store, candidate_id, job_id))
+
+    @app.post("/jobs/{job_id}/submit/{candidate_id}")
+    def submit_form(job_id: int, candidate_id: int):
+        job_or_404(job_id)
+        cand_or_404(candidate_id)
+        go = f"/jobs/{job_id}/submit/{candidate_id}"
+        try:
+            got = chase.submit(store, candidate_id, job_id, by="app")
+        except (ValueError, NotFound) as exc:
+            return RedirectResponse(f"{go}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = (f"Moved to {got['stage']}. Now email the write-up from your own mail." if got["moved"]
+                  else f"Already in {got['stage']}, so nothing moved.")
+        return RedirectResponse(f"{go}?{urlencode({'notice': notice})}#draft", status_code=303)
+
     @app.post("/jobs/{job_id}/delete")
     def delete_job_form(job_id: int):
         """App window only. The AI has no tool to delete a job."""
@@ -1408,7 +1439,40 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/clients/due", response_class=HTMLResponse)
     def clients_due_page(request: Request):
         """The Friday send-out: every update due this week, ready to copy, email and mark as sent."""
-        return page(request, "due.html", due=reports.due_updates(store), num=reports._num)
+        due = reports.due_updates(store)
+        return page(request, "due.html", due=due, num=reports._num,
+                    split={p["key"]: reports.split_note(store, p["key"]) for p in due["parts"]})
+
+    @app.post("/clients/new")
+    async def new_client(request: Request):
+        """A client before its first job: name, and if known its contacts, update day and time zone."""
+        form = await request.form()
+        fields = {k: str(form.get(k) or "") for k in ("contacts", "update_day", "time_zone")}
+        try:
+            got = reports.create_client(store, str(form.get("name") or ""), **fields)
+        except ValueError as exc:
+            return RedirectResponse("/clients?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        c = got["client"]
+        notice = (f"Added {c['name']}. Add its first job when the req comes in." if got["created"]
+                  else f"{c['name']} is already here, so nothing changed.")
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.get("/clients/chase", response_class=HTMLResponse)
+    def chase_page(request: Request):
+        """Everyone waiting on a client's feedback, per client and hiring manager, with a nudge for each."""
+        days = chase.chase_days(store)
+        return page(request, "chase.html", groups=chase.chase_list(store, days=days), days=days,
+                    slug=reports.slug)
+
+    @app.post("/clients/chase/days")
+    async def chase_days_form(request: Request):
+        form = await request.form()
+        try:
+            n = chase.set_chase_days(store, form.get("days"))
+        except ValueError as exc:
+            return RedirectResponse("/clients/chase?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Now listing people waiting {n} days or more."}),
+                                status_code=303)
 
     def client_or_404(slug: str) -> dict[str, Any]:
         try:
@@ -1431,7 +1495,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
         sections = [{"rep": r, "text": (t := reports.report_text(r)), "email": (e := reports.email_link(r, t)),
                      "mailto": e["href"] if e else None, "notes": reports.recruiter_notes(r)} for r in parts]
+        early = c.get("update_day") if c.get("update_day") and reports._day_start(
+            c.get("update_day"), datetime.now(timezone.utc)) is None else None
         return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
+                    early=early, split_note=reports.split_note(store, c["key"]),
                     submittals=reports.submittals(store, c["key"]),
                     updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
                     labels=rep.get("labels") or (reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS),
@@ -1475,12 +1542,42 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"{back}?{urlencode({'flash_error': str(exc)})}", status_code=303)
         who = f"{done['manager']}'s update" if done.get("manager") else (
             "The update for jobs with no hiring manager" if manager is not None else "")
+        if done.get("already"):
+            notice = (f"Already marked as sent at {_local(done['sent_at'], '%-I:%M %p')}. Nothing new since, so "
+                      "nothing changed.")
+            return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
         if back == "/clients/due":
             notice = f"Marked {who or 'the update to ' + c['name']} as sent. A copy is kept on its page."
         else:
             notice = (f"Marked {who} as sent. A copy is kept below, and their next update starts from now." if who
                       else "Marked as sent. A copy is kept below, and the next update starts from now.")
         return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/clients/{slug}/chased")
+    async def client_chased(request: Request, slug: str):
+        """The recruiter sent a hiring manager's nudge: Today stops asking until it's due again."""
+        c = client_or_404(slug)
+        form = await request.form()
+        mk = reports.manager_key(str(form.get("manager") or ""))
+        chase.mark_chased(store, c["key"], mk)
+        who = str(form.get("manager_name") or "").strip()[:200] or c["name"]
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {who} as chased today."}),
+                                status_code=303)
+
+    @app.post("/clients/{slug}/note")
+    async def client_note_form(request: Request, slug: str):
+        """The note that opens this client's next update (one per hiring manager when updates are split)."""
+        c = client_or_404(slug)
+        form = await request.form()
+        manager = str(form["manager"]) if "manager" in form else None
+        back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
+        try:
+            text = reports.save_client_note(store, c["key"], str(form.get("note") or ""), manager)
+        except ValueError as exc:
+            return RedirectResponse(f"{back}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = ("Saved. The note opens the update, and Mark as sent clears it." if text
+                  else "Took the note out of the update.")
+        return RedirectResponse(f"{back}?{urlencode({'notice': notice})}#report", status_code=303)
 
     @app.post("/clients/{slug}/ai-reviewed")
     async def client_ai_reviewed(request: Request, slug: str):
@@ -1633,6 +1730,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, nxt, error=str(exc))
         sep = "&" if "?" in nxt else "?"
         return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
+
+    @app.get("/interviews/{interview_id}/job", response_class=HTMLResponse)
+    def interview_job_page(request: Request, interview_id: int):
+        """An interview logged with no job: pick which job it's for, so it lands in the right client's update."""
+        try:
+            got = chase.interview_jobs(store, interview_id)
+        except NotFound:
+            raise HTTPException(404, "Interview not found")
+        return page(request, "interview_job.html", iv=got["interview"], jobs=got["jobs"])
+
+    @app.post("/interviews/{interview_id}/job")
+    async def interview_job_form(request: Request, interview_id: int):
+        form = await request.form()
+        jid = str(form.get("job_id") or "")
+        try:
+            iv = chase.set_interview_job(store, interview_id, int(jid) if jid.isdigit() else -1)
+        except NotFound:
+            raise HTTPException(404, "Interview not found")
+        except ValueError as exc:
+            return RedirectResponse(f"/interviews/{interview_id}/job?{urlencode({'flash_error': str(exc)})}",
+                                    status_code=303)
+        job = store.get_job(iv["job_id"])
+        notice = f"That interview is now for {actions.job_label(job['title'], job.get('company'))}."
+        return RedirectResponse(f"/candidates/{iv['candidate_id']}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
 
     @app.get("/interviews", response_class=HTMLResponse)
     def interviews_page(request: Request, week: str = ""):

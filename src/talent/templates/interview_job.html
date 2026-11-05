@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Pick the job · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>Which job is this interview for?</h1>
+  <a class="btn small" href="/candidates/{{ iv.candidate_id }}#timeline">Back to {{ iv.candidate_name }}</a></div>
+<p class="lead">{{ iv.candidate_name }}, {{ iv.at | local }}{% if iv.body %}: {{ iv.body }}{% endif %}. {% if iv.job_id %}It's set to a job now; pick another to change it.{% else %}It was logged with no job, so it stays out of every client update until you pick one.{% endif %}</p>
+{% if jobs %}
+<ul class="plain">{% for j in jobs %}
+  <li><form method="post" action="/interviews/{{ iv.id }}/job" class="inline"><input type="hidden" name="job_id" value="{{ j.job_id }}">
+    <button class="btn small{{ ' primary' if iv.job_id == j.job_id }}" type="submit">{{ job_label(j.title, j.company) }}</button></form> <span class="muted">{{ j.stage }}</span></li>
+{% endfor %}</ul>
+{% else %}<p class="fine">{{ iv.candidate_name }} isn't on any job yet. Add them to one first.</p>{% endif %}
+{% endblock %}

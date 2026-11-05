@@ -11,9 +11,11 @@
   <div class="sec-head"><h2><a href="/clients/{{ p.slug }}">{{ p.name }}</a>{% if p.manager is not none %}: {{ p.manager or 'Jobs with no hiring manager' }}{% endif %}
     <span class="badge{{ ' overdue' if p.late_days > 0 }}">{{ 'Due today' if p.late_days == 0 else 'Due since ' ~ p.day }}</span></h2>
     <span class="copy-status no-print">{% if p.rep.held %}<span class="badge overdue">({{ p.rep.held | length }} held back, review first)</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
+  {% if split[p.key] and (loop.first or loop.previtem.key != p.key) %}<p class="flash warn no-print" role="note">{{ split[p.key] }}</p>{% endif %}
   {% if p.ai_moves %}{% set ai_moves, ai_slug, ai_back = p.ai_moves, p.slug, 'due' %}{% include "_ai_moves.html" %}{% endif %}
   {% for o in p.overfilled %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.hired }} {{ p.rep.hire_word }} for {{ o.openings }} opening{{ 's' if o.openings != 1 }} (over by {{ o.over }}). Check those hires, or raise the job's openings, before you send this.</p>{% endfor %}
   {% if p.not_shown %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: left out as internal stages: {% for s, n in p.not_shown.items() %}{{ s }} ({{ n }}){{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
+  {% if p.rep.loose_interviews %}<p class="fine no-print recruiter-only" role="note">For you only: an interview logged with no job stays out of this update. Pick the job: {% for x in p.rep.loose_interviews %}<a href="{{ x.href }}">{{ x.name }}</a>{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ p.text }}</pre>
   {% if p.manager is none and p.email %}{% set ck = p.key %}{% include "_ai_contacts.html" %}{% endif %}
   <div class="actions-inline no-print">

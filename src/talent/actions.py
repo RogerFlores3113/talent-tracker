@@ -912,6 +912,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += shortlist_items(store)
     from .reports import today_items as update_items  # here: reports imports this module
     items += update_items(store, now)  # client (or hiring manager) updates due today or earlier this week
+    from .chase import today_items as chase_items  # here: chase imports this module
+    items += chase_items(store, now)  # people waiting on a client's feedback past the chase days
     stuck_more = 0
     if on("flag_stuck"):
         rows, n_hidden, stuck_more = _stuck_items(store, now, _int(cfg, "stuck_days", 7), snoozed, label)
