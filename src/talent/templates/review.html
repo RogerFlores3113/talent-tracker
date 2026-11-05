@@ -36,6 +36,7 @@
         {% if r.detail %}<div class="fit">{{ r.detail }}</div><div class="fine">Text from your AI app, not checked.</div>{% endif %}
         {% if r.kind == 'client_edit' and 'contacts' in r.payload.fields %}<div class="fine">Client updates would go to these contacts.</div>{% endif %}
         {% if r.kind == 'job_edit' and 'hiring_manager_email' in r.payload.fields %}<div class="fine">Client updates for this job can be emailed to this address.</div>{% endif %}
+        {% if r.stale %}<div class="fine"><span class="badge warn">Out of date</span> {{ r.stale }}</div>{% endif %}
         {% if r.kind == 'stage_move' and r.payload.notes %}<div class="fine">With the note: {{ r.payload.notes }}</div>{% endif %}
         <div class="fine">Sent {{ r.created_at | ago }}</div>
       </div>

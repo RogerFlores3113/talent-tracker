@@ -1940,7 +1940,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 d = _json_or_none(r["data"]) or {}
                 lines = change_lines(d)
                 rows.append({"at": r["at"], "who": d.get("by") if d.get("by") in CHANGE_WHO else "app",
-                             "who_label": "You, in Claude" if d.get("via") == "claude" else None,
+                             "who_label": "You, on the Shortlist card in your AI app" if d.get("via") == "claude" else None,
                              "name": r["candidate_name"], "href": f"/candidates/{r['candidate_id']}#timeline",
                              "text": ("Undo: " if (r["body"] or "").startswith("Undid") else "")
                              + ("; ".join(lines) if lines else r["body"] or ""),
@@ -2320,6 +2320,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         review.set_options(store, **{k: form.get(k) == "1" for k in review.OPTIONS})
         msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job, client and interview "
                "changes, and notes now wait on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
+        if on:
+            msg += review.extra_holds_text(store)
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
 
     @app.post("/settings/time-zone")

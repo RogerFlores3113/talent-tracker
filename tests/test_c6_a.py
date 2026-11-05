@@ -144,18 +144,19 @@ def _card(store, monkeypatch, *names):
 def test_card_keeps_and_passes_are_ai_actions_that_undo_all_ai_takes_back(store, monkeypatch):
     server, job, (pat, bo), key = _card(store, monkeypatch, "Pat Prospect", "Bo Li")
     call(server, "keep_prospect", job_id=job["id"], prospect_id=pat, view_key=key)
+    key = call(server, "shortlist_card_key", job_id=job["id"], prospect_ids=[bo]).structuredContent["key"]  # one-time
     call(server, "pass_prospect", job_id=job["id"], prospect_id=bo, view_key=key)
     kinds = [a["kind"] for a in store.ai_actions()]
     assert kinds[:2] == ["card_pass", "card_keep"]
     page = local_client(store).get("/changes").text
-    assert page.count("from the Shortlist card in Claude, for Backend (Ledgerly)") == 2  # its row, and its session
+    assert page.count("on the Shortlist card in your AI app, for Backend (Ledgerly)") == 4  # keep and pass, rows and session
     assert "from the Shortlist for Backend" not in page
     c = local_client(store)
     r = c.post(f"/changes/ai/{store.ai_actions()[0]['id']}/undo", follow_redirects=False)  # the pass, alone
     assert flash_of(r).startswith('Undid: Passed on "Bo Li"') and shortlist.counts(store, job["id"])["passed"] == 0
     r = c.post("/changes/undo-ai", data={"since": hour_ago()}, follow_redirects=False)
     msg = flash_of(r)
-    assert msg.startswith('Undid 2 AI changes: Kept "Pat Prospect" from the Shortlist card'), msg
+    assert msg.startswith('Undid 2 AI changes: Kept "Pat Prospect" on the Shortlist card'), msg
     assert store.count_candidates() == 0 and shortlist.counts(store, job["id"]) == {"proposed": 0, "kept": 0,
                                                                                    "passed": 0}
 

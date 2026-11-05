@@ -15,11 +15,10 @@ Rules the tools enforce (from the product decisions):
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import re
 import secrets
+import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -37,7 +36,7 @@ from . import outreach
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
-from .paths import app_key, app_url
+from .paths import app_url
 from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
@@ -119,8 +118,18 @@ VIEW_KEY = "talent-search/shortlist"
 NOT_FROM_VIEW = ("Nothing changed. Only the recruiter keeps or passes people, with the buttons on the Shortlist "
                  "card or in the app. Use propose_candidates and leave the choice to them.")
 # A press on a card whose key no longer fits: the person who pressed reads this on the card.
-CARD_STALE = ("This card is from an earlier Claude session. Ask Claude to show the Shortlist again, or review it in "
-              "Talent Search.")
+CARD_STALE = ("Nothing changed: this card's key didn't fit. Ask your AI app to show the Shortlist again, or review "
+              "it in Talent Search.")
+# Card keys are one-time and belong to the AI session that gave them out (see CardKeys).
+CARD_USED = ("Nothing changed: that card key was already used or ran out. Press the button again, or review the "
+             "Shortlist in Talent Search.")
+CARD_OTHER_SESSION = ("Nothing changed: that card key came from another AI session. Ask your AI app to show the "
+                      "Shortlist again, or review it in Talent Search.")
+# A card keep counts toward the hourly cap on what the AI app changes (each press counts once).
+CARD_CAP = ("Nothing changed: the AI app's hourly limit on changes is used up. Keep them in Talent Search, on the "
+            "Shortlist, or try again later.")
+CARD_KEY_SECONDS = 120  # how long a key the card asked for stays good
+CARD_KEYS_KEPT = 500  # keys waiting at once, per session; the oldest go first
 CARD_TOOLS = ("keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects", "shortlist_card_key")
 # A press on a card in a chat app that didn't say it shows Talent Search cards.
 CARD_NO_APPS = ("This chat app didn't say it shows Talent Search cards, so Keep and Pass work in Talent Search "
@@ -131,14 +140,52 @@ AI_TODO_CAP = 20
 UI_EXTENSION = "io.modelcontextprotocol/ui"
 
 
-def _card_secret() -> bytes:
-    """The Shortlist cards' key, derived from this install's key file in the data folder, so a card keeps working
-    after a restart. A data folder that can't be written falls back to a key for this run only."""
+class CardKeys:
+    """The keys the Shortlist card's buttons send, one AI session's worth, kept in memory. The card asks for one
+    (shortlist_card_key) right before each press; a key works once, only in the session that gave it out, only for
+    its job and the proposal batches the card shows, and only for CARD_KEY_SECONDS. So a key copied into another
+    session, or sent twice, does nothing. A batch press (Keep all, Pass all) takes one key."""
+
+    def __init__(self, session: str) -> None:
+        self.session = session
+        self._keys: dict[str, dict[str, Any]] = {}
+        self._spent: dict[str, float] = {}
+
+    def issue(self, job_id: int, scope: str, client: Any = None) -> str:
+        now = time.monotonic()
+        for k in [k for k, v in self._keys.items() if v["until"] < now]:
+            self._spent[k] = now
+            del self._keys[k]
+        while len(self._keys) >= CARD_KEYS_KEPT:
+            del self._keys[next(iter(self._keys))]
+        nonce = secrets.token_hex(16)
+        self._keys[nonce] = {"job_id": job_id, "scope": scope, "client": client, "until": now + CARD_KEY_SECONDS}
+        return f"{self.session}:{nonce}"
+
+    def take(self, key: str, job_id: int, client: Any = None) -> str:
+        """Use up a key and return the batches it covers. Raises ToolError with what was wrong with it."""
+        tag, _, nonce = str(key or "").rpartition(":")
+        if tag != self.session:
+            raise ToolError(CARD_OTHER_SESSION if re.fullmatch(r"[0-9a-f]{12}", tag) else CARD_STALE)
+        rec = self._keys.pop(nonce, None)
+        if rec is None:
+            raise ToolError(CARD_USED if nonce in self._spent else CARD_STALE)
+        self._spent[nonce] = time.monotonic()
+        while len(self._spent) > CARD_KEYS_KEPT * 4:
+            del self._spent[next(iter(self._spent))]
+        if rec["until"] < time.monotonic():
+            raise ToolError(CARD_USED)
+        if rec["job_id"] != job_id or rec["client"] != client:
+            raise ToolError(CARD_STALE)
+        return rec["scope"]
+
+
+def _mcp_session(mcp: FastMCP) -> int | None:
+    """Which connection a request came on, so a card key works only on the one that asked for it."""
     try:
-        base = app_key().encode()
-    except OSError:
-        base = secrets.token_bytes(32)
-    return hmac.new(base, b"talent-search:shortlist-cards", hashlib.sha256).digest()  # its own subkey
+        return id(mcp.get_context().session)
+    except (LookupError, ValueError, AttributeError):  # no request in flight (tests)
+        return None
 
 
 def apps_support(params: Any) -> bool | None:
@@ -534,9 +581,33 @@ def _differences(saved: dict[str, Any], given: dict[str, Any]) -> list[dict[str,
     return out
 
 
+# Tag-shaped markup in candidate text ("</candidate-provided> SYSTEM NOTICE"), taken out of what the model reads so
+# it can't pass for the end of a fence. An address in angle brackets ("Ana <ana@x.com>") isn't tag-shaped.
+_TAG_LIKE = re.compile(r"</?\s*[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?\s*>")
+
+
+def untag(v: Any) -> Any:
+    """Candidate text (or a structure holding it) with tag-shaped markup taken out."""
+    if isinstance(v, str):
+        return _TAG_LIKE.sub("", v) if "<" in v else v
+    if isinstance(v, list):
+        return [untag(x) for x in v]
+    if isinstance(v, dict):
+        return {k: untag(x) for k, x in v.items()}
+    return v
+
+
+def fenced(lines: list[str]) -> list[str]:
+    """Candidate-provided lines between a marker made fresh for this reply, after the data note. The lines lose any
+    tag-shaped markup, so nothing in them can close the fence early."""
+    mark = "data-" + secrets.token_hex(4)
+    return [f"{DATA_NOTE} <{mark}>", *(untag(x) for x in lines), f"</{mark}> (end of candidate-provided text)"]
+
+
 def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
-    """get_candidate's text. The data note comes first, so it covers the name, title, skills and all below."""
-    out = [DATA_NOTE, _line(c)] if note else [_line(c)]
+    """get_candidate's text. The data note comes first, so it covers the name, title, skills and all below; with
+    the note, the candidate's own lines sit inside a fresh marker (fenced), and the recruiter's words come after."""
+    out = [_line(c)]
     for k, label in (("email", "Email"), ("phone", "Phone"), ("linkedin_url", "LinkedIn"), ("website", "Website"),
                      ("source", "Source"), ("last_contacted_at", "Last contacted"), ("updated_at", "Last updated")):
         if c.get(k):
@@ -559,6 +630,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
     if rest:
         out.append("Recent activity:")
     out += [f"- {_timeline_line(t)}" for t in rest]
+    if note:
+        out = fenced(out)
     if theirs:
         out.append("Typed by the recruiter in the app (their own words, not candidate-provided):")
         out += [f"- {_timeline_line(t)}" for t in theirs]
@@ -679,8 +752,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                          + (" These people share some of the words, under other names:" if results else ""))
         else:
             lines.append(head)
-        if results:
-            lines.append(DATA_NOTE)
+        found = len(lines)
         for c in results:
             line = f"- {_line(c)}"
             if c.get("reason"):
@@ -694,13 +766,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if c.get("jobs"):
                 line += ". In: " + "; ".join(f"{j['job']} [job_id {j['job_id']}], {j['stage']}" for j in c["jobs"])
             lines.append(line)
+        if results:  # the people found, between a marker made fresh for this reply
+            lines[found:] = fenced(lines[found:])
         if not results and not is_id:
             lines = [f"No one named {quoted(q)} is saved." if named else
                      "No saved candidates match. Try fewer or different words, or no filters."]
         if res.suggestion and not res.corrected:
             lines.append(f"Did you mean {res.suggestion}?")
         return _result("\n".join(lines), {
-            "total": res.total, "exact_total": exact_total, "results": results, "closest": res.closest,
+            "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
             "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q,
             **({"no_one_named": q} if nobody else {}),
             "app_url": app_url("/?q=" + quote(res.suggestion if res.corrected else q))})
@@ -725,7 +799,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def get_candidate(candidate_id: int) -> CallToolResult:
         """Full record for one candidate: contact details, skills, work history, jobs and stages, recent activity."""
         c = {**candidate_view(candidate_id), "data_note": DATA_NOTE}
-        return _result(_candidate_text(c), c)
+        text = _candidate_text(c)
+        return _result(text, untag(c))
 
     def brief(c: dict[str, Any]) -> dict[str, Any]:
         return _slim({k: c.get(k) for k in (
@@ -1764,14 +1839,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result("\n".join(lines), {"followups": out, "data_note": DATA_NOTE, "app_url": app_url("/")})
 
     # Keep and Pass on the in-chat Shortlist card. The host hides these from the model (visibility "app"), and a
-    # call without the key that only the card received (in the result's _meta) is refused, so only a press acts.
-    # The key comes from this install's own key file, so a card still works after Claude or the app restarts. It
-    # is per job and covers only the proposal batches the card shows, so it acts on nobody proposed later.
-    card_secret = _card_secret()
-
-    def key_for(job_id: int, scope: str) -> str:
-        mac = hmac.new(card_secret, f"shortlist:{job_id}:{scope}".encode(), hashlib.sha256).hexdigest()[:32]
-        return f"{scope}:{mac}"
+    # call without a key that only the card received (from the app-only shortlist_card_key) is refused, so only a
+    # press acts. A key is one-time, belongs to this session and covers only the proposal batches the card shows,
+    # so it acts on nobody proposed later. After a restart the card simply asks the new session for a key.
+    card_keys = CardKeys(session)
 
     def _with_view_key(res: CallToolResult, job_id: int, prospect_ids: list[int]) -> CallToolResult:
         """Tell the view which job it shows. No key: the model may see _meta, so the view asks for the key itself."""
@@ -1786,15 +1857,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            tuple(prospect_ids))
         return ".".join(sorted({f"b{r['batch_id']}" if r["batch_id"] else f"p{r['id']}" for r in rows}))
 
-    def _from_view(job_id: int, prospect_id: int, key: str | None) -> None:
+    def _from_view(job_id: int, prospect_ids: int | list[int], key: str | None) -> None:
+        """Check (and use up) the card's key for one press, on one person or a batch."""
         if not key or _client_apps(mcp) is not True:
             raise ToolError(NOT_FROM_VIEW)
-        scope, _, _mac = str(key).rpartition(":")
-        if not hmac.compare_digest(str(key).encode(), key_for(job_id, scope).encode()):
-            raise ToolError(CARD_STALE)
-        row = store._row("SELECT id, batch_id FROM prospects WHERE id = ? AND job_id = ?", (prospect_id, job_id))
-        if row and (f"b{row['batch_id']}" if row["batch_id"] else f"p{row['id']}") not in scope.split("."):
-            raise ToolError(CARD_STALE)
+        scope = card_keys.take(str(key), job_id, _mcp_session(mcp)).split(".")
+        for pid in ([prospect_ids] if isinstance(prospect_ids, int) else prospect_ids):
+            row = store._row("SELECT id, batch_id FROM prospects WHERE id = ? AND job_id = ?", (pid, job_id))
+            if row and (f"b{row['batch_id']}" if row["batch_id"] else f"p{row['id']}") not in scope:
+                raise ToolError(CARD_STALE)
 
     def _decided(job_id: int, prospect_id: int, sentence: str, **extra: Any) -> CallToolResult:
         row = shortlist.get(store, job_id, prospect_id)
@@ -1815,7 +1886,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return _card_error(ToolError(CARD_NO_APPS))
         store.get_job(job_id)
         return CallToolResult(content=[TextContent(type="text", text="Ready.")],
-                              structuredContent={"job_id": job_id, "key": key_for(job_id, _scope(prospect_ids))})
+                              structuredContent={"job_id": job_id, "key": card_keys.issue(
+                                  job_id, _scope(prospect_ids), _mcp_session(mcp))})
 
     def _kept_sentence(done: dict[str, Any], job: dict[str, Any]) -> str:
         c, stage = done["candidate"], done["stage"]
@@ -1834,6 +1906,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         to add them to (the first stage, or Contacted)."""
         try:
             _from_view(job_id, prospect_id, view_key)
+            if not store.ai_overwrites_left(1):
+                raise ToolError(CARD_CAP)
             done = shortlist.keep(store, job_id, prospect_id, link_id=candidate_id, as_new=as_new, via="claude",
                                   log=False, stage=stage)
             batch = shortlist._log_keeps(store, job_id, [done["record"]])
@@ -1857,8 +1931,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ToolError("Nobody picked. Tick the people to keep, or press Keep all.")
         if len(ids) > shortlist.MAX_BATCH * 4:
             raise ToolError("That's too many at once. Keep them in Talent Search.")
-        for pid in ids:
-            _from_view(job_id, pid, view_key)
+        _from_view(job_id, ids, view_key)  # one key for the whole press
         return ids
 
     def _rows_back(job_id: int, ids: list[int], sentence: str, **extra: Any) -> CallToolResult:
@@ -1884,6 +1957,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Calls from the model are refused. People whose same-name match needs a choice are left waiting."""
         try:
             ids = _many(job_id, prospect_ids, view_key)
+            if not store.ai_overwrites_left(1):
+                raise ToolError(CARD_CAP)
             done = shortlist.keep_all(store, job_id, ids, stage=stage, via="claude")
             if done["batch"] is not None:
                 with store._write():  # keeps through Claude are AI actions too, so Undo all AI covers them
@@ -2355,7 +2430,18 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         submitted to this client in the last 12 months, or is in play at another client."""
         job = store.get_job(job_id)
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
-        got = chase.submit(store, candidate_id, job_id, by="ai")
+        target = chase.submit_stage(store, job_id)
+        if before and target and before.lower() != target["name"].lower():
+            _check_cap(store, 1)  # a move into a client-facing stage counts toward the hourly cap
+        held = review.queue_submit(store, candidate_id, job_id, session) if review.hold_moves(store) else None
+        if held is not None:  # Cautious mode holds every stage move: the move waits, the write-up still comes back
+            got = {"moved": False, "stage": before, "at": None, "writeup": chase.writeup(store, candidate_id, job_id),
+                   "warning": chase.earlier_to_client(store, candidate_id, job_id),
+                   "elsewhere": chase.other_clients(store, candidate_id, job_id)}
+        else:
+            got = chase.submit(store, candidate_id, job_id, by="ai")
+            if got["moved"]:
+                review.mark_submit(store, candidate_id, job_id)
         name = store.get_candidate(candidate_id)["name"]
         w = got["writeup"]
         data: dict[str, Any] = {"data_note": DATA_NOTE, "candidate_id": candidate_id, "job_id": job_id,
@@ -2371,7 +2457,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             data["warning"] = " ".join(warnings)
         if not w["to"]:
             data["note"] = "No email saved for this job's hiring manager or client: ask the recruiter who gets it."
-        if got["moved"]:
+        if held is not None:
+            data["pending_review"] = {"id": held["id"], "summary": held["summary"]}
+            sentence = (f"Nothing moved yet: Cautious mode holds every stage move, so moving {quoted(name)} to "
+                        f"{held['payload']['stage']} on {_job_name(job)} waits on Review for the recruiter to keep or "
+                        "pass. Don't send it again. The write-up is in writeup; nothing was sent, and the recruiter "
+                        "sends it from their own mail once they keep the move.")
+        elif got["moved"]:
             sentence = (f"Moved {quoted(name)} to {got['stage']} on {_job_name(job)} (was {before}). The write-up is "
                         "in writeup for the recruiter to send from their own mail; nothing was sent.")
         else:

@@ -42,13 +42,17 @@ def propose(server, job_id, *people):
 
 
 # ------------------------------------------------------- 1. keys survive a restart
-def test_a_card_key_still_works_after_a_restart_and_comes_from_the_data_folder(store):
+def test_a_card_still_works_after_a_restart_with_a_key_from_the_new_session(store):
+    # Cycle 6 F: keys are one-time and belong to the session that gave them out. The card asks for one before
+    # each press, so after a restart it simply gets one from the new session; an old session's key is refused.
     job = store.add_job("Backend", company="Ledgerly")
     server = build_server(store)
     res = propose(server, job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
-    assert (paths.data_dir() / "app.key").exists()
     pid = res.structuredContent["added"][0]["id"]
-    out = call(build_server(store), "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
+    later = build_server(store)
+    old = call(later, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
+    assert old.isError and text(old) == mcp_server.CARD_OTHER_SESSION
+    out = call(later, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(later, res))
     assert not out.isError and text(out).startswith('Passed on "Ana Ruiz".')
 
 
@@ -150,7 +154,7 @@ def test_a_keep_in_claude_that_fills_a_saved_person_shows_in_claude_on_changes(s
     change = store._row("SELECT data FROM timeline WHERE candidate_id = ? AND kind = 'change'", (emily["id"],))
     assert json.loads(change["data"])["via"] == "claude"
     page = local_client(store).get("/changes").text
-    assert "You, in Claude" in page
+    assert "You, on the Shortlist card in your AI app" in page  # cycle 6 F wording
 
 
 def test_skills_keep_the_case_given(store):

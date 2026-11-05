@@ -1587,6 +1587,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_move":
         return f"Moved an interview with {name} to a new time{what}"
     if kind == "interview_outcome":
+        verdict = _added_verdict(old.get("data"), new.get("data"))
+        if verdict:  # one interviewer's own verdict: say whose, so it doesn't read as the session's outcome
+            return f"{verdict[0]}'s verdict on {name}: {verdict[1]}"
         label = interview_label(new.get("data")) or ""
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
     if kind == "interview_feedback":
@@ -1603,11 +1606,23 @@ def _ai_summary(r: dict[str, Any]) -> str:
                 + (f": {body}" if body else ""))
     if kind == "card_keep":
         if (new.get("count") or 1) > 1:
-            return f"Kept {new['count']} people from the Shortlist card in Claude, for {job}"
-        return f"Kept {quoted(new.get('name'))} from the Shortlist card in Claude, for {job}"
+            return f"Kept {new['count']} people on the Shortlist card in your AI app, for {job}"
+        return f"Kept {quoted(new.get('name'))} on the Shortlist card in your AI app, for {job}"
     if kind == "card_pass":
-        return f"Passed on {quoted(new.get('name'))} on the Shortlist card in Claude, for {job}"
+        return f"Passed on {quoted(new.get('name'))} on the Shortlist card in your AI app, for {job}"
     return AI_ACTION_KINDS.get(kind, "A change")
+
+
+def _added_verdict(old: Any, new: Any) -> tuple[str, str] | None:
+    """(who, "Yes") for the interviewer verdict an AI action added to a session, or None when it added none."""
+    was = [v for v in ((old or {}).get("verdicts") or []) if isinstance(v, dict)] if isinstance(old, dict) else []
+    now = [v for v in ((new or {}).get("verdicts") or []) if isinstance(v, dict)] if isinstance(new, dict) else []
+    if len(now) <= len(was):
+        return None
+    last = now[-1]
+    who = re.sub(r"\s*<[^>]*>\s*", " ", " ".join(str(last.get("by") or "").split())).strip()
+    label = VERDICT_LABELS.get(str(last.get("verdict") or ""))
+    return (who, label) if who and label else None
 
 
 def quoted(name: Any) -> str:
@@ -2506,8 +2521,13 @@ class Store:
                 n, last = n + hit, max(last or "", r["created_at"])
                 people.add(r["candidate_id"])
         for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
-                            " AND kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
-                            " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer')", (since,)):
+                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer', 'card_keep')"
+                            " OR (kind = 'stage_move' AND json_valid(new_data)"
+                            " AND json_extract(new_data, '$.submit') = 1))"  # a submit to a client, and card presses
+                            " UNION ALL SELECT 'stage_move', candidate_id, job_id, NULL, NULL, created_at FROM ai_review"
+                            " WHERE created_at >= ? AND kind = 'stage_move' AND status = 'pending' AND json_valid(payload)"
+                            " AND json_extract(payload, '$.submit') = 1", (since, since)):  # a held submit too
             try:
                 old = json.loads(r["old_data"] or "{}") or {}
                 new = json.loads(r["new_data"] or "{}") or {}
