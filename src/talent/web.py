@@ -1267,10 +1267,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def client_page(request: Request, slug: str, since: str = "", until: str = ""):
         c = client_or_404(slug)
         rep, error = client_report_or_error(c, since, until)
-        text = reports.report_text(rep)
-        return page(request, "client.html", c=c, rep=rep, text=text, error=error, since=since, until=until,
-                    mailto=reports.mailto(rep, text), submittals=reports.submittals(store, c["key"]),
-                    updates=reports.updates(store, c["key"]), groups=reports.GROUPS, labels=reports.GROUP_LABELS, days=reports.UPDATE_DAYS,
+        # In-house with hiring managers named, one update per manager; else the one client update.
+        span = (None, None) if error else (since or None, until or None)
+        parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
+        sections = [{"rep": r, "text": (t := reports.report_text(r)), "mailto": reports.mailto(r, t),
+                     "notes": reports.recruiter_notes(r)} for r in parts]
+        return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
+                    submittals=reports.submittals(store, c["key"]),
+                    updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
+                    labels=reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS,
                     zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=reports.update_due(c),
                     since_day=_local(rep["since"], "%Y-%m-%d"),
                     until_day=_local(rep["until"], "%Y-%m-%d"))
