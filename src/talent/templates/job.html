@@ -56,13 +56,13 @@
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>
-<details class="panel" id="status" {{ 'open' if omit }}><summary>Status update for the hiring manager</summary>
-  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone.</p>
-  <form method="get" action="/jobs/{{ job.id }}#status" class="inline omit-stages">
+<details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>Status update for the hiring manager</summary>
+  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
+  <form method="post" action="/jobs/{{ job.id }}/omit" class="inline omit-stages">
     <span class="fine">Leave out:</span>
     {% set omitted = omit | map('lower') | list %}
     {% for s in stages %}<label class="inline-label"><input type="checkbox" name="omit" value="{{ s.name }}" {{ 'checked' if s.name | lower in omitted }}> {{ s.name }}</label>{% endfor %}
-    <button class="btn small" type="submit">Update the text</button>
+    <button class="btn small" type="submit">Save and update the text</button>
   </form>
   <pre class="code status-text">{{ status_text }}</pre>
 </details>

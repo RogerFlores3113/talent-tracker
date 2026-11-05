@@ -59,7 +59,7 @@ def test_a_sheet_row_with_another_last_name_doesnt_overwrite(store):
 def test_ai_changes_one_identity_field_per_call(store):
     lee = store.add_candidate(name="Lee Chen", email="lee@x.com", phone="555 0100")
     server = build_server(store)
-    with pytest.raises(Exception, match="only one of name, email, phone and LinkedIn URL"):
+    with pytest.raises(Exception, match="fields that say who the person is"):
         call(server, "update_candidate", candidate_id=lee["id"], email="harvest@evil.example", phone="555 9999")
     with pytest.raises(Exception, match="doesn't look like the same person"):
         call(server, "update_candidate", candidate_id=lee["id"], name="Someone Else")
@@ -68,7 +68,9 @@ def test_ai_changes_one_identity_field_per_call(store):
     out = data(call(server, "update_candidate", candidate_id=lee["id"], email="LEE@x.com", phone="555 0101",
                     name="Lee Chen"))
     assert out["changed"] == ["phone"]
-    assert data(call(server, "update_candidate", candidate_id=lee["id"], name="Lee Chen-Park"))["changed"] == ["name"]
+    # A second identity change within 10 minutes waits for the recruiter (tests/test_c2_f.py).
+    with pytest.raises(Exception, match="changed this person's phone a few minutes ago"):
+        call(server, "update_candidate", candidate_id=lee["id"], name="Lee Chen-Park")
 
 
 # ----------------------------------------------------- 3. save_candidate
@@ -239,7 +241,7 @@ def test_merge_in_the_app(store):
     confirm = c.get(f"/candidates/{keep['id']}/merge/{other['id']}").text
     assert "Keep this one" in confirm and "Merge in and delete this one" in confirm and "PM" in confirm
     r = c.post(f"/candidates/{keep['id']}/merge/{other['id']}", follow_redirects=False)
-    assert notice(r).startswith("Merged Daniel Kim into Daniel Kim: filled title") and store.count_candidates() == 1
+    assert notice(r).startswith(f"Merged Daniel Kim (id {other['id']}) into Daniel Kim (id {keep['id']}): filled title") and store.count_candidates() == 1
     assert any(n.startswith("before-merge-") for n in backups())
     assert "Same person?" not in c.get(f"/candidates/{keep['id']}").text
     for path in ("/", f"/candidates/{keep['id']}", "/settings"):

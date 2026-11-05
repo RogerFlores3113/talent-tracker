@@ -18,7 +18,7 @@
   <div class="sec-head"><h2>Where each client stands</h2>
     <span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ digest_text }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy status for all open jobs</button><span class="fine" role="status"></span></span></div>
   <table class="dense">
-    <thead><tr><th>Company</th><th>Open jobs</th><th>In process</th><th>Hired</th><th></th></tr></thead>
+    <thead><tr><th>Company</th><th>Open jobs</th><th>In process</th><th>{{ 'Placed' if rollup | map(attribute='word') | select('ne', 'placed') | list | length == 0 else 'Hired' }}</th><th></th></tr></thead>
     <tbody>{% for r in rollup %}
     <tr><td>{{ r.company or 'No company' }}</td><td>{{ r.jobs | length }}</td><td>{{ r.active }}</td><td>{{ r.hired }} of {{ r.openings }}</td>
       <td>{% for c in companies if c.company == r.company %}<span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ c.text }}" data-copy-note="next" data-copy-msg="Copied.">Copy status for {{ r.company }}</button><span class="fine" role="status"></span></span>{% endfor %}</td></tr>

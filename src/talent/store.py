@@ -857,6 +857,14 @@ def _labels(fields: Iterable[str]) -> str:
     return ", ".join(FIELD_LABELS.get(f, f) for f in fields)
 
 
+def dropped_text(dropped: dict[str, Any], width: int = 200) -> str:
+    """'title: Senior Analytics Engineer; LinkedIn: ...' for the values a merge didn't keep."""
+    def short(v: Any) -> str:
+        v = " ".join(str(v).split())
+        return v if len(v) <= width else v[:width - 3].rstrip() + "..."
+    return "; ".join(f"{FIELD_LABELS.get(k, k.replace('_', ' '))}: {short(v)}" for k, v in dropped.items())
+
+
 def _change_body(old: dict[str, Any], new: dict[str, Any]) -> str:
     cleared = [k for k, v in new.items() if v in (None, "", [])]
     updated = [k for k in new if k not in cleared]
@@ -924,8 +932,34 @@ class Store:
     def schema_version(self) -> int:
         return self._conn.execute("PRAGMA user_version").fetchone()[0]
 
+    def erase_traces(self) -> None:
+        """After a delete or merge: rebuild the search indexes so a deleted person's words leave them
+        (full-text search keeps old entries until its segments merge), then empty the write-ahead log."""
+        with self._lock:
+            try:
+                with self._conn:
+                    for (name,) in self._conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE '%USING fts5(%'").fetchall():
+                        self._conn.execute(f"INSERT INTO {name}({name}) VALUES ('optimize')")
+            except sqlite3.Error:
+                pass
+        self.checkpoint()
+
+    def checkpoint(self) -> None:
+        """Copy the write-ahead log into the main file and empty it, so a deleted person's text
+        doesn't linger in talent.db-wal. Best effort: another process reading at the same moment
+        can keep part of the log until the next checkpoint."""
+        if self.path == ":memory:":
+            return
+        with self._lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            except sqlite3.Error:
+                pass
+
     def close(self) -> None:
         with self._lock:
+            self.checkpoint()
             self._conn.close()
 
     def _rows(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
@@ -1338,6 +1372,7 @@ class Store:
             cur = self._conn.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
         if cur.rowcount == 0:
             raise NotFound(f"No candidate with id {candidate_id}")
+        self.erase_traces()
 
     def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
         """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
@@ -1356,6 +1391,7 @@ class Store:
             krow = self._row("SELECT * FROM candidates WHERE id = ?", (keep_id,))
             orow = self._row("SELECT * FROM candidates WHERE id = ?", (other_id,))
             fields: dict[str, Any] = {}
+            dropped: dict[str, Any] = {}
             for k in CANDIDATE_FIELDS:
                 kv, ov = krow.get(k), orow.get(k)
                 if k == "tags":
@@ -1367,6 +1403,8 @@ class Store:
                         fields[k] = ov
                 elif ov and not kv:
                     fields[k] = ov
+                elif k != "name" and ov and kv and str(ov).strip() != str(kv).strip():
+                    dropped[k] = ov
             mine = self.work_history(keep_id)
             seen = {((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) for e in mine}
             extra = [e for e in self.work_history(other_id)
@@ -1407,17 +1445,21 @@ class Store:
             if jobs:
                 bits.append(f"{len(jobs)} job{'' if len(jobs) == 1 else 's'}")
             body = f"Merged in {other['name']} (id {other_id})" + (": " + ", ".join(bits) if bits else "") + "."
+            if dropped:
+                body += " Kept this profile's values. Theirs were: " + dropped_text(dropped) + "."
             ts = now_iso()
             by = by if by in CHANGE_SOURCES else "app"
             info = {"id": other_id, "name": other["name"], "email": orow.get("email"),
                     "linkedin_url": orow.get("linkedin_url"), "phone": orow.get("phone"), "timeline": moved,
-                    "jobs": jobs}
+                    "jobs": jobs, "dropped": dropped}
             self._conn.execute(
                 "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (keep_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
                  json.dumps({"by": by, "old": old, "new": fields, "merged": info})))
         cand = self.get_candidate(keep_id)
-        cand["_merged"] = {"name": other["name"], "filled": filled, "timeline": moved, "jobs": jobs}
+        cand["_merged"] = {"name": other["name"], "filled": filled, "timeline": moved, "jobs": jobs,
+                           "dropped": dropped}
+        self.erase_traces()
         return cand
 
     def recent_candidates(self, limit: int = 25, offset: int = 0) -> list[dict[str, Any]]:
@@ -1547,11 +1589,14 @@ class Store:
 
     def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
                          restore: bool = False, outcome: str | None = None, note: str | None = None,
-                         candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
-        """Reschedule, cancel (it stays on the timeline, marked cancelled), restore, or record how it went.
+                         reason: str | None = None, candidate_id: int | None = None,
+                         by: str = "app") -> dict[str, Any]:
+        """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
+        restore, or record how it went.
 
-        outcome: passed, not passed or no show, with an optional note. Nothing is ever deleted; the
-        old time is kept in the entry's data as `rescheduled_from`.
+        outcome: passed, not passed or no show, with an optional note, only once the interview's time
+        has come. Nothing is ever deleted; the old time is kept in the entry's data as `rescheduled_from`
+        and the reason as `reschedule_note`.
         """
         iv = self.get_interview(entry_id, candidate_id)
         data = dict(iv["data"])
@@ -1575,12 +1620,17 @@ class Store:
             value = INTERVIEW_OUTCOMES.get(key)
             if value is None:
                 raise ValueError("The outcome must be passed, not passed or no show.")
+            if new_at > ts:
+                raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
+                                 "went after it takes place, or change its time first.")
             data["outcome"], data["outcome_at"] = value, ts
             if data.get("status") == "cancelled":
                 data["status"] = "scheduled"
         if note is not None:
             data["outcome_note"] = _clean(note)
-        if not (at or cancel or restore or outcome is not None or note is not None):
+        if reason is not None:
+            data["reschedule_note"] = _clean(reason)
+        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None):
             raise ValueError("Say what to change: a new time, cancel, or an outcome.")
         data["updated_by"] = CHANGE_SOURCES.get(by, by)
         with self._lock, self._conn:
@@ -1915,6 +1965,7 @@ class Store:
             cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         if cur.rowcount == 0:
             raise NotFound(f"No job with id {job_id}")
+        self.erase_traces()
 
     def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
         sql = """SELECT j.*,
@@ -1972,9 +2023,7 @@ class Store:
     def add_stage(self, job_id: int, name: str, *, after: str | None = None,
                   outcome: str | None = None) -> list[dict[str, Any]]:
         """Add a stage after the named one, or before the closing stages. Outcome defaults from the name."""
-        name = _clean(name)
-        if not name:
-            raise ValueError("A stage needs a name.")
+        name = _stage_name(name)
         outcome = normalize_outcome(outcome) or stage_outcome(name)
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
@@ -2001,9 +2050,7 @@ class Store:
         """Rename a stage (its candidates move with it). An in-play stage with in-play stages after it
         can't take a closing name like "Passed" unless `outcome` says what it should count as."""
         stage = self.resolve_stage(job_id, old)
-        new = _clean(new)
-        if not new:
-            raise ValueError("A stage needs a name.")
+        new = _stage_name(new)
         outcome = normalize_outcome(outcome)
         stages = self.job_stages(job_id)
         if new.lower() != stage["name"].lower() and any(s["name"].lower() == new.lower() for s in stages):
@@ -2094,7 +2141,10 @@ class Store:
                     )
         return self.get_application(app_id)
 
-    def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> dict[str, Any]:
+    def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None, *,
+                   by: str | None = None) -> dict[str, Any]:
+        """Move someone to another stage of a job. With `by` ("app" or "ai") the stage entry records the
+        old and new stage, so the move can be undone from the timeline."""
         app = self._row(
             "SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id)
         )
@@ -2107,9 +2157,14 @@ class Store:
                 self._conn.execute(
                     "UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?", (s["name"], ts, app["id"])
                 )
+                source = data = None
+                if by in CHANGE_SOURCES:
+                    source = CHANGE_SOURCES[by]
+                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"],
+                                                              "new": s["name"]}})
                 self._conn.execute(
-                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at) VALUES (?, ?, 'stage', ?, ?, ?)",
-                    (candidate_id, job_id, s["name"], ts, ts),
+                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
+                    " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),
                 )
                 if s["name"].lower() == "contacted":
                     self._conn.execute(
@@ -2336,6 +2391,20 @@ def interview_status(data: dict[str, Any] | None) -> str:
     return data.get("outcome") or "scheduled"
 
 
+STAGE_NAME_LIMIT = 60
+
+
+def _stage_name(name: Any) -> str:
+    """A cleaned stage name, or ValueError when it's missing or too long."""
+    n = _clean(str(name or ""))
+    if not n:
+        raise ValueError("A stage needs a name.")
+    if len(n) > STAGE_NAME_LIMIT:
+        raise ValueError(f"Stage names can be up to {STAGE_NAME_LIMIT} characters, and this one has {len(n):,}. "
+                         "Pick a shorter name; nothing was changed.")
+    return n
+
+
 def _stage_key(name: str | None) -> str:
     """'Phone-screen ' and 'phone screen' compare equal."""
     return re.sub(r"[\W_]+", " ", name or "").strip().lower()
@@ -2348,7 +2417,7 @@ def _stage_plan(names: list[str | dict[str, Any]]) -> list[tuple[str, str]]:
     seen: set[str] = set()
     for item in names:
         n, outcome = (item.get("name"), item.get("outcome")) if isinstance(item, dict) else (item, None)
-        n = _clean(str(n or ""))
+        n = _stage_name(n) if _clean(str(n or "")) else None
         if n and n.lower() not in seen:
             seen.add(n.lower())
             out.append((n, normalize_outcome(outcome) or stage_outcome(n)))

@@ -79,6 +79,9 @@ def test_interview_controls_on_the_timeline(store):
     assert "Cancelled" in page and "Put back on the schedule" in page
     assert not [i for i in actions.action_items(store)["items"] if i["kind"] == "interview"]
 
+    # An interview still in the future can't have an outcome yet (tests/test_c2_f.py); move it to the past.
+    past = _at(-1).astimezone().strftime("%Y-%m-%dT%H:%M")
+    c.post(f"/candidates/{ana}/interviews/{iv['id']}", data={"op": "reschedule", "at": past})
     r = c.post(f"/candidates/{ana}/interviews/{iv['id']}", data={"op": "outcome", "outcome": "passed",
                                                                  "note": "Strong system design"}, follow_redirects=False)
     assert _msg(r) == "Saved: Passed."

@@ -4,7 +4,7 @@
 {% block body %}
 {% macro person(c, heading) -%}
 <section class="panel">
-  <p class="fine">{{ heading }}</p>
+  <p class="fine">{{ heading }} (id {{ c.id }})</p>
   <h2><a href="/candidates/{{ c.id }}">{{ c.name }}</a></h2>
   <p class="sub">{{ sub(c) }}</p>
   {{ chips(c.tags) }}
@@ -19,14 +19,14 @@
 </section>
 {%- endmacro %}
 <h1>Merge these two?</h1>
-<p class="lead">Talent Search keeps {{ keep.name }}, fills in anything that profile is missing from {{ other.name }}, adds their skills, and moves their timeline, work history and jobs over. Then {{ other.name }} (id {{ other.id }}) is deleted. If both are in the same job, the further stage is kept. A backup is saved first.</p>
+<p class="lead">Talent Search keeps {{ keep.name }} (id {{ keep.id }}), fills in anything that profile is missing from {{ other.name }} (id {{ other.id }}), adds their skills, and moves their timeline, work history and jobs over. Where both have a different value, id {{ keep.id }}'s value is kept and id {{ other.id }}'s is written on the timeline. Then {{ other.name }} (id {{ other.id }}) is deleted. If both are in the same job, the further stage is kept. A backup is saved first.</p>
 <div class="connect-grid">
   {{ person(keep, 'Keep this one') }}
   {{ person(other, 'Merge in and delete this one') }}
 </div>
 <form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="actions-inline">
-  <button class="btn primary" type="submit">Merge into {{ keep.name }}</button>
-  <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ other.name }} instead</a>
+  <button class="btn primary" type="submit">Merge into {{ keep.name }} (id {{ keep.id }})</button>
+  <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ other.name }} (id {{ other.id }}) instead</a>
   <a class="btn" href="/candidates/{{ keep.id }}">Cancel</a>
 </form>
 {% endblock %}

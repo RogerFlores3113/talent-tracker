@@ -286,10 +286,12 @@ def _job_name(job: dict[str, Any], hint: str | None = None) -> str:
 
 # ------------------------------------------------------------------ today
 def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
-    """{'items': [...], 'counts': {...}, 'hidden': n, 'scheduled': n, 'stale_total': n, 'next_week': [...]}.
+    """{'items': [...], 'counts': {...}, 'hidden': n, 'scheduled': n, 'scheduled_later': n, 'stale_total': n,
+    'next_week': [...]}.
 
     Items are ordered most urgent first: interviews, then follow-ups, then the rest.
-    Interviews 8 to 14 days out are listed apart, under next_week, and don't count as things to do.
+    Interviews 8 to 14 days out, and to-dos due in the next 14 days, are listed apart under next_week and
+    don't count as things to do. `scheduled` counts every future to-do, `scheduled_later` the ones after that.
     Jobs that need more candidates fold into one row, and so do out-of-date profiles.
     """
     now = now or datetime.now(timezone.utc)
@@ -298,7 +300,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     snoozed = store.snoozed_keys()
     jobs = {j["id"]: j for j in store.list_jobs()}
     items: list[dict[str, Any]] = []
-    hidden = scheduled = 0
+    hidden = scheduled = scheduled_later = 0
 
     hints = twin_hints(list(jobs.values()))
     today = now.astimezone().date().isoformat()
@@ -333,21 +335,33 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 items.append(row)
 
     if on("flag_suggestions"):
+        horizon = (now + timedelta(days=14)).astimezone().date().isoformat()
         for s in store.open_suggestions():
             due = s.get("due_on") or ""
-            if due > today:
-                scheduled += 1
-                continue
             mine = (s.get("source") or "") != "AI app"
             detail = [s.get("note"), label(s.get("job_id"), s.get("job_title"))]
             if not mine:
                 detail.append("Suggested by your AI app")
+            if due > today:
+                scheduled += 1
+                if due <= horizon:  # listed under Next week with its day, not counted as a thing to do
+                    next_week.append({
+                        "key": f"suggestion:{s['id']}", "kind": "suggestion", "rank": 1,
+                        "when": due + "T00:00:00+00:00", "title": s["text"],
+                        "detail": " · ".join(x for x in detail if x), "due_on": due, "overdue": False,
+                        "due_text": due_text(due, today), "candidate_id": s.get("candidate_id"),
+                        "job_id": s.get("job_id"), "suggestion_id": s["id"],
+                        "href": f"/candidates/{s['candidate_id']}" if s.get("candidate_id")
+                        else f"/jobs/{s['job_id']}" if s.get("job_id") else "/"})
+                else:
+                    scheduled_later += 1
+                continue
             items.append({
                 "key": f"suggestion:{s['id']}", "kind": "suggestion", "rank": 1,
                 "when": (due + "T00:00:00+00:00") if due else s["created_at"],
                 "title": s["text"], "detail": " · ".join(x for x in detail if x),
                 "note": s.get("note"), "due_on": due or None, "overdue": bool(due and due < today),
-                "due_text": due_text(due, today),
+                "due_text": due_text(due, today), "due_day": _day_label(due),
                 "candidate_id": s.get("candidate_id"), "job_id": s.get("job_id"), "suggestion_id": s["id"],
                 "href": f"/candidates/{s['candidate_id']}" if s.get("candidate_id")
                 else f"/jobs/{s['job_id']}" if s.get("job_id") else "/",
@@ -440,15 +454,44 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     for i in visible:
         counts[i["kind"]] = counts.get(i["kind"], 0) + 1
     shown_stale = stale_total if any(i["kind"] == "stale" for i in visible) else 0
+    next_week.sort(key=lambda i: i["when"] or "")
     return {"items": visible, "counts": counts, "hidden": hidden, "scheduled": scheduled,
-            "stale_total": shown_stale, "stale_more": 0, "next_week": next_week}
+            "scheduled_later": scheduled_later, "stale_total": shown_stale, "stale_more": 0, "next_week": next_week}
 
 
 # ---------------------------------------------------------- status update
+def _omit_key(job_id: int) -> str:
+    return f"status_omit:{job_id}"
+
+
+def saved_omit(store: Store, job_id: int) -> list[str]:
+    """The stages the recruiter chose to leave out of this job's status update (remembered per job)."""
+    import json
+
+    try:
+        names = json.loads(store.setting(_omit_key(job_id)) or "[]")
+    except (ValueError, KeyError):
+        return []
+    return [str(n) for n in names if str(n).strip()] if isinstance(names, list) else []
+
+
+def save_omit(store: Store, job_id: int, names: list[str]) -> list[str]:
+    """Remember which stages to leave out of this job's status updates (empty clears it)."""
+    import json
+
+    names = list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+    if names:
+        _put_setting(store, _omit_key(job_id), json.dumps(names))
+    else:
+        _drop_setting(store, _omit_key(job_id))
+    return names
+
+
 def _omitted(store: Store, job_id: int, omit_stages: list[str] | None) -> set[str]:
-    """Stage keys to leave out. Names may be partial ('rej'); ones the job doesn't have are ignored."""
+    """Stage keys to leave out: omit_stages, or the job's remembered choice when None. Names may be partial
+    ('rej'); ones the job doesn't have are ignored."""
     out = set()
-    for name in omit_stages or []:
+    for name in saved_omit(store, job_id) if omit_stages is None else omit_stages:
         try:
             out.add(_stage_key(store.resolve_stage(job_id, name)["name"]))
         except ValueError:
@@ -491,7 +534,7 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     """A plain-text pipeline summary to paste to a hiring manager or client. No ids, local times.
 
     omit_stages leaves those stages' people out of the lists (Sourced, Rejected...); the counts stay.
-    The app's Copy status update and the AI's job_pipeline both use this text."""
+    None means the job's remembered Leave out choice (saved_omit). The app's Copy status update and the AI's job_pipeline both use this text."""
     now = now or datetime.now(timezone.utc)
     job = store.get_job(job_id)
     groups = store.pipeline_by_stage(job_id)
@@ -530,7 +573,7 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
 
 
 def company_rollup(store: Store, company: str | None = None) -> list[dict[str, Any]]:
-    """[{company, jobs, active, hired, openings}] for open jobs, one row per company (None for no company)."""
+    """[{company, jobs, active, hired, openings, word}] for open jobs, one row per company (None for no company)."""
     rows: dict[str, dict[str, Any]] = {}
     for j in store.list_jobs("open"):
         co = j.get("company") or ""
@@ -541,12 +584,17 @@ def company_rollup(store: Store, company: str | None = None) -> list[dict[str, A
         r["active"] += j["active_count"]
         r["hired"] += j["hired_count"]
         r["openings"] += j.get("openings") or 1
+        r.setdefault("words", set()).add(hire_word(store, j["id"]))
+    for r in rows.values():
+        r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"  # the jobs' own word, when they agree
     return sorted(rows.values(), key=lambda r: (r["company"] is None, (r["company"] or "").lower()))
 
 
 def status_digest(store: Store, company: str | None = None, now: datetime | None = None, *,
                   omit_stages: list[str] | None = None) -> str:
-    """One paste-ready update for every open job (or one company's), with a roll-up per company first."""
+    """One paste-ready update for every open job (or one company's), with a roll-up per company first.
+
+    omit_stages applies to every job; when None, each job uses its own remembered Leave out choice."""
     now = now or datetime.now(timezone.utc)
     groups = company_rollup(store, company)
     if not groups:
@@ -556,7 +604,7 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
     for g in groups:
         n = len(g["jobs"])
         lines.append(f"- {g['company'] or 'No company'}: {n} open job{'' if n == 1 else 's'}, "
-                     f"{g['active']} in process, {g['hired']} of {g['openings']} hired.")
+                     f"{g['active']} in process, {g['hired']} of {g['openings']} {g['word']}.")
     for g in groups:
         for j in g["jobs"]:
             lines += ["", job_status_text(store, j["id"], now, omit_stages=omit_stages, dated=False)]
