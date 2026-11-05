@@ -1504,19 +1504,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 "enrolled": len(seq.get("enrolled") or [])}
 
     @app.post("/jobs/{job_id}/sequence/enroll")
-    def enroll_existing(request: Request, job_id: int):
-        """Enroll the people already messaged on this job into its follow-up steps."""
+    async def enroll_existing(request: Request, job_id: int):
+        """Enroll the people already messaged on this job into its follow-up steps (from today, or from their
+        first message)."""
         job_or_404(job_id)
+        form = await request.form()
+        start = str(form.get("start") or "today")
         try:
-            got = outreach.enroll_existing(store, job_id)
+            got = outreach.enroll_existing(store, job_id, None, start)
         except ValueError as exc:
             return back(request, f"/jobs/{job_id}#followups", error=str(exc))
         if not got:
             return back(request, f"/jobs/{job_id}#followups", notice="Nobody needed enrolling.")
         names = ", ".join(p["name"] for p in got[:3]) + (f" and {len(got) - 3} more" if len(got) > 3 else "")
+        when = ("Their next follow-up counts from today." if start == "today" else
+                "Their next follow-up comes due from their first message, so some may be due now.")
         return back(request, f"/jobs/{job_id}#followups", notice=(
-            f"Enrolled {len(got)} {'person' if len(got) == 1 else 'people'} ({names}). Their next follow-up comes "
-            "due from their first message, so some may be due now."))
+            f"Enrolled {len(got)} {'person' if len(got) == 1 else 'people'} ({names}). {when}"))
 
     @app.post("/jobs/{job_id}/followups/batch")
     async def followups_batch(request: Request, job_id: int):
@@ -1540,7 +1544,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def outreach_page(request: Request, job_id: int):
         """Everyone messaged on a job: first message, step, next due, replied, source, and reply rates."""
         job = job_or_404(job_id)
-        return page(request, "outreach.html", job=job, t=outreach.table(store, job_id),
+        only = request.query_params.get("status") or None
+        return page(request, "outreach.html", job=job, t=outreach.table(store, job_id, only=only),
                     not_following=len(outreach.not_following(store, job_id)))
 
     @app.post("/jobs/{job_id}/outreach/bulk")
@@ -1550,7 +1555,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
         try:
-            notice = outreach.bulk_apply(store, job_id, str(form.get("action") or ""), ids)
+            notice = outreach.bulk_apply(store, job_id, str(form.get("action") or ""), ids,
+                                         str(form.get("start") or "today"))
         except (ValueError, NotFound) as exc:
             return back(request, f"/jobs/{job_id}/outreach", error=str(exc))
         return back(request, f"/jobs/{job_id}/outreach", notice=notice)

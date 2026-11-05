@@ -130,6 +130,22 @@ def _json(raw: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------- sequences
+STEP_KEYS = {"label": ("label", "name", "title"), "day": ("day", "days", "after_days", "after", "offset"),
+             "text": ("text", "body", "message", "template", "content")}
+STEP_EXAMPLE = '{"label": "Nudge", "day": 3, "text": "Hi {first_name}, just checking in."}'
+
+
+def _step_fields(s: dict[str, Any], i: int) -> dict[str, Any]:
+    """A step's label, day and text, accepting the usual other names for each. Names it doesn't know are an error
+    that says which keys to use."""
+    known = {a for names in STEP_KEYS.values() for a in names}
+    odd = [str(k) for k in s if str(k) not in known]
+    if odd:
+        raise ValueError(f"Step {i + 1} has keys I don't know ({', '.join(odd)}). Each step takes label, day and "
+                         f"text, for example {STEP_EXAMPLE}.")
+    return {k: next((s[a] for a in names if s.get(a) is not None), None) for k, names in STEP_KEYS.items()}
+
+
 def clean_steps(raw: Any) -> list[dict[str, Any]]:
     """Steps as saved: up to 5, each with a label, a day (days after the first message, rising) and the text."""
     if raw in (None, "", []):
@@ -140,9 +156,10 @@ def clean_steps(raw: Any) -> list[dict[str, Any]]:
     for i, s in enumerate(raw):
         if not isinstance(s, dict):
             raise ValueError("Each step needs a label, a day and the text.")
-        label = " ".join(str(s.get("label") or "").split())[:LABEL_LIMIT]
-        text = str(s.get("text") or "").strip()[:TEXT_LIMIT]
-        day_raw = str(s.get("day") if s.get("day") is not None else "").strip()
+        f = _step_fields(s, i)
+        label = " ".join(str(f["label"] or "").split())[:LABEL_LIMIT]
+        text = str(f["text"] or "").strip()[:TEXT_LIMIT]
+        day_raw = str(f["day"] if f["day"] is not None else "").strip()
         if not label and not text and not day_raw:
             continue
         if not day_raw and not steps:
@@ -182,7 +199,7 @@ def save_sequence(store: Store, job_id: int, steps: Any) -> list[dict[str, Any]]
         if not clean:
             store._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
         else:
-            keep = {k: (old or {})[k] for k in ("enrolled", "paused") if (old or {}).get(k)}
+            keep = {k: (old or {})[k] for k in ("enrolled", "paused", "starts") if (old or {}).get(k)}
             value = json.dumps({"steps": clean, "since": (old or {}).get("since") or now_iso(), **keep})
             store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
                                 " value = excluded.value", (key, value))
@@ -253,11 +270,15 @@ def progress(store: Store, job_id: int, now: datetime | None = None) -> list[dic
     reach = _at(stages, contact["name"]) if contact else 0
     since_day = _local_day(seq["since"])
     enrolled, paused = set(seq.get("enrolled") or []), set(seq.get("paused") or [])
+    starts = seq.get("starts") or {}
     all_touches, all_replies = _scan(store, job_id, now)
     apps = {a["candidate_id"]: a for a in store.pipeline(job_id)}
     out = []
     for cid, every in all_touches.items():
         days = _follows(every, cid, since_day, enrolled)
+        if days and str(cid) in starts:  # enrolled "from today": their earlier messages count as the first step
+            begin = date.fromisoformat(starts[str(cid)])
+            days = [begin] + [d for d in days if d > begin]
         a = apps.get(cid)
         if not days or a is None:
             continue
@@ -327,9 +348,23 @@ def _put_seq(store: Store, job_id: int, seq: dict[str, Any] | None) -> None:
                             " value = excluded.value", (key, json.dumps(seq)))
 
 
-def enroll_existing(store: Store, job_id: int, candidate_ids: list[int] | None = None) -> list[dict[str, Any]]:
+START_CHOICES = ("today", "first_message")
+
+
+def clean_start(raw: Any) -> str:
+    """'today' (the default) or 'first_message'; anything else is a plain error."""
+    v = str(raw or "today").strip().lower().replace(" ", "_").replace("-", "_")
+    if v not in START_CHOICES:
+        raise ValueError("enroll_from is 'today' (count from today) or 'first_message' (count from their first message).")
+    return v
+
+
+def enroll_existing(store: Store, job_id: int, candidate_ids: list[int] | None = None,
+                    start: str = "today") -> list[dict[str, Any]]:
     """Enroll people already messaged on this job (see not_following) into its sequence, all of them or just these
-    ids. Their earlier messages count, so the next step comes due from their first one. Returns who was enrolled."""
+    ids. start="today" (the default) counts the clock from today, their earlier message being step one, so nobody
+    shows overdue at once; start="first_message" counts from their first message. Returns who was enrolled."""
+    start = clean_start(start)
     seq = sequence(store, job_id)
     if not seq:
         raise ValueError("Set up follow-ups for this job first, then enroll the people you already messaged.")
@@ -337,6 +372,9 @@ def enroll_existing(store: Store, job_id: int, candidate_ids: list[int] | None =
     if people:
         with store._write():
             seq["enrolled"] = sorted({*(seq.get("enrolled") or []), *(p["candidate_id"] for p in people)})
+            if start == "today":
+                today = as_local(datetime.now(timezone.utc)).date().isoformat()
+                seq["starts"] = {**(seq.get("starts") or {}), **{str(p["candidate_id"]): today for p in people}}
             _put_seq(store, job_id, seq)
     return people
 
@@ -534,7 +572,7 @@ def _names(names: list[str], most: int = 3) -> str:
     return ", ".join(names[:most]) + (f" and {len(names) - most} more" if len(names) > most else "")
 
 
-def bulk_apply(store: Store, job_id: int, action: str, candidate_ids: list[int]) -> str:
+def bulk_apply(store: Store, job_id: int, action: str, candidate_ids: list[int], start: str = "today") -> str:
     """The Outreach tab's bulk actions on the people ticked: sent, replied, pause, resume or enroll. Returns the
     one-line notice. Raises ValueError with a plain reason."""
     if not candidate_ids:
@@ -562,9 +600,10 @@ def bulk_apply(store: Store, job_id: int, action: str, candidate_ids: list[int])
         word = "Paused" if action == "pause" else "Resumed"
         return f"{word} follow-ups for {n} {'person' if n == 1 else 'people'}." if n else "Nothing to change."
     if action == "enroll":
-        got = enroll_existing(store, job_id, candidate_ids)
+        got = enroll_existing(store, job_id, candidate_ids, start)
         return (f"Enrolled {len(got)} {'person' if len(got) == 1 else 'people'} ({_names([g['name'] for g in got])}). "
-                "Their next follow-up comes due from their first message." if got
+                + ("Their next follow-up counts from today." if clean_start(start) == "today"
+                   else "Their next follow-up comes due from their first message.") if got
                 else "None of them needed enrolling: they follow the steps already, or have replied or moved on.")
     raise ValueError("Pick an action.")
 
@@ -574,11 +613,17 @@ def _rate(n: int, of: int) -> str:
     return f"{round(100 * n / of)}%" if of else "none yet"
 
 
-def table(store: Store, job_id: int, now: datetime | None = None) -> dict[str, Any]:
+FILTERS = ("due", "quiet", "replied", "paused")
+FILTER_OF = {"due": "due", "waiting": "due", "paused": "paused", "replied": "replied", "moved_on": "replied"}
+
+
+def table(store: Store, job_id: int, now: datetime | None = None, only: str | None = None) -> dict[str, Any]:
     """Everyone messaged on a job, for the Outreach tab and list_outreach: one row per person (first message, how
     many sent, current step, next due, replied or not, source) and reply rates per step and per source.
-    A step's rate is the people who replied after it, of those who got it."""
+    A step's rate is the people who replied after it, of those who got it. Rows come due first (overdue, due
+    today, later), then paused, quiet (nothing to do) and replied; only= one of FILTERS shows just that group."""
     now = now or datetime.now(timezone.utc)
+    today = as_local(now).date().isoformat()
     job, seq = store.get_job(job_id), sequence(store, job_id)
     steps = (seq or {}).get("steps") or []
     stages = store.job_stages(job_id)
@@ -618,9 +663,15 @@ def table(store: Store, job_id: int, now: datetime | None = None) -> dict[str, A
             k = sum(1 for d in days if d <= reply) or 1
             got_reply[k] = got_reply.get(k, 0) + 1
         people.append(row)
-    order = {"due": 0, "not_following": 1, "waiting": 2, "paused": 3, "no_sequence": 4, "finished": 5,
-             "replied": 6, "moved_on": 7}
-    people.sort(key=lambda r: (order.get(r["status"], 9), r["next_due"] or "9999", r["name"]))
+    for r in people:
+        d = r["next_due"] if r["status"] in ("due", "waiting") else None
+        r["group"] = FILTER_OF.get(r["status"], "quiet")
+        r["rank"] = 0 if d and d < today else 1 if d and d == today else 2 if d else 3 if r["status"] == "paused" else \
+            4 if r["group"] == "quiet" else 5
+    people.sort(key=lambda r: (r["rank"], r["next_due"] or "9999", r["name"]))
+    counts = {f: sum(1 for r in people if r["group"] == f) for f in FILTERS}
+    only = only if only in FILTERS else None
+    shown = [r for r in people if r["group"] == only] if only else people
     by_step = []
     for k in range(1, max([len(steps), *sent_at, 0]) + 1):
         n, r = sent_at.get(k, 0), got_reply.get(k, 0)
@@ -635,7 +686,7 @@ def table(store: Store, job_id: int, now: datetime | None = None) -> dict[str, A
                          key=lambda g: (-g["contacted"], g["source"]))
     replied = sum(1 for r in people if r["replied"])
     return {"job": {"id": job_id, "title": job["title"], "company": job.get("company")}, "has_sequence": bool(seq),
-            "people": people, "by_step": by_step, "by_source": sources_out,
+            "people": shown, "filter": only, "counts": counts, "by_step": by_step, "by_source": sources_out,
             "totals": {"contacted": len(people), "replied": replied, "rate": _rate(replied, len(people)),
                        "due": sum(1 for r in people if r["status"] == "due"),
                        "not_following": sum(1 for r in people if r["status"] == "not_following"),
@@ -643,17 +694,20 @@ def table(store: Store, job_id: int, now: datetime | None = None) -> dict[str, A
 
 
 # ------------------------------------------------------- the AI sets one
-def ai_set_sequence(store: Store, job_id: int, steps: Any, enroll_existing_too: bool = False) -> dict[str, Any]:
+def ai_set_sequence(store: Store, job_id: int, steps: Any, enroll_existing_too: bool = False,
+                    start: str = "today") -> dict[str, Any]:
     """The AI app sets a job's follow-up steps (never removes them), and with enroll_existing_too also enrolls the
     people already messaged. One logged AI action, so it shows on Changes and can be undone."""
     store.get_job(job_id)
+    start = clean_start(start)
     clean = clean_steps(steps)
     if not clean:
-        raise ValueError("Send at least two steps: the first message on day 0, then a follow-up on a later day.")
+        raise ValueError("Send at least two steps: the first message on day 0, then a follow-up on a later day. "
+                         f"Each step takes label, day and text, for example {STEP_EXAMPLE}.")
     old = sequence(store, job_id)
     save_sequence(store, job_id, clean)
     new = sequence(store, job_id) or {}
-    enrolled = enroll_existing(store, job_id) if enroll_existing_too else []
+    enrolled = enroll_existing(store, job_id, None, start) if enroll_existing_too else []
     final = sequence(store, job_id) or {}
     with store._write():
         action = store._log_ai("sequence_set", job_id=job_id, old={"sequence": old}, new={"sequence": final},

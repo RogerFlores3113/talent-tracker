@@ -709,7 +709,8 @@ def _timeline_line(t: dict[str, Any]) -> str:
             _feedback_text(f) for f in b["feedback"]]
         line += "".join(f". {p.rstrip(' .') if k < len(parts) - 1 else p}" for k, p in enumerate(parts))  # no ".."
     else:
-        line = t["kind"] + job + (f": {t['body']}" if t.get("body") else "")
+        kind = "reply" if t["kind"] == "message" and (t.get("reply") or (isinstance(t.get("data"), dict) and t["data"].get("reply"))) else t["kind"]
+        line = kind + job + (f": {t['body']}" if t.get("body") else "")
     return f"{_local(t['at'])} {line}"
 
 
@@ -838,6 +839,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "at_local": _local(t["at"]),
                                 "job_title": t.get("job_title"), "job_company": t.get("job_company"),
                                 "by_recruiter": t.get("source") == CHANGE_SOURCES["app"] or None,
+                                "reply": bool(t["kind"] == "message" and isinstance(t.get("data"), dict)
+                                              and t["data"].get("reply")) or None,
                                 **({"id": t["id"], "status": t.get("status"), **_interview_bits(t)}
                                    if t["kind"] == "interview" else {})})
                          for t in c["timeline"] if not t.get("struck")]  # struck out by the recruiter: not for the AI
@@ -1715,6 +1718,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         twins = store.similar_open_jobs(title, company)
         if not stages and stage_set in (None, "") and stages_from_job_id in (None, ""):
             stage_set = actions.default_stage_set(store)  # in-house mode: the in-house stages
+            if stage_set == "default" and (company or "").strip() and actions.company_key(company):
+                try:  # a job for a client gets the agency stages, which include Submitted
+                    reports.client(store, actions.company_key(company))
+                    stage_set = "agency"
+                except NotFound:
+                    pass
         stages = actions.new_job_stages(store, stages, stage_set, stages_from_job_id)
         stages, out_note = actions.with_out_stages(stages)  # every job gets an Out stage
         held_email = hiring_manager_email if review.cautious(store) and not _blank(hiring_manager_email) else None
@@ -2219,20 +2228,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result("\n".join(lines), data)
 
     @mcp.tool(annotations=EDIT)
-    def set_followup_sequence(job_id: int, steps: list[dict[str, Any]], enroll_existing: bool = False) -> CallToolResult:
+    def set_followup_sequence(job_id: int, steps: list[dict[str, Any]], enroll_existing: bool = False,
+                              enroll_from: str = "today") -> CallToolResult:
         """Set a job's follow-up steps: up to 5, each {"label": "Follow-up", "day": 4, "text": "Hi {first_name}, ..."}.
         The first step is the first message, on day 0; day is days after it and rises. In text, {first_name},
         {job} and {company} fill in. The app sends nothing: follow-ups come due on Today and in list_followups.
         This replaces the job's steps (the recruiter can undo it on Changes) and can't remove them. People
         messaged before the steps were set don't follow them unless enroll_existing is true, which enrolls the
-        ones still in Sourced or Contacted who haven't replied, counting from their first message."""
+        ones still in Sourced or Contacted who haven't replied. enroll_from says where their clock starts:
+        "today" (the default, so nobody shows overdue at once) or "first_message"."""
         try:
             job = store.get_job(job_id)
+            enroll_from = outreach.clean_start(enroll_from)
+            outreach.clean_steps(steps)  # name the wrong keys before anything else
             if review.cautious(store):
-                waiting = review.queue_sequence(store, job_id, steps, bool(enroll_existing), session)
+                waiting = review.queue_sequence(store, job_id, steps, bool(enroll_existing), session, enroll_from)
                 return _said(_wait_text(waiting), {"job_id": job_id, "pending_review": _waiting(waiting)})
             _check_cap(store, 1 if outreach.sequence(store, job_id) else 0)
-            got = outreach.ai_set_sequence(store, job_id, steps, bool(enroll_existing))
+            got = outreach.ai_set_sequence(store, job_id, steps, bool(enroll_existing), enroll_from)
         except ValueError as exc:
             msg = str(exc)
             raise ValueError(msg if msg.startswith("No change made") else f"No change made. {msg}") from None
@@ -2247,7 +2260,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes.append("This replaced the steps the job had. The recruiter can undo it on Changes.")
         if got["not_following"]:
             notes.append(f"{got['not_following']} people messaged earlier don't follow the steps yet. Call again with "
-                         "enroll_existing=true if the recruiter wants them to.")
+                         "enroll_existing=true if the recruiter wants them to (enroll_from='today' counts from today).")
         if notes:
             out["note"] = " ".join(notes)
         return _plain(sentence, out)
@@ -2873,7 +2886,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Add a client before its first job, when the recruiter asks for it plainly ("add Harbor Freight Labs as
         a client"). Same details as update_client: contacts (one per line; updates go to the first email),
         update_day (Monday to Sunday, "fri" works), time_zone (America/New_York, or ET, CT, MT, PT), notes. A name
-        that matches an existing client ("Acme" and "Acme, Inc." are one) changes nothing. Jobs join it by their
+        that matches an existing client ("Acme" and "Acme, Inc." are one) is not added again; any details you give
+        are saved on it as update_client would (held for review where it holds them). Jobs join it by their
         company. The recruiter can undo it on Changes while no job names it."""
         if ai_caps.clients_left(store) < 1:
             raise ValueError(ai_caps.limit_text(f"create {ai_caps.CLIENT_CAP} clients", 0))
@@ -2884,11 +2898,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         got = reports.ai_create_client(store, name)
         c = got["client"]
         url = app_url(f"/clients/{quote(c['slug'])}")
+        fields = {k: v for k, v in {"contacts": contacts, "update_day": update_day, "time_zone": time_zone,
+                                    "notes": notes}.items() if v not in (None, "")}
+        if not got["created"] and fields:
+            res = update_client(client=c["name"], **fields)
+            data = {**(res.structuredContent or {}), "created": False}
+            first = res.content[0].text
+            return (_said if data.get("pending_review") else _plain)(
+                f"{quoted(c['name'])} is already a client, so I didn't add it again. " + first, data)
         if not got["created"]:
             return _plain(f"{quoted(c['name'])} is already a client, so nothing was added. Use update_client to "
                           "change its details.", {"client": c["name"], "created": False, "app_url": url})
-        fields = {k: v for k, v in {"contacts": contacts, "update_day": update_day, "time_zone": time_zone,
-                                    "notes": notes}.items() if v not in (None, "")}
         data: dict[str, Any] = {"client": c["name"], "created": True, "app_url": url}
         sentence = f"Added the client {quoted(c['name'])}."
         if fields:

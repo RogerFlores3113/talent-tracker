@@ -11,16 +11,22 @@
 </div>
 
 <section class="panel" id="outreach">
-  <div class="sec-head"><h2>{% if t.people %}{{ t.totals.contacted }} messaged, {{ t.totals.replied }} replied ({{ t.totals.rate }}){% else %}Nobody messaged yet{% endif %}</h2></div>
+  <div class="sec-head"><h2>{% if t.totals.contacted %}{{ t.totals.contacted }} messaged, {{ t.totals.replied }} replied ({{ t.totals.rate }}){% else %}Nobody messaged yet{% endif %}</h2></div>
   {% if not t.has_sequence %}
   <p class="fine">No follow-up steps are set for this job. <a href="/jobs/{{ job.id }}?sequence=1#followups">Set them up</a> and each follow-up shows on Today with the text ready to paste. Nothing is sent for you.</p>
   {% endif %}
-  {% if not t.people %}
+  {% if not t.totals.contacted %}
   <p class="none">Log a call, email or message on someone's profile (with this job) and they show up here.</p>
   {% else %}
   {% if not_following %}
   <p class="flash warn"><strong>{{ not_following }} {{ 'person' if not_following == 1 else 'people' }} you messaged before the steps were set {% if not_following == 1 %}isn't{% else %}aren't{% endif %} following them.</strong> Tick them and press Enroll, or enroll everyone from the job page.</p>
   {% endif %}
+  <p class="filters fine" id="outreach-filters">Show:
+    <a href="/jobs/{{ job.id }}/outreach"{% if not t.filter %} aria-current="true"{% endif %}>{% if not t.filter %}<strong>Everyone</strong>{% else %}Everyone{% endif %} ({{ t.totals.contacted }})</a>
+    {% for f, label in (('due', 'Due'), ('quiet', 'Quiet'), ('replied', 'Replied'), ('paused', 'Paused')) %}
+    · <a href="/jobs/{{ job.id }}/outreach?status={{ f }}"{% if t.filter == f %} aria-current="true"{% endif %}>{% if t.filter == f %}<strong>{{ label }}</strong>{% else %}{{ label }}{% endif %} ({{ t.counts[f] }})</a>
+    {% endfor %}
+  </p>
   <form method="post" action="/jobs/{{ job.id }}/outreach/bulk" class="outreach-form">
     <div class="bulk">
       <span class="fine">With the ticked people:</span>
@@ -28,7 +34,8 @@
       <button class="btn small" type="submit" name="action" value="replied">Mark replied</button>
       <button class="btn small" type="submit" name="action" value="pause" title="No follow-ups come due for them until you resume">Pause</button>
       <button class="btn small" type="submit" name="action" value="resume">Resume</button>
-      {% if t.has_sequence %}<button class="btn small" type="submit" name="action" value="enroll" title="Follow-ups count from their first message">Enroll</button>{% endif %}
+      {% if t.has_sequence %}<button class="btn small" type="submit" name="action" value="enroll" title="Enroll the ticked people who were messaged before the steps were set">Enroll</button>
+      <label class="fine">counting <select name="start"><option value="today">from today</option><option value="first_message">from their first message</option></select></label>{% endif %}
     </div>
     <table class="outreach-table">
       <thead><tr>
@@ -57,13 +64,14 @@
           <td>{{ r.source or '' }}</td>
         </tr>
       {% endfor %}
+      {% if not t.people %}<tr><td colspan="8" class="muted">Nobody is in this group.</td></tr>{% endif %}
       </tbody>
     </table>
   </form>
   {% endif %}
 </section>
 
-{% if t.people %}
+{% if t.totals.contacted %}
 <div class="grid-2">
   <section class="panel">
     <h2>Reply rate by step</h2>

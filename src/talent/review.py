@@ -439,7 +439,7 @@ def queue_stages(store: Store, job_id: int, args: dict[str, Any], session: str |
 
 
 def queue_sequence(store: Store, job_id: int, steps: list[dict[str, Any]], enroll: bool,
-                   session: str | None) -> dict[str, Any]:
+                   session: str | None, enroll_from: str = "today") -> dict[str, Any]:
     """Hold the AI app's follow-up steps for a job (and enrolling the people already messaged, if it asked)."""
     from . import outreach
     j = store.get_job(job_id)
@@ -449,7 +449,7 @@ def queue_sequence(store: Store, job_id: int, steps: list[dict[str, Any]], enrol
     job = j["title"] + (f" ({j['company']})" if j.get("company") else "")
     return _queue(store, "sequence", f"Set the follow-up steps of {job}: {len(clean)} steps"
                   + (", and enroll the people already messaged" if enroll else ""),
-                  {"steps": clean, "enroll": enroll, "before": outreach.sequence(store, job_id)},
+                  {"steps": clean, "enroll": enroll, "enroll_from": enroll_from, "before": outreach.sequence(store, job_id)},
                   job_id=job_id, session=session)
 
 
@@ -719,7 +719,7 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("That job is gone.")
         if outreach.sequence(store, jid) != p.get("before"):
             raise ValueError("The job's follow-up steps were changed since, so nothing was changed.")
-        out = outreach.ai_set_sequence(store, jid, p["steps"], bool(p.get("enroll")))
+        out = outreach.ai_set_sequence(store, jid, p["steps"], bool(p.get("enroll")), p.get("enroll_from") or "today")
         return r["summary"] + (f" (enrolled {len(out['enrolled'])})" if out["enrolled"] else "")
     if kind == "plan":
         from .plan import apply_review as apply_seat  # here: plan imports this module

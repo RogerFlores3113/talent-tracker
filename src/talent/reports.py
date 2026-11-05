@@ -1038,6 +1038,9 @@ def _clear_notes(store: Store, key: str, manager: str | None) -> None:
             store._conn.execute("DELETE FROM settings WHERE key = ?", (_note_key(key, manager),))
 
 
+STAGE_LINE_AT = 5  # more people than this in one stage are one line in the update
+
+
 def person_lines(people: list[dict[str, Any]], upcoming: list[dict[str, Any]], labels: dict[str, str],
                  tz: str | None, own: bool) -> list[str]:
     """One line per person in play, furthest along first: 'Lena Hoffmann (Staff Engineer at Fetch) for Robotics
@@ -1049,7 +1052,16 @@ def person_lines(people: list[dict[str, Any]], upcoming: list[dict[str, Any]], l
     rows = sorted((p for p in people if p["group"] in IN_PLAY),
                   key=lambda p: (-order[p["group"]], p["name"].lower(), p["job"].lower()))
     out = []
+    crowd = {st: [p for p in rows if p["stage"] == st] for st in {p["stage"] for p in rows}}
+    done_stage: set[str] = set()
     for p in rows:
+        many = crowd[p["stage"]]
+        if len(many) > STAGE_LINE_AT:  # a big stage is one line: the count and the first few names
+            if p["stage"] not in done_stage:
+                done_stage.add(p["stage"])
+                names = ", ".join(x["name"] for x in many[:4])
+                out.append(f"\u2022 {len(many)} in {p['stage']}: {names}" + (f" and {len(many) - 4} more" if len(many) > 4 else ""))
+            continue
         role = " at ".join(x for x in (p.get("title"), p.get("company")) if x) if p.get("title") else ""
         who = p["name"] + (f" ({role})" if role else "")
         when = "" if p.get("imported") else " " + in_zone(p["since"], tz, "%b %-d")
