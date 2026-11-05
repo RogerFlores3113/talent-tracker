@@ -15,6 +15,7 @@
   {% for o in p.overfilled %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.hired }} {{ p.rep.hire_word }} for {{ o.openings }} opening{{ 's' if o.openings != 1 }} (over by {{ o.over }}). Check those hires, or raise the job's openings, before you send this.</p>{% endfor %}
   {% if p.not_shown %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: left out as internal stages: {% for s, n in p.not_shown.items() %}{{ s }} ({{ n }}){{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ p.text }}</pre>
+  {% if p.manager is none and p.email %}{% set ck = p.key %}{% include "_ai_contacts.html" %}{% endif %}
   <div class="actions-inline no-print">
     {% if p.email %}{% set e = p.email %}<a class="btn small" href="{{ e.href }}">Email {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">Too long to fill in by link: the email opens empty, so copy the update first and paste it in.</span>{% endif %}
     {% else %}<span class="fine">No email saved{% if p.manager is none %}. Add the contacts on <a href="/clients/{{ p.slug }}#details">its page</a>{% endif %}.</span>{% endif %}

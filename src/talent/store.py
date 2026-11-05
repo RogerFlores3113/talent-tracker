@@ -611,6 +611,22 @@ AI_NOTE_CAP = 10
 STRIKE_KINDS = ("note", "call", "email", "message", "meeting")
 # SQL: a timeline row (alias t) that nobody struck out.
 NOT_STRUCK = "NOT (json_valid(t.data) AND json_extract(t.data, '$.struck_at') IS NOT NULL)"
+
+
+def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int:
+    """How many saved values one logged AI action replaced or cleared, for the hourly cap: a job's or a client's
+    saved fields, each renamed stage (or 1 for a new order), and 1 for a Mark as sent or an interview's cancel,
+    new time or outcome."""
+    if kind in ("job_edit", "client_edit"):
+        return sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+    if kind == "stages_edit":
+        was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
+        now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
+        renamed = sum(1 for s in now if s.get("id") in was and s.get("name") != was[s["id"]].get("name"))
+        kept = [s.get("id") for s in now if s.get("id") in was]
+        moved = kept != [i for i in was if i in set(kept)]
+        return renamed + int(moved)
+    return 1
 AI_SOURCE = "AI app"
 
 
@@ -2379,15 +2395,21 @@ class Store:
             if hit:
                 n, last = n + hit, max(last or "", r["created_at"])
                 people.add(r["candidate_id"])
-        for r in self._rows("SELECT job_id, old_data, at FROM ai_actions WHERE kind = 'job_edit' AND at >= ?", (since,)):
+        for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
+                            " AND kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " 'interview_move', 'interview_outcome')", (since,)):
             try:
                 old = json.loads(r["old_data"] or "{}") or {}
+                new = json.loads(r["new_data"] or "{}") or {}
             except ValueError:
                 continue
-            hit = sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+            hit = _overwrite_count(r["kind"], old, new)
             if hit:
                 n, last = n + hit, max(last or "", r["at"])
-                jobs.add(r["job_id"])
+                if r["job_id"]:
+                    jobs.add(r["job_id"])
+                if r["candidate_id"]:
+                    people.add(r["candidate_id"])
         return {"count": n, "people": len(people), "jobs": len(jobs), "last": last}
 
     def ai_overwrites_left(self, n: int) -> bool:
@@ -2395,10 +2417,18 @@ class Store:
         return n <= 0 or self.ai_overwrites_this_hour()["count"] + n <= AI_OVERWRITE_CAP
 
     def ai_notes_this_hour(self, candidate_id: int, minutes: int = AI_EDIT_WINDOW_MINUTES) -> int:
-        """Entries (notes, calls, emails, interviews...) the AI app logged on this person in the last hour."""
+        """Entries (notes, calls, emails, interviews, notes sent with a move or an add...) and interview feedback the
+        AI app logged on this person in the last hour, plus those waiting for review. Struck-out or undone ones
+        don't count, so a recruiter who cleaned up can still have the AI app log what is real."""
         since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
-        return self._row("SELECT count(*) AS n FROM timeline WHERE candidate_id = ? AND source = ? AND created_at >= ?"
-                         " AND kind NOT IN ('stage', ?)", (candidate_id, AI_SOURCE, since, CHANGE_KIND))["n"]
+        logged = self._row(f"SELECT count(*) AS n FROM timeline t WHERE t.candidate_id = ? AND t.source = ?"
+                           f" AND t.created_at >= ? AND t.kind NOT IN ('stage', ?) AND {NOT_STRUCK}",
+                           (candidate_id, AI_SOURCE, since, CHANGE_KIND))["n"]
+        feedback = self._row("SELECT count(*) AS n FROM ai_actions WHERE candidate_id = ? AND kind = 'interview_feedback'"
+                             " AND at >= ? AND undone_at IS NULL", (candidate_id, since))["n"]
+        waiting = self._row("SELECT count(*) AS n FROM ai_review WHERE candidate_id = ? AND status = 'pending'"
+                            " AND kind IN ('note', 'feedback') AND created_at >= ?", (candidate_id, since))["n"]
+        return logged + feedback + waiting
 
     def mark_ai_note(self, entry: dict[str, Any]) -> int | None:
         """Log a note, call, email, message or meeting the AI app just added, so Changes lists it and the
@@ -2471,10 +2501,12 @@ class Store:
         return {**entry, "data": data}
 
     def confirm_ai_action(self, action_id: int) -> dict[str, Any]:
-        """The recruiter said Yes to an AI hire move or job close on Today: it stays, and Today stops asking."""
+        """The recruiter said Yes to an AI hire move or job close on Today (or kept it on Review, marked it reviewed
+        on a client page, or kept a contacts change): it stays, and nothing asks about it again. This one mark is
+        the "reviewed" state every page reads."""
         a = self.ai_action(action_id)
-        if a["kind"] not in ("stage_move", "pipeline_add", "job_edit"):
-            raise ValueError("Only an AI move or job change can be confirmed.")
+        if a["kind"] not in ("stage_move", "pipeline_add", "job_edit", "client_edit"):
+            raise ValueError("Only an AI move, job change or client change can be confirmed.")
         if a["undone_at"]:
             raise ValueError("That change was undone.")
         with self._write():
