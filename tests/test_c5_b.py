@@ -305,3 +305,15 @@ def test_mcp_lists_the_week_and_result_items(store):
     out = call(server, "list_interviews", week=monday.isoformat())
     assert "Mei Lin Zhao" in text(out) and "Priya 1" in text(out)
     assert "Panel" in [x["name"] for lp in structured(out)["loops"] for x in lp["sessions"]]
+
+
+def test_no_windows_unsafe_day_formats():
+    """Windows strftime has no %-d; dates go through actions.day_text / local_time (which fall back to %#d)."""
+    import pathlib, re
+    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "talent"
+    bad = []
+    for f in list(root.rglob("*.py")) + list(root.rglob("*.html")):
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"strftime\(\s*['\"][^'\"]*%-", line):
+                bad.append(f"{f.name}:{n}")
+    assert not bad, bad

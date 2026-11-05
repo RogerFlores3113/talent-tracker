@@ -5,7 +5,7 @@
 <div class="sec-head">
   <div>
     <h1>Interviews</h1>
-    <p class="sub">{{ w.start.strftime('%a %b %-d') }} to {{ w.end.strftime('%a %b %-d') }} · {{ w.total }} session{{ '' if w.total == 1 else 's' }} across all jobs</p>
+    <p class="sub">{{ w.start|day }} to {{ w.end|day }} · {{ w.total }} session{{ '' if w.total == 1 else 's' }} across all jobs</p>
   </div>
   <nav class="seg" aria-label="Week">
     <a href="/interviews?week={{ w.prev.isoformat() }}">Previous week</a>

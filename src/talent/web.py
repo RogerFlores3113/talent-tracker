@@ -277,6 +277,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["date"] = _local_date
     env.filters["ago"] = _ago
     env.filters["local"] = _local
+    env.filters["day"] = actions.day_text  # a date, Windows-safe
     env.globals["IV_TIME"] = IV_TIME
     env.globals["local_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.filters["claude_link"] = recipes.claude_link

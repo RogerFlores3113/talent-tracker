@@ -40,7 +40,7 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
            WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ?
              AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled' ORDER BY t.at, t.id""", (lo, hi))
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    days = [{"day": monday + timedelta(days=i), "label": (monday + timedelta(days=i)).strftime("%a %b %-d"),
+    days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
              "loops": []} for i in range(5)]
     loops = []
     for g in actions.group_loops(rows):
@@ -97,7 +97,7 @@ def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def week_text(w: dict[str, Any]) -> str:
     """The week as plain text (for the AI): each day's loops, then each interviewer's load and any clashes."""
-    lines = [f"Interviews {w['start'].strftime('%a %b %-d')} to {w['end'].strftime('%a %b %-d')}: {w['total']} "
+    lines = [f"Interviews {actions.day_text(w['start'])} to {actions.day_text(w['end'])}: {w['total']} "
              f"session{'' if w['total'] == 1 else 's'}."]
     for d in w["days"]:
         if not d["loops"]:

@@ -95,6 +95,14 @@ def local_time(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt.replace("%-", "%#"))
 
 
+def day_text(d: Any, fmt: str = "%a %b %-d") -> str:
+    """strftime that also takes %-d on Windows (which spells it %#d). For dates and datetimes not in local time."""
+    try:
+        return d.strftime(fmt)
+    except ValueError:  # Windows strftime has no %-d
+        return d.strftime(fmt.replace("%-", "%#"))
+
+
 def _in_stage(days: int, new: str = "new today") -> str:
     """How long someone has been in a stage: 'new today' (so it doesn't read as the day they applied), '3 days'."""
     return new if days <= 0 else "1 day" if days == 1 else f"{days} days"
