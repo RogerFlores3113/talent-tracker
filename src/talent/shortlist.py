@@ -7,16 +7,19 @@ again, and other jobs' proposals say they were passed on before.
 """
 from __future__ import annotations
 
+import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .actions import job_label
-from .store import NotFound, Store, fold_name, normalize_linkedin, now_iso
+from .store import NotFound, Store, fold_name, linkedin_slug_ok, normalize_linkedin, now_iso, quoted
 
 MAX_BATCH = 25
 STATUSES = ("proposed", "kept", "passed")
 LIMITS = {"name": 200, "title": 200, "company": 200, "location": 200, "fit": 1000, "source": 200}
 REASON_LIMIT = 300
+KEEP_PREFIX = "shortlist_keep:"  # settings key of one Keep or Keep all, so Changes can undo it as one
+SENTENCE_NAME = "the name reads like a sentence, not a person's name"
 _PROFILE = re.compile(r"^https://linkedin\.com/in/([^/?#]+)")
 
 
@@ -43,7 +46,15 @@ def profile_url(url: Any) -> tuple[str | None, str | None]:
     m = _PROFILE.match(normalize_linkedin(raw) or "")
     if not m:
         return None, "not a linkedin.com/in/ profile link (Sales Navigator and Recruiter links can't be checked)"
+    if not linkedin_slug_ok(raw):
+        return None, "the link has no real profile name after /in/ (only dots, spaces or quotes)"
     return "https://linkedin.com/in/" + m.group(1), None
+
+
+def _sentence_like(name: str) -> bool:
+    from .mcp_server import sentence_like_name  # the same check save_candidate holds names with
+
+    return sentence_like_name(name)
 
 
 def _job_name(job: dict[str, Any]) -> str:
@@ -132,6 +143,9 @@ def propose(store: Store, job_id: int, people: list[dict[str, Any]], *, by: str 
         if not name:
             skipped.append({"name": "(no name)", "reason": "no name given"})
             continue
+        if _sentence_like(name):
+            skipped.append({"name": name[:80], "reason": SENTENCE_NAME + "; ask the recruiter what they are called"})
+            continue
         url, problem = profile_url(raw.get("linkedin_url"))
         if problem:
             skipped.append({"name": name, "linkedin_url": raw.get("linkedin_url"), "reason": problem})
@@ -210,11 +224,17 @@ def get(store: Store, job_id: int, prospect_id: int) -> dict[str, Any]:
     return row
 
 
+def _last_timeline_id(store: Store) -> int:
+    return store._row("SELECT coalesce(max(id), 0) AS n FROM timeline")["n"]
+
+
 def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = None,
-         as_new: bool = False) -> dict[str, Any]:
+         as_new: bool = False, log: bool = True) -> dict[str, Any]:
     """The recruiter keeps someone: link the person already saved with this profile link (or the one they
     picked), or save them, then add them to the job's first stage. Returns {"candidate", "created", "stage",
-    "already"}. Raises NeedsChoice when someone with the same name is saved and the recruiter hasn't chosen."""
+    "already", "record"}. Raises NeedsChoice when someone with the same name is saved and the recruiter hasn't
+    chosen. With log, the keep is listed on Changes with its own Undo (keep_all logs its keeps as one)."""
+    mark = _last_timeline_id(store)
     p = get(store, job_id, prospect_id)
     if p["status"] != "proposed":
         raise ValueError(f"{p['name']} was already {p['status']}.")
@@ -229,9 +249,13 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
     if created:
         target = store.add_candidate(name=p["name"], linkedin_url=p["linkedin_url"], current_title=p["title"],
                                      current_company=p["company"], location=p["location"], source=p["source"])
-    elif p["linkedin_url"] and not target.get("linkedin_url"):
+    linked = None
+    if not created and p["linkedin_url"] and not target.get("linkedin_url"):
         try:  # the recruiter said it's the same person: their empty LinkedIn takes this one
             target = store.update_candidate(target["id"], linkedin_url=p["linkedin_url"])
+            if target.get("_changed"):
+                linked = store._row("SELECT id FROM timeline WHERE candidate_id = ? AND kind = 'change' AND id > ?"
+                                    " ORDER BY id DESC LIMIT 1", (target["id"], mark))
         except ValueError:
             pass
     already = next((a["stage"] for a in store.pipeline(job_id) if a["candidate_id"] == target["id"]), None)
@@ -243,20 +267,150 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
         ts = now_iso()
         store._conn.execute("UPDATE prospects SET status = 'kept', candidate_id = ?, decided_at = ?, updated_at = ?"
                             " WHERE id = ?", (target["id"], ts, ts, prospect_id))
-    return {"candidate": target, "created": created, "stage": stage, "already": bool(already)}
+    entry = None if already else store._row(
+        "SELECT id FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage' AND id > ?"
+        " ORDER BY id DESC LIMIT 1", (target["id"], job_id, mark))
+    own = [r["id"] for r in store._rows("SELECT id FROM timeline WHERE candidate_id = ? AND id > ?",
+                                        (target["id"], mark))]
+    record = {"prospect_id": prospect_id, "candidate_id": target["id"], "name": target["name"], "created": created,
+              "stage": stage, "stage_entry": entry["id"] if entry else None, "linked": linked["id"] if linked else None,
+              "own": own}
+    if log:
+        _log_keeps(store, job_id, [record])
+    return {"candidate": target, "created": created, "stage": stage, "already": bool(already), "record": record}
 
 
 def keep_all(store: Store, job_id: int) -> dict[str, Any]:
-    """Keep everyone waiting, except people whose same-name match needs the recruiter's choice."""
-    kept, left = [], []
+    """Keep everyone waiting, except people whose same-name match needs the recruiter's choice and names that
+    read like a sentence (keep those one at a time, if they really are someone). Logged as one change."""
+    kept, left, held = [], [], []
     for p in listed(store, job_id, "proposed", with_checks=False):
+        if _sentence_like(p["name"]):
+            held.append(p["name"])
+            continue
         try:
-            kept.append(keep(store, job_id, p["id"]))
+            kept.append(keep(store, job_id, p["id"], log=False))
         except NeedsChoice:
             left.append(p["name"])
         except (ValueError, NotFound):
             left.append(p["name"])
-    return {"kept": kept, "left": left}
+    if kept:
+        _log_keeps(store, job_id, [k["record"] for k in kept])
+    return {"kept": kept, "left": left, "held": held}
+
+
+def _log_keeps(store: Store, job_id: int, records: list[dict[str, Any]]) -> int:
+    with store._write():
+        rows = store._rows(f"SELECT key FROM settings WHERE key LIKE '{KEEP_PREFIX}%'")
+        n = 1 + max((int(r["key"][len(KEEP_PREFIX):]) for r in rows if r["key"][len(KEEP_PREFIX):].isdigit()),
+                    default=0)
+        store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?)", (f"{KEEP_PREFIX}{n}", json.dumps(
+            {"job_id": job_id, "at": now_iso(), "kept": records})))
+    return n
+
+
+def keep_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]:
+    """Keeps from the Shortlist, newest first, each with its Changes line and whether Undo can still run.
+    Ones whose job is gone are left out."""
+    out = []
+    for r in store._rows(f"SELECT key, value FROM settings WHERE key LIKE '{KEEP_PREFIX}%'"):
+        bid = r["key"][len(KEEP_PREFIX):]
+        try:
+            b = json.loads(r["value"])
+        except ValueError:
+            continue
+        if not bid.isdigit() or not isinstance(b, dict) or (since and (b.get("at") or "") < since):
+            continue
+        job = store._row("SELECT title, company FROM jobs WHERE id = ?", (b.get("job_id"),))
+        if not job:
+            continue
+        kept = b.get("kept") or []
+        n = len(kept)
+        who = quoted(kept[0]["name"]) if n == 1 else f"{n} people"
+        stages = sorted({k["stage"] for k in kept if k.get("stage")})
+        text = (f"Kept {who} from the Shortlist for {job_label(job['title'], job.get('company'))}"
+                + (f", in {' and '.join(stages)}" if stages else ""))
+        out.append({**b, "id": int(bid), "job_title": job["title"], "text": text, "undoable": not b.get("undone_at"),
+                    "note": b.get("undo_note")})
+    return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)
+
+
+def _touched_since(store: Store, rec: dict[str, Any]) -> bool:
+    """Whether anyone worked on a person a keep saved, apart from the keep itself."""
+    cid, own = rec["candidate_id"], [i for i in rec.get("own") or [] if isinstance(i, int)]
+    marks = ", ".join("?" * len(own)) or "NULL"
+    return bool(store._row(f"SELECT 1 FROM timeline WHERE candidate_id = ? AND id NOT IN ({marks}) LIMIT 1",
+                           (cid, *own))
+                or store._row("SELECT 1 FROM applications WHERE candidate_id = ?", (cid,))
+                or store._row("SELECT 1 FROM suggestions WHERE candidate_id = ?", (cid,)))
+
+
+def undo_keep(store: Store, batch_id: int, before_delete: Callable[[], Any] | None = None) -> str:
+    """Take back a Keep or Keep all: each person goes back on the Shortlist, waiting, and out of the job (unless
+    they were moved since). Someone the keep saved is taken out again when nobody worked on them since (the app
+    backs up first); otherwise they stay saved. Returns the notice. Raises NotFound or ValueError."""
+    key = f"{KEEP_PREFIX}{batch_id}"
+    raw = store._row("SELECT value FROM settings WHERE key = ?", (key,))
+    if raw is None:
+        raise NotFound("That keep is gone. Reload the page.")
+    b = json.loads(raw["value"])
+    if b.get("undone_at"):
+        raise ValueError("That keep was already undone.")
+    job_id, back, stayed, saved_still = b["job_id"], 0, [], []
+    for rec in reversed(b.get("kept") or []):
+        p = store._row("SELECT status, candidate_id FROM prospects WHERE id = ? AND job_id = ?",
+                       (rec["prospect_id"], job_id))
+        if p is None or p["status"] != "kept":
+            stayed.append(rec["name"])
+            continue
+        if rec.get("stage_entry"):
+            app = store._row("SELECT id, stage FROM applications WHERE candidate_id = ? AND job_id = ?",
+                             (rec["candidate_id"], job_id))
+            later = store._row("SELECT 1 FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'"
+                               " AND id > ?", (rec["candidate_id"], job_id, rec["stage_entry"]))
+            if app is not None and (later or app["stage"].lower() != (rec.get("stage") or "").lower()):
+                stayed.append(rec["name"])
+                continue
+            if app is not None:
+                with store._write():
+                    store._conn.execute("DELETE FROM applications WHERE id = ?", (app["id"],))
+        if rec.get("linked"):
+            try:
+                store.undo_change(rec["linked"], by="app")
+            except (ValueError, NotFound):
+                pass
+        own = [i for i in rec.get("own") or [] if isinstance(i, int)]
+        if not rec.get("created") and rec.get("stage_entry") and own:  # their timeline loses the keep's add and note
+            with store._write():
+                store._conn.execute(f"DELETE FROM timeline WHERE kind IN ('stage', 'note') AND candidate_id = ?"
+                                    f" AND id IN ({', '.join('?' * len(own))})", (rec["candidate_id"], *own))
+        with store._write():
+            store._conn.execute("UPDATE prospects SET status = 'proposed', candidate_id = NULL, decided_at = NULL,"
+                                " updated_at = ? WHERE id = ?", (now_iso(), rec["prospect_id"]))
+        back += 1
+        if rec.get("created"):
+            try:
+                if _touched_since(store, rec):
+                    saved_still.append(rec["name"])
+                else:
+                    if before_delete:
+                        before_delete()
+                    store.delete_candidate(rec["candidate_id"])
+            except NotFound:
+                pass
+    if not back:
+        raise ValueError("Nothing to undo: " + ("everyone in it was moved or decided again since."
+                                                if stayed else "they are gone."))
+    note = "; ".join(x for x in (
+        f"left {len(stayed)} as they are, moved or decided since" if stayed else "",
+        f"kept {len(saved_still)} saved because you worked on them since" if saved_still else "") if x)
+    with store._write():
+        store._conn.execute("UPDATE settings SET value = ? WHERE key = ?",
+                            (json.dumps({**b, "undone_at": now_iso(), "undo_note": note or None}), key))
+    who = quoted(b["kept"][0]["name"]) if back == 1 and len(b.get("kept") or []) == 1 else \
+        f"{back} {'person' if back == 1 else 'people'}"
+    return (f"Undid the keep: {who} {'waits' if back == 1 else 'wait'} on the Shortlist again."
+            + (f" ({note[:1].upper() + note[1:]}.)" if note else ""))
 
 
 def pass_on(store: Store, job_id: int, prospect_id: int, reason: str | None = None) -> dict[str, Any]:
@@ -320,6 +474,7 @@ def row_view(p: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["MAX_BATCH", "NeedsChoice", "propose", "listed", "keep", "keep_all", "pass_on", "pass_all", "put_back",
+__all__ = ["MAX_BATCH", "NeedsChoice", "propose", "listed", "keep", "keep_all", "keep_batches", "undo_keep",
+           "pass_on", "pass_all", "put_back",
            "counts", "waiting", "today_items", "checks", "check_lines", "row_view", "profile_url",
            "same_name"]

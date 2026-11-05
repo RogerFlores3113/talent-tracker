@@ -208,7 +208,7 @@ def test_a_job_title_as_job_id_gets_a_plain_error(store):
     with pytest.raises(Exception, match=r"^job_id is a number"):
         call(server, "job_pipeline", job_id="Staff ML")
     job = store.add_job("Staff ML")
-    assert "Added Ana" in text(call(server, "add_to_pipeline", candidate_id=cid, job_id=str(job["id"])))
+    assert 'Added "Ana"' in text(call(server, "add_to_pipeline", candidate_id=cid, job_id=str(job["id"])))
 
 
 # ------------------------------------------------------------ 7. paste skills

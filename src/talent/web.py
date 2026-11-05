@@ -1198,10 +1198,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def shortlist_keep_all(job_id: int):
         job_or_404(job_id)
         done = shortlist.keep_all(store, job_id)
-        n, left = len(done["kept"]), done["left"]
+        n, left, held = len(done["kept"]), done["left"], done.get("held") or []
         stage = done["kept"][0]["stage"] if done["kept"] else ""
         notice = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {stage}" if n else "") + "."
-                  + (f" {len(left)} need your choice first: {_and(left)}." if left else ""))
+                  + (" You can undo this on Changes." if n else "")
+                  + (f" {len(left)} need your choice first: {_and(left)}." if left else "")
+                  + (f" Left {len(held)} whose name reads like a sentence; keep them one at a time if they are "
+                     "real people." if held else ""))
         return to_shortlist(job_id, notice=notice)
 
     @app.post("/jobs/{job_id}/shortlist/pass-all")
@@ -1428,6 +1431,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if who in ("", "ai"):
             ai = store.ai_actions(since, limit)
             for a in ai:
+                if a.get("batch_id"):  # one save_candidates call is one row: the batch's own, below
+                    continue
                 if a["candidate_id"]:
                     name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
                 elif a["job_id"]:
@@ -1444,6 +1449,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undo_pending"])
                              if a["undo_pending"] else 0,
                              "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
+                if a["kind"] == "save_batch" and a.get("children"):  # "this and everything after" starts at its first save
+                    first = min(a["children"])
+                    rows[-1].update(undo_label="Undo this batch", undo_from_url=f"/changes/ai/{first}/undo-from",
+                                    from_count=sum(1 for b in ai if b["id"] >= first and b["undo_pending"]))
         if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
             rows.extend(import_change_rows(since)[:limit])
         if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
@@ -1451,6 +1460,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
+        if who in ("", "app"):  # a Keep or Keep all on a Shortlist: one row each, with its own undo
+            for b in shortlist.keep_batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}/shortlist",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "note": b.get("note"), "undo_url": f"/changes/shortlist-keep/{b['id']}/undo",
+                             "undo_label": "Undo this keep",
+                             "confirm": "Undo this keep? They go back on the Shortlist and out of the job. People it "
+                                        "saved are taken out again if nobody worked on them since; a backup is "
+                                        "saved first."})
         if who in ("", "app"):  # what a stage counts as, changed in the app
             for c in actions.stage_outcome_changes(store, since)[:limit]:
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
@@ -1533,7 +1551,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         undone, skipped = [], []
         backup = ai_backup()
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
-            if a["undone_at"] or a.get("record"):
+            if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
                 continue
             try:
                 undone.append(store.undo_ai_action(a["id"], by="app", before_delete=backup))
@@ -1567,6 +1585,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, "/changes", error="That close-out is gone. Reload the page.")
         except ValueError as exc:
             return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/changes/shortlist-keep/{batch_id}/undo")
+    def undo_shortlist_keep(request: Request, batch_id: int):
+        try:
+            notice = shortlist.undo_keep(store, batch_id, before_delete=ai_backup())
+        except NotFound:
+            return back(request, "/changes", error="That keep is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=f"Couldn't undo that. {exc}")
         return back(request, "/changes", notice=notice)
 
     @app.post("/changes/ai/{action_id}/undo")
