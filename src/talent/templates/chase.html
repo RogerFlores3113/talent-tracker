@@ -19,6 +19,11 @@
       <td class="nowrap">{% if p.date_unknown %}<span class="muted">date unknown (imported)</span>{% else %}{{ p.days }} days <span class="muted">since {{ p.since | local('%b %-d') }}</span>{% endif %}</td></tr>
     {% endfor %}</tbody>
   </table>
+  {% if g.by_job_stage | length > 1 %}<table class="dense by-stage">
+    <thead><tr><th>Job</th><th>Stage</th><th>People</th><th>Longest wait</th><th class="no-print"></th></tr></thead>
+    <tbody>{% for r in g.by_job_stage[:12] %}<tr><td><a href="/jobs/{{ r.job_id }}">{{ r.job }}</a></td><td>{{ r.stage }}</td><td>{{ r.count }}</td><td class="nowrap">{{ r.longest }} days</td>
+      <td class="no-print"><a class="small" href="/candidates?{{ {'job': r.job_id, 'stage': r.stage} | urlencode }}">See them</a></td></tr>{% endfor %}</tbody>
+  </table>{% if g.by_job_stage | length > 12 %}<p class="fine">And {{ g.by_job_stage | length - 12 }} more jobs and stages.</p>{% endif %}{% endif %}
   {% if g.people | length > shown %}<p class="fine no-print">{% if all_here %}Showing all {{ g.people | length }}. <a href="/clients/chase#{{ anchor }}">Show fewer</a>{% else %}Showing the {{ shown }} longest waits. <a href="/clients/chase?all={{ anchor | urlencode }}#{{ anchor }}">Show all {{ g.people | length }}</a>{% endif %}</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ g.text }}</pre>
   <div class="actions-inline no-print">
@@ -26,6 +31,8 @@
     {% else %}<span class="fine">No email saved for {{ g.manager or 'this client' }}. Add it on <a href="/clients/{{ g.slug }}#details">the client's page</a> or on the job.</span>{% endif %}
     <form method="post" action="/clients/{{ g.slug }}/chased" class="inline"><input type="hidden" name="manager" value="{{ g.manager_key }}"><input type="hidden" name="manager_name" value="{{ g.manager or g.client }}">
       <button class="btn small primary" type="submit">Mark as chased</button></form>
+    <form method="post" action="/clients/{{ g.slug }}/chased-all" class="inline"><label class="inline-label">Snooze <input type="number" name="snooze" min="1" max="365" value="{{ days }}" aria-label="Days to snooze"> days</label>
+      <button class="btn small" type="submit">Mark this client chased</button></form>
   </div>
 </section>
 {% endfor %}

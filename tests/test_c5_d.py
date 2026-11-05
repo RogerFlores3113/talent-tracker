@@ -306,7 +306,7 @@ def test_talent_sync_shows_the_diff_and_applies(store, tmp_path, monkeypatch, ca
     monkeypatch.setattr("sys.argv", ["talent", "sync", str(f), "--dry-run"])
     cli.main()
     out = capsys.readouterr().out
-    assert "Using the saved matches for this export (ats.csv)." in out
+    assert "Using the saved matches for exports like ats.csv." in out
     assert "Stage moves (1):" in out and "Submitted to Client to Offer on iOS Engineer (Initech)" in out
     assert "Nothing was changed (dry run)." in out
     monkeypatch.setattr("builtins.input", lambda _: "n")

@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
-from . import chase
+from . import chase, opsreview
 from . import decide, interviews, offers, sessions
 from . import outreach
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
@@ -341,6 +341,7 @@ def _lead_ask(tool: str) -> str:
             "so they can't be saved twice.")
 
 
+OPS_ROWS = 100  # jobs in ops_review's reply
 CLOSE_OUT_SHOWN = 10  # people still in play named in update_job's reply, then a count
 
 
@@ -703,7 +704,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     # ------------------------------------------------------------ candidates
     @mcp.tool(annotations=READ, meta=tool_meta("results"))
     def search_candidates(query: str = "", location: str | None = None, title: str | None = None,
-                          tag: str | None = None, source: str | None = None, limit: int = 10) -> CallToolResult:
+                          tag: str | None = None, source: str | None = None, limit: int = 10,
+                          job_id: int | None = None, client: str | None = None,
+                          stage: str | None = None) -> CallToolResult:
         """Search saved candidates by any words: skills, past or current companies, titles, names, places,
         the jobs they're in (title or company, like "Acme Fintech") and their timeline notes and interviews.
 
@@ -718,12 +721,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         tag narrows to one skill tag; source to one exact "Found via" value (like Referral). Words in Found via
         ("referral", "alex" for "Referral from Alex") also match the query. Each hit lists the jobs the person
         is in and their stage there, so "already in my pipeline?" takes one call.
+        job_id, client and stage narrow to people in that job, on that client's jobs, or in that stage name
+        (they all have to hold in the same pipeline, so job_id 4 with stage "Onsite" is who is in Onsite on job 4).
+        With no query this lists them, most recently updated first.
         """
         q = (query or "").strip()
         is_id, _ = store.lookup_exact(q)
         limit = max(1, min(limit, 50))
+        member = {"job_id": job_id, "client": client, "stage": stage}
+        if stage and stage.strip() and job_id:
+            store.resolve_stage(job_id, stage)  # a stage the job doesn't have gets the plain error
+        elif job_id:
+            store.get_job(job_id)
         res = (store.search_candidates(q, limit=limit) if is_id
-               else search.search(q, location=location, title=title, tag=tag, source=source, limit=limit))
+               else search.search(q, location=location, title=title, tag=tag, source=source, limit=limit, **member))
         results = []
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
@@ -862,8 +873,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source)
+        someone_else: list[dict[str, Any]] = []
         if not create_anyway and store.find_duplicate(email, linkedin_url) is None:
-            same_name = store.find_by_name(name)
+            same_name, someone_else = store.split_same_name(name, email, linkedin_url)
             if same_name:
                 n = len(same_name)
                 dupes = [{**brief(c), "app_url": app_url(f"/candidates/{c['id']}"),
@@ -936,6 +948,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             store.log(cand["id"], "note", _lead_note(lead, lead_url), source="AI app")
             out["linkedin_note"] = _lead_ask(lead)
             notes.append(out["linkedin_note"])
+        if created and someone_else:
+            n_else = len(someone_else)
+            line = (f"Same name, different LinkedIn: saved as someone new. {n_else} other saved "
+                    f"{'person has' if n_else == 1 else 'people have'} the name {quoted(cand['name'])}.")
+            out["same_name_saved_as_new"] = [c["id"] for c in someone_else][:10]
+            notes.append(line)
         if not created:
             out["changed"] = changed
             if over_held:
@@ -1647,6 +1665,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         A stage can be given by the start of its name ("tech" for "Technical interview").
         `notes` (or `note`; notes is preferred) is logged on their timeline. Only a stage still in play works (not
         one that counts as hired or out): ask the recruiter before anyone goes further."""
+        store.get_job(job_id)  # "No job with id 7", not "This job has no stages."
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
         held_note = None
         note_text = (notes or "").strip() if not already else ""
@@ -1727,8 +1746,35 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     + (f" (was {before})." if before else "."))
         return _plain(sentence, out)
 
+    def _stage_people(job: dict[str, Any], stage: str, limit: int | None) -> CallToolResult:
+        """job_pipeline with a stage: who is in it, longest waiting first, capped."""
+        job_id = job["id"]
+        st = store.resolve_stage(job_id, stage)
+        cap = max(1, min(limit if limit is not None else 50, 500))
+        people = sorted((a for a in store.pipeline(job_id) if a["stage"].lower() == st["name"].lower()),
+                        key=lambda a: (a["stage_changed_at"], a["candidate_id"]))
+        next_iv = actions.next_interviews(store, job_id)
+        rows = [_slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"],
+                       "current_title": a["current_title"], "current_company": a["current_company"],
+                       "since": a["stage_changed_at"], "days_in_stage": _days_since(a["stage_changed_at"]),
+                       "next_interview": next_iv.get(a["candidate_id"]),
+                       "app_url": app_url(f"/candidates/{a['candidate_id']}")}) for a in people[:cap]]
+        more = max(0, len(people) - len(rows))
+        head = f"{len(people)} in {st['name']} on {_job_name(job)}" + (f", showing the {len(rows)} waiting longest" if more else "") + ":"
+        lines = [head] if people else [f"No one is in {st['name']} on {_job_name(job)}."]
+        if rows:
+            lines += fenced([f"- {r['name']} (id {r['candidate_id']}), {r['days_in_stage']} days in stage"
+                             for r in rows])
+        if more:
+            lines.append(f"{more} more. Ask again with a higher limit to see them.")
+        data = {"job": _job_out(_slim(job)), "stage": st["name"], "total": len(people), "more": more,
+                "stages": [{"name": st["name"], "outcome": st["outcome"], "total": len(people), "candidates": rows}],
+                "app_url": app_url(f"/candidates?job={job_id}&stage={quote(st['name'])}")}
+        return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
+
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
-    def job_pipeline(job_id: int, omit_stages: list[str] | None = None) -> CallToolResult:
+    def job_pipeline(job_id: int, omit_stages: list[str] | None = None, stage: str | None = None,
+                     limit: int | None = None) -> CallToolResult:
         """Everyone in a job's pipeline, grouped by the job's stages in order, with days in stage and next interview.
 
         The first text block is a status update to paste straight to a hiring manager or client (no ids), the same
@@ -1736,8 +1782,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         the recruiter chose to leave out for this job in the app), and its counts cover only the people it names.
         omit_stages overrides that, e.g. ["Sourced", "Rejected"]; pass [] to include every stage. Up to 10 names
         are listed per stage. left_out in the result names the stages left out.
+        stage (the start of a name is enough) returns only the people in that stage, longest waiting first, with
+        their days in stage, instead of the status update. limit caps how many people come back per stage
+        (50 with stage, no cap without); "more" says how many were left off, so ask again with a higher limit.
         """
         job = store.get_job(job_id)
+        if stage and stage.strip():
+            return _stage_people(job, stage, limit)
         next_iv = actions.next_interviews(store, job_id)
         nums = actions.job_numbers(store, job_id)
         left_out = actions.omitted_stages(store, job_id, omit_stages)
@@ -1759,6 +1810,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         offer_lines = offers.recruiter_lines(store, job_id)  # status words only, never pasted
         if offer_lines:
             content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} offers: " + "; ".join(offer_lines) + "."))
+        if limit is not None:
+            cap = max(1, min(limit, 500))
+            for st in stages:
+                st["total"] = len(st["candidates"])
+                st["candidates"] = st["candidates"][:cap]
         data = {"job": _job_out(_slim(job)), "stages": stages, "counts": {k: nums[k] for k in ("active", "hired", "out")},
                 "openings": nums["openings"], "filled": nums["filled"], "headline": actions.headline(shown, job["status"]),
                 "left_out": left_out, "app_url": app_url(f"/jobs/{job_id}")}
@@ -2581,8 +2637,30 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
              "text": g["text"], "last_chased_at": g["chased_at"],
              "people": [{k: p[k] for k in ("candidate_id", "name", "job_id", "job", "stage", "since", "days",
                                            "date_unknown")} for p in g["people"][:cap]],
-             "count": len(g["people"]), "shown": min(cap, len(g["people"]))} for g in shown]}
+             "count": len(g["people"]), "shown": min(cap, len(g["people"])),
+             "by_job_stage": g["by_job_stage"][:chase.TABLE_ROWS]} for g in shown]}
         return _result(text, data)
+
+    @mcp.tool(annotations=READ)
+    def ops_review(client: str | None = None, stuck_days: int = opsreview.STUCK_DAYS) -> CallToolResult:
+        """One table across all open jobs for a weekly ops review: per job, how many people are in process, new
+        this week, moved this week, stuck over `stuck_days` days (14 by default) in a stage, with an interview
+        booked, with an offer out, and how many days since the client's last update. Each count has a link to
+        the people behind it in the app. client (a name or the start of one) narrows it to one client. Reads
+        only; use job_pipeline with a stage to name the people."""
+        if client and client.strip():
+            client = _one_client(client)  # a clear error for a client that isn't here
+        data = opsreview.review(store, stuck_days, client)
+        rows = data["rows"][:OPS_ROWS]
+        text = opsreview.text({**data, "rows": rows})
+        if len(data["rows"]) > len(rows):
+            text += f"\nShowing {len(rows)} of {len(data['rows'])} open jobs. Narrow it with client."
+        out_rows = [{**{k: r[k] for k in ("job_id", "title", "client", "hiring_manager", "counts",
+                                          "last_update_sent_at", "days_since_update")},
+                     "links": {p: app_url(u) for p, u in r["links"].items()}} for r in rows]
+        return _result(DATA_NOTE + "\n" + text, _slim({
+            "rows": out_rows, "totals": data["totals"], "stuck_days": data["stuck_days"],
+            "week_days": data["week_days"], "open_jobs": len(data["rows"]), "app_url": app_url("/clients/review")}))
 
     offers.register_tools(mcp, store, session)  # record_offer, record_offer_answer, list_offers
 
@@ -2747,6 +2825,11 @@ ARG_ALIASES = {
     "log_activity": {"body": "summary", "candidates": "candidate_ids", "people": "candidate_ids"},
     "propose_candidates": {"prospects": "people", "candidates": "people"},
     "client_report": {"company": "client"},
+    "status_digest": {"client": "company"},
+    "client_chase": {"company": "client"},
+    "mark_update_sent": {"company": "client"},
+    "update_client": {"company": "client"},
+    "ops_review": {"company": "client"},
 }
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one
 # extra field. Every other tool refuses an argument it doesn't know.

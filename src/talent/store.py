@@ -1982,6 +1982,18 @@ class Store:
                 return DuplicateValue("linkedin_url", owner)
         return None
 
+    def split_same_name(self, name: str, email: str | None = None, linkedin_url: str | None = None
+                        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """People saved under this name, split in two: (could be the same person, clearly someone else). Someone
+        is clearly someone else when both have a LinkedIn link and the links differ. A name match alone, a link
+        against a saved person with none, or a different email (people change jobs) still needs a human."""
+        li = normalize_linkedin(linkedin_url)
+        maybe, other = [], []
+        for c in self.find_by_name(name):
+            saved_li = normalize_linkedin(c.get("linkedin_url"))
+            (other if li and saved_li and li != saved_li else maybe).append(c)
+        return maybe, other
+
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
         """Everyone saved under this name, ignoring case, accents and punctuation ('Jose Alvarez'
         finds 'José Álvarez')."""
@@ -3300,7 +3312,9 @@ class Store:
         return False, None
 
     def candidate_filters(self, *, location: str | None = None, title: str | None = None,
-                          tag: str | None = None, source: str | None = None) -> tuple[list[str], list[Any], dict]:
+                          tag: str | None = None, source: str | None = None, job_id: int | None = None,
+                          client: str | None = None, stage: str | None = None, pipe: str | None = None,
+                          days: int | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
         bay area, swe) and ignore case and accents; tag and source ignore case."""
         where: list[str] = []
@@ -3321,7 +3335,53 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        from .opsreview import PIPES, pipe_sql
+        pipe = pipe if pipe in PIPES else None  # a column of the Ops review: in process, stuck, offers out...
+        if job_id or (client and client.strip()) or (stage and stage.strip()) or pipe:
+            # one pipeline row has to match all of job, client and stage together
+            sub, sp = ["a.candidate_id = c.id"], []
+            if job_id:
+                sub.append("a.job_id = ?")
+                sp.append(int(job_id))
+                filters["job_id"] = str(job_id)
+            if client and client.strip():
+                from . import actions  # a client is a company by its key: "Plaid, Inc." and "plaid" are one
+                want = actions.company_key(client)
+                ids = [r["id"] for r in self._rows("SELECT id, company FROM jobs")
+                       if actions.company_key(r["company"]) == want]
+                sub.append("a.job_id IN (SELECT value FROM json_each(?))")
+                sp.append(json.dumps(ids))
+                filters["client"] = client
+            if stage and stage.strip():
+                sub.append("lower(trim(a.stage)) = lower(?)")
+                sp.append(stage.strip())
+                filters["stage"] = stage
+            if pipe:
+                cond, extra = pipe_sql(pipe, days)
+                sub.append(cond)
+                sp += extra
+                sub.append("j.status = 'open'")
+                filters["pipe"] = pipe
+            where.append("EXISTS (SELECT 1 FROM applications a JOIN jobs j ON j.id = a.job_id WHERE "
+                         + " AND ".join(sub) + ")")
+            params += sp
         return where, params, filters
+
+    def membership_choices(self, job_id: int | None = None) -> dict[str, Any]:
+        """Job, client and stage choices for the Candidates filter bar. Stages follow the chosen job."""
+        from . import actions
+        jobs = self._rows("SELECT id, title, company, status FROM jobs ORDER BY (status = 'open') DESC, title")
+        clients: dict[str, str] = {}
+        for j in jobs:
+            if (j["company"] or "").strip():
+                clients.setdefault(actions.company_key(j["company"]), j["company"].strip())
+        if job_id:
+            stages = [s["name"] for s in self.job_stages(job_id)]
+        else:
+            stages = [r["stage"] for r in self._rows(
+                "SELECT stage, count(*) n FROM applications GROUP BY lower(stage) ORDER BY n DESC LIMIT 40")]
+        return {"job_choices": jobs, "client_choices": sorted(clients.values(), key=str.lower),
+                "stage_choices": stages}
 
     def list_sources(self) -> list[dict[str, Any]]:
         """Where people came from ("LinkedIn", "Referral"), most common first, for the Candidates filter."""
@@ -3340,6 +3400,11 @@ class Store:
         limit: int = 25,
         offset: int = 0,
         fix_typos: bool = True,
+        job_id: int | None = None,
+        client: str | None = None,
+        stage: str | None = None,
+        pipe: str | None = None,
+        days: int | None = None,
     ) -> SearchResult:
         """Ranked search, best matches first; empty query lists most recent.
 
@@ -3347,7 +3412,8 @@ class Store:
         their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
         matches with some of the words. A word nobody has gets a spelling fix from the saved words.
         """
-        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source)
+        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source,
+                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
@@ -3375,7 +3441,8 @@ class Store:
                     for word, fix in all_fixes.items():
                         fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                     res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                                 limit=limit, offset=offset, fix_typos=False)
+                                                 limit=limit, offset=offset, fix_typos=False,
+                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                     res.suggestion = fixed
                     return res
             if fixes:
@@ -3383,12 +3450,14 @@ class Store:
                 for word, fix in fixes.items():
                     fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                 res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False)
+                                             limit=limit, offset=offset, fix_typos=False,
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                 if res.exact_total:
                     res.query, res.suggestion, res.corrected = query, fixed, True
                     return res
                 res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False)
+                                             limit=limit, offset=offset, fix_typos=False,
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                 res.suggestion = fixed
                 return res
 

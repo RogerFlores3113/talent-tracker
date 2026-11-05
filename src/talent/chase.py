@@ -21,7 +21,9 @@ DEFAULT_DAYS = 5
 CHASED_KEY = "client_chased:{}"
 WRITEUP_NOTES = 3  # screen notes in a write-up, newest first
 NOTE_CHARS = 400
-SHOWN = 15  # people per nudge, then "and 3 more"
+SHOWN = 10  # people per nudge (oldest first), then "and 3 more" with a count per job and stage
+TODAY_SHOWN = 5  # names on a Today chase card: the worst few, then "and 30 more"
+TABLE_ROWS = 12  # job and stage rows in a nudge's count table
 _COMP = re.compile(r"\b(comp|compensation|salary|base|ote|total comp|tc|rate|expecting|expects|\$\s?\d)", re.I)
 _AVAIL = re.compile(r"\b(availab\w*|notice|start date|can start|start in|starting|open to start)\b", re.I)
 
@@ -144,12 +146,52 @@ def chased_at(store: Store, key: str, manager: str) -> str | None:
     return raw.get("at") if isinstance(raw, dict) else None
 
 
-def mark_chased(store: Store, key: str, manager: str, now: datetime | None = None) -> str:
-    """The recruiter sent this manager's nudge: Today stops asking until the next one is due."""
+def mark_chased(store: Store, key: str, manager: str, now: datetime | None = None,
+                snooze_days: int | None = None) -> str:
+    """The recruiter sent this manager's nudge: Today stops asking until the next one is due, or for snooze_days."""
     reports.client(store, key)  # NotFound for a client that isn't here
-    ts = (now or datetime.now(timezone.utc)).replace(microsecond=0).isoformat()
-    reports._put_json(store, _chased_key(key, manager), {"at": ts})
-    return ts
+    when = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    row: dict[str, Any] = {"at": when.isoformat()}
+    if snooze_days:
+        row["until"] = (when + timedelta(days=snooze_days)).isoformat()
+    reports._put_json(store, _chased_key(key, manager), row)
+    return row["at"]
+
+
+def snooze_days_from(value: Any) -> int | None:
+    """The snooze box: empty means the chase days; otherwise 1 to 365 days."""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError("Give the snooze as a number of days from 1 to 365.") from None
+    if not 1 <= n <= 365:
+        raise ValueError("Give the snooze as a number of days from 1 to 365.")
+    return n
+
+
+def mark_client_chased(store: Store, key: str, snooze_days: int | None = None,
+                       now: datetime | None = None) -> int:
+    """Mark every hiring manager's nudge for this client as chased in one go, with an optional snooze of N days.
+    Returns how many nudges that covered (at least one, so a client with nothing waiting still snoozes)."""
+    reports.client(store, key)
+    managers = {g["manager_key"] for g in chase_list(store, key, now=now)} or {""}
+    for mk in managers:
+        mark_chased(store, key, mk, now, snooze_days)
+    return len(managers)
+
+
+def snoozed(store: Store, key: str, manager: str, now: datetime) -> bool:
+    """Whether Today should stay quiet about this nudge: chased within the chase days, or snoozed until later."""
+    raw = reports._get_json(store, _chased_key(key, manager))
+    if not isinstance(raw, dict):
+        return False
+    until, last = to_dt(raw.get("until")), to_dt(raw.get("at"))
+    if until:
+        return now < until
+    return bool(last and now - last < timedelta(days=chase_days(store)))
 
 
 # ------------------------------------------------------------------ helpers
@@ -435,8 +477,20 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                           + (f" for {c['name']}" if not own else ""))
         grp["email"] = _mailto(grp["to"], grp["subject"], grp["text"])
         grp["longest"] = max(p["days"] for p in grp["people"])
+        grp["by_job_stage"] = by_job_stage(grp["people"])
         out.append(grp)
     return sorted(out, key=lambda g: (-g["longest"], g["client"].lower(), g["manager_key"]))
+
+
+def by_job_stage(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """[{"job", "job_id", "stage", "count", "longest"}] for these people, biggest wait first."""
+    rows: dict[tuple[int, str], dict[str, Any]] = {}
+    for p in people:
+        r = rows.setdefault((p["job_id"], p["stage"]), {"job": p["job"], "job_id": p["job_id"], "stage": p["stage"],
+                                                        "count": 0, "longest": 0})
+        r["count"] += 1
+        r["longest"] = max(r["longest"], p["days"])
+    return sorted(rows.values(), key=lambda r: (-r["longest"], -r["count"], r["job"].lower(), r["stage"].lower()))
 
 
 def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
@@ -449,7 +503,11 @@ def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
         when = "" if p["date_unknown"] else f" since {reports.in_zone(p['since'], tz, '%b %-d')} ({p['days']} days)"
         lines.append(f"- {p['name']} ({p['job']}): {p['stage']}{when}")
     if len(people) > SHOWN:
-        lines.append(f"- and {len(people) - SHOWN} more")
+        rest = by_job_stage(people[SHOWN:])
+        lines.append(f"- and {len(people) - SHOWN} more" + (", by job and stage:" if rest else ""))
+        lines += [f"  {r['job']}, {r['stage']}: {r['count']}" for r in rest[:TABLE_ROWS]]
+        if len(rest) > TABLE_ROWS:
+            lines.append(f"  other jobs and stages: {sum(r['count'] for r in rest[TABLE_ROWS:])}")
     lines += ["", "Could you let me know where each one stands, or if you'd like to meet any of them?", "", "Thanks"]
     return "\n".join(lines)
 
@@ -475,16 +533,15 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
     days = chase_days(store)
     items = []
     for g in chase_list(store, now=now, days=days):
-        last = to_dt(g["chased_at"])
-        if last and now - last < timedelta(days=days):
+        if snoozed(store, g["key"], g["manager_key"], now):
             continue
         n = len(g["people"])
         who = f"{g['manager']} at {g['client']}" if g["manager"] else g["client"]
         items.append({"key": f"client_chase:{g['key']}:{g['manager_key']}:{now.date().isocalendar()[1]}",
                       "kind": "client_chase", "rank": 2, "when": g["people"][0]["since"],
                       "title": f"Chase {who} for feedback: {n} {'person' if n == 1 else 'people'} waiting {days}+ days",
-                      "detail": ", ".join(f"{p['name']} ({p['days']} days)" for p in g["people"][:3])
-                      + (f" and {n - 3} more" if n > 3 else ""), "client": g["client"],
+                      "detail": ", ".join(f"{p['name']} ({p['days']} days)" for p in g["people"][:TODAY_SHOWN])
+                      + (f" and {n - TODAY_SHOWN} more" if n > TODAY_SHOWN else ""), "client": g["client"],
                       "href": f"/clients/chase#chase-{reports.slug(g['key'])}-{reports.slug(g['manager_key']) or 'none'}"})
     return items
 
@@ -565,6 +622,6 @@ def ai_job_undo(store: Store, a: dict[str, Any]) -> str:
     return a["summary"]
 
 
-__all__ = ["attach_interview_job", "chase_days", "chase_max_days", "counts_stage", "set_chase_max_days",
+__all__ = ["attach_interview_job", "by_job_stage", "mark_client_chased", "snooze_days_from", "snoozed", "chase_days", "chase_max_days", "counts_stage", "set_chase_max_days",
            "set_stage_picks", "stage_choices", "chase_list", "chase_text", "interview_jobs", "mark_chased", "nudge_text",
            "set_chase_days", "set_interview_job", "submit", "submit_stage", "today_items", "writeup"]
