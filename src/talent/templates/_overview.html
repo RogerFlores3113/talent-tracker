@@ -8,6 +8,18 @@
     {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button.</span></button></form>{% endif %}
   </div>
 {%- endmacro %}
+{% macro loop_sessions(i) -%}
+  <ul class="sessions">
+  {% for x in i.sessions %}
+    <li><span class="fine">{{ x.at | local(IV_TIME) }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}
+      {% if i.kind == 'interview_outcome' and x.status == 'scheduled' and x.started %}
+      <span class="session-acts">{% for value, word in interview_outcomes.items() %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ x.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}</span>
+      {% elif x.status in interview_outcomes %}<span class="badge">{{ interview_outcomes[x.status] }}</span>
+      {% else %}<a class="link small" href="{{ x.href }}">Reschedule</a>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+{%- endmacro %}
 {% if total_all == 0 and not jobs %}
 <div class="welcome">
   <h1>Welcome to Talent Search</h1>
@@ -40,7 +52,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -51,6 +63,7 @@
           {% else %}
           <div class="fine">{% if i.kind in ('interview', 'interview_out', 'interview_outcome') %}{{ i.when | local(IV_TIME) }}{% if i.detail %} · {% endif %}{% endif %}{{ i.detail }}</div>
           {% endif %}
+          {% if i.sessions %}{{ loop_sessions(i) }}{% endif %}
         </div>
         <div class="item-acts">
           {% if i.kind == 'stuck' and i.next_stage %}
@@ -72,9 +85,13 @@
           {% elif i.kind == 'interview_out' %}
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="cancel"><button class="btn small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview{{ 's' if i.interview_ids | length > 1 }}</button></form>
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="keep"><button class="link small" type="submit" title="Stop asking. It shows on Today as a normal interview.">Keep it</button></form>
+          {% elif i.kind == 'interview_result' and i.next_stage %}
+          <form method="post" action="/actions/advance"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="stage" value="{{ i.next_stage }}">{% if i.notes %}<input type="hidden" name="notes" value="{{ i.notes }}">{% endif %}<button class="btn small" type="submit">Move to {{ i.next_stage }}</button></form>
+          {% elif i.kind == 'interview_outcome' and i.loop %}
           {% elif i.kind == 'interview_outcome' %}
           {% for value, word in interview_outcomes.items() %}<form method="post" action="/candidates/{{ i.candidate_id }}/interviews/{{ i.interview_id }}"><input type="hidden" name="op" value="outcome"><input type="hidden" name="outcome" value="{{ value }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">{{ word }}</button></form>{% endfor %}
           <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}" title="It didn't happen: move it to a new time">Reschedule</a>
+          {% elif i.kind == 'interview' and i.loop %}
           {% elif i.kind == 'interview' %}
           <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Reschedule</a>
           {% if i.started %}<a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Record outcome</a>{% endif %}
@@ -99,10 +116,11 @@
             <span class="kind">{{ 'Follow-up' if i.kind == 'suggestion' else 'Interview' }}</span>
             <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge(i.candidate_id and i.candidate_id in sample[0]) }}{% if i.on_hold %} <span class="badge">job on hold</span>{% endif %}
             <div class="fine">{% if i.kind == 'suggestion' %}{{ i.due_text }}{% else %}{{ i.when | local(IV_TIME) }}{% endif %}{% if i.detail %} · {{ i.detail }}{% endif %}</div>
+            {% if i.sessions %}{{ loop_sessions(i) }}{% endif %}
           </div>
           {% if i.kind == 'suggestion' %}<div class="item-acts"><form method="post" action="/actions/suggestions/{{ i.suggestion_id }}/done"><button class="btn small" type="submit">Done</button></form></div>
           {% elif i.kind == 'interview' %}<div class="item-acts">
-            <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Reschedule</a>
+            {% if not i.loop %}<a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Reschedule</a>{% endif %}
             <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
           </div>{% endif %}
         </li>
@@ -111,9 +129,9 @@
     </div>
     {% endif %}
     <form method="post" action="/actions/todo" class="inline add-todo">
-      <input type="text" name="text" placeholder="Add a to-do, like {{ 'Send Priya the weekly update' if inhouse() else 'Send Acme the weekly update' }}" required aria-label="New to-do">
+      <input type="text" name="text" placeholder="Add a to-do, like {{ 'Send the hiring team an update' if inhouse() else 'Send Acme the weekly update' }}" required aria-label="New to-do">
       {% if jobs %}<select name="job_id" aria-label="Job (optional)"><option value="">No job</option>{% for j in jobs %}<option value="{{ j.id }}">{{ job_label(j.title, j.company) }}{% if j.location %} ({{ j.location }}){% endif %}</option>{% endfor %}</select>{% endif %}
-      <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
+      <label class="inline-label">Show from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
       <button class="btn small" type="submit">Add to-do</button>
     </form>
     {% if today.stuck_more %}<p class="fine">And {{ today.stuck_more }} more stuck reminder{{ '' if today.stuck_more == 1 else 's' }} not shown. Snooze some, or raise the days in <a href="/settings">Settings</a>.</p>{% endif %}

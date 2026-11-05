@@ -92,7 +92,8 @@
       {% if ivd.interviewer %}<div class="fine">Interviewer: {{ ivd.interviewer }}</div>{% endif %}
       {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% if ivd.outcome_note %}<div class="fine">How it went: {{ ivd.outcome_note }}</div>{% endif %}
-      <details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel or record how it went</summary>
+      {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}: {{ f.text }}</div>{% endfor %}
+      <details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">
           <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
@@ -109,6 +110,19 @@
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline"><input type="hidden" name="op" value="restore"><button class="btn small" type="submit">Put back on the schedule</button></form>
         {% else %}
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline"><input type="hidden" name="op" value="cancel"><button class="link small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview</button></form>
+        {% endif %}
+        {% if t.status != 'cancelled' %}
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}/feedback" class="inline">
+          <input type="text" name="interviewer" value="{{ ivd.interviewer or '' }}" placeholder="Who said it" aria-label="Interviewer" maxlength="200">
+          <input type="text" name="text" placeholder="Their feedback, in their words" aria-label="Feedback" maxlength="4000" required>
+          <button class="btn small" type="submit">Add feedback</button>
+        </form>
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}/session" class="inline">
+          <input type="text" name="body" placeholder="Next session, like Onsite: coding" aria-label="Session name" maxlength="200" required>
+          <input type="time" name="time" aria-label="Start time, {{ local_zone() }}" required>
+          <input type="text" name="interviewer" placeholder="Interviewer (optional)" aria-label="Interviewer" maxlength="200">
+          <button class="btn small" type="submit" title="Builds an onsite loop: same day and job">Add another session that day</button>
+        </form>
         {% endif %}
       </details>
       {% endif %}

@@ -567,7 +567,10 @@ AI_ACTION_KINDS = {
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
     "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
+    "interview_feedback": "Added interview feedback",
 }
+# AI interview changes that Undo puts back by restoring the interview's time and data as they were.
+INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback")
 # AI actions listed on Changes as a record only: there is nothing to put back.
 AI_RECORD_KINDS = frozenset({"interview_outcome"})
 # How many saved values (cleared or replaced) the AI app may change on one person in an hour.
@@ -1469,6 +1472,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_outcome":
         label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
+    if kind == "interview_feedback":
+        who = r.get("body") or ""
+        return f"Added interview feedback on {name}" + (f" from {who}" if who else "") + what
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -2244,7 +2250,7 @@ class Store:
                 if kind == "todo_added":
                     return "that to-do is done" if s is None or s["done_at"] else None
                 return None if s is not None and s["done_at"] == new.get("done_at") else "that to-do was changed since"
-            if kind in ("interview_cancel", "interview_move"):
+            if kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
             if kind.startswith("client_"):
@@ -2402,7 +2408,7 @@ class Store:
                 self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
             elif kind == "prospects_proposed":
                 note = self._undo_proposed(action_id, new)
-            elif kind in ("interview_cancel", "interview_move"):
+            elif kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 if reason:
                     raise ValueError(reason)
@@ -2809,10 +2815,16 @@ class Store:
             data["status"] = "scheduled"
             data.pop("cancelled_at", None)
         if outcome is not None:
-            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower())
-            value = INTERVIEW_OUTCOMES.get(key)
+            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower()).strip(" .!")
+            value = INTERVIEW_OUTCOMES.get(key) or INTERVIEW_VERDICTS.get(key)
             if value is None:
-                raise ValueError("The outcome must be passed, not passed or no show.")
+                raise ValueError("Outcome must be one of: passed, not passed, no show. Words like strong yes and "
+                                 "mixed count as passed, and strong no as not passed; the word is kept in the note.")
+            if key in INTERVIEW_VERDICTS:  # "strong yes": recorded as passed, with the interviewer's word kept
+                word = key[:1].upper() + key[1:]
+                rest = _clean(note) if note is not None else _clean(data.get("outcome_note"))
+                if not (rest or "").lower().startswith(key):
+                    note = f"{word}. {rest}" if rest else f"{word}."
             if new_at > ts:
                 raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
                                  "went after it takes place, or change its time first.")
@@ -2851,6 +2863,38 @@ class Store:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                     " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
+        return self.get_interview(entry_id)
+
+    def add_interview_feedback(self, entry_id: int, text: str, interviewer: str | None = None, *,
+                               candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Add one interviewer's free-text feedback to an interview (kept in its data as `feedback`, a list of
+        {by, text, at, source}). Several people can each add theirs; the same words from the same person twice
+        are kept once. Nothing is ever removed. An AI app's feedback is listed on Changes, where Undo takes it back.
+        """
+        iv = self.get_interview(entry_id, candidate_id)
+        body = _clean(text)
+        if not body:
+            raise ValueError("Feedback needs some text: what the interviewer said.")
+        if len(body) > FEEDBACK_LIMIT:
+            raise ValueError(f"That feedback is too long ({len(body):,} characters). The limit is {FEEDBACK_LIMIT:,}, "
+                             "so nothing was saved.")
+        who = _clean(interviewer) or None
+        if who and len(who) > 200:
+            raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
+        if iv["status"] == "cancelled":
+            raise ValueError("That interview was cancelled, so it has no feedback. Put it back first if it happened.")
+        data = dict(iv["data"])
+        notes = [f for f in data.get("feedback") or [] if isinstance(f, dict)]
+        if any((f.get("by") or "").casefold() == (who or "").casefold() and f.get("text") == body for f in notes):
+            return iv
+        source = CHANGE_SOURCES.get(by, by)
+        data["feedback"] = [*notes, {"by": who, "text": body, "at": now_iso(), "source": source}]
+        with self._write():
+            self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry_id))
+            if by == "ai":
+                self._log_ai("interview_feedback", candidate_id=iv["candidate_id"], job_id=iv.get("job_id"),
+                             target_id=entry_id, body=who, old={"at": iv["at"], "data": iv["data"]},
+                             new={"at": iv["at"], "data": data, "summary": iv.get("body")})
         return self.get_interview(entry_id)
 
     # ---------------------------------------------------------------- search
@@ -3787,6 +3831,12 @@ def _job_extras(data: dict[str, Any]) -> dict[str, Any]:
 INTERVIEW_OUTCOMES = {"passed": "passed", "pass": "passed", "not passed": "not_passed", "failed": "not_passed",
                       "did not pass": "not_passed", "no show": "no_show", "noshow": "no_show"}
 INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show"}
+# How interviewers often say it. Each counts as an outcome, and the word itself is kept at the start of the note.
+INTERVIEW_VERDICTS = {"strong yes": "passed", "yes": "passed", "lean yes": "passed", "mixed": "passed",
+                      "strong no": "not_passed", "no": "not_passed", "lean no": "not_passed"}
+# The outcome values an AI app may send (update_interview lists these as its schema enum).
+INTERVIEW_OUTCOME_CHOICES = ("passed", "not passed", "no show", "strong yes", "yes", "mixed", "no", "strong no")
+FEEDBACK_LIMIT = 4000  # one interviewer's feedback on one interview
 LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
                   " AND json_extract(t.data, '$.outcome') IS NULL")
 
