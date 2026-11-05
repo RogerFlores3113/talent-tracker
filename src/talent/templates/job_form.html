@@ -11,14 +11,16 @@
   <label>Hiring manager email<input type="email" name="hiring_manager_email" value="{{ j.hiring_manager_email or '' }}"></label>
   <label>Openings<input type="number" name="openings" min="1" step="1" value="{{ j.openings or 1 }}" title="How many people you're hiring for this role"></label>
   <label>Target date<input type="date" name="target_date" value="{{ j.target_date or '' }}" title="Optional. When the role should be filled."></label>
-  <label>Active candidates to aim for<input type="number" name="min_active" min="1" step="1" value="{{ j.min_active or '' }}" placeholder="Your usual target" title="Today asks for more people when fewer than this are in play. Leave blank to use the number in Settings."></label>
+  <label>Active candidates to aim for<input type="number" name="min_active" min="1" step="1" value="{{ j.min_active or '' }}" placeholder="3 per opening" title="Today asks for more people when fewer than this are in play. Leave blank for 3 per opening, up to the number in Settings."></label>
   {% if j.id %}
   <label>Status<select name="status">{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if j.status == s }}>{{ s | replace('_', ' ') | capitalize }}</option>{% endfor %}</select></label>
   {% endif %}
   <label class="wide">Description (the AI uses this when sourcing)<textarea name="description" rows="6">{{ j.description or '' }}</textarea></label>
   {% if not j.id %}
-  <label class="wide">Stages, one per line (leave blank for the usual ones)
-    <textarea name="stages" rows="4" placeholder="Sourced&#10;Contacted&#10;Screening&#10;Interviewing&#10;Offer&#10;Hired&#10;Rejected&#10;Withdrawn"></textarea></label>
+  <label>Stage set<select name="stage_set">{% for key, (label, names) in (stage_sets or {}).items() %}<option value="{{ key }}" {{ 'selected' if (j.stage_set or 'default') == key }}>{{ label }}{% if names %}: {{ names | join(', ') }}{% else %}: Sourced, Contacted, Screening, Interviewing, Offer, Hired, Rejected, Withdrawn{% endif %}</option>{% endfor %}</select></label>
+  <label class="wide">Or your own stages, one per line (leave blank to use the stage set)
+    <textarea name="stages" rows="4" placeholder="Sourced&#10;Contacted&#10;Screening&#10;Interviewing&#10;Offer&#10;Hired&#10;Rejected&#10;Withdrawn">{{ j.stages or '' }}</textarea></label>
+  <p class="fine wide">Without an Out stage, Rejected and Withdrawn are added for you so you can mark a no.</p>
   {% endif %}
   <div class="actions"><button class="btn primary" type="submit">Save</button>
     <a class="btn" href="{{ '/jobs/' ~ j.id if j.id else '/jobs' }}">Cancel</a></div>

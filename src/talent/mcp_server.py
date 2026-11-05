@@ -488,10 +488,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         forward as out. Check stage_outcomes in the result. openings is the headcount (default 1); min_active
         is how many active candidates this job should have before the dashboard asks for more."""
         twins = store.similar_open_jobs(title, company)
+        stages, out_note = actions.with_out_stages(stages)  # every job gets an Out stage
         job = store.add_job(title, company, location, description, stages=stages, **_given(
             hiring_manager=hiring_manager, hiring_manager_email=hiring_manager_email, openings=openings,
             target_date=target_date, min_active=min_active))
-        out = {**_slim(job), **_stage_info(store, job["id"])}
+        out = {**_slim(job), **_stage_info(store, job["id"]), **({"note": out_note} if out_note else {})}
         if twins:
             ids = ", ".join(str(j["id"]) for j in twins)
             out["warning"] = (f"Created, but open job id {ids} has the same title and company. Ask the recruiter "
@@ -508,7 +509,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _slim(store.update_job(job_id, **_given(
             title=title, company=company, location=location, description=description, status=status,
             hiring_manager=hiring_manager, hiring_manager_email=hiring_manager_email, openings=openings,
-            target_date=target_date, min_active=min_active)))
+            target_date=target_date, min_active=min_active))) | actions.close_out_hint(store, job_id)
 
     @mcp.tool(annotations=EDIT)
     def edit_job_stages(job_id: int, rename: dict[str, str | dict[str, str]] | None = None,
@@ -568,6 +569,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes))
         if before:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
+        out.update({k: v for k, v in actions.exit_interviews(store, candidate_id, job_id).items()
+                    if k in ("upcoming_interviews", "warning")})
         return out
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
@@ -575,13 +578,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Everyone in a job's pipeline, grouped by the job's stages in order, with days in stage and next interview.
 
         The first text block is a status update to paste straight to a hiring manager or client (no ids), the same
-        text as the app's Copy status update. omit_stages leaves those stages' names out of it, e.g.
-        ["Sourced", "Rejected"]; the counts stay. Leave it out to use what the recruiter chose to leave out for
-        this job in the app; pass [] to include every stage.
+        text as the app's Copy status update. It leaves out internal stages (Sourced, Contacted and the like, or what
+        the recruiter chose to leave out for this job in the app), and its counts cover only the people it names.
+        omit_stages overrides that, e.g. ["Sourced", "Rejected"]; pass [] to include every stage. Up to 10 names
+        are listed per stage. left_out in the result names the stages left out.
         """
         job = store.get_job(job_id)
         next_iv = actions.next_interviews(store, job_id)
         nums = actions.job_numbers(store, job_id)
+        left_out = actions.omitted_stages(store, job_id, omit_stages)
+        shown = actions.status_numbers(store, job_id, omit_stages)
         stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [
             _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "current_title": a["current_title"],
                    "current_company": a["current_company"], "since": a["stage_changed_at"],
@@ -594,23 +600,26 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if total:
             content.append(TextContent(type="text", text=PASTE_NOTE))
         data = {"job": _slim(job), "stages": stages, "counts": {k: nums[k] for k in ("active", "hired", "out")},
-                "openings": nums["openings"], "filled": nums["filled"], "headline": actions.headline(nums, job["status"]),
-                "app_url": app_url(f"/jobs/{job_id}")}
+                "openings": nums["openings"], "filled": nums["filled"], "headline": actions.headline(shown, job["status"]),
+                "left_out": left_out, "app_url": app_url(f"/jobs/{job_id}")}
         return CallToolResult(content=content, structuredContent=data)
 
     @mcp.tool(annotations=READ)
     def status_digest(company: str | None = None, omit_stages: list[str] | None = None) -> CallToolResult:
         """One paste-ready status update for every open job, or only one company's (a client or team), with a
-        roll-up per company first. The same text as "Copy status" on the app's Jobs page. omit_stages works
-        as in job_pipeline."""
-        rollup = actions.company_rollup(store, company)
+        roll-up per company first and on-hold jobs as one line each. The same text as "Copy status" on the app's
+        Jobs page. company matches any case, by the start of the name ("lumen" for Lumen Health) or a close
+        spelling. Internal stages are left out as in job_pipeline; omit_stages works as there."""
+        rollup = actions.company_rollup(store, company, omit_stages)
+        held = actions.held_jobs(store, company)
         text = actions.status_digest(store, company, omit_stages=omit_stages)
         content = [TextContent(type="text", text=text)]
         if rollup:
             content.append(TextContent(type="text", text=PASTE_NOTE))
         data = {"companies": [{"company": r["company"], "open_jobs": len(r["jobs"]), "active": r["active"],
-                               "hired": r["hired"], "openings": r["openings"],
+                               "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
                                "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup],
+                "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
                 "app_url": app_url("/jobs")}
         return CallToolResult(content=content, structuredContent=data)
 
