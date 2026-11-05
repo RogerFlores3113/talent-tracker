@@ -263,6 +263,18 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
                                     status_code=303)
         return RedirectResponse(f"/candidates/{candidate_id}#timeline", status_code=303)
 
+    @app.post("/candidates/{candidate_id}/undo/{timeline_id}")
+    def undo_change_form(candidate_id: int, timeline_id: int):
+        cand_or_404(candidate_id)
+        try:
+            store.undo_change(timeline_id, candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That change isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}#timeline", status_code=303)
+
     @app.post("/candidates/{candidate_id}/contacted")
     def mark_contacted(candidate_id: int):
         cand_or_404(candidate_id)
