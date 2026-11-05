@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, backups, importers, integrations, paths, recipes
+from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -39,6 +39,7 @@ MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
+BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
 OPEN_PATHS = {"/launch", "/api/health"}  # everything else needs the app window's key
@@ -80,13 +81,16 @@ class CandidateIn(BaseModel):
     last_contacted_at: str | None = None
 
 
-def _ago(iso: str | None) -> str:
+def _ago(iso: str | None, now: datetime | None = None) -> str:
+    """'today', 'yesterday', '3 days ago'... counted in calendar days on this computer's clock, so something
+    from 11 PM last night is 'yesterday' at 1 AM, not 'today'."""
     dt = to_dt(iso)
     if not dt:
         return "never"
-    days = (datetime.now(timezone.utc) - dt).days
-    if days < 0:
+    now = now or datetime.now(timezone.utc)
+    if dt > now + timedelta(minutes=1):
         return "upcoming"
+    days = max(0, actions.local_days(dt, now))
     if days == 0:
         return "today"
     if days == 1:
@@ -98,6 +102,9 @@ def _ago(iso: str | None) -> str:
     return f"{days // 365} years ago"
 
 
+IV_TIME = actions.IV_TIME  # interview times say their zone
+
+
 def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
@@ -107,6 +114,15 @@ def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt)
     except ValueError:  # Windows strftime has no %-d
         return local.strftime(fmt.replace("%-", "%#"))
+
+
+def _local_date(iso: str | None) -> str:
+    """'2026-11-04': a timestamp's day on this computer's clock (a plain day stays as it is)."""
+    v = iso or ""
+    if "T" not in v:
+        return v[:10]
+    dt = to_dt(v)
+    return dt.astimezone().date().isoformat() if dt else v[:10]
 
 
 def _shown(field: str, value: Any) -> str:
@@ -164,10 +180,20 @@ def change_lines(data: Any) -> list[str]:
         elif not now:
             out.append(f"Cleared {label}" + (f" (was {was})" if was else ""))
         elif not was:
-            out.append(f"{cap}: {now} (was empty)")
+            out.append(f"Added {label}: {now}")
         else:
             out.append(f"{cap}: {was} to {now}")
     return out
+
+
+def ai_change_text(a: dict[str, Any]) -> str:
+    """An AI action's line on Changes; interview moves and cancels say when, in local time."""
+    old, new = a.get("old_data") or {}, a.get("new_data") or {}
+    if a["kind"] == "interview_move" and old.get("at") and new.get("at"):
+        return f"{a['summary']} (was {_local(old['at'])}, now {_local(new['at'])})"
+    if a["kind"] == "interview_cancel" and old.get("at"):
+        return f"{a['summary']} (it was set for {_local(old['at'])})"
+    return a["summary"]
 
 
 def profile_label(url: str | None) -> str:
@@ -239,15 +265,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     key = key or paths.app_key()
     cookie_name = key_cookie_name(key)
     flash_name = flash_cookie_name(key)
-    locked_logged = [0.0]
+    locked_logged = [float("-inf")]  # monotonic time can be under 60s on a just-booted computer
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     res = resource_dir()
     templates = Jinja2Templates(directory=str(res / "templates"))
     env = templates.env
     env.filters["snippet"] = snippet_html
-    env.filters["date"] = lambda iso: (iso or "")[:10]
+    env.filters["date"] = _local_date
     env.filters["ago"] = _ago
     env.filters["local"] = _local
+    env.globals["IV_TIME"] = IV_TIME
+    env.globals["local_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
@@ -257,7 +285,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
+    env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
+    env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -461,8 +491,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         try:
             cand, created = store.upsert_candidate(work_history=history or None, **data)
             if job_id.isdigit():
-                store.add_to_pipeline(cand["id"], int(job_id))
-                return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+                warning = add_with_warning(cand["id"], int(job_id))
+                return RedirectResponse(f"/jobs/{job_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
+                                        status_code=303)
         except ValueError as exc:
             return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                         error=str(exc), job_id=form.get("job_id"))
@@ -594,7 +625,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     raise ValueError("Pick the new date and time.")
                 reason = str(form.get("reason") or "").strip()
                 iv = store.update_interview(entry_id, at=at, reason=reason or None, candidate_id=candidate_id)
-                notice = f"Moved the interview to {_local(iv['at'])}."
+                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}."
             elif op == "cancel":
                 store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
                 notice = "Interview cancelled. It stays on the timeline, marked cancelled."
@@ -614,6 +645,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That interview isn't on this profile.")
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        if str(form.get("next") or "") == "/":  # recorded from Today: back there
+            return RedirectResponse("/?" + urlencode({"notice": f"{notice[:-1]} for {cand_or_404(candidate_id)['name']}."}),
                                     status_code=303)
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
                                 status_code=303)
@@ -645,9 +679,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         cand_or_404(candidate_id)
         form = await request.form()
         job = str(form.get("job_id") or "")
-        if job.isdigit():
-            store.add_to_pipeline(candidate_id, int(job))
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        warning = add_with_warning(candidate_id, int(job)) if job.isdigit() else ""
+        return RedirectResponse(f"/candidates/{candidate_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
+                                status_code=303)
 
     # ----------------------------------------------------------- paste
     @app.get("/paste", response_class=HTMLResponse)
@@ -691,7 +725,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         mapping = importers.guess_mapping(header, rows)
-        return map_step(request, token, header, rows, mapping, importers.default_source(header), upload.filename)
+        return map_step(request, token, header, rows, mapping, importers.default_source(header),
+                        _file_name(upload.filename))
+
+    def _file_name(name: Any) -> str:
+        """The uploaded file's own name, without any folder, for Changes and the backup list."""
+        return re.split(r"[\\/]", str(name or ""))[-1].strip()[:120]
+
+    def _save_lists(token: str, which: str, result: dict[str, Any]) -> None:
+        """Keep an import's (or a dry run's) detail lists for an hour, for "Download the full list"."""
+        lists = {k: result.get(k) or [] for k, _ in importers.PANELS}
+        path = imports_dir() / f"{token}.{which}.json"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(lists, f)
+        except OSError:
+            pass  # the panels still show their first lines
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
@@ -703,10 +753,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
+        if preview:
+            _save_lists(token, "preview", preview)
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     preview_lines=importers.preview_lines(preview) if preview else [],
+                    panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
@@ -728,7 +781,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
         header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
-                        str(form.get("source") or "CSV import"), add_stages=form.get("add_stages") == "1")
+                        str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
+                        add_stages=form.get("add_stages") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -741,25 +795,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
+        filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
-            return map_step(request, token, header, rows, mapping, source, error="Pick which column holds the name.",
-                            add_stages=add_stages)
+            return map_step(request, token, header, rows, mapping, source, filename,
+                            error="Pick which column holds the name.", add_stages=add_stages)
         try:
-            result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages)
+            result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
+                                           file_name=filename or None)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
+        backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
-            backups.remember_import(store, result["backup"])
             result["backup_name"] = Path(result["backup"]).name
-        return page(request, "import.html", step="done", result=result)
+        _save_lists(token, "result", result)
+        return page(request, "import.html", step="done", result=result, token=token,
+                    panels=importers.result_panels(result))
+
+    @app.get("/import/{token}/{which}.csv")
+    def import_list_csv(token: str, which: str, panel: str = ""):
+        """One result panel in full, as a CSV. Kept for an hour after the import or dry run."""
+        titles = dict(importers.PANELS)
+        path = imports_dir() / f"{token}.{which}.json"
+        if not token.isalnum() or which not in ("result", "preview") or panel not in titles or not path.is_file():
+            raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.")
+        try:
+            lines = [str(x) for x in json.loads(path.read_text(encoding="utf-8")).get(panel) or []]
+        except (OSError, ValueError, AttributeError):
+            raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.") from None
+        name = f"import-{titles[panel].lower().replace(' ', '-').replace(',', '')}.csv"
+        return Response(importers.panel_csv(titles[panel], lines), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.post("/import/undo")
     async def import_undo(request: Request):
         """Put back the backup taken before an import, only while nothing else has changed since."""
         form = await request.form()
-        name = str(form.get("backup") or "")
+        return undo_import(str(form.get("backup") or ""))
+
+    @app.post("/changes/import/{name}/undo")
+    def undo_import_from_changes(name: str):
+        return undo_import(name)
+
+    def undo_import(name: str) -> RedirectResponse:
         state = backups.import_undo_state(store, name)
         if state == "changed":
             return RedirectResponse("/settings?" + urlencode({"flash_error": (
@@ -781,7 +860,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def _sweep_uploads() -> None:
         """Uploads nobody finished importing are deleted after an hour."""
         cutoff = time.time() - UPLOAD_TTL
-        for f in imports_dir().glob("*.csv"):
+        for f in [*imports_dir().glob("*.csv"), *imports_dir().glob("*.json")]:
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
@@ -831,12 +910,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def jobs_page(request: Request, status: str = ""):
         jobs = store.list_jobs(status if status in JOB_STATUSES else None)
         hints = actions.twin_hints(jobs)
-        rollup = actions.company_rollup(store)
-        companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
+        by_manager = actions.by_manager(store)  # in-house: one row and one update per hiring manager
+        if by_manager:
+            rollup = actions.manager_rollup(store)
+            companies = [{**r, "text": actions.status_digest(store, hiring_manager=r["manager"])}
+                         for r in rollup if r["manager"]]
+        else:
+            rollup = [{**r, "label": r["company"]} for r in actions.company_rollup(store)]
+            companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
         held = actions.held_jobs(store)
         return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status,
-                    rollup=rollup, companies=companies, held=held,
-                    digest_text=actions.status_digest(store) if rollup or held else "")
+                    rollup=rollup, companies=companies, held=held, by_manager=by_manager,
+                    digest_text=actions.status_digest(store) if rollup or held else "",
+                    hidden_notes=actions.digest_hidden_notes(store) if rollup else [])
 
     @app.post("/jobs/wording")
     async def save_wording(request: Request):
@@ -844,12 +930,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         on = str(form.get("inhouse") or "") == "1"
         actions.set_inhouse(store, on)
-        notice = "Using in-house wording." if on else "Using agency wording."
-        return RedirectResponse("/jobs?" + urlencode({"notice": notice}), status_code=303)
+        notice = ("Using in-house wording, since you hire for your own company." if on
+                  else "Using agency wording, since you hire for clients.")
+        go = str(form.get("next") or "")
+        go = go if go in ("/", "/settings", "/jobs") else "/jobs"
+        return RedirectResponse(go + "?" + urlencode({"notice": notice}), status_code=303)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
-        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS)
+        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS,
+                    copy_jobs=store.list_jobs(None))
 
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
@@ -857,14 +947,21 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", *JOB_EXTRA_FIELDS)}
         stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
         picked = str(form.get("stage_set") or "default")
+        copy_from = str(form.get("copy_from") or "").strip()
         twins = store.similar_open_jobs(data["title"], data["company"])
         try:
-            stages, out_note = actions.with_out_stages(stages or actions.stage_set(picked))
+            if stages:
+                chosen = stages
+            elif copy_from.isdigit():
+                chosen = actions.new_job_stages(store, from_job_id=int(copy_from))
+            else:
+                chosen = actions.stage_set(picked)
+            stages, out_note = actions.with_out_stages(chosen)
             job = store.add_job(**data, stages=stages or None)
         except ValueError as exc:
             return page(request, "job_form.html", j={**data, "stages": str(form.get("stages") or ""),
-                                                     "stage_set": picked}, error=str(exc),
-                        stage_sets=actions.STAGE_SETS)
+                                                     "stage_set": picked, "copy_from": copy_from}, error=str(exc),
+                        stage_sets=actions.STAGE_SETS, copy_jobs=store.list_jobs(None))
         notes = ["Created."] if twins or out_note else []
         if twins:
             ids = ", ".join(f"#{j['id']}" for j in twins)
@@ -892,6 +989,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),
+                   hidden_note=actions.hidden_note(store, job_id, omit),
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
                    close=actions.close_out_plan(store, job_id),
@@ -979,7 +1077,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         op = str(form.get("op") or "")
         name = str(form.get("stage") or "")
+        notice = ""
         try:
+            if op != "add" and not name.strip():  # a blank name would otherwise mean the first stage
+                raise ValueError("Pick which stage to change first. Nothing was changed.")
             if op == "add":
                 store.add_stage(job_id, str(form.get("new_name") or ""), after=str(form.get("after") or "") or None)
             elif op == "rename":
@@ -993,34 +1094,54 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     names[i], names[j] = names[j], names[i]
                     store.reorder_stages(job_id, names)
             elif op == "outcome":
-                store.set_stage_outcome(job_id, name, str(form.get("outcome") or "open"))
+                res = actions.change_stage_outcome(store, job_id, name, str(form.get("outcome") or "open"))
+                notice = res["notice"]
+                if res["asks"]:  # people already in the stage who still have interviews: offer to cancel
+                    return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': res['asks'][0]['candidate_id'], 'notice': notice})}#pipeline",
+                                            status_code=303)
             elif op == "remove":
                 store.remove_empty_stage(job_id, name)
         except ValueError as exc:
             return page(request, "job_form.html", j=store.get_job(job_id), error=str(exc),
                         stages=store.job_stages(job_id), outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
-        return RedirectResponse(f"/jobs/{job_id}/edit#stages", status_code=303)
+        return RedirectResponse(f"/jobs/{job_id}/edit" + (f"?{urlencode({'notice': notice})}" if notice else "")
+                                + "#stages", status_code=303)
+
+    def resubmit_warning(candidate_id: int, job_id: int, before: str | None) -> str:
+        """After an add or a move into a Submitted or Presented stage: the warning when the person was already
+        submitted to this client in the last 12 months, else ''."""
+        sub = reports.submittal_note(store, candidate_id, job_id)
+        return (sub["warning"] or "") if sub and sub["stage"] != before else ""
+
+    def add_with_warning(candidate_id: int, job_id: int) -> str:
+        """add_to_pipeline (first stage), and the resubmit warning when that stage is a submittal."""
+        before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
+        store.add_to_pipeline(candidate_id, job_id)
+        return resubmit_warning(candidate_id, job_id, before)
 
     @app.post("/jobs/{job_id}/move", response_class=HTMLResponse)
     async def move(request: Request, job_id: int):
         job = job_or_404(job_id)
         form = await request.form()
         cid = str(form.get("candidate_id") or "")
-        error, ask = None, None
+        error, ask, resubmit = None, None, ""
         try:
+            before = next((p["stage"] for p in store.candidate_pipelines(int(cid)) if p["job_id"] == job_id), None)
             store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None,
                              by="app")
             ask = actions.exit_interviews(store, int(cid), job_id) or None
+            resubmit = resubmit_warning(int(cid), job_id, before)
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
             view = str(form.get("view") or store.setting("pipeline_view"))
             return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
-                        stages=store.job_stages(job_id), view=view, error=error, ask=ask,
+                        stages=store.job_stages(job_id), view=view, error=error, ask=ask, resubmit=resubmit,
                         next_iv=actions.next_interviews(store, job_id))
         if ask:
-            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': cid})}#pipeline", status_code=303)
-        return back(request, f"/jobs/{job_id}", error=error or "")
+            q = {"ask_cancel": cid, **({"flash_error": resubmit} if resubmit else {})}
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}#pipeline", status_code=303)
+        return back(request, f"/jobs/{job_id}", error=error or resubmit)
 
     @app.post("/jobs/{job_id}/delete")
     def delete_job_form(job_id: int):
@@ -1042,7 +1163,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not cid.isdigit():
             return RedirectResponse(f"/jobs/{job_id}", status_code=303)
         cand = cand_or_404(int(cid))
-        store.add_to_pipeline(cand["id"], job_id)
+        warning = add_with_warning(cand["id"], job_id)
         # From the same-name box on Add: fill the details they have empty with what was typed. Never replace one.
         fill = {f: str(form.get("fill_" + f)).strip() for f in FILL_FIELDS
                 if str(form.get("fill_" + f) or "").strip() and not (cand.get(f) or "").strip()}
@@ -1062,9 +1183,188 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         notice += "."
         if skipped:
             notice += f" Didn't fill the {_and(skipped)}: another saved candidate has it."
-        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
+        q = {"notice": notice, **({"flash_error": warning} if warning else {})}
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}", status_code=303)
+
+    # ------------------------------------------------------------ shortlist
+    def to_shortlist(job_id: int, notice: str = "", error: str = "") -> RedirectResponse:
+        q = urlencode([(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v])
+        return RedirectResponse(f"/jobs/{job_id}/shortlist" + (f"?{q}" if q else ""), status_code=303)
+
+    @app.get("/jobs/{job_id}/shortlist", response_class=HTMLResponse)
+    def shortlist_page(request: Request, job_id: int, choose: str = ""):
+        """People the AI app proposed for this job. Keep saves (or links) them and adds them to the first stage;
+        Pass sets them aside with an optional reason, so they aren't proposed for this job again."""
+        job = job_or_404(job_id)
+        rows = shortlist.listed(store, job_id, "proposed")
+        for r in rows:
+            r["check_lines"] = shortlist.check_lines(r.get("checks") or {})
+        decided = shortlist.listed(store, job_id, "all", with_checks=False)
+        return page(request, "shortlist.html", job=job, rows=rows, counts=shortlist.counts(store, job_id),
+                    kept=[r for r in decided if r["status"] == "kept"],
+                    passed=[r for r in decided if r["status"] == "passed"],
+                    first_stage=(store.job_stages(job_id) or [{"name": "the first stage"}])[0]["name"],
+                    choose=int(choose) if choose.isdigit() else None)
+
+    @app.post("/jobs/{job_id}/shortlist/keep-all")
+    def shortlist_keep_all(job_id: int):
+        job_or_404(job_id)
+        done = shortlist.keep_all(store, job_id)
+        n, left, held = len(done["kept"]), done["left"], done.get("held") or []
+        stage = done["kept"][0]["stage"] if done["kept"] else ""
+        notice = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {stage}" if n else "") + "."
+                  + (" You can undo this on Changes." if n else "")
+                  + (f" {len(left)} need your choice first: {_and(left)}." if left else "")
+                  + (f" Left {len(held)} whose name reads like a sentence; keep them one at a time if they are "
+                     "real people." if held else ""))
+        return to_shortlist(job_id, notice=notice)
+
+    @app.post("/jobs/{job_id}/shortlist/pass-all")
+    async def shortlist_pass_all(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        n = shortlist.pass_all(store, job_id, str(form.get("reason") or ""))
+        return to_shortlist(job_id, notice=f"Passed on {n} {'person' if n == 1 else 'people'}. They won't be "
+                                           "proposed for this job again." if n else "Nobody was waiting.")
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/keep")
+    async def shortlist_keep(request: Request, job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        link = str(form.get("link_id") or "")
+        try:
+            done = shortlist.keep(store, job_id, prospect_id, link_id=int(link) if link.isdigit() else None,
+                                  as_new=str(form.get("as_new") or "") == "1")
+        except shortlist.NeedsChoice as exc:
+            return RedirectResponse(f"/jobs/{job_id}/shortlist?{urlencode({'choose': prospect_id, 'flash_error': str(exc)})}"
+                                    f"#p{prospect_id}", status_code=303)
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        c = done["candidate"]
+        if done["already"]:
+            notice = f"Kept {c['name']}. They were already in this job, in {done['stage']}."
+        else:
+            notice = (f"{'Saved' if done['created'] else 'Kept'} {c['name']} and added them to {done['stage']}"
+                      + ("." if done["created"] else ", linked to the person you already had."))
+        return to_shortlist(job_id, notice=notice)
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/pass")
+    async def shortlist_pass(request: Request, job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        try:
+            p = shortlist.pass_on(store, job_id, prospect_id, str(form.get("reason") or ""))
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        return to_shortlist(job_id, notice=f"Passed on {p['name']}. They won't be proposed for this job again.")
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/put-back")
+    def shortlist_put_back(job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        try:
+            p = shortlist.put_back(store, job_id, prospect_id)
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        return to_shortlist(job_id, notice=f"Put {p['name']} back on the Shortlist.")
+
+    # ------------------------------------------------------------ clients
+    @app.get("/clients", response_class=HTMLResponse)
+    def clients_page(request: Request):
+        return page(request, "clients.html", rows=reports.overview(store), no_company=reports.no_company_jobs(store))
+
+    def client_or_404(slug: str) -> dict[str, Any]:
+        try:
+            return reports.client(store, reports.unslug(slug))
+        except NotFound:
+            raise HTTPException(404, "Client not found")
+
+    def client_report_or_error(c: dict[str, Any], since: str, until: str) -> tuple[dict[str, Any], str]:
+        try:
+            return reports.report(store, c["key"], since or None, until or None), ""
+        except ValueError as exc:
+            return reports.report(store, c["key"]), str(exc)
+
+    @app.get("/clients/{slug}", response_class=HTMLResponse)
+    def client_page(request: Request, slug: str, since: str = "", until: str = ""):
+        c = client_or_404(slug)
+        rep, error = client_report_or_error(c, since, until)
+        # In-house with hiring managers named, one update per manager; else the one client update.
+        span = (None, None) if error else (since or None, until or None)
+        parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
+        sections = [{"rep": r, "text": (t := reports.report_text(r)), "mailto": reports.mailto(r, t),
+                     "notes": reports.recruiter_notes(r)} for r in parts]
+        return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
+                    submittals=reports.submittals(store, c["key"]),
+                    updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
+                    labels=reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS,
+                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=reports.update_due(c),
+                    since_day=_local(rep["since"], "%Y-%m-%d"),
+                    until_day=_local(rep["until"], "%Y-%m-%d"))
+
+    @app.post("/clients/{slug}", response_class=HTMLResponse)
+    async def save_client(request: Request, slug: str):
+        c = client_or_404(slug)
+        form = await request.form()
+        fields = {k: str(form.get(k) or "") for k in ("name", "contacts", "notes", "update_day", "time_zone") if k in form}
+        try:
+            reports.save_client(store, c["key"], **fields)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}#details",
+                                    status_code=303)
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': 'Saved.'})}#details", status_code=303)
+
+    @app.post("/clients/{slug}/sent")
+    async def client_sent(request: Request, slug: str):
+        """Mark this update as sent: keep a copy, and start the next one from now."""
+        c = client_or_404(slug)
+        form = await request.form()
+        try:
+            reports.mark_sent(store, c["key"], str(form.get("since") or "") or None, str(form.get("until") or "") or None)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = "Marked as sent. A copy is kept below, and the next update starts from now."
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/clients/{slug}/updates/{update_id}/undo")
+    def client_sent_undo(slug: str, update_id: int):
+        c = client_or_404(slug)
+        try:
+            reports.undo_sent(store, c["key"], update_id)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = "Took back that Mark as sent. The update starts where it did before."
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.get("/clients/{slug}/pipeline.csv")
+    def client_csv(slug: str, since: str = "", until: str = ""):
+        c = client_or_404(slug)
+        rep, _ = client_report_or_error(c, since, until)
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
+        return Response(reports.pipeline_csv(rep), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
     # ------------------------------------------------------- dashboard acts
+    @app.post("/actions/interviews/out")
+    async def exit_interviews_form(request: Request):
+        """Today's "Dana is out of Backend but still has an interview" row: Cancel interview, or Keep it."""
+        form = await request.form()
+        cid, jid, op = (str(form.get(k) or "") for k in ("candidate_id", "job_id", "op"))
+        group = next((g for g in actions.exit_prompts(store) if str(g["candidate_id"]) == cid
+                      and str(g["job_id"]) == jid), None) if cid.isdigit() and jid.isdigit() else None
+        if group is None or op not in ("cancel", "keep"):
+            return back(request, notice="Nothing to change. That interview may already be cancelled or kept.")
+        ids = [i["id"] for i in group["interviews"]]
+        for iv in ids:
+            if op == "cancel":
+                store.update_interview(iv, cancel=True, candidate_id=int(cid), by="app")
+            else:
+                store.update_interview(iv, keep=True, candidate_id=int(cid), by="app")
+        n = "the interview" if len(ids) == 1 else f"{len(ids)} interviews"
+        notice = (f"Cancelled {n}. It stays on the timeline, marked cancelled." if op == "cancel"
+                  else f"Kept {n}. It shows on Today as usual.")
+        return back(request, notice=notice)
+
     @app.post("/actions/snooze")
     async def snooze(request: Request):
         form = await request.form()
@@ -1143,6 +1443,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if who in ("", "ai"):
             ai = store.ai_actions(since, limit)
             for a in ai:
+                if a.get("batch_id"):  # one save_candidates call is one row: the batch's own, below
+                    continue
                 if a["candidate_id"]:
                     name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
                 elif a["job_id"]:
@@ -1151,19 +1453,61 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
                 rows.append({"at": a["at"], "who": "ai", "name": name, "href": href,
-                             "text": "; ".join(lines) if lines else a["summary"], "undoable": a["undoable"],
+                             "text": "; ".join(lines) if lines else ai_change_text(a), "undoable": a["undoable"],
                              "undone": bool(a["undone_at"]), "note": a.get("undo_note"),
+                             "blocked": a.get("blocked"), "record": a.get("record"),
                              "undo_url": f"/changes/ai/{a['id']}/undo",
                              # newest first, so every newer AI change is already in this list
-                             "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undoable"]),
+                             "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undo_pending"])
+                             if a["undo_pending"] else 0,
                              "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
+                if a["kind"] == "save_batch" and a.get("children"):  # "this and everything after" starts at its first save
+                    first = min(a["children"])
+                    rows[-1].update(undo_label="Undo this batch", undo_from_url=f"/changes/ai/{first}/undo-from",
+                                    from_count=sum(1 for b in ai if b["id"] >= first and b["undo_pending"]))
+        if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
+            rows.extend(import_change_rows(since)[:limit])
         if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
             for b in actions.close_out_batches(store, since)[:limit]:
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
+        if who in ("", "app"):  # a Keep or Keep all on a Shortlist: one row each, with its own undo
+            for b in shortlist.keep_batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}/shortlist",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "note": b.get("note"), "undo_url": f"/changes/shortlist-keep/{b['id']}/undo",
+                             "undo_label": "Undo this keep",
+                             "confirm": "Undo this keep? They go back on the Shortlist and out of the job. People it "
+                                        "saved are taken out again if nobody worked on them since; a backup is "
+                                        "saved first."})
+        if who in ("", "app"):  # what a stage counts as, changed in the app
+            for c in actions.stage_outcome_changes(store, since)[:limit]:
+                rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
+                             "text": c["text"], "undoable": c["undoable"], "undone": not c["undoable"],
+                             "undo_url": f"/changes/stage-outcome/{c['id']}/undo"})
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
+
+    def import_change_rows(since: str | None) -> list[dict[str, Any]]:
+        out = []
+        for e in backups.import_log(store):
+            if since and e["at"] < since:
+                continue
+            name = e.get("backup") or ""
+            state = backups.import_undo_state(store, name) if name else "none"
+            hint = None
+            if state == "changed":
+                hint = ("Something changed since, so it can't be undone here. Its backup is under Automatic backups "
+                        "in Settings.")
+            elif state == "gone" and backups.backup_file(name):
+                hint = "Its backup is under Automatic backups in Settings."
+            out.append({"at": e["at"], "who": "import", "name": "CSV import", "href": "/settings#backups",
+                        "text": backups.import_text(e), "undoable": state == "ok", "undone": False, "hint": hint,
+                        "undo_url": f"/changes/import/{name}/undo", "undo_label": "Undo this import",
+                        "confirm": "Undo this import? Your data goes back to how it was just before it. A copy with "
+                                   "the import in it is backed up first."})
+        return out
 
     def since_iso(since: str) -> str | None:
         """A start time from the Changes form: 1, 7 or 30 (days back), epoch seconds, or ISO with a zone
@@ -1187,7 +1531,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         start = since_iso(since)
         rows = change_rows(who, start)
         ai_since = start or since_iso("1")
-        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undoable"])
+        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
                     ai_since_epoch=int(to_dt(ai_since).timestamp()))
@@ -1219,7 +1563,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         undone, skipped = [], []
         backup = ai_backup()
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
-            if a["undone_at"]:
+            if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
                 continue
             try:
                 undone.append(store.undo_ai_action(a["id"], by="app", before_delete=backup))
@@ -1235,6 +1579,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
         return back(request, "/changes", notice=notice)
 
+    @app.post("/changes/stage-outcome/{change_id}/undo")
+    def undo_stage_outcome(request: Request, change_id: int):
+        try:
+            notice = actions.undo_stage_outcome(store, change_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
     @app.post("/changes/close-out/{batch_id}/undo")
     def undo_close_out(request: Request, batch_id: int):
         try:
@@ -1243,6 +1597,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, "/changes", error="That close-out is gone. Reload the page.")
         except ValueError as exc:
             return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/changes/shortlist-keep/{batch_id}/undo")
+    def undo_shortlist_keep(request: Request, batch_id: int):
+        try:
+            notice = shortlist.undo_keep(store, batch_id, before_delete=ai_backup())
+        except NotFound:
+            return back(request, "/changes", error="That keep is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=f"Couldn't undo that. {exc}")
         return back(request, "/changes", notice=notice)
 
     @app.post("/changes/ai/{action_id}/undo")
@@ -1352,6 +1716,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             values["pipeline_view"] = str(form.get("pipeline_view"))
         if errors:
             return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
+        if form.get("hiring_for") in ("own", "clients"):
+            actions.set_inhouse(store, form.get("hiring_for") == "own")
         store.set_settings(**values)
         return RedirectResponse("/settings?saved=1", status_code=303)
 
@@ -1378,9 +1744,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "report.html", link=None, error="Say in a few words what went wrong.",
                         env_line=recipes.environment_line(), where=str(form.get("where") or ""))
         details, where = str(form.get("details") or ""), str(form.get("where") or "app")
-        names = [r["name"] for r in store._rows("SELECT name FROM candidates")]
-        link = recipes.issue_url(summary, details, where=where, names=names)
-        title, body = recipes.issue_text(summary, details, where=where, names=names)
+        private = recipes.report_private(store)
+        link = recipes.issue_url(summary, details, where=where, private=private)
+        title, body = recipes.issue_text(summary, details, where=where, private=private)
         return page(request, "report.html", link=link, summary=summary, env_line=recipes.environment_line(),
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 

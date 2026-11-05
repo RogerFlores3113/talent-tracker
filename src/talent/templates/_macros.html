@@ -17,3 +17,12 @@
 {% macro sample_badge(is_sample) -%}
 {% if is_sample %}<span class="badge sample" title="Made-up sample data. Remove it in Settings.">Sample</span>{% endif %}
 {%- endmacro %}
+
+{% macro hiring_for_form(next) -%}
+<form method="post" action="/jobs/wording" class="hiring-for">
+  <input type="hidden" name="next" value="{{ next }}">
+  <p><strong>Are you hiring for your own company or for clients?</strong> <span class="fine">It sets the wording of status updates and stage names. You can change it in Settings.</span></p>
+  <p class="actions-inline"><button class="btn{{ ' primary' if inhouse() }}" type="submit" name="inhouse" value="1" aria-pressed="{{ 'true' if inhouse() else 'false' }}">My own company</button>
+    <button class="btn{{ '' if inhouse() else ' primary' }}" type="submit" name="inhouse" value="0" aria-pressed="{{ 'false' if inhouse() else 'true' }}">Clients</button></p>
+</form>
+{%- endmacro %}

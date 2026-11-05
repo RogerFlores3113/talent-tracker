@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Shortlist · {{ job.title }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+  </div>
+  {% include "_job_tabs.html" %}
+</div>
+
+<section class="panel shortlist" id="shortlist">
+  <div class="sec-head">
+    <h2>{{ counts.proposed }} waiting for you{% if counts.kept or counts.passed %} <span class="fine">· {{ counts.kept }} kept · {{ counts.passed }} passed on</span>{% endif %}</h2>
+    {% if rows %}
+    <div class="actions-inline">
+      <form method="post" action="/jobs/{{ job.id }}/shortlist/keep-all" class="inline" data-confirm="Keep all {{ rows | length }} and add them to {{ first_stage }}? People who share a name with someone saved wait for your choice.">
+        <button class="btn small primary" type="submit">Keep all</button></form>
+      <form method="post" action="/jobs/{{ job.id }}/shortlist/pass-all" class="inline" data-confirm="Pass on all {{ rows | length }}? They won't be proposed for this job again.">
+        <input type="text" name="reason" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for passing on everyone">
+        <button class="btn small" type="submit">Pass all</button></form>
+    </div>
+    {% endif %}
+  </div>
+  <p class="fine">Your AI app puts people it researched here instead of saving them. Keep saves them (or links the person you already have) and adds them to {{ first_stage }}. Pass sets them aside, and your AI app won't propose them for this job again. Only you can keep or pass.</p>
+  {% if not rows %}
+  <p class="none">Nobody is waiting. Ask your AI app to source people for this job, and they show up here.</p>
+  {% endif %}
+  <ul class="prospects">
+  {% for p in rows %}
+    <li class="prospect" id="p{{ p.id }}">
+      <div class="prospect-main">
+        <strong>{{ p.name }}</strong>
+        <span class="muted">{{ p.title or '' }}{% if p.company %} at {{ p.company }}{% endif %}{% if p.location %} · {{ p.location }}{% endif %}</span>
+        {% if p.linkedin_url %}<a href="{{ p.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ p.linkedin_url | profile_label }}</a>{% endif %}
+        {% if p.fit %}<div class="fit">{{ p.fit }}</div>{% endif %}
+        {% for line in p.check_lines %}<div class="fine check">{{ line }}</div>{% endfor %}
+        <div class="fine">Proposed {{ p.created_at | ago }}{% if p.proposed_by == 'ai' %} by your AI app{% endif %}</div>
+      </div>
+      <div class="item-acts">
+        {% set same = (p.checks or {}).get('same_name') %}
+        {% if same and not (p.checks or {}).get('saved') %}
+          {% for m in same %}
+          <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline"><input type="hidden" name="link_id" value="{{ m.id }}">
+            <button class="btn small{{ ' primary' if choose == p.id }}" type="submit">Keep as {{ m.name }} (#{{ m.id }})</button></form>
+          {% endfor %}
+          <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline"><input type="hidden" name="as_new" value="1">
+            <button class="btn small" type="submit">Keep as someone new</button></form>
+        {% else %}
+          <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline">
+            <button class="btn small primary" type="submit">Keep</button></form>
+        {% endif %}
+        <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/pass" class="inline pass-form">
+          <input type="text" name="reason" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for passing on {{ p.name }}">
+          <button class="btn small" type="submit">Pass</button></form>
+      </div>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+
+{% if kept %}
+<details class="panel"><summary>Kept ({{ kept | length }})</summary>
+  <ul class="prospects done">{% for p in kept %}
+    <li>{% if p.candidate_id %}<a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %} <span class="fine">kept {{ p.decided_at | ago }}</span></li>
+  {% endfor %}</ul>
+</details>
+{% endif %}
+{% if passed %}
+<details class="panel"><summary>Passed on ({{ passed | length }})</summary>
+  <p class="fine">Your AI app sees these and won't propose them for this job again.</p>
+  <ul class="prospects done">{% for p in passed %}
+    <li>{{ p.name }}{% if p.pass_reason %} <span class="muted">· {{ p.pass_reason }}</span>{% endif %} <span class="fine">{{ p.decided_at | ago }}</span>
+      <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/put-back" class="inline"><button class="link small" type="submit">Put back</button></form></li>
+  {% endfor %}</ul>
+</details>
+{% endif %}
+{% endblock %}

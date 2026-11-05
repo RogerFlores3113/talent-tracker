@@ -161,7 +161,7 @@ def test_job_pipeline_text_reads_like_a_status_update(store, pst):
     assert out.splitlines()[0] == "Payments Lead, Acme Pay · Remote"
     assert "1 candidate in process, none hired yet. 1 out." in out
     local = when.astimezone()
-    assert "Interviewing (1): Maya Chen (today)" in out
+    assert "Interviewing (1): Maya Chen (new today)" in out
     assert f"- Maya Chen: {local:%a %b} {local.day}, 3:00 PM P" in out  # 23:00 UTC is 3 PM Pacific
     assert "(id" not in out and "job " not in out  # no database ids in a hiring-manager update
     assert "Candidate-provided" not in out and "Candidate-provided" in res.content[1].text

@@ -142,7 +142,7 @@ def test_search_finds_people_by_pipeline_job_and_notes(store):
     assert ids(store.search_candidates("northwind")) == [marcus]
     assert ids(store.search_candidates("dana")) == [priya]
     hit = store.search_candidates("140k").hits[0]
-    assert hit.candidate["id"] == marcus and hit.reason == "Matched a note" and "\x02140k\x03" in hit.snippet
+    assert hit.candidate["id"] == marcus and hit.reason == "Matched a call" and "\x02140k\x03" in hit.snippet
     # a word in the profile plus a word only in the pipeline still counts as every word
     assert exact(store.search_candidates("backend northwind")) == [marcus]  # one word per pipeline
     assert exact(store.search_candidates("engineer northwind")) == [marcus]
@@ -150,9 +150,9 @@ def test_search_finds_people_by_pipeline_job_and_notes(store):
 
     out = text(call(build_server(store), "search_candidates", query="Acme Fintech"))
     assert "In pipeline: Senior Backend Engineer (Acme Fintech)" in out
-    assert "Matched a note: Wants **140k** base" in text(call(build_server(store), "search_candidates", query="140k"))
+    assert "Matched a call: Wants **140k** base" in text(call(build_server(store), "search_candidates", query="140k"))
     page = local_client(store).get("/?q=140k").text
-    assert "Matched a note" in page and "<mark>140k</mark>" in page
+    assert "Matched a call" in page and "<mark>140k</mark>" in page
 
 
 # 4. filters and aliases -----------------------------------------------------

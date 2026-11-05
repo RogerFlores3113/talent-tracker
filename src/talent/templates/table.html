@@ -14,8 +14,8 @@
     {% for t in tags %}<option value="{{ t.tag }}" {{ 'selected' if t.tag | lower == tag | lower }}>{{ t.tag }} ({{ t.count }})</option>{% endfor %}
   </select>
   <input type="text" name="location" value="{{ location }}" placeholder="Location (sf, nyc, bay area)" aria-label="Filter by location">
-  {% if sources %}<select name="source" aria-label="Filter by source" data-autosubmit>
-    <option value="">Any source</option>
+  {% if sources %}<select name="source" aria-label="Filter by Found via" data-autosubmit>
+    <option value="">Found via: Any source</option>
     {% for s in sources %}<option value="{{ s.source }}" {{ 'selected' if s.source | lower == source | lower }}>{{ s.source }} ({{ s.count }})</option>{% endfor %}
   </select>{% endif %}
   <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">

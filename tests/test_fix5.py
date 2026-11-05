@@ -147,7 +147,7 @@ def test_import_result_page_copy(store):
 def test_change_lines_show_old_and_new_values(store):
     assert change_lines({"old": {"current_company": "Acme", "email": "ana@x.com", "phone": None},
                          "new": {"current_company": "Initech", "email": None, "phone": "555"}}) == [
-        "Company: Acme to Initech", "Cleared email (was ana@x.com)", "Phone: 555 (was empty)"]
+        "Company: Acme to Initech", "Cleared email (was ana@x.com)", "Added phone: 555"]  # Cycle 4 P: filling a blank reads "Added"
     assert change_lines(None) == [] and change_lines({"old": {}}) == []
     ana = store.add_candidate(name="Ana", current_company="Acme", email="ana@x.com")
     store.update_candidate(ana["id"], current_company="Initech", email="")
@@ -163,7 +163,9 @@ def test_profile_link_label():
 
 
 def test_candidate_page_labels_non_linkedin_profile(store):
-    ana = store.add_candidate(name="Ana", linkedin_url="https://github.com/ana")
+    ana = store.add_candidate(name="Ana")  # Cycle 4 P: a non-LinkedIn link is refused now; older data may have one
+    with store._lock, store._conn:
+        store._conn.execute("UPDATE candidates SET linkedin_url = ? WHERE id = ?", ("https://github.com/ana", ana["id"]))
     page = local_client(store).get(f"/candidates/{ana['id']}").text
     assert "<dt>Profile</dt>" in page and "<dt>LinkedIn</dt>" not in page
 

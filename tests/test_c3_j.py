@@ -29,13 +29,13 @@ def test_write_tools_lead_with_a_plain_sentence(store):
     cid = store.add_candidate(name="Priya Raman")["id"]
 
     res = call(server, "add_to_pipeline", candidate_id=cid, job_id=job["id"])
-    assert text(res).splitlines()[0] == "Added Priya Raman to Staff Backend Engineer (Acme Fintech), in Sourced."
+    assert text(res).splitlines()[0] == 'Added "Priya Raman" to Staff Backend Engineer (Acme Fintech), in Sourced.'
     assert structured(res)["stage"] == "Sourced"  # structured data as before
     again = call(server, "add_to_pipeline", candidate_id=cid, job_id=job["id"])
-    assert text(again).startswith("Priya Raman is already in Staff Backend Engineer (Acme Fintech), in Sourced.")
+    assert text(again).startswith('"Priya Raman" is already in Staff Backend Engineer (Acme Fintech), in Sourced.')
 
     moved = call(server, "move_stage", candidate_id=cid, job_id=job["id"], stage="screen")
-    assert text(moved).splitlines()[0] == ("Moved Priya Raman to Screening on Staff Backend Engineer (Acme Fintech) "
+    assert text(moved).splitlines()[0] == ('Moved "Priya Raman" to Screening on Staff Backend Engineer (Acme Fintech) '
                                            "(was Sourced).")
     upd = call(server, "update_job", job_id=job["id"], status="on hold", openings=2)
     assert text(upd).splitlines()[0] == "Updated Staff Backend Engineer (Acme Fintech): status on hold, openings 2."
@@ -49,11 +49,11 @@ def test_log_activity_says_when_in_local_time(store):
     res = call(server, "log_activity", candidate_id=cid, kind="interview", summary="Onsite", when=at)
     local = to_dt(at).astimezone()
     first = text(res).splitlines()[0]
-    assert first.startswith(f"Logged an interview with Dana Lee for {local:%a %b} {local.day}, ")
+    assert first.startswith(f'Logged an interview with "Dana Lee" for {local:%a %b} {local.day}, ')
     assert first.endswith(f"{local.tzname()}.")
     assert structured(res)["logged"]["at_local"] in first
     past = call(server, "log_activity", candidate_id=cid, kind="call", when="2026-01-05 1:00 PM")
-    assert text(past).startswith("Logged a call with Dana Lee on Mon Jan 5, 1:00 PM")
+    assert text(past).startswith('Logged a call with "Dana Lee" on Mon Jan 5, 1:00 PM')
 
 
 def test_get_candidate_shows_local_times_and_the_client(store):
@@ -75,7 +75,7 @@ def test_get_candidate_shows_local_times_and_the_client(store):
 
 def test_date_errors_give_a_time_example_and_read_it():
     with pytest.raises(ValueError, match=r"2026-11-09 1:00 PM"):
-        parse_when("next tuesday 2pm")
+        parse_when("sometime next week")  # c4 X: "next tuesday 2pm" reads now
     local = to_dt(parse_when("2026-11-09 1:00 PM")).astimezone()
     assert (local.day, local.hour, local.minute) == (9, 13, 0)
 
@@ -184,7 +184,9 @@ def test_import_maps_close_stages_and_offers_missing_ones(store):
     header, rows = importers.read_csv(AGENCY)
     mapping = importers.guess_mapping(header, rows)
     p = importers.preview_import(store, header, rows, mapping)
-    assert p["missing_stages"] == [{"job": "Staff Backend Engineer (Acme)", "stage": "Submitted"}]
+    # Cycle 4: the tickbox adds every Status the job has no stage for, near ones too.
+    assert p["missing_stages"] == [{"job": "Staff Backend Engineer (Acme)", "stage": s}
+                                   for s in ("Submitted", "Phone screen", "Client Interview")]
     assert "Row 2: will be put in Sourced, since Staff Backend Engineer (Acme) has no stage called 'Submitted'" \
         in p["stage_fallbacks"]
     assert "Row 3: will be put in Screening, the closest stage to 'Phone screen' on Staff Backend Engineer (Acme)" \
@@ -197,7 +199,8 @@ def test_import_maps_close_stages_and_offers_missing_ones(store):
     names = [s["name"] for s in store.job_stages(job["id"])]
     assert names.index("Submitted") < names.index("Hired")
     stages = {a["candidate_name"]: a["stage"] for a in store.pipeline(job["id"])}
-    assert stages == {"Priya Raman": "Submitted", "Marcus Lee": "Screening", "Dana Okafor": "Interviewing"}
+    # With the box ticked, near stages become their own instead of merging (cycle 4).
+    assert stages == {"Priya Raman": "Submitted", "Marcus Lee": "Phone screen", "Dana Okafor": "Client Interview"}
     assert r["merged_rows"] == ["Rows 2 and 5 are the same person (Priya Raman), so they were saved as one"]
 
 

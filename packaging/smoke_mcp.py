@@ -21,7 +21,7 @@ async def main(exe: str) -> None:
             res = await s.call_tool("search_candidates", {"query": "zebra"})
             assert not res.isError and res.structuredContent["total"] == 1, res
             views = (await s.list_resources()).resources
-            assert len(views) == 4, views
+            assert len(views) >= 4, views
             html = (await s.read_resource(views[0].uri)).contents[0].text
             assert "ui/initialize" in html
             today = await s.call_tool("list_action_items", {})

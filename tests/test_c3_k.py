@@ -26,10 +26,10 @@ def test_more_write_tools_lead_with_a_plain_sentence(store):
     server = build_server(store)
     cid = store.add_candidate(name="Priya Raman", location="Austin", about="Backend")["id"]
     res = call(server, "update_candidate", candidate_id=cid, current_title="Staff Engineer", location="")
-    assert text(res).splitlines()[0] == f"Updated Priya Raman (id {cid}): title, location cleared."
+    assert text(res).splitlines()[0] == f'Updated "Priya Raman" (id {cid}): title, location cleared.'
     assert structured(res)["current_title"] == "Staff Engineer" and structured(res)["changed"]
     same = call(server, "update_candidate", candidate_id=cid, current_title="Staff Engineer")
-    assert text(same).startswith(f"Nothing to change on Priya Raman (id {cid})")
+    assert text(same).startswith(f'Nothing to change on "Priya Raman" (id {cid})')
 
     job = store.add_job("Staff Backend Engineer", "Acme Fintech")
     res = call(server, "edit_job_stages", job_id=job["id"], add=["Take-home after Screening"])

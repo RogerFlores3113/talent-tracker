@@ -6,9 +6,10 @@ kind of item can be switched off in Settings, and its threshold changed.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 from .store import LIVE_INTERVIEW, NotFound, Store, _stage_key, _stage_plan, parse_when, to_dt
@@ -34,12 +35,18 @@ BOARD_CARDS = 50  # cards per board column before "Show more"
 # Stages a client or hiring manager shouldn't see by default (people not presented yet).
 # Applied is not here: applicants are real pipeline the client expects to hear about.
 INTERNAL_STAGE_WORDS = frozenset({"sourced", "contacted", "new", "lead", "leads", "prospect", "prospects"})
+# A stage named like this is where people are first shown to the client; in-play stages before it are internal.
+SUBMIT_STAGE_WORDS = frozenset({"submitted", "submittal", "submittals", "presented", "shortlist", "shortlisted"})
+# A stage named like this is past the client's door (an interview or an offer), wherever it sits in the list.
+LATE_STAGE_WORDS = frozenset({"offer", "interview", "interviews", "interviewing", "interviewed", "onsite", "panel",
+                              "final"})
 OUT_STAGES = ("Rejected", "Withdrawn")
 CLOSE_REASON = "Reason: Position filled"
 INHOUSE_KEY = "inhouse_wording"
+HIRING_FOR_ANSWERED_KEY = "hiring_for_answered"  # set once they've said own company or clients
 STAGE_SETS: dict[str, tuple[str, tuple[str, ...] | None]] = {
     "default": ("Default", None),
-    "agency": ("Agency", ("Sourced", "Screened", "Submitted", "Client interview", "Offer", "Placed", "Rejected",
+    "agency": ("Agency", ("Sourced", "Screened", "Submitted", "Client interview", "Offer", "Placed", "Client passed",
                           "Withdrawn")),
     "inhouse": ("In-house", ("Applied", "Recruiter screen", "Hiring manager screen", "Interviews", "Offer", "Hired",
                              "Rejected", "Withdrawn")),
@@ -47,9 +54,14 @@ STAGE_SETS: dict[str, tuple[str, tuple[str, ...] | None]] = {
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
+def local_days(then: datetime, now: datetime) -> int:
+    """Calendar days from `then` to `now` on this computer's clock: 11 PM yesterday is 1 day ago at 1 AM."""
+    return (now.astimezone().date() - then.astimezone().date()).days
+
+
 def _days_ago(iso: str | None, now: datetime) -> int:
     dt = to_dt(iso)
-    return (now - dt).days if dt else 0
+    return local_days(dt, now) if dt else 0
 
 
 def _int(cfg: dict[str, str], key: str, default: int) -> int:
@@ -83,8 +95,9 @@ def local_time(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt.replace("%-", "%#"))
 
 
-def _in_stage(days: int) -> str:
-    return "today" if days <= 0 else "1 day" if days == 1 else f"{days} days"
+def _in_stage(days: int, new: str = "new today") -> str:
+    """How long someone has been in a stage: 'new today' (so it doesn't read as the day they applied), '3 days'."""
+    return new if days <= 0 else "1 day" if days == 1 else f"{days} days"
 
 
 # ---------------------------------------------------------------- settings
@@ -203,6 +216,143 @@ def _live_interviews(store: Store, rows: list[dict[str, Any]], jobs: dict[int, d
     return out
 
 
+IV_TIME = "%a %b %-d, %-I:%M %p %Z"  # interview times say their zone: 'Fri Nov 6, 10:00 PM CST'
+
+
+def _iv_data(t: dict[str, Any]) -> dict[str, Any]:
+    d = t.get("data")
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except ValueError:
+            d = None
+    return d if isinstance(d, dict) else {}
+
+
+def interview_name(t: dict[str, Any], limit: int = 60) -> str:
+    """What an interview is, from its summary's first line ('Onsite: system design'), or ''."""
+    line = ((t.get("body") or "").strip().splitlines() or [""])[0].strip()
+    return line if len(line) <= limit else line[:limit - 3].rstrip() + "..."
+
+
+def interviewer_of(t: dict[str, Any]) -> str:
+    return str(_iv_data(t).get("interviewer") or "").strip()
+
+
+def interview_label(t: dict[str, Any]) -> str:
+    """'Onsite: system design, with Priya Raman', 'with Priya Raman', or ''."""
+    who = interviewer_of(t)
+    return ", ".join(x for x in (interview_name(t), f"with {who}" if who else "") if x)
+
+
+OUTCOME_ASK_DAYS = 30  # how far back Today asks how an interview with no outcome went
+
+
+def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], asked: set[int],
+                  label: Callable[..., str]) -> list[dict[str, Any]]:
+    """'How did Ben Okafor's interview on Tue Nov 3 go?': interviews more than two hours past, in the last 30 days,
+    still scheduled with no outcome, for people still in that job. One item per interview, with outcome buttons."""
+    end = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
+    start = (now - timedelta(days=OUTCOME_ASK_DAYS)).replace(microsecond=0).isoformat()
+    rows = store._rows(
+        f"""SELECT t.*, c.name AS candidate_name, j.title AS job_title FROM timeline t
+           JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ? AND {LIVE_INTERVIEW} ORDER BY t.at""", (start, end))
+    out = []
+    for t in _live_interviews(store, [r for r in rows if r["id"] not in asked], jobs):
+        who = interviewer_of(t)
+        bits = [label(t.get("job_id"), t.get("job_title")), interview_name(t), f"with {who}" if who else None]
+        out.append({
+            "key": f"interview_outcome:{t['id']}", "kind": "interview_outcome", "rank": 1, "when": t["at"],
+            "title": f"How did {t['candidate_name']}'s interview on {local_time(t['at'], '%a %b %-d')} go?",
+            "detail": " · ".join(x for x in bits if x), "interview_id": t["id"], "interviewer": who or None,
+            "candidate_id": t["candidate_id"], "job_id": t.get("job_id"),
+            "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}",
+        })
+    return out
+
+
+def exit_prompts(store: Store, now: datetime | None = None, days: int = 90) -> list[dict[str, Any]]:
+    """Interviews still scheduled after their candidate left the job (an Out stage), was hired, or the job
+    closed, grouped per person and job: [{candidate_id, name, job_id, job, stage, why, interviews: [...]}].
+    Ones the recruiter chose to keep (since that move) are left out."""
+    now = now or datetime.now(timezone.utc)
+    rows = [r for r in store.upcoming_interviews(days=days, now=now) if r.get("job_id")]
+    if not rows:
+        return []
+    jobs = {j["id"]: j for j in store.list_jobs()}
+    apps = {(a["candidate_id"], a["job_id"]): a for a in store._rows(
+        """SELECT a.candidate_id, a.job_id, a.stage, a.stage_changed_at, s.outcome FROM applications a
+           LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+           WHERE a.candidate_id IN ({})""".format(",".join("?" * len({r["candidate_id"] for r in rows}))),
+        sorted({r["candidate_id"] for r in rows}))}
+    groups: dict[tuple[int, int], dict[str, Any]] = {}
+    for r in rows:
+        job = jobs.get(r["job_id"])
+        app = apps.get((r["candidate_id"], r["job_id"]))
+        outcome = (app or {}).get("outcome") or "open"
+        closed = bool(job and job["status"] == "closed")
+        if not job or (outcome == "open" and not closed):
+            continue
+        kept = str(_iv_data(r).get("kept_at") or "")
+        since = (app or {}).get("stage_changed_at") or "" if outcome != "open" else job.get("updated_at") or ""
+        if kept and kept >= since:
+            continue
+        why = "hired" if outcome == "hired" else "out" if outcome == "lost" else "closed"
+        g = groups.setdefault((r["candidate_id"], r["job_id"]), {
+            "candidate_id": r["candidate_id"], "name": r["candidate_name"], "job_id": r["job_id"], "job": job,
+            "stage": (app or {}).get("stage"), "why": why, "interviews": []})
+        g["interviews"].append(r)
+    return sorted(groups.values(), key=lambda g: g["interviews"][0]["at"])
+
+
+def _exit_title(store: Store, g: dict[str, Any]) -> str:
+    """'Dana Okafor is out of Backend Engineer but still has an interview Fri Nov 6'."""
+    ivs = g["interviews"]
+    days = list(dict.fromkeys(local_time(i["at"], "%a %b %-d") for i in ivs))
+    when = days[0] if len(days) == 1 else ", ".join(days[:-1]) + " and " + days[-1]
+    what = f"an interview {when}" if len(ivs) == 1 else f"{len(ivs)} interviews ({when})"
+    title = g["job"]["title"]
+    if g["why"] == "closed":
+        return f"{title} is closed but {g['name']} still has {what}"
+    if g["why"] == "hired":
+        return f"{g['name']} was {hire_word(store, g['job_id'])} for {title} but still has {what}"
+    return f"{g['name']} is out of {title} but still has {what}"
+
+
+def next_interview_days(store: Store, job_id: int, now: datetime | None = None) -> dict[int, list[dict[str, Any]]]:
+    """{candidate_id: [interviews]}: everything scheduled on the day of each in-the-running candidate's next
+    interview for this job (or with no job), so an onsite loop shows as its sessions, in time order."""
+    now = now or datetime.now(timezone.utc)
+    start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
+    rows = store._rows(
+        f"""SELECT t.id, t.candidate_id, t.at, t.body, t.data FROM timeline t
+           JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = ?
+           JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+           WHERE t.kind = 'interview' AND t.at >= ? AND (t.job_id = ? OR t.job_id IS NULL)
+             AND s.outcome = 'open' AND {LIVE_INTERVIEW}
+           ORDER BY t.at, t.id""", (job_id, start, job_id))
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        first = out.setdefault(r["candidate_id"], [r])[0]
+        if r is not first and to_dt(r["at"]).astimezone().date() == to_dt(first["at"]).astimezone().date():
+            out[r["candidate_id"]].append(r)
+    return out
+
+
+def interview_line(name: str, ivs: list[dict[str, Any]]) -> str:
+    """'- Tomasz: Fri Nov 6, 4:30 PM CST (Onsite: system design, with Priya)', or for a loop
+    '- Tomasz: Fri Nov 6, 3 interviews: 9:00 AM CST System design (with Priya); 10:00 AM CST Coding'."""
+    if len(ivs) == 1:
+        label = interview_label(ivs[0])
+        return f"- {name}: {local_time(ivs[0]['at'], IV_TIME).strip()}" + (f" ({label})" if label else "")
+    parts = []
+    for i in ivs:
+        bits = [interview_name(i) or "Interview", *([f"(with {interviewer_of(i)})"] if interviewer_of(i) else [])]
+        parts.append(f"{local_time(i['at'], '%-I:%M %p %Z').strip()} {' '.join(bits)}")
+    return f"- {name}: {local_time(ivs[0]['at'], '%a %b %-d')}, {len(ivs)} interviews: " + "; ".join(parts)
+
+
 def next_interviews(store: Store, job_id: int, now: datetime | None = None) -> dict[int, str]:
     """{candidate_id: ISO time} of the next scheduled interview for each candidate still in the running for
     this job (interviews for this job or with no job). Cancelled ones and ones with an outcome don't count."""
@@ -252,6 +402,20 @@ def ai_identity_changes(store: Store, now: datetime | None = None, days: int = 7
         out.append({**item, "title": f"Your AI app changed {name}'s {what}. Review or undo.",
                     "detail": "Check it's right before you reach out."})
     return out
+
+
+def ai_clear_cap(store: Store) -> list[dict[str, Any]]:
+    """A Today item while the AI app has hit its hourly limit on clearing saved values across everyone, so
+    the recruiter looks at what it emptied (and more clears wait until the hour has passed)."""
+    from .store import AI_CLEAR_CAP
+
+    got = store.ai_clears_this_hour()
+    if got["count"] < AI_CLEAR_CAP:
+        return []
+    people = f"{got['people']} {'person' if got['people'] == 1 else 'people'}"
+    return [{"key": f"aiclears:{got['last']}", "kind": "ai_change", "rank": 0, "when": got["last"],
+             "title": f"Your AI app cleared {got['count']} saved values on {people} in the last hour. Review or undo.",
+             "detail": "It can't clear more until the hour has passed.", "href": "/changes?who=ai&since=1"}]
 
 
 def _offer_name(name: str | None) -> bool:
@@ -407,16 +571,33 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     next_week: list[dict[str, Any]] = []
     if on("flag_interviews"):
         week_end = (now + timedelta(days=7)).replace(microsecond=0).isoformat()
-        for t in _live_interviews(store, store.upcoming_interviews(days=14, now=now), jobs):
+        prompts = exit_prompts(store, now)
+        asked = {i["id"] for g in prompts for i in g["interviews"]}
+        for g in prompts:  # still on someone's calendar: ask, whatever the day, so nobody joins a dropped call
+            ivs = g["interviews"]
+            bits = [label(g["job_id"]), *(interview_label(i) for i in ivs[:3])]
+            items.append({
+                "key": f"interview_out:{g['candidate_id']}:{g['job_id']}", "kind": "interview_out", "rank": 0,
+                "when": ivs[0]["at"], "title": _exit_title(store, g), "detail": " · ".join(x for x in bits if x),
+                "candidate_id": g["candidate_id"], "job_id": g["job_id"], "interview_id": ivs[0]["id"],
+                "interview_ids": [i["id"] for i in ivs], "stage": g["stage"],
+                "href": f"/candidates/{g['candidate_id']}#timeline",
+            })
+        live = [t for t in store.upcoming_interviews(days=14, now=now) if t["id"] not in asked]
+        kept = [t for t in live if _iv_data(t).get("kept_at")]  # kept after a move out: a real interview
+        shown = {t["id"] for t in _live_interviews(store, live, jobs)} | {t["id"] for t in kept}
+        for t in (t for t in live if t["id"] in shown):
             job = jobs.get(t.get("job_id")) if t.get("job_id") else None
-            bits = [label(t.get("job_id"), t.get("job_title")), t.get("body"),
+            who = interviewer_of(t)
+            bits = [label(t.get("job_id"), t.get("job_title")), t.get("body"), f"with {who}" if who else None,
                     "job on hold" if job and job["status"] == "on_hold" else None]
             row = {
                 "key": f"interview:{t['id']}", "kind": "interview", "rank": 0, "when": t["at"],
                 "title": f"Interview with {t['candidate_name']}", "interview_id": t["id"],
                 "detail": " · ".join(x for x in bits if x), "on_hold": bool(job and job["status"] == "on_hold"),
-                "candidate_id": t["candidate_id"], "job_id": t.get("job_id"),
-                "href": f"/candidates/{t['candidate_id']}#timeline",
+                "candidate_id": t["candidate_id"], "job_id": t.get("job_id"), "interviewer": who or None,
+                "started": t["at"] <= now.replace(microsecond=0).isoformat(),
+                "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}",
             }
             if t["at"] > week_end:
                 if row["key"] in snoozed:
@@ -425,6 +606,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                     next_week.append(row)
             else:
                 items.append(row)
+        items += _outcome_asks(store, now, jobs, asked, label)
 
     if on("flag_suggestions"):
         horizon = (now + timedelta(days=14)).astimezone().date().isoformat()
@@ -459,7 +641,9 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 else f"/jobs/{s['job_id']}" if s.get("job_id") else "/",
             })
 
-    items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now)
+    items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now) + ai_clear_cap(store)
+    from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
+    items += shortlist_items(store)
     if on("flag_stuck"):
         limit = _int(cfg, "stuck_days", 7)
         for a in store.open_applications():
@@ -562,9 +746,25 @@ def internal_like(name: str | None) -> bool:
     return bool(key) and (key in INTERNAL_STAGE_WORDS or key.split()[0] in INTERNAL_STAGE_WORDS)
 
 
+def submit_like(name: str | None) -> bool:
+    """A stage named like Submitted, Presented or Shortlist: where people are first shown to the client."""
+    return bool(set(_stage_key(name).split()) & SUBMIT_STAGE_WORDS)
+
+
+def late_like(name: str | None) -> bool:
+    """A stage named like an interview, an onsite, an HM screen or an offer: the client has seen these people."""
+    words = _stage_key(name).split()
+    return bool(set(words) & LATE_STAGE_WORDS) or words[:1] == ["hm"] or words[:2] == ["hiring", "manager"]
+
+
 def default_omit(store: Store, job_id: int) -> list[str]:
-    """The job's in-play stages named like internal ones, left out of status updates until the recruiter chooses."""
-    return [s["name"] for s in store.job_stages(job_id) if s["outcome"] == "open" and internal_like(s["name"])]
+    """The job's in-play stages named like internal ones, and every in-play stage before its first Submitted-like
+    stage (Screened, in the agency set), left out of status updates until the recruiter chooses. A stage named
+    like an interview or an offer is never left out for its place: imported stages can land after Offer."""
+    stages = store.job_stages(job_id)
+    first = next((i for i, s in enumerate(stages) if s["outcome"] == "open" and submit_like(s["name"])), 0)
+    return [s["name"] for i, s in enumerate(stages) if s["outcome"] == "open" and (
+        internal_like(s["name"]) or (i < first and not late_like(s["name"]) and not submit_like(s["name"])))]
 
 
 def has_saved_omit(store: Store, job_id: int) -> bool:
@@ -607,9 +807,34 @@ def _omitted(store: Store, job_id: int, omit_stages: list[str] | None) -> set[st
     return out
 
 
+def booked_hidden(store: Store, job_id: int, omit: set[str], groups: list[dict[str, Any]] | None = None,
+                  now: datetime | None = None) -> dict[int, str]:
+    """{candidate_id: stage} for people in a left-out stage who have an interview booked for this job. A status
+    update lists them anyway: a booked interview is never hidden from the client or hiring manager."""
+    if not omit:
+        return {}
+    groups = groups if groups is not None else store.pipeline_by_stage(job_id)
+    if not any(g["candidates"] and g["outcome"] == "open" and _stage_key(g["name"]) in omit for g in groups):
+        return {}
+    booked = next_interview_days(store, job_id, now)
+    return {a["candidate_id"]: g["name"] for g in groups if g["outcome"] == "open" and _stage_key(g["name"]) in omit
+            for a in g["candidates"] if a["candidate_id"] in booked}
+
+
+def shown_numbers(store: Store, job_id: int, omit: set[str], groups: list[dict[str, Any]] | None = None,
+                  now: datetime | None = None) -> dict[str, Any]:
+    """job_numbers for the people a status update shows: not the left-out stages, but people there with an
+    interview booked do count."""
+    groups = groups if groups is not None else store.pipeline_by_stage(job_id)
+    nums = job_numbers(store, job_id, omit, groups)
+    nums["active"] += len(booked_hidden(store, job_id, omit, groups, now))
+    return nums
+
+
 def status_numbers(store: Store, job_id: int, omit_stages: list[str] | None = None) -> dict[str, Any]:
-    """job_numbers for the people a status update shows (its left-out stages don't count)."""
-    return job_numbers(store, job_id, _omitted(store, job_id, omit_stages))
+    """job_numbers for the people a status update shows (its left-out stages don't count, except people there
+    with an interview booked)."""
+    return shown_numbers(store, job_id, _omitted(store, job_id, omit_stages))
 
 
 def omitted_stages(store: Store, job_id: int, omit_stages: list[str] | None = None) -> list[str]:
@@ -629,9 +854,11 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = t.job_id
            LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
            WHERE t.job_id = ? AND t.kind = 'stage' AND t.at >= ?
+             AND coalesce(json_extract(CASE WHEN json_valid(t.data) THEN t.data END, '$.imported'), 0) = 0
            GROUP BY t.candidate_id ORDER BY at""", (job_id, cutoff))
     kinds: dict[str, list[str]] = {"hired": [], "out": [], "moved": [], "new": []}
     word = hire_word(store, job_id)
+    own = inhouse(store)
     for r in rows:
         if omit and _stage_key(r["stage"]) in omit:
             continue
@@ -639,7 +866,7 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
         if outcome == "hired":
             kinds["hired"].append(r["name"])
         elif outcome == "lost":
-            kinds["out"].append(f"{r['name']} ({_out_reason(r)})")
+            kinds["out"].append(f"{r['name']} ({_out_reason(r, own)})")
         elif r["created_at"] >= cutoff:
             kinds["new"].append(f"{r['name']} in {r['stage']}")
         else:
@@ -648,10 +875,18 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
     return [f"- {labels[k]}: {_capped(v)}" for k, v in kinds.items() if v]
 
 
-def _out_reason(app: dict[str, Any]) -> str:
+# Out stages that name the client, said as the hiring team's call in in-house wording.
+_CLIENT_EXITS = frozenset({"client passed", "client pass", "client declined", "client rejected", "rejected by client"})
+
+
+def _out_reason(app: dict[str, Any], inhouse_words: bool = False) -> str:
     """Why someone is out, as a status update says it: 'position filled' after a close-out (the client never
-    turned them down), else their Out stage."""
-    return "position filled" if (app.get("notes") or "").strip() == CLOSE_REASON else app["stage"]
+    turned them down), else their Out stage ('Hiring team passed' for a client exit in in-house wording)."""
+    if (app.get("notes") or "").strip() == CLOSE_REASON:
+        return "position filled"
+    if inhouse_words and _stage_key(app["stage"]) in _CLIENT_EXITS:
+        return "Hiring team passed"
+    return app["stage"]
 
 
 def _capped(names: list[str], limit: int = NAMES_PER_STAGE) -> str:
@@ -671,7 +906,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     job = store.get_job(job_id)
     groups = store.pipeline_by_stage(job_id)
     omit = _omitted(store, job_id, omit_stages)
-    nums = job_numbers(store, job_id, omit, groups)
+    booked = booked_hidden(store, job_id, omit, groups, now)
+    nums = shown_numbers(store, job_id, omit, groups, now)
     head = job_label(job["title"], job.get("company"))
     if job.get("location"):
         head += f" · {job['location']}"
@@ -683,32 +919,68 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     if job.get("target_date"):
         lines.append(f"Target date: {local_time(job['target_date'] + 'T12:00:00', '%a %b %-d, %Y')}")
     lines += [headline(nums, job["status"]), ""]
+    from .importers import imported_placements  # placed by an import with no stage date: "(imported)"
+    imported = imported_placements(store, job_id)
     total = shown = 0
+    own = inhouse(store)
     for g in groups:
         total += len(g["candidates"])
-        if not g["candidates"] or _stage_key(g["name"]) in omit:
+        # A left-out stage still lists the people in it who have an interview booked.
+        cands = ([a for a in g["candidates"] if a["candidate_id"] in booked] if _stage_key(g["name"]) in omit
+                 else g["candidates"])
+        if not cands:
             continue
-        shown += len(g["candidates"])
+        shown += len(cands)
         lost = g["outcome"] == "lost"
         people = [f"{a['candidate_name']} ("
                   + ("position filled, " if lost and _out_reason(a) == "position filled" else "")
-                  + f"{_in_stage(_days_ago(a['stage_changed_at'], now))})"
-                  for a in sorted(g["candidates"], key=lambda a: a["stage_changed_at"])]
-        lines.append(f"{g['name']} ({len(g['candidates'])}): {_capped(people)}")
+                  + ("imported" if a["candidate_id"] in imported else _in_stage(_days_ago(a['stage_changed_at'], now),
+                                                                             "today" if lost else "new today"))
+                  + ")"
+                  for a in sorted(cands, key=lambda a: a["stage_changed_at"])]
+        label = "Hiring team passed" if own and lost and _stage_key(g["name"]) in _CLIENT_EXITS else g["name"]
+        lines.append(f"{label} ({len(cands)}): {_capped(people)}")
     if not shown:
         lines.append("No one to share yet." if total else "No one in the pipeline yet.")
-    hidden = [f"{g['name']} ({len(g['candidates'])})" for g in groups if g["candidates"] and _stage_key(g["name"]) in omit]
-    if hidden:
-        lines.append("Not shown: " + ", ".join(hidden))
     changes = recent_changes(store, job_id, now, omit=omit)
     lines += ["", "Changes since last week:", *changes] if changes else ["", "Changes since last week: none."]
-    names = {a["candidate_id"]: a["candidate_name"] for g in groups
-             if g["outcome"] == "open" and _stage_key(g["name"]) not in omit for a in g["candidates"]}
-    upcoming = sorted((at, cid) for cid, at in next_interviews(store, job_id, now).items() if cid in names)
+    names = {a["candidate_id"]: a["candidate_name"] for g in groups if g["outcome"] == "open"
+             for a in g["candidates"] if _stage_key(g["name"]) not in omit or a["candidate_id"] in booked}
+    upcoming = sorted((ivs[0]["at"], cid, ivs) for cid, ivs in next_interview_days(store, job_id, now).items()
+                      if cid in names)
     if upcoming:
         lines += ["", "Next interviews:"]
-        lines += [f"- {names[cid]}: {local_time(at, '%a %b %-d, %-I:%M %p %Z').strip()}" for at, cid in upcoming]
+        lines += [interview_line(names[cid], ivs) for _, cid, ivs in upcoming]
     return "\n".join(lines)
+
+
+def hidden_note(store: Store, job_id: int, omit_stages: list[str] | None = None) -> str:
+    """'Not shown: Sourced (3), Contacted (1)': who the status update leaves out, for the recruiter's eyes only.
+    It sits outside the text they copy, so the client never reads it. Empty when nothing is left out."""
+    omit = _omitted(store, job_id, omit_stages)
+    groups = store.pipeline_by_stage(job_id)
+    booked = booked_hidden(store, job_id, omit, groups)
+    hidden = [f"{g['name']} ({n})" for g in groups if _stage_key(g["name"]) in omit
+              and (n := sum(1 for a in g["candidates"] if a["candidate_id"] not in booked))]
+    parts = ["Not shown: " + ", ".join(hidden)] if hidden else []
+    if booked:
+        names = {a["candidate_id"]: a["candidate_name"] for g in groups for a in g["candidates"]}
+        parts.append("listed though their stage is left out, since an interview is booked: "
+                     + _capped([f"{names[cid]} ({stage})" for cid, stage in booked.items()]))
+    out = "; ".join(parts)
+    return out[:1].upper() + out[1:]
+
+
+def digest_hidden_notes(store: Store, company: str | None = None,
+                        omit_stages: list[str] | None = None) -> list[str]:
+    """hidden_note for each job a status_digest covers, as 'Backend (Acme): not shown: Sourced (3)'."""
+    out = []
+    for g in company_rollup(store, company, omit_stages):
+        for j in g["jobs"]:
+            note = hidden_note(store, j["id"], omit_stages)
+            if note:
+                out.append(f"{job_label(j['title'], j.get('company'))}: {note[0].lower()}{note[1:]}")
+    return out
 
 
 _CO_SUFFIXES = frozenset({"inc", "incorporated", "llc", "llp", "ltd", "limited", "corp", "corporation", "co", "company",
@@ -760,57 +1032,124 @@ def _company_names(store: Store) -> list[str | None]:
 def company_rollup(store: Store, company: str | None = None, omit_stages: list[str] | None = None,
                    ) -> list[dict[str, Any]]:
     """[{company, jobs, active, hired, openings, filled, word}] for open jobs, one row per company (None for no
-    company). Counts cover the people each job's status update shows. company matches as in match_companies."""
+    company). Counts cover the people each job's status update shows, each person once even when they're in two
+    of the company's jobs. company matches as in match_companies."""
     wanted = match_companies(_company_names(store), company) if company is not None else None
     rows: dict[str, dict[str, Any]] = {}
     for j in store.list_jobs("open"):
         co = j.get("company") or ""
         if wanted is not None and co.strip().lower() not in wanted:
             continue
-        nums = job_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
+        omit = _omitted(store, j["id"], omit_stages)
+        groups = store.pipeline_by_stage(j["id"])
+        nums = job_numbers(store, j["id"], omit, groups)
+        booked = booked_hidden(store, j["id"], omit, groups)
         r = rows.setdefault(company_key(co), {"company": co or None, "jobs": [], "active": 0, "hired": 0,
-                                              "openings": 0, "filled": 0})
+                                              "openings": 0, "filled": 0, "_people": set(), "_hired": set()})
         r["jobs"].append(j)
-        r["active"] += nums["active"]
-        r["hired"] += nums["hired"]
+        for g in groups:  # people, not applications: one person in two of a client's jobs counts once
+            if _stage_key(g["name"]) not in omit and g["outcome"] in ("open", "hired"):
+                r["_people" if g["outcome"] == "open" else "_hired"].update(a["candidate_id"] for a in g["candidates"])
+        r["_people"].update(booked)  # left out by stage, but an interview is booked
+        r["active"] = len(r["_people"])
+        r["hired"] = len(r["_hired"])
         r["openings"] += nums["openings"]
         r["filled"] += nums["filled_seats"]
         r.setdefault("words", set()).add(nums["word"])
     for r in rows.values():
+        r.pop("_people"), r.pop("_hired")
         r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"  # the jobs' own word, when they agree
         r["filled_text"] = filled_text(r["filled"], r["openings"])
     return sorted(rows.values(), key=lambda r: (r["company"] is None, (r["company"] or "").lower()))
 
 
-def held_jobs(store: Store, company: str | None = None) -> list[dict[str, Any]]:
+def _manager_names(store: Store) -> list[str | None]:
+    return [r["hiring_manager"] for r in store._rows(
+        "SELECT DISTINCT hiring_manager FROM jobs WHERE status IN ('open', 'on_hold')")]
+
+
+def _job_filter(store: Store, company: str | None, manager: str | None) -> Any:
+    """A test for jobs matching the company and hiring manager filters (each matched as in match_companies:
+    any case, the start of a name or one of its words, or a close spelling, so 'priya' finds Priya Raman)."""
+    cos = match_companies(_company_names(store), company) if company is not None else None
+    hms = match_companies(_manager_names(store), manager) if manager is not None else None
+    return lambda j: ((cos is None or (j.get("company") or "").strip().lower() in cos)
+                      and (hms is None or (j.get("hiring_manager") or "").strip().lower() in hms))
+
+
+def by_manager(store: Store) -> bool:
+    """Roll status updates up by hiring manager: in-house, once an open job names one."""
+    return inhouse(store) and any((m or "").strip() for m in _manager_names(store))
+
+
+def manager_rollup(store: Store, manager: str | None = None, omit_stages: list[str] | None = None,
+                   company: str | None = None) -> list[dict[str, Any]]:
+    """Like company_rollup, one row per hiring manager instead: [{manager, label, jobs, active, hired, openings,
+    filled, word, filled_text}] for open jobs (manager None for jobs with no hiring manager)."""
+    keep = _job_filter(store, company, manager)
+    rows: dict[str, dict[str, Any]] = {}
+    for j in store.list_jobs("open"):
+        if not keep(j):
+            continue
+        hm = (j.get("hiring_manager") or "").strip()
+        nums = shown_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
+        r = rows.setdefault(re.sub(r"\s+", " ", hm.lower()), {
+            "manager": hm or None, "label": hm or None, "jobs": [], "active": 0, "hired": 0, "openings": 0,
+            "filled": 0, "words": set()})
+        r["jobs"].append(j)
+        for k, n in (("active", "active"), ("hired", "hired"), ("openings", "openings"), ("filled", "filled_seats")):
+            r[k] += nums[n]
+        r["words"].add(nums["word"])
+    for r in rows.values():
+        r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"
+        r["filled_text"] = filled_text(r["filled"], r["openings"])
+    return sorted(rows.values(), key=lambda r: (r["manager"] is None, (r["manager"] or "").lower()))
+
+
+def held_jobs(store: Store, company: str | None = None, manager: str | None = None) -> list[dict[str, Any]]:
     """On-hold jobs, for one company (matched as in match_companies) or all."""
-    wanted = match_companies(_company_names(store), company) if company is not None else None
-    return [j for j in store.list_jobs("on_hold") if wanted is None or (j.get("company") or "").strip().lower() in wanted]
+    keep = _job_filter(store, company, manager)
+    return [j for j in store.list_jobs("on_hold") if keep(j)]
 
 
 def status_digest(store: Store, company: str | None = None, now: datetime | None = None, *,
-                  omit_stages: list[str] | None = None) -> str:
-    """One paste-ready update for every open job (or one company's), with a roll-up per company first.
+                  omit_stages: list[str] | None = None, hiring_manager: str | None = None,
+                  group_by_manager: bool | None = None) -> str:
+    """One paste-ready update for every open job (or one company's, or one hiring manager's), with a roll-up
+    per company first (per hiring manager with a hiring_manager filter, or in-house once jobs name one).
 
-    company matches any case, by the start of the name, or by a close spelling. omit_stages applies to every
-    job; when None, each job uses its own Leave out choice. On-hold jobs are listed one line each at the end."""
+    company and hiring_manager match any case, by the start of the name, or by a close spelling. omit_stages
+    applies to every job; when None, each job uses its own Leave out choice. On-hold jobs are listed one line
+    each at the end."""
     now = now or datetime.now(timezone.utc)
-    groups = company_rollup(store, company, omit_stages)
-    held = held_jobs(store, company)
+    if group_by_manager is None:
+        group_by_manager = hiring_manager is not None or (company is None and by_manager(store))
+    if group_by_manager:
+        groups = [{**g, "company": g["manager"]} for g in manager_rollup(store, hiring_manager, omit_stages, company)]
+    else:
+        groups = company_rollup(store, company, omit_stages)
+    held = held_jobs(store, company, hiring_manager)
     if not groups and not held:
-        named = (company or "").strip().rstrip(".")
+        named = " and ".join(x.strip().rstrip(".") for x in (company, hiring_manager) if x and x.strip())
         return f"No open jobs{' for ' + named if named else ''}."
-    found = sorted({g["company"] for g in groups if g["company"]} | {j["company"] for j in held if j.get("company")},
-                   key=str.lower)
-    who = " and ".join(found) if company and company.strip() and found else "all open jobs"
-    lines = [f"Status update for {who}, {local_time(now.isoformat(), '%a %b %-d, %Y')}"]
+    if hiring_manager and hiring_manager.strip():
+        found = sorted({g["company"] for g in groups if g["company"]}
+                       | {j["hiring_manager"] for j in held if j.get("hiring_manager")}, key=str.lower)
+    else:
+        found = sorted({g["company"] for g in groups if g["company"]}
+                       | {j["company"] for j in held if j.get("company")}, key=str.lower)
+    named = (company and company.strip()) or (hiring_manager and hiring_manager.strip())
+    who = " and ".join(found) if named and found else "all open jobs"
+    word = "Hiring update" if inhouse(store) else "Status update"
+    lines = [f"{word} for {who}, {local_time(now.isoformat(), '%a %b %-d, %Y')}"]
 
     def summary(g: dict[str, Any]) -> str:
         n = len(g["jobs"])
         return f"{n} open job{'' if n == 1 else 's'}, {g['active']} in process, {g['filled_text']}."
 
     if len(groups) > 1:
-        lines += [f"- {g['company'] or 'No company'}: {summary(g)}" for g in groups]
+        none = "No hiring manager" if group_by_manager else "No company"
+        lines += [f"- {g['company'] or none}: {summary(g)}" for g in groups]
     elif groups and len(groups[0]["jobs"]) > 1:  # one company: its total, without repeating its name
         lines.append(summary(groups[0]))
     for g in groups:
@@ -841,8 +1180,36 @@ def with_out_stages(stages: list[Any] | None) -> tuple[list[Any] | None, str | N
 
 def stage_set(key: str | None) -> list[str] | None:
     """The stage names of a stage set (agency, inhouse), or None for the default."""
-    found = STAGE_SETS.get((key or "").strip().lower().replace("-", ""))
+    found = STAGE_SETS.get(re.sub(r"[\s_-]+", "", (key or "").strip().lower()))
     return list(found[1]) if found and found[1] else None
+
+
+def copied_stages(store: Store, job_id: int) -> list[dict[str, str]]:
+    """Another job's stages, with what each counts as, for a new job that copies them."""
+    store.get_job(job_id)  # NotFound when there's no such job
+    return [{"name": s["name"], "outcome": s["outcome"]} for s in store.job_stages(job_id)]
+
+
+def new_job_stages(store: Store, stages: list[Any] | None = None, set_name: str | None = None,
+                   from_job_id: int | None = None) -> list[Any] | None:
+    """The stages a new job starts with: its own list, a copy of another job's, or a built-in stage set
+    (default, agency, inhouse). None means the default set. Raises ValueError when more than one is given
+    or the set or job isn't known."""
+    given = [n for n, v in (("stages", stages), ("stages_from_job_id", from_job_id), ("stage_set", set_name))
+             if v not in (None, "", [])]
+    if len(given) > 1:
+        raise ValueError(f"Give only one of {' or '.join(given)}.")
+    if from_job_id not in (None, ""):
+        try:
+            return copied_stages(store, int(from_job_id))
+        except (NotFound, ValueError, TypeError):
+            raise ValueError(f"No job with id {from_job_id} to copy stages from. list_jobs shows them.") from None
+    if set_name not in (None, ""):
+        key = re.sub(r"[\s_-]+", "", str(set_name).strip().lower())
+        if key not in STAGE_SETS:
+            raise ValueError(f"No stage set called {set_name!r}. Stage sets: {', '.join(STAGE_SETS)}.")
+        return stage_set(key)
+    return stages or None
 
 
 # ----------------------------------------------------- moves and close-out
@@ -1057,13 +1424,103 @@ def close_out_hint(store: Store, job_id: int) -> dict[str, Any]:
                 "click. Don't move anyone unless the recruiter says so.")}
 
 
+# ------------------------------------------------- a stage's "Counts as"
+STAGE_OUTCOME_PREFIX = "stage_outcome:"  # settings key of one app change to what a stage counts as
+OUTCOME_WORDS = {"open": "In play", "hired": "Hired", "lost": "Out"}
+
+
+def change_stage_outcome(store: Store, job_id: int, stage: str, outcome: str) -> dict[str, Any]:
+    """Set what a stage counts as from the app, log it on Changes (undoable), and say what it means for the
+    people in it: {'changed', 'stage', 'old', 'new', 'notice', 'asks'}, where asks holds exit_interviews for each
+    person in the stage who still has an interview coming up. Raises ValueError for an unknown stage or outcome."""
+    import json
+
+    from .store import normalize_outcome
+
+    found = store.resolve_stage(job_id, stage)
+    new = normalize_outcome(outcome) or ""
+    store.set_stage_outcome(job_id, found["name"], outcome)
+    res: dict[str, Any] = {"changed": found["outcome"] != new, "stage": found["name"], "old": found["outcome"],
+                           "new": new, "asks": [], "notice": ""}
+    if not res["changed"]:
+        return res
+    people = next((g["candidates"] for g in store.pipeline_by_stage(job_id) if g["name"] == found["name"]), [])
+    rows = store._rows(f"SELECT key FROM settings WHERE key LIKE '{STAGE_OUTCOME_PREFIX}%'")
+    cid = 1 + max((int(r["key"][len(STAGE_OUTCOME_PREFIX):]) for r in rows
+                   if r["key"][len(STAGE_OUTCOME_PREFIX):].isdigit()), default=0)
+    _put_setting(store, f"{STAGE_OUTCOME_PREFIX}{cid}", json.dumps({
+        "job_id": job_id, "stage": found["name"], "old": found["outcome"], "new": new, "people": len(people),
+        "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}))
+    n = len(people)
+    who = f"{n} {'person' if n == 1 else 'people'}" if n else "Nobody"
+    effect = {"lost": "out of the running", "hired": "counted as hired", "open": "in play"}[new]
+    res["notice"] = (f"{found['name']} now counts as {OUTCOME_WORDS[new]}. {who} in it {'is' if n <= 1 else 'are'} "
+                     f"{effect} now. You can undo this on Changes.")
+    if new != "open":
+        res["asks"] = [a for a in (exit_interviews(store, p["candidate_id"], job_id) for p in people) if a]
+    if res["asks"]:
+        names = [a["name"] for a in res["asks"]]
+        res["notice"] += (f" {' and '.join(names) if len(names) < 3 else ', '.join(names[:-1]) + ' and ' + names[-1]}"
+                          f" still {'has' if len(names) == 1 else 'have'} an interview coming up.")
+    return res
+
+
+def stage_outcome_changes(store: Store, since: str | None = None) -> list[dict[str, Any]]:
+    """App changes to what a stage counts as, newest first, each with a Changes line and whether it can be undone."""
+    import json
+
+    out = []
+    for r in store._rows(f"SELECT key, value FROM settings WHERE key LIKE '{STAGE_OUTCOME_PREFIX}%'"):
+        cid = r["key"][len(STAGE_OUTCOME_PREFIX):]
+        try:
+            c = json.loads(r["value"])
+        except ValueError:
+            continue
+        if not cid.isdigit() or not isinstance(c, dict) or (since and (c.get("at") or "") < since):
+            continue
+        job = store._row("SELECT title, company FROM jobs WHERE id = ?", (c.get("job_id"),))
+        if not job:
+            continue
+        text = (f"{c.get('stage')} on {_job_name(job)} counts as {OUTCOME_WORDS.get(c.get('new'), c.get('new'))} "
+                f"(was {OUTCOME_WORDS.get(c.get('old'), c.get('old'))})")
+        out.append({**c, "id": int(cid), "job_title": job["title"], "text": text, "undoable": not c.get("undone_at")})
+    return sorted(out, key=lambda c: (c["at"], c["id"]), reverse=True)
+
+
+def undo_stage_outcome(store: Store, change_id: int) -> str:
+    """Put a stage back to what it counted as before an app change. Returns the notice. Raises NotFound, or
+    ValueError when it was already undone or the stage has changed since."""
+    import json
+
+    key = f"{STAGE_OUTCOME_PREFIX}{change_id}"
+    raw = store.setting(key)
+    if not raw:
+        raise NotFound("That change is gone. Reload the page.")
+    c = json.loads(raw)
+    if c.get("undone_at"):
+        raise ValueError("That change was already undone.")
+    stage = next((s for s in store.job_stages(c["job_id"]) if s["name"].lower() == str(c["stage"]).lower()), None)
+    if not stage or stage["outcome"] != c["new"]:
+        raise ValueError(f"Couldn't undo that: {c['stage']} was renamed, removed or changed again since.")
+    store.set_stage_outcome(c["job_id"], stage["name"], c["old"])
+    c["undone_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    _put_setting(store, key, json.dumps(c))
+    return f"Undid: {stage['name']} counts as {OUTCOME_WORDS[c['old']]} again."
+
+
 # ------------------------------------------------------------- wording
 def inhouse(store: Store) -> bool:
     """The recruiter hires for their own company (in-house wording instead of agency wording)."""
     return store.setting(INHOUSE_KEY) == "1"
 
 
+def hiring_for_answered(store: Store) -> bool:
+    """They've said whether they hire for their own company or for clients, so the welcome stops asking."""
+    return inhouse(store) or store.setting(HIRING_FOR_ANSWERED_KEY) == "1"
+
+
 def set_inhouse(store: Store, on: bool) -> None:
+    _put_setting(store, HIRING_FOR_ANSWERED_KEY, "1")
     if on:
         _put_setting(store, INHOUSE_KEY, "1")
     else:
@@ -1082,4 +1539,5 @@ def reasons(store: Store) -> list[tuple[str, str]]:
 __all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "close_out", "close_out_batches",
            "close_out_hint", "close_out_plan", "company_key", "undo_close_out", "company_rollup", "complete_followup", "due_text", "exit_interviews", "headline",
            "job_label", "job_numbers", "job_status_text", "local_time", "match_companies", "next_interviews",
+           "exit_prompts", "interview_label", "interview_line", "local_days", "manager_rollup", "next_interview_days",
            "parse_day", "recent_changes", "schedule_followup", "status_digest", "twin_hints", "with_out_stages"]

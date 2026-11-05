@@ -189,18 +189,28 @@ def main(argv: list[str] | None = None) -> None:
                     print("  " + line)
                 print("Nothing was changed (dry run).")
             else:
-                r = importers.import_rows(store, header, rows, mapping, source=source)
+                from . import backups
+
+                r = importers.import_rows(store, header, rows, mapping, source=source, file_name=Path(args.file).name)
+                backups.record_import(store, r, Path(args.file).name, len(rows))
                 print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
                       f"skipped {r['skipped_rows']}, {r['notes']} note{'' if r['notes'] == 1 else 's'} added.")
                 if r["pipelines_added"] or r["jobs_created"]:
                     print(f"Put {r['pipelines_added']} in job pipelines"
                           + (f", made {len(r['jobs_created'])} new job(s): " + ", ".join(r["jobs_created"])
                              if r["jobs_created"] else "") + ".")
-                for line in (r["skipped"] + r["possible_duplicates"] + r["warnings"])[:20]:
-                    print("  " + line)
+                for p in importers.result_panels(r):
+                    if p["key"] == "changes":
+                        continue
+                    print(f"{p['title']} ({p['count']}):")
+                    for line in (p["groups"] or p["lines"])[:importers.PANEL_LINES]:
+                        print("  " + line)
                 if r["not_imported"]:
                     print("Not imported: " + ", ".join(r["not_imported"]))
-                print(f"Backup from before this import: {r['backup']}")
+                if r["backup"]:
+                    print(f"Backup from before this import: {r['backup']}")
+                else:
+                    print("Nothing changed, so no backup was needed.")
     elif cmd in ("connect-claude", "connect-codex", "connect-lmstudio"):
         from . import integrations
 

@@ -18,6 +18,8 @@ URIS = {
     "results": "ui://talent-search/search-results.html",
     "pipeline": "ui://talent-search/pipeline-board.html",
     "today": "ui://talent-search/action-items.html",
+    "shortlist": "ui://talent-search/shortlist.html",
+    "saved": "ui://talent-search/batch-save.html",
 }
 
 _CSS = r"""
@@ -137,15 +139,52 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date"};
+const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
  const card=i=>el("div",{class:"card"},el("div",{class:"kind"},LABEL[i.kind]||i.kind),el("div",{},i.title),
-  (i.kind==="interview"&&i.when)?el("div",{class:"small"},when(i.when)):null,i.due_text?el("div",{class:"small"+(i.overdue?"":" muted")},i.due_text):null,
+  ((i.kind==="interview"||i.kind==="interview_out"||i.kind==="interview_outcome")&&i.when)?el("div",{class:"small"},when(i.when)):null,i.due_text?el("div",{class:"small"+(i.overdue?"":" muted")},i.due_text):null,
   i.detail?el("div",{class:"small muted"},i.detail):null);
  for(const i of d.items)wrap.append(card(i));
  if(d.next_week&&d.next_week.length){wrap.append(el("h2",{},"Next week"));for(const i of d.next_week)wrap.append(card(i))}
+ return wrap}""",
+    "shortlist": r"""
+function prospect(p){const sub=[p.title,p.company&&("at "+p.company)].filter(Boolean).join(" ")+(p.location?" · "+p.location:"");
+ const badge=p.status==="passed"?"Passed":p.status==="kept"?"Kept":null;
+ return el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
+  sub?el("div",{class:"muted small"},sub):null,p.fit?el("div",{class:"small"},p.fit):null,
+  p.pass_reason?el("div",{class:"small muted"},"Reason: "+p.pass_reason):null,
+  (p.check_lines&&p.check_lines.length)?el("ul",{class:"small"},p.check_lines.map(x=>el("li",{},x))):null)}
+function render(d){
+ const wrap=el("div",{});const rows=d.added||d.prospects||[];const c=d.counts||{};
+ wrap.append(el("div",{class:"row"},el("h1",{},"Shortlist"+(d.job?": "+d.job.title+(d.job.company?" · "+d.job.company:""):"")),appLink(d.app_url,"Review in Talent Search")));
+ wrap.append(el("div",{class:"small muted"},(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"));
+ if(d.added)wrap.append(el("h2",{},"Added now"));
+ if(!rows.length)wrap.append(el("p",{class:"empty"},"Nobody here."));
+ for(const p of rows)wrap.append(prospect(p));
+ if(d.skipped&&d.skipped.length){wrap.append(el("h2",{},"Skipped"),el("ul",{class:"small"},d.skipped.map(x=>el("li",{},x.name+": "+x.reason))))}
+ return wrap}""",
+    "saved": r"""
+const FIELD={current_title:"title",current_company:"company",linkedin_url:"LinkedIn",work_history:"work history",email:"email",phone:"phone",location:"location"};
+const GROUPS=[["saved","Saved"],["updated","Updated"],["unchanged","Already saved, nothing new"],["needs_answer","Needs your answer (nothing saved)"],["not_saved","Not saved"]];
+function fields(xs){return (xs||[]).map(f=>FIELD[f]||String(f).replace(/_/g," ")).join(", ")}
+function row(r){const bits=[];
+ if(r.stage)bits.push(r.already_in_job?"already in "+r.stage:"added to "+r.stage);
+ if(r.kept&&r.kept.length)bits.push("kept the saved "+fields(r.kept));
+ if(r.held&&r.held.length)bits.push("held for you: "+fields(r.held));
+ return openCard("pc",r.app_url,el("div",{class:"row"},el("b",{},r.name),r.saved_status&&r.saved_status!=="Saved"?el("span",{class:"badge"},r.saved_status):null),
+  bits.length?el("div",{class:"small muted"},bits.join(" · ")):null,
+  r.reason?el("div",{class:"small"},r.reason):null,
+  (r.notes||[]).map(x=>el("div",{class:"small"},x)),
+  r.pipeline_error?el("div",{class:"small"},"Not added to the job: "+r.pipeline_error):null)}
+function render(d){
+ const wrap=el("div",{});
+ wrap.append(el("div",{class:"row"},el("h1",{},d.job?"Saved for "+d.job.title+(d.job.company?" · "+d.job.company:""):"Saved people"),appLink(d.app_url)));
+ if(d.summary)wrap.append(el("div",{class:"small muted"},d.summary));
+ if(d.warning)wrap.append(el("div",{class:"card small"},d.warning));
+ for(const[k,label]of GROUPS){const rs=d[k]||[];if(!rs.length)continue;wrap.append(el("h2",{},label+" ("+rs.length+")"));for(const r of rs)wrap.append(row(r))}
+ if(d.batch_id)wrap.append(el("p",{class:"small muted"},"You can undo this whole batch in Talent Search, under Changes."));
  return wrap}""",
 }
 

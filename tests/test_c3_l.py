@@ -107,7 +107,8 @@ def test_status_text_says_what_it_leaves_out_and_when_seats_are_filled(store):
     _people(store, job["id"], "Hired", "Hana")
     out = actions.job_status_text(store, job["id"])
     assert "1 of 1 opening filled." in out and "No one in process" not in out and "role is filled" not in out
-    assert "Not shown: Sourced (3), Contacted (1)" in out and "S1" not in out
+    assert "Not shown" not in out and "S1" not in out  # the left-out line sits outside the copied text (c4 U)
+    assert actions.hidden_note(store, job["id"]) == "Not shown: Sourced (3), Contacted (1)"
     _people(store, job["id"], "Screening", "Ana Ruiz")
     out = actions.job_status_text(store, job["id"])
     assert "1 candidate in process, 1 of 1 opening filled." in out and "role is filled" not in out
@@ -124,7 +125,7 @@ def test_status_box_is_for_the_client_unless_in_house(store):
     c = local_client(store)
     assert "Status update for the client</summary>" in c.get(f"/jobs/{job['id']}").text
     actions.set_inhouse(store, True)
-    assert "Status update for the hiring manager</summary>" in c.get(f"/jobs/{job['id']}").text
+    assert "<summary>Status update</summary>" in c.get(f"/jobs/{job['id']}").text  # the founder is the manager (c4 U)
 
 
 # ------------------------------------------------- 6. web Add same-name box

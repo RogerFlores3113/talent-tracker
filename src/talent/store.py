@@ -20,9 +20,10 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import unquote, urlsplit
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
 # candidate is still in play; "hired" and "lost" close the application.
@@ -48,7 +49,14 @@ LOST_STAGE_NAMES = frozenset({
     "not interested", "no hire", "dropped out", "turned down", "archived",
     "passed", "pass", "no go", "ghosted", "not moving forward", "rejected by client", "client rejected",
     "declined offer", "not selected", "did not proceed",
+    "client passed", "client pass", "client declined", "client decline", "hiring team passed", "team passed",
+    "not progressed", "not progressing", "unsuccessful", "candidate withdrew", "withdrew application",
 })
+# A stage whose name ends with one of these words is an exit ("Client declined", "Screen rejected")...
+_LOST_LAST_WORDS = frozenset({"declined", "rejected", "withdrew", "withdrawn"})
+# ...and "passed" is one when someone passed on the person ("Client passed"), not when they passed a step
+# ("Screen passed" is still in play).
+_PASSED_BY = frozenset({"client", "clients", "hiring", "team", "manager", "hm", "company", "we", "employer"})
 _OUTCOME_ALIASES = {"in play": "open", "active": "open", "won": "hired", "hire": "hired", "placed": "hired",
                     "out": "lost", "no": "lost", "rejected": "lost", "closed": "lost"}
 
@@ -65,7 +73,14 @@ def normalize_job_status(value: str | None) -> str:
 def stage_outcome(name: str) -> str:
     """Guess a stage's outcome from its name: 'hired' for wins, 'lost' for exits, else 'open'."""
     key = re.sub(r"[\W_]+", " ", name or "").strip().lower()
-    return "hired" if key in WON_STAGE_NAMES else "lost" if key in LOST_STAGE_NAMES else "open"
+    if key in WON_STAGE_NAMES:
+        return "hired"
+    words = key.split()
+    if key in LOST_STAGE_NAMES or (words and len(words) <= 4 and (
+            words[-1] in _LOST_LAST_WORDS or words[0] in ("rejected", "declined", "withdrew", "withdrawn")
+            or (words[-1] in ("passed", "pass") and words[0] in _PASSED_BY))):
+        return "lost"
+    return "open"
 
 
 def normalize_outcome(value: str | None) -> str | None:
@@ -246,6 +261,17 @@ def _migrate_v6_data(conn: sqlite3.Connection) -> None:
             continue
         conn.execute("INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, at, undone_at)"
                      " VALUES (?, ?, ?, ?, ?, ?)", (what, cid, job_id, tid, created, data.get("undone_at")))
+
+
+def _fill_linkedin_keys(conn: sqlite3.Connection, everyone: bool = True) -> None:
+    """Set candidates.linkedin_key (see v9): for everyone, or only rows that have a link and no key yet. Marks
+    which matching rule made the keys, so Store._refresh_linkedin_keys works them all out again when it changes."""
+    where = "linkedin_url IS NOT NULL" + ("" if everyone else " AND linkedin_key IS NULL")
+    rows = conn.execute(f"SELECT id, linkedin_url, linkedin_key FROM candidates WHERE {where}").fetchall()
+    conn.executemany("UPDATE candidates SET linkedin_key = ? WHERE id = ?",
+                     [(k, cid) for cid, url, key in rows if (k := normalize_linkedin(url)) != key])
+    conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                 (LINKEDIN_RULE_KEY, _linkedin_rule()))
 
 
 _MIGRATIONS: tuple[Any, ...] = (
@@ -465,13 +491,86 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v6_data,
     ),
+    # v7: a Shortlist per job. The AI app proposes people it researched; the recruiter keeps them (saved and
+    # added to the job) or passes (with an optional reason). Passed profile links stay, so nobody is proposed
+    # for that job again. batch_id is the AI action that proposed the row, so Undo takes back only that batch.
+    """
+    CREATE TABLE prospects (
+        id           INTEGER PRIMARY KEY,
+        job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        linkedin_url TEXT,
+        name         TEXT NOT NULL,
+        title        TEXT,
+        company      TEXT,
+        location     TEXT,
+        fit          TEXT,
+        source       TEXT,
+        proposed_by  TEXT NOT NULL DEFAULT 'ai',
+        status       TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'kept', 'passed')),
+        pass_reason  TEXT,
+        candidate_id INTEGER REFERENCES candidates(id) ON DELETE SET NULL,
+        batch_id     INTEGER,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        decided_at   TEXT
+    );
+    CREATE INDEX prospects_job_idx ON prospects(job_id, status);
+    CREATE INDEX prospects_url_idx ON prospects(linkedin_url);
+    CREATE UNIQUE INDEX prospects_job_url_uq ON prospects(job_id, linkedin_url) WHERE linkedin_url IS NOT NULL;
+    """,
+    # v8: clients (one per job company, matched by actions.company_key) with their contacts, notes, update day
+    # and time zone, and a copy of every client update the recruiter marked as sent.
+    """
+    CREATE TABLE clients (
+        id                  INTEGER PRIMARY KEY,
+        name                TEXT NOT NULL,
+        key                 TEXT NOT NULL UNIQUE,
+        contacts            TEXT,
+        notes               TEXT,
+        update_day          TEXT,
+        time_zone           TEXT,
+        last_update_sent_at TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    );
+    CREATE TABLE client_updates (
+        id        INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sent_at   TEXT NOT NULL,
+        since     TEXT,
+        body      TEXT NOT NULL
+    );
+    CREATE INDEX client_updates_client_idx ON client_updates(client_id, sent_at);
+    """,
+    # v9: each person's LinkedIn link in its matching form (normalize_linkedin), kept by add_candidate and _apply,
+    # so finding a saved profile is an index lookup, not a pass over everyone (imports were O(rows x people)).
+    # A row written some other way has no key yet; the second index keeps those few findable and quick to fill.
+    (
+        """
+        ALTER TABLE candidates ADD COLUMN linkedin_key TEXT;
+        CREATE INDEX candidates_linkedin_key_idx ON candidates(linkedin_key) WHERE linkedin_key IS NOT NULL;
+        CREATE INDEX candidates_linkedin_unkeyed_idx ON candidates(id)
+            WHERE linkedin_key IS NULL AND linkedin_url IS NOT NULL;
+        """,
+        _fill_linkedin_keys,
+    ),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
     "candidate": "Added a person", "profile": "Edited a profile", "pipeline_add": "Added to a pipeline",
     "stage_move": "Moved a stage", "job_created": "Created a job", "job_edit": "Edited a job",
     "stages_edit": "Edited a job's stages", "todo_added": "Added a to-do", "todo_done": "Marked a to-do done",
+    "prospects_proposed": "Proposed people for a Shortlist",
+    "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
+    "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
 }
+# AI actions listed on Changes as a record only: there is nothing to put back.
+AI_RECORD_KINDS = frozenset({"interview_outcome"})
+# How many saved values (cleared or replaced) the AI app may change on one person in an hour.
+AI_EDIT_BUDGET = 3
+AI_EDIT_WINDOW_MINUTES = 60
+# How many saved values the AI app may clear (empty), across everyone, in an hour.
+AI_CLEAR_CAP = 10
 AI_SOURCE = "AI app"
 
 
@@ -483,7 +582,9 @@ _MONTHS = {m: i for i, m in enumerate(
     ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
 _FULL_MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august", "september",
                 "october", "november", "december", "sept")
-_TIME = r"(?:[ T,]+(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?)?"
+# A time after a date: 14:30, 2:30 PM, 3pm, at 3 p.m. (an hour alone needs AM or PM).
+_TIME = (r"(?:[ T,]+(?:at\s+)?(?:(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?"
+         r"|(?P<h2>\d{1,2})\s*(?P<ap2>[ap]\.?m\.?)))?")
 _DATE_FORMS = (
     # 11/5/2026, 11/5/26, 5.11.2026 (day first only when the first number can't be a month)
     re.compile(r"(?P<a>\d{1,2})[/.-](?P<b>\d{1,2})[/.-](?P<y>\d{4}|\d{2})" + _TIME + r"$", re.I),
@@ -500,15 +601,64 @@ _DATE_FORMS = (
 )
 
 
-def _parse_loose(s: str) -> datetime | None:
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_RELATIVE = re.compile(r"(?:(?P<word>today|tomorrow|yesterday)|(?:(?P<which>next|this|last)\s+)?(?P<wd>[a-z]{3,9})\.?)"
+                       + _TIME + r"$", re.I)
+
+
+def _clock(g: dict[str, Any]) -> tuple[int, int, int] | None:
+    """(hour, minute, second) from a _TIME match, (0, 0, 0) when no time was given, None if it can't be a time."""
+    hour, minute, sec = int(g["h"] or g["h2"] or 0), int(g["mi"] or 0), int(g["s"] or 0)
+    ap = g["ap"] or g["ap2"]
+    if ap:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ap.lower().startswith("p") else 0)
+    return (hour, minute, sec) if hour < 24 and minute < 60 and sec < 60 else None
+
+
+def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
+    """'yesterday 3pm', 'today 10am', 'tomorrow 2:30 pm', 'next Tuesday 2pm', 'last Fri'. The day is counted on
+    the calendar of the zone typed after it (this computer's own when none). With no time the day reads as
+    midday, the same way a day with no time is shown elsewhere, so it isn't taken for a 12:00 AM time. 'today'
+    alone is midday or now, whichever is earlier."""
+    m = _RELATIVE.match(s)
+    if not m:
+        return None
+    g = m.groupdict()
+    now = datetime.now(zone) if zone is not None else datetime.now().astimezone()
+    today = now.date()
+    if g["word"]:
+        day = today + timedelta(days={"today": 0, "tomorrow": 1, "yesterday": -1}[g["word"].lower()])
+    else:
+        wd = g["wd"].lower()
+        target = next((i for i, full in enumerate(_WEEKDAYS) if full.startswith(wd)), None)
+        if target is None and wd in ("tues", "thur", "thurs", "weds"):
+            target = 1 if wd == "tues" else 2 if wd == "weds" else 3
+        if target is None:
+            return None
+        ahead = (target - today.weekday()) % 7
+        which = (g["which"] or "").lower()
+        if which == "last":
+            day = today - timedelta(days=(today.weekday() - target) % 7 or 7)
+        else:  # 'Tuesday' and 'this Tuesday' can be today; 'next Tuesday' is the next one after today
+            day = today + timedelta(days=ahead or (7 if which == "next" else 0))
+    if g["h"] is None and g["h2"] is None:
+        noon = datetime(day.year, day.month, day.day, 12)
+        if day == today and now.replace(tzinfo=None) < noon:
+            return now.replace(tzinfo=None, microsecond=0)
+        return noon
+    clock = _clock(g)
+    return datetime(day.year, day.month, day.day, *clock) if clock else None
+
+
+def _parse_loose(s: str, zone: tzinfo | None = None) -> datetime | None:
     """The date shapes people type in spreadsheets. None if it isn't one of them."""
-    low = s.lower()
-    if low in ("today", "now", "yesterday"):
-        today = datetime.now().astimezone()
-        if low == "now":
-            return today
-        day = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        return day - timedelta(days=1) if low == "yesterday" else day
+    if s.lower() == "now":
+        return datetime.now().astimezone()
+    relative = _parse_relative(s, zone)
+    if relative is not None:
+        return relative
     for form in _DATE_FORMS:
         m = form.match(s)
         if not m:
@@ -528,13 +678,11 @@ def _parse_loose(s: str) -> datetime | None:
             month, day = (b, a) if a > 12 >= b else (a, b)  # US order unless that can't be right
         else:
             month, day = int(g["m"]), int(g["d"])
-        hour, minute, sec = int(g["h"] or 0), int(g["mi"] or 0), int(g["s"] or 0)
-        if g.get("ap"):
-            if not 1 <= hour <= 12:
-                return None
-            hour = hour % 12 + (12 if g["ap"].lower().startswith("p") else 0)
+        clock = _clock(g)
+        if clock is None:
+            return None
         try:
-            out = datetime(year, month, day, hour, minute, sec)
+            out = datetime(year, month, day, *clock)
             if not g["y"] and out.date() < datetime.now().date():  # no year: the next one coming
                 out = out.replace(year=year + 1)
             return out
@@ -543,16 +691,104 @@ def _parse_loose(s: str) -> datetime | None:
     return None
 
 
+# Time zone words people type after a time. PT, PST and PDT all mean Pacific time (with daylight saving as it
+# falls on that day), since that is what someone typing "2 PM PST" in July means.
+_ZONE_WORDS = {
+    **dict.fromkeys(("pt", "pst", "pdt", "pacific"), "America/Los_Angeles"),
+    **dict.fromkeys(("mt", "mst", "mdt", "mountain"), "America/Denver"),
+    **dict.fromkeys(("ct", "cst", "cdt", "central"), "America/Chicago"),
+    **dict.fromkeys(("et", "est", "edt", "eastern"), "America/New_York"),
+    **dict.fromkeys(("akt", "akst", "akdt"), "America/Anchorage"),
+    **dict.fromkeys(("ht", "hst"), "Pacific/Honolulu"),
+    **dict.fromkeys(("utc", "gmt", "z"), "UTC"),
+}
+# Standard offsets (hours) and whether daylight saving applies, for when this computer has no zone database
+# (Windows without the tzdata package).
+_US_ZONES = {"America/Los_Angeles": (-8, True), "America/Denver": (-7, True), "America/Phoenix": (-7, False),
+             "America/Chicago": (-6, True), "America/New_York": (-5, True), "America/Anchorage": (-9, True),
+             "Pacific/Honolulu": (-10, False), "UTC": (0, False)}
+_US_ABBR = {"America/Los_Angeles": ("PST", "PDT"), "America/Denver": ("MST", "MDT"), "America/Phoenix": ("MST", "MST"),
+            "America/Chicago": ("CST", "CDT"), "America/New_York": ("EST", "EDT"), "America/Anchorage": ("AKST", "AKDT"),
+            "Pacific/Honolulu": ("HST", "HST")}
+_ZONE_TAIL = re.compile(r"^(?P<rest>.*\S)\s+\(?(?P<zone>[A-Za-z]+(?:/[A-Za-z0-9_+-]+)+|[A-Za-z]{1,8})\)?$")
+DATE_HELP = ("Use a form like 2026-11-09, 2026-11-09 1:00 PM, 2026-11-09T13:00:00-08:00 or "
+             "2026-11-09 1:00 PM America/Los_Angeles (PT, ET, CT and MT work too).")
+
+
+class _USZone(tzinfo):
+    """A US time zone with today's daylight saving rule (2nd Sunday in March to 1st Sunday in November, 2 AM)."""
+
+    def __init__(self, name: str, hours: int, dst: bool) -> None:
+        self._name, self._std, self._dst = name, timedelta(hours=hours), dst
+
+    def _is_dst(self, dt: datetime) -> bool:
+        if not self._dst:
+            return False
+        y = dt.year
+        start = datetime(y, 3, 8 + (6 - datetime(y, 3, 8).weekday()) % 7, 2)
+        end = datetime(y, 11, 1 + (6 - datetime(y, 11, 1).weekday()) % 7, 2)
+        return start <= dt.replace(tzinfo=None) < end
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        return self._std + self.dst(dt)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(hours=1) if dt is not None and self._is_dst(dt) else timedelta(0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        abbr = _US_ABBR.get(self._name)
+        if not abbr:
+            return self._name
+        return abbr[1] if dt is not None and self._is_dst(dt) else abbr[0]
+
+
+def zone_named(name: str) -> tzinfo | None:
+    """The time zone a word or IANA name means ('PT', 'est', 'America/Chicago'), or None if it isn't one."""
+    key = _ZONE_WORDS.get(name.strip().lower(), name.strip())
+    if key == "UTC":
+        return timezone.utc
+    if "/" not in key:
+        return None
+    key = next((k for k in _US_ZONES if k.lower() == key.lower()), key)
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(key)
+    except (ImportError, KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        pass
+    if key in _US_ZONES:
+        hours, dst = _US_ZONES[key]
+        return _USZone(key, hours, dst)
+    return None
+
+
+def _split_zone(s: str) -> tuple[str, tzinfo | None]:
+    """'2026-11-10 14:00 America/Los_Angeles' -> ('2026-11-10 14:00', its zone). A trailing word that isn't a
+    zone (like PM) stays put. An unknown IANA-looking name is an error, so a typo isn't read as local time."""
+    m = _ZONE_TAIL.match(s)
+    if not m:
+        return s, None
+    word = m.group("zone")
+    if word.lower() in ("am", "pm", "a", "p"):
+        return s, None
+    zone = zone_named(word)
+    if zone is None and "/" in word:
+        raise ValueError(f"Couldn't read the time zone {word!r}. Use a name like America/Los_Angeles, a short one "
+                         "like PT or ET, or an offset like 2026-11-09T13:00:00-08:00.")
+    return (m.group("rest"), zone) if zone is not None else (s, None)
+
+
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
     """Accept '2026-11-05', '2026-11-05 14:30', ISO with offset, '11/5/2026', '11/5/26',
-    '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'today', 'yesterday', or a datetime. Returns UTC ISO.
+    '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'Nov 12 3pm', 'today', 'yesterday 3pm', 'tomorrow 2:30 PM',
+    'next Tuesday 2pm', or a datetime. Returns UTC ISO.
 
-    A time with no zone is taken as this computer's local time, which is what
-    a recruiter means when they type one. Slash dates read month first (US),
-    unless the first number can't be a month.
+    A time can end with a zone: an IANA name ('America/Los_Angeles') or PT, ET, CT, MT (PST, EST... too),
+    or UTC. A time with no zone is taken as this computer's local time, which is what a recruiter means
+    when they type one. Slash dates read month first (US), unless the first number can't be a month.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return now_iso() if default_now else None
+    zone: tzinfo | None = None
     if isinstance(value, datetime):
         dt = value
     else:
@@ -560,13 +796,16 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
-            loose = _parse_loose(s)
-            if loose is None:
-                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-09, "
-                                 "2026-11-09 1:00 PM or Nov 9, 2026.") from None
-            dt = loose
+            s, zone = _split_zone(s)
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                loose = _parse_loose(s, zone)
+                if loose is None:
+                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
+                dt = loose
     if dt.tzinfo is None:
-        dt = dt.astimezone()  # local time
+        dt = dt.replace(tzinfo=zone) if zone is not None else dt.astimezone()  # else local time
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -771,11 +1010,99 @@ def stored_tags(text: str | None) -> list[str]:
     return split_tags(text)
 
 
+LINKEDIN_RULE_KEY = "linkedin_key_rule"
+# Saved email equals ?, ignoring case. The blank checks let SQLite use candidates_email_uq (a partial index).
+_EMAIL_MATCH = "lower(email) = lower(?) AND email IS NOT NULL AND email <> ''"
+
+
+def _linkedin_rule() -> str:
+    """A fingerprint of the LinkedIn matching code, so stored keys are worked out again when it changes."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for fn in (normalize_linkedin, _linkedin_parts, _clean):
+        code = fn.__code__
+        h.update(code.co_code + repr(code.co_consts).encode() + repr(code.co_names).encode())
+    return h.hexdigest()[:16]
+
+
+def _linkedin_parts(url: str) -> tuple[str, str] | None:
+    """(host, path) of a linkedin.com address (any subdomain), else None. A bare "linkedin.com/in/x" works."""
+    text = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+        text = "https://" + text.lstrip("/")
+    try:
+        parts = urlsplit(text)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not (host == "linkedin.com" or host.endswith(".linkedin.com")):
+        return None
+    return host, parts.path
+
+
+# Sales Navigator and Recruiter links point at a seat-only page, not the person's public profile.
+LINKEDIN_LEAD_PATHS = {"/sales/": "Sales Navigator", "/talent/": "LinkedIn Recruiter", "/recruiter/": "LinkedIn Recruiter"}
+
+
+def linkedin_lead_tool(url: str | None) -> str | None:
+    """'Sales Navigator' or 'LinkedIn Recruiter' for a link from those tools (it won't dedupe), else None."""
+    got = _linkedin_parts(url or "") if _clean(url) else None
+    if not got:
+        return None
+    path = got[1].lower()
+    return next((tool for prefix, tool in LINKEDIN_LEAD_PATHS.items() if path.startswith(prefix)), None)
+
+
+def linkedin_problem(url: str | None) -> str | None:
+    """Why this can't be saved as someone's LinkedIn URL, or None when it can (or it's blank)."""
+    if not _clean(url):
+        return None
+    if _linkedin_parts(url) is None:
+        return ("That LinkedIn URL isn't a linkedin.com address, so nothing was saved. Use a link like "
+                "https://www.linkedin.com/in/their-name, and put any other site in Website.")
+    tool = linkedin_lead_tool(url)
+    if tool:
+        return (f"That is a {tool} link, which only works inside {tool}, so nothing was saved. Use their profile "
+                "link instead, like https://www.linkedin.com/in/their-name.")
+    if not linkedin_slug_ok(url):
+        return ("That LinkedIn link doesn't end in a profile name (it has spaces, quotes or only dots after /in/), "
+                "so nothing was saved. Use a link like https://www.linkedin.com/in/their-name.")
+    return None
+
+
+_BAD_SLUG = re.compile(r"[\s\"'`<>\\]")
+
+
+def linkedin_slug_ok(url: str | None) -> bool:
+    """False for a /in/ link whose profile name is only dots ("in/..") or holds spaces, quotes, angle brackets or
+    backslashes ('in/ab"onmouseover=x'): junk that would still dedupe as if it were a person. True otherwise."""
+    got = _linkedin_parts(_clean(url) or "")
+    if not got:
+        return True
+    path = re.sub(r"^/mwlite(?=/)", "", re.sub(r"/{2,}", "/", got[1]), flags=re.I)
+    m = re.match(r"^/in(?:/([^/]*))?", path, re.I)
+    if not m:
+        return True
+    slug = unquote(m.group(1) or "").strip()
+    return bool(slug) and slug.strip(".") != "" and not _BAD_SLUG.search(slug)
+
+
 def normalize_linkedin(url: str | None) -> str | None:
-    """Canonical form so the same profile pasted two ways dedupes."""
+    """Canonical form so the same profile pasted two ways dedupes: https://linkedin.com/in/<slug>, without the
+    www or country subdomain, any /details/, /overlay/ or /recent-activity/ tail, query or fragment. The slug is
+    lower case and percent-decoded. (No "www": every URL saved before this has that form, so they still match.)"""
     url = _clean(url)
     if not url:
         return None
+    got = _linkedin_parts(url)
+    if got:
+        path = re.sub(r"/{2,}", "/", got[1])
+        path = re.sub(r"^/mwlite(?=/)", "", path, flags=re.I)
+        m = re.match(r"^/in/([^/]+)", path, re.I)
+        if m:
+            return "https://linkedin.com/in/" + unquote(m.group(1)).strip().lower()
+        return "https://linkedin.com" + path.lower().rstrip("/")
     u = url.lower()
     u = re.sub(r"^https?://", "", u)
     u = re.sub(r"^(www\.|[a-z]{2}\.)linkedin\.com", "linkedin.com", u)
@@ -930,6 +1257,32 @@ def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     return re.compile(rf"\b{body}{tail}", re.I)
 
 
+# Index columns to quote a match from, most useful first: about, skills, title, company, location, past roles, name.
+_SNIPPET_ORDER = (4, 5, 1, 2, 3, 6, 0)
+_HL_RE = re.compile(f"{HL_START}(.*?){HL_END}", re.S)
+
+
+def _match_snippet(snippets: list[str | None], patterns: list[list[re.Pattern[str]]]) -> str | None:
+    """One 'Match:' line that shows every query word found, not only the first: the most useful column's
+    excerpt, then the other columns that add a word it doesn't show ('…runs **Kubernetes**… · **Austin**')."""
+    picked: list[str] = []
+    covered: set[int] = set()
+    seen: set[str] = set()
+    for snip in snippets:
+        marked = [fold(m) for m in _HL_RE.findall(snip or "")]
+        if not marked:
+            continue
+        words = {i for i, ps in enumerate(patterns) for m in marked if any(p.search(m) for p in ps)}
+        new_words = set(marked) - seen
+        if not picked or words - covered or (new_words and len(covered) < len(patterns) and not words):
+            picked.append(snip)
+            covered |= words
+            seen |= set(marked)
+        if len(covered) == len(patterns) or len(picked) == 3:
+            break
+    return " · ".join(picked) if picked else None
+
+
 def _excerpt(body: str, pattern: re.Pattern[str], width: int = 60) -> str:
     text = re.sub(r"\s+", " ", body).strip()
     m = pattern.search(text)
@@ -1037,7 +1390,13 @@ def _job_change_body(job: dict[str, Any], fields: dict[str, Any]) -> str:
     parts = []
     for k, v in fields.items():
         label = JOB_FIELD_LABELS.get(k, k)
-        parts.append(f"{label} changed" if k == "description" else f"{label} {shown(k, job.get(k))} to {shown(k, v)}")
+        was, now = job.get(k), v
+        if was in (None, "") and now not in (None, ""):
+            parts.append(f"added {label}" if k == "description" else f"added {label} {shown(k, now)}")
+        elif now in (None, ""):
+            parts.append(f"{label} cleared (was {shown(k, was)})")
+        else:
+            parts.append(f"{label} changed" if k == "description" else f"{label} {shown(k, was)} to {shown(k, now)}")
     return ", ".join(parts)
 
 
@@ -1081,7 +1440,67 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Added a to-do: {r.get('todo_text') or 'a to-do'}"
     if kind == "todo_done":
         return f"Marked a to-do done: {r.get('todo_text') or 'a to-do'}"
+    if kind == "prospects_proposed":
+        n = len(new.get("prospect_ids") or [])
+        return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
+    if kind == "save_batch":
+        return _batch_summary(new, job if r.get("job_title") else None)
+    what = f": {new['summary']}" if new.get("summary") else ""
+    if kind == "interview_cancel":
+        return f"Cancelled an interview with {name}{what}"
+    if kind == "interview_move":
+        return f"Moved an interview with {name} to a new time{what}"
+    if kind == "interview_outcome":
+        label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
+        return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
     return AI_ACTION_KINDS.get(kind, "A change")
+
+
+def quoted(name: Any) -> str:
+    """A person's name as a write sentence repeats it: in double quotes, so an injected "name" reads as data."""
+    return '"' + " ".join(str(name or "").split()).replace('"', "'") + '"'
+
+
+def _batch_summary(new: dict[str, Any], job: str | None) -> str:
+    """'Saved 3 new people ("Ana Ruiz", "Bo Li" and 1 more) and updated 1 ("Wei Zhang") in one batch, and added 4
+    to Backend (Acme) in Sourced'."""
+    def people(n: int, names: list[str], adj: str = "") -> str:
+        shown = [quoted(x) for x in names[:2]]
+        more = n - len(shown)
+        listed = ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+        return f"{n} {adj}{'person' if n == 1 else 'people'}" + (f" ({listed})" if shown else "")
+
+    saved, updated = int(new.get("saved") or 0), int(new.get("updated") or 0)
+    bits = []
+    if saved:
+        bits.append("saved " + people(saved, list(new.get("saved_names") or []), "new "))
+    if updated:
+        bits.append("updated " + people(updated, list(new.get("updated_names") or [])))
+    text = (" and ".join(bits) or "saved nobody new") + " in one batch"
+    added = int(new.get("added") or 0)
+    if job and added:
+        text += f", and added {added} to {job} in {new.get('stage')}"
+    return text[:1].upper() + text[1:]
+
+
+def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    """What an AI action changed, so a newer action on the same thing can be found (see Store.ai_actions)."""
+    kind, cid, jid = r["kind"], r.get("candidate_id"), r.get("job_id")
+    if kind == "save_batch":
+        return (("batch", r["id"]),)
+    if kind == "candidate":
+        return (("person", cid),)
+    if kind == "profile":
+        return (("person", cid), ("profile", cid))
+    if kind in ("pipeline_add", "stage_move"):
+        return (("person", cid), ("job", jid), ("stage", cid, jid))
+    if kind == "job_created":
+        return (("job", jid),)
+    if kind in ("job_edit", "stages_edit"):
+        return (("job", jid), (kind, jid))
+    if kind.startswith("interview_"):
+        return (("person", cid), ("interview", r.get("target_id")))
+    return (("todo", r.get("target_id")),)
 
 
 class Store:
@@ -1106,11 +1525,13 @@ class Store:
         self._conn.execute("PRAGMA secure_delete = ON")
         self._conn.create_function("fold_name", 1, fold_name, deterministic=True)
         self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
+        self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
+        self._refresh_linkedin_keys()
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:
@@ -1127,6 +1548,28 @@ class Store:
                 except Exception:
                     self._conn.rollback()
                     raise
+
+    def _refresh_linkedin_keys(self) -> None:
+        """On open: fill linkedin_key where it is missing (a row written by another tool), and work every key out
+        again when the matching rule itself changed (a new normalize_linkedin), so stale keys never hide a match."""
+        with self._lock:
+            try:
+                with self._conn:
+                    mark = self._conn.execute("SELECT value FROM settings WHERE key = ?", (LINKEDIN_RULE_KEY,)).fetchone()
+                    everyone = not mark or mark[0] != _linkedin_rule()
+                    if everyone or self._conn.execute("SELECT 1 FROM candidates WHERE linkedin_key IS NULL"
+                                                      " AND linkedin_url IS NOT NULL LIMIT 1").fetchone():
+                        _fill_linkedin_keys(self._conn, everyone)
+            except sqlite3.OperationalError:  # another process holds the write lock: the next open fills them
+                pass
+
+    def _linkedin_owner(self, key: str, exclude_id: int = 0, cols: str = "*") -> dict[str, Any] | None:
+        """The first saved person (other than exclude_id) whose LinkedIn link matches this normalised key: an
+        index lookup, then the few rows written without a key (see v9)."""
+        return (self._row(f"SELECT {cols} FROM candidates WHERE linkedin_key = ? AND id <> ?"
+                          " ORDER BY linkedin_url = ? DESC, id LIMIT 1", (key, exclude_id, key))
+                or self._row(f"SELECT {cols} FROM candidates WHERE linkedin_key IS NULL AND linkedin_url IS NOT NULL"
+                             " AND id <> ? AND li_key(linkedin_url) = ? ORDER BY id LIMIT 1", (exclude_id, key)))
 
     @contextmanager
     def _write(self):
@@ -1265,6 +1708,7 @@ class Store:
         if row is not None:
             row["tags"] = stored_tags(row.get("tags"))
             row.pop("history_text", None)
+            row.pop("linkedin_key", None)
         return row
 
     def _prepare(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -1283,6 +1727,9 @@ class Store:
                 raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
                                  f"The limit is {limit:,}, so nothing was saved.")
         if "linkedin_url" in out:
+            problem = linkedin_problem(out["linkedin_url"])
+            if problem:
+                raise ValueError(problem)
             out["linkedin_url"] = normalize_linkedin(out["linkedin_url"])
         if "last_contacted_at" in out and out["last_contacted_at"]:
             out["last_contacted_at"] = parse_when(out["last_contacted_at"])
@@ -1316,6 +1763,8 @@ class Store:
             raise ValueError("A candidate needs a name.")
         ts = now_iso()
         fields["created_at"] = fields["updated_at"] = ts
+        if fields.get("linkedin_url"):
+            fields["linkedin_key"] = normalize_linkedin(fields["linkedin_url"])
         cols = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
         with self._lock, self._conn:
@@ -1336,22 +1785,26 @@ class Store:
     def find_duplicate(self, email: str | None = None, linkedin_url: str | None = None) -> dict[str, Any] | None:
         email = _clean(email)
         if email:
-            hit = self._row("SELECT * FROM candidates WHERE lower(email) = lower(?)", (email,))
+            hit = self._row(f"SELECT * FROM candidates WHERE {_EMAIL_MATCH}", (email,))
             if hit:
                 return self._hydrate(hit)
         li = normalize_linkedin(linkedin_url)
-        if li:
-            return self._hydrate(self._row("SELECT * FROM candidates WHERE linkedin_url = ?", (li,)))
+        if li:  # a URL saved before links were cut to /in/<slug> (with a /details/ tail) still matches
+            return self._hydrate(self._linkedin_owner(li))
         return None
 
     def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
         """The first prepared email or LinkedIn value in `fields` that someone else already has."""
-        for f, sql in (("email", "lower(email) = lower(?)"), ("linkedin_url", "linkedin_url = ?")):
-            if fields.get(f):
-                owner = self._row(f"SELECT id, name FROM candidates WHERE {sql} AND id <> ?",
-                                  (fields[f], candidate_id or 0))
-                if owner:
-                    return DuplicateValue(f, owner)
+        if fields.get("email"):
+            owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?",
+                              (fields["email"], candidate_id or 0))
+            if owner:
+                return DuplicateValue("email", owner)
+        key = normalize_linkedin(fields.get("linkedin_url"))
+        if key:
+            owner = self._linkedin_owner(key, candidate_id or 0, "id, name")
+            if owner:
+                return DuplicateValue("linkedin_url", owner)
         return None
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
@@ -1380,16 +1833,15 @@ class Store:
         same email, LinkedIn URL or phone number, or a name that could be theirs ('Mike Okonkwo' and
         'Michael Okonkwo', 'Priya R.' and 'Priya Raman') at the same current company."""
         c = self.get_candidate(candidate_id)
-        key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
+        key, phone, li = fold_name(c["name"]), phone_key(c.get("phone")), normalize_linkedin(c.get("linkedin_url"))
         rows = self._rows(
             """SELECT * FROM candidates WHERE id <> ? AND (
                    (? <> '' AND fold_name(name) = ?)
                    OR (? IS NOT NULL AND lower(email) = lower(?))
-                   OR (? IS NOT NULL AND linkedin_url = ?)
+                   OR (? IS NOT NULL AND coalesce(linkedin_key, li_key(linkedin_url)) = ?)
                    OR (? IS NOT NULL AND phone_key(phone) = ?))
                ORDER BY updated_at DESC LIMIT 10""",
-            (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
-             phone, phone))
+            (candidate_id, key, key, c.get("email"), c.get("email"), li, li, phone, phone))
         if _clean(c.get("current_company")) and len(rows) < 10:
             seen = {r["id"] for r in rows}
             rows += [r for r in self._rows(
@@ -1443,7 +1895,8 @@ class Store:
             elif cur != v:
                 kept.append(k)
         history = work_history or self._history_for_new_role(existing["id"], row, merged)
-        cand = self._update(existing["id"], merged, history, by=by, merge=True)
+        cand = self._update(existing["id"], merged, history, by=by, merge=True,
+                            derived=() if work_history or history is None else ("work_history",))
         cand["_kept"] = kept
         return cand, False
 
@@ -1499,7 +1952,7 @@ class Store:
         return self._update(candidate_id, fields, work_history, by=by)
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
-                *, by: str, merge: bool = False) -> dict[str, Any]:
+                *, by: str, merge: bool = False, derived: tuple[str, ...] = ()) -> dict[str, Any]:
         with self._lock, self._conn:
             old, new = self._diff(candidate_id, fields, work_history)
             clash = self._clash(candidate_id, new)
@@ -1508,7 +1961,8 @@ class Store:
             if new:
                 self._apply(candidate_id, new)
                 body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
-                self._record_change(candidate_id, old, new, by, body)
+                self._record_change(candidate_id, old, new, by, body,
+                                    derived=tuple(k for k in derived if k in new))
         cand = self.get_candidate(candidate_id)
         cand["_changed"] = list(new)
         return cand
@@ -1531,6 +1985,8 @@ class Store:
     def _apply(self, candidate_id: int, new: dict[str, Any]) -> None:
         """Write already-prepared values. Call inside a transaction."""
         cols = {k: v for k, v in new.items() if k != "work_history"}
+        if "linkedin_url" in cols:
+            cols["linkedin_key"] = normalize_linkedin(cols["linkedin_url"])
         cols["updated_at"] = now_iso()
         sets = ", ".join(f"{k} = ?" for k in cols)
         self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))
@@ -1540,12 +1996,14 @@ class Store:
             self._write_history(candidate_id, new["work_history"] or [])
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
-                       body: str, undo_of: int | None = None) -> int:
+                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = ()) -> int:
         by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
         data: dict[str, Any] = {"by": by, "old": old, "new": new}
         if undo_of:
             data["undo_of"] = undo_of
+        if derived:  # changed only because another field did (work history following a new title)
+            data["derived"] = list(derived)
         tid = self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by], json.dumps(data)),
@@ -1633,9 +2091,9 @@ class Store:
         if app is None or app["stage"].lower() != (move["new"] or "").lower():
             raise ValueError("They were moved again since, so there is nothing to undo.")
         ts = now_iso()
-        if move.get("old"):
+        if move.get("old"):  # back to the stage they were in, and since when, so "stuck for 20 days" stays right
             self._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
-                               (move["old"], ts, app["id"]))
+                               (move["old"], data.get("old_since") or ts, app["id"]))
             self._conn.execute(
                 "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
                 " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)",
@@ -1685,8 +2143,160 @@ class Store:
                 except ValueError:
                     r[k] = None
             r["summary"] = _ai_summary(r)
-            r["undoable"] = not r["undone_at"]
+            r["record"] = r["kind"] in AI_RECORD_KINDS
+            r["blocked"] = None if r["undone_at"] or r["record"] else self._ai_blocker(r)
+            r["undoable"] = not r["undone_at"] and not r["record"] and not r["blocked"]
+        # Something the AI app changed again later comes back once that newer change is undone, so Undo all
+        # and "Undo this and everything after" still count it; its own Undo waits for the newer one.
+        later: dict[tuple[Any, ...], int] = {}
+        for r in sorted(rows, key=lambda r: r["id"], reverse=True):
+            keys = _ai_keys(r)  # the last one is the thing itself; the others are what it belongs to
+            chained = r["kind"] not in ("candidate", "job_created") or "pipeline" in (r["blocked"] or "")
+            if r["blocked"] and chained and later.get(keys[-1], 0) > r["id"]:
+                r["after_newer"] = True
+                r["blocked"] = "your AI app changed it again later. Undo that first"
+            if not r["undone_at"] and not r["record"]:
+                for k in keys:
+                    later[k] = max(later.get(k, 0), r["id"])
+        for r in rows:
+            r["undo_pending"] = r["undoable"] or bool(r.get("after_newer"))
+        self._fold_batches(rows)
         return rows
+
+    def _fold_batches(self, rows: list[dict[str, Any]]) -> None:
+        """A save_candidates batch is one row on Changes: its own state follows the saves and adds it made
+        (undone once they all are, undoable while any is). Each of those carries `batch_id`. The batch row
+        never counts as pending itself, so Undo all doesn't count its changes twice."""
+        by_id = {r["id"]: r for r in rows}
+        for b in (r for r in rows if r["kind"] == "save_batch"):
+            ids = [i for i in ((b.get("new_data") or {}).get("action_ids") or []) if isinstance(i, int)]
+            kids = []
+            for i in ids:
+                kid = by_id[i] if i in by_id else next(iter(self.ai_actions(action_id=i)), None)
+                if kid is not None:
+                    kid["batch_id"] = b["id"]
+                    kids.append(kid)
+            b["children"] = [k["id"] for k in kids]
+            b["record"], b["undo_pending"] = False, False
+            if not b["undone_at"] and kids and all(k["undone_at"] for k in kids):
+                b["undone_at"] = max(k["undone_at"] for k in kids)
+            if not b["undone_at"] and not kids:
+                b["undone_at"] = b["at"]  # everything it saved was taken out since
+            b["undoable"] = not b["undone_at"] and any(k["undo_pending"] for k in kids)
+            b["blocked"] = None if b["undone_at"] or b["undoable"] else next(
+                (k["blocked"] for k in kids if k.get("blocked")), "it was changed since")
+
+    def _ai_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why one AI change can't be undone any more (short, for Changes), or None if it still can."""
+        kind, old, new = a["kind"], a.get("old_data") or {}, a.get("new_data") or {}
+        try:
+            if kind == "profile":
+                d = a.get("change_data") or {}
+                if d.get("undone_at"):
+                    return "already undone on the timeline"
+                if not d.get("old"):
+                    return "nothing to put back"
+                row = self._row("SELECT * FROM candidates WHERE id = ?", (a["candidate_id"],)) or {}
+                hist = self.work_history(a["candidate_id"]) if "work_history" in d["new"] else None
+                same = [k for k in d["old"] if (hist if k == "work_history" else row.get(k)) == d["new"].get(k)]
+                return None if same else "those details were changed again since"
+            if kind in ("pipeline_add", "stage_move"):
+                app = self._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?",
+                                (a["candidate_id"], a["job_id"]))
+                if app is None:
+                    return "they were taken out of that job since"
+                return None if app["stage"].lower() == (new.get("stage") or "").lower() else "they were moved again since"
+            if kind == "candidate":
+                reason = self._candidate_touched(a["candidate_id"])
+                return reason.split(".")[0].lower() if reason else None
+            if kind == "job_created":
+                reason = self._job_touched(a["job_id"], new)
+                return reason.split(".")[0].lower() if reason else None
+            if kind == "job_edit":
+                job = self._row("SELECT * FROM jobs WHERE id = ?", (a["job_id"],)) or {}
+                fields = [k for k in new if not k.startswith("_")]
+                return None if any(job.get(k) == new[k] for k in fields) else "those details were changed again since"
+            if kind == "stages_edit":
+                shape = [(s["id"], s["name"], s["outcome"]) for s in sorted(new.get("stages") or [],
+                                                                         key=lambda s: s["position"])]
+                now = [(s["id"], s["name"], s["outcome"]) for s in self.job_stages(a["job_id"])]
+                return None if now == shape else "its stages were changed again since"
+            if kind in ("todo_added", "todo_done"):
+                s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
+                if kind == "todo_added":
+                    return "that to-do is done" if s is None or s["done_at"] else None
+                return None if s is not None and s["done_at"] == new.get("done_at") else "that to-do was changed since"
+            if kind in ("interview_cancel", "interview_move"):
+                reason = self._interview_blocker(a)
+                return reason.rstrip(".").lower() if reason else None
+        except (NotFound, ValueError):
+            return "it is gone"
+        return None
+
+    def _interview_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why an AI interview cancel or reschedule can't be put back: the interview changed again since."""
+        new = a.get("new_data") or {}
+        t = self._row("SELECT at, data FROM timeline WHERE id = ? AND kind = 'interview'", (a["target_id"],))
+        if t is None:
+            return "That interview is gone from the timeline."
+        data = json.loads(t["data"]) if t.get("data") else {}
+        if t["at"] != new.get("at") or data != (new.get("data") or {}):
+            return "That interview was changed again since."
+        return None
+
+    def ai_edits_this_hour(self, candidate_id: int, minutes: int = AI_EDIT_WINDOW_MINUTES) -> int:
+        """How many saved values the AI app cleared or replaced on this person in the last hour (filling an
+        empty field doesn't count, nor does a work history that only followed a new title or company)."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n = 0
+        for r in self._rows("SELECT data FROM timeline WHERE candidate_id = ? AND kind = ? AND source = ?"
+                            " AND created_at >= ?", (candidate_id, CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived = set(data.get("derived") or ())
+            n += sum(1 for k, v in (data.get("old") or {}).items() if k not in derived and v not in (None, "", []))
+        return n
+
+    def ai_clears_this_hour(self, minutes: int = AI_EDIT_WINDOW_MINUTES) -> dict[str, Any]:
+        """Saved values the AI app emptied in the last hour, across everyone: {"count", "people", "last"}.
+        Undone clears still count, so undoing doesn't reopen the limit for the same AI session."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n, people, last = 0, set(), None
+        for r in self._rows("SELECT candidate_id, data, created_at FROM timeline WHERE kind = ? AND source = ?"
+                            " AND created_at >= ? ORDER BY id", (CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived, new = set(data.get("derived") or ()), data.get("new") or {}
+            hit = sum(1 for k, v in (data.get("old") or {}).items()
+                      if k not in derived and v not in (None, "", []) and new.get(k) in (None, "", []))
+            if hit:
+                n, last = n + hit, r["created_at"]
+                people.add(r["candidate_id"])
+        return {"count": n, "people": len(people), "last": last}
+
+    def ai_clears_left(self, n: int) -> bool:
+        """Whether the AI app may clear n more saved values now (at most AI_CLEAR_CAP an hour, across everyone)."""
+        return n <= 0 or self.ai_clears_this_hour()["count"] + n <= AI_CLEAR_CAP
+
+    def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
+                      work_history: list[dict[str, Any]] | None = None) -> list[str]:
+        """The saved (non-empty) fields this update would clear or replace."""
+        old, _new = self._diff(candidate_id, self._prepare(data), work_history)
+        return [k for k, v in old.items() if v not in (None, "", [])]
+
+    def ai_edit_budget_left(self, candidate_id: int, overwrites: Iterable[str]) -> bool:
+        """Whether the AI app may also clear or replace these saved values on this person now. The first
+        change in an hour always may (a refresh replaces several at once); after that, at most
+        AI_EDIT_BUDGET saved values in the hour."""
+        n = len(list(overwrites))
+        if not n:
+            return True
+        done = self.ai_edits_this_hour(candidate_id)
+        return not done or done + n <= AI_EDIT_BUDGET
 
     def ai_action(self, action_id: int) -> dict[str, Any]:
         rows = self.ai_actions(action_id=action_id)
@@ -1719,6 +2329,8 @@ class Store:
         if a["undone_at"]:
             raise ValueError("That change was already undone.")
         kind, what = a["kind"], a["summary"]
+        if kind == "save_batch":
+            return self._undo_save_batch(a, by, before_delete)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
@@ -1764,11 +2376,48 @@ class Store:
                 if s is None or s["done_at"] != new.get("done_at"):
                     raise ValueError("That to-do was changed again since.")
                 self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
+            elif kind == "prospects_proposed":
+                note = self._undo_proposed(action_id, new)
+            elif kind in ("interview_cancel", "interview_move"):
+                reason = self._interview_blocker(a)
+                if reason:
+                    raise ValueError(reason)
+                self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
+                                   (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
+            elif kind in AI_RECORD_KINDS:
+                raise ValueError("How an interview went stays on the timeline as a record.")
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
                                (now_iso(), note, action_id))
         return what + (f" ({note})" if note else "")
+
+    def _undo_save_batch(self, a: dict[str, Any], by: str, before_delete: Callable[[], Any] | None) -> str:
+        """Undo what one save_candidates call did, newest first: its job adds, its profile updates (put back as
+        they were) and the people it added (taken out again, as Undo does for one person, once nothing else
+        holds them). Anything changed since stays, and the note says so."""
+        done, left = 0, []
+        for cid in sorted(a.get("children") or [], reverse=True):
+            try:
+                kid = self.ai_action(cid)
+            except NotFound:
+                continue  # went with a person taken out just before
+            if kid["undone_at"]:
+                continue
+            try:
+                self.undo_ai_action(cid, by=by, before_delete=before_delete)
+                done += 1
+            except NotFound:
+                continue
+            except ValueError as exc:
+                left.append(f"{kid['summary']} ({str(exc).rstrip('.')})")
+        if not done and left:
+            raise ValueError("Nothing in it could be undone: " + "; ".join(left) + ".")
+        note = (f"left {len(left)} as {'it is' if len(left) == 1 else 'they are'}: " + "; ".join(left)) if left else None
+        with self._write():
+            self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
+                               (now_iso(), note, a["id"]))
+        return a["summary"] + (f" ({note})" if note else "")
 
     def _candidate_touched(self, candidate_id: int) -> str | None:
         """Why an AI-added person can't simply be taken out again: someone else has worked on them since."""
@@ -1799,7 +2448,23 @@ class Store:
             return "You added a to-do for it, so it stays."
         if made and self._job_shape(job_id) != made:
             return "It was edited since, so it stays."
+        if self._row("SELECT 1 FROM prospects WHERE job_id = ? AND status <> 'proposed'", (job_id,)):
+            return "You reviewed its Shortlist, so it stays."
         return None
+
+    def _undo_proposed(self, action_id: int, new: dict[str, Any]) -> str | None:
+        """Take back the people one propose_candidates call put on a Shortlist that are still waiting. Anyone
+        the recruiter already kept or passed stays as they decided. Call inside a transaction."""
+        ids = [i for i in (new.get("prospect_ids") or []) if isinstance(i, int)]
+        marks = ", ".join("?" * len(ids)) or "NULL"
+        rows = self._rows(f"SELECT id, status FROM prospects WHERE id IN ({marks}) AND batch_id = ?", (*ids, action_id))
+        waiting = [r["id"] for r in rows if r["status"] == "proposed"]
+        decided = len(rows) - len(waiting)
+        if not waiting:
+            raise ValueError("You already kept or passed everyone in it." if decided
+                             else "They are no longer on the Shortlist.")
+        self._conn.execute(f"DELETE FROM prospects WHERE id IN ({', '.join('?' * len(waiting))})", waiting)
+        return f"left {decided} you already kept or passed" if decided else None
 
     def _undo_job_edit(self, job_id: int, old: dict[str, Any], new: dict[str, Any]) -> str | None:
         job = self._row("SELECT * FROM jobs WHERE id = ?", (job_id,)) or {}
@@ -1995,11 +2660,12 @@ class Store:
 
     # -------------------------------------------------------------- timeline
     def log(self, candidate_id: int, kind: str, body: str | None = None, *, at: str | datetime | None = None,
-            job_id: int | None = None, source: str | None = None) -> dict[str, Any]:
+            job_id: int | None = None, source: str | None = None,
+            interviewer: str | None = None) -> dict[str, Any]:
         """Add a note, call, email, message, meeting or interview to the candidate's timeline.
 
         Logging the same thing twice (same kind, time and text) is a no-op, so
-        an AI re-reading an inbox doesn't double up.
+        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
         """
         kind = (kind or "").strip().lower()
         if kind not in TIMELINE_KINDS or kind in ("stage", CHANGE_KIND):
@@ -2014,6 +2680,9 @@ class Store:
         if job_id is not None:
             self.get_job(job_id)
         when = parse_when(at)
+        who = _clean(interviewer) if kind == "interview" else None
+        if who and len(who) > 200:
+            raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM timeline WHERE candidate_id = ? AND kind = ? AND at = ? AND coalesce(body, '') = ?",
@@ -2033,6 +2702,12 @@ class Store:
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
                         (when, candidate_id, when),
                     )
+            if who:  # who runs the interview lives in its data, like its status (a re-log fills it in)
+                raw = self._conn.execute("SELECT data FROM timeline WHERE id = ?", (entry_id,)).fetchone()["data"]
+                old = json.loads(raw) if raw else {}
+                if not old.get("interviewer"):
+                    self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?",
+                                       (json.dumps({**old, "interviewer": who}), entry_id))
         return self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
@@ -2076,9 +2751,12 @@ class Store:
     def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
                          restore: bool = False, outcome: str | None = None, note: str | None = None,
                          reason: str | None = None, candidate_id: int | None = None,
-                         by: str = "app") -> dict[str, Any]:
+                         interviewer: str | None = None, keep: bool = False, by: str = "app") -> dict[str, Any]:
         """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
-        restore, or record how it went.
+        restore, record how it went, or name the interviewer ('' clears it).
+
+        keep marks an interview the recruiter chose to keep after its candidate left the job (or was hired),
+        so Today stops asking whether to cancel it (until they're moved out again).
 
         outcome: passed, not passed or no show, with an optional note, only once the interview's time
         has come. Nothing is ever deleted; the old time is kept in the entry's data as `rescheduled_from`
@@ -2116,12 +2794,30 @@ class Store:
             data["outcome_note"] = _clean(note)
         if reason is not None:
             data["reschedule_note"] = _clean(reason)
-        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None):
-            raise ValueError("Say what to change: a new time, cancel, or an outcome.")
+        if interviewer is not None:
+            who = _clean(interviewer)
+            if who and len(who) > 200:
+                raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
+            if who:
+                data["interviewer"] = who
+            else:
+                data.pop("interviewer", None)
+        if keep:
+            data["kept_at"] = ts
+        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None
+                or interviewer is not None or keep):
+            raise ValueError("Say what to change: a new time, cancel, an outcome or the interviewer.")
         data["updated_by"] = CHANGE_SOURCES.get(by, by)
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
+            if by == "ai":  # on Changes: a cancel or a new time can be undone, an outcome is listed as a record
+                kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
+                        else "interview_outcome" if outcome is not None or note is not None else None)
+                if kind:
+                    self._log_ai(kind, candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), target_id=entry_id,
+                                 old={"at": iv["at"], "data": iv["data"]},
+                                 new={"at": new_at, "data": data, "summary": iv.get("body")})
             if outcome is not None and data["outcome"] != "no_show" and new_at <= ts:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
@@ -2234,17 +2930,19 @@ class Store:
                                      snippet=_excerpt(body, pattern) if body else None))
             return out
 
+        patterns = [[_word_pattern(f, t.prefix) for f in (*t.forms, *t.names)] for t in terms]
+
         def ranked(match: str, exclude: list[int], closest: bool) -> tuple[int, Callable[[int, int], list]]:
             ex = " AND c.id NOT IN (SELECT value FROM json_each(?))" if exclude else ""
             args = (match, *params, *([json.dumps(exclude)] if exclude else []))
             n = self._row(f"SELECT count(*) AS n {base}{ex}", args)["n"]
 
             def fetch(off: int, k: int) -> list[SearchHit]:
+                snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}"
+                                  for i in _SNIPPET_ORDER)
                 rows = self._rows(
                     # column weights: name, title, company, location, about, tags, past roles
-                    f"""SELECT c.*,
-                               snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
-                               snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
+                    f"""SELECT c.*, {snips},
                                bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
                         {base}{ex}
                         ORDER BY _score, c.id LIMIT ? OFFSET ?""",
@@ -2252,9 +2950,7 @@ class Store:
                 )
                 out = []
                 for r in rows:
-                    about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
-                    if HL_START in (about_snip or ""):
-                        snippet = about_snip  # the About text is the most useful context to show
+                    snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
                     score = r.pop("_score")
                     out.append(SearchHit(candidate=self._hydrate(r), score=score, closest=closest,
                                          snippet=snippet if HL_START in (snippet or "") else None))
@@ -2288,8 +2984,8 @@ class Store:
     def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
         """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
 
-        A job they're in whose title or company has the word, or a note, call, email or interview
-        on their timeline that mentions it. Read at query time, so nothing extra is stored."""
+        A job they're in whose title or company has the word, where they were found (Found via), or a note,
+        call, email or interview on their timeline that mentions it. Read at query time, so nothing extra is stored."""
         found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
         patterns = [_word_pattern(f, term.prefix) for f in term.forms]
         likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
@@ -2306,14 +3002,24 @@ class Store:
             if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
                 job = r["title"] + (f" ({r['company']})" if r["company"] else "")
                 found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+        for r in self._rows(  # where they came from ("Referral from Alex")
+                f"SELECT id, source FROM candidates WHERE {any_like.format(col='source')} ORDER BY id", likes):
+            if r["id"] not in found and first(r["source"]):
+                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, patterns[0])
         marks = ", ".join("?" for _ in _SEARCHED_KINDS)
-        for r in self._rows(
-                f"SELECT candidate_id, body FROM timeline WHERE kind IN ({marks}) AND ({any_like.format(col='body')})"
-                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes)):
+        who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
+        for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
+                f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
+                f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
+                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
             if r["candidate_id"] not in found:
-                hit = first(r["body"])
+                text = r["body"] or ""
+                if r["kind"] == "interview" and isinstance(r["interviewer"], str) and r["interviewer"].strip():
+                    text = (text + " " if text else "") + f"(interviewer: {r['interviewer'].strip()})"
+                hit = first(text)
                 if hit:
-                    found[r["candidate_id"]] = ("Matched a note", r["body"], hit)
+                    an = "an" if r["kind"][0] in "aeiou" else "a"
+                    found[r["candidate_id"]] = (f"Matched {an} {r['kind']}", text, hit)
         return found
 
     def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
@@ -2517,8 +3223,11 @@ class Store:
         for s in stages:
             if _stage_key(s["name"]) == key:
                 return s
-        # An unambiguous start of a name is enough: "tech" finds "Technical interview".
-        starts = [s for s in stages if key and _stage_key(s["name"]).startswith(key)]
+        starts: list[dict[str, Any]] = []
+        for test in (_stage_same, _stage_starts):  # short forms ("HM screen"), then an unambiguous start
+            starts = [s for s in stages if key and test(key, s["name"])]
+            if starts:
+                break
         if len(starts) == 1:
             return starts[0]
         listed = ", ".join(s["name"] for s in stages)
@@ -2684,6 +3393,15 @@ class Store:
         if changed:
             raise ValueError(f"No change made. Ask the recruiter to change what {prior[changed[0]['id']]['name']} "
                              "counts as in the app.")
+        # A new name that reads as another outcome ("Hired" to "Sourced2") would mislead everyone who reads the
+        # board or a status update, though the stage still counts as before.
+        for s in after:
+            was = prior.get(s["id"])
+            if was and s["name"] != was["name"] and stage_outcome(s["name"]) != s["outcome"]:
+                raise ValueError(
+                    f"No change made. {s['name']} reads as {_OUTCOME_WORDS.get(stage_outcome(s['name']))}, but "
+                    f"{was['name']} counts as {_OUTCOME_WORDS.get(s['outcome'], s['outcome'])}. Ask the recruiter "
+                    f"to rename {was['name']} in the app, or pick a name that reads the same way.")
 
     def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""
@@ -2761,8 +3479,8 @@ class Store:
                 source = data = None
                 if by in CHANGE_SOURCES:
                     source = CHANGE_SOURCES[by]
-                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"],
-                                                              "new": s["name"]}})
+                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"], "new": s["name"]},
+                                       "old_since": app["stage_changed_at"]})
                 tid = self._conn.execute(
                     "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
                     " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),
@@ -3020,6 +3738,33 @@ def _stage_name(name: Any) -> str:
 def _stage_key(name: str | None) -> str:
     """'Phone-screen ' and 'phone screen' compare equal."""
     return re.sub(r"[\W_]+", " ", name or "").strip().lower()
+
+
+# Short forms people use for stage words: "HM screen" is "Hiring manager screen".
+_STAGE_SHORT = {"hm": "hiring manager", "mgr": "manager", "mgmt": "management", "f2f": "face to face",
+                "tech": "technical", "intvw": "interview", "int": "interview", "rec": "recruiter",
+                "ta": "talent acquisition", "onsite": "on site", "dq": "disqualified"}
+
+
+def _stage_words(key: str) -> list[str]:
+    """A stage key with short forms spelled out and plurals dropped: 'hm screens' -> ['hiring', 'manager', 'screen']."""
+    words = " ".join(_STAGE_SHORT.get(w, w) for w in key.split()).split()
+    return [w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words]
+
+
+def _stage_same(key: str, stage: str) -> bool:
+    """The same stage once short forms and plurals are allowed for: 'HM screen', 'Interview', 'onsite'."""
+    a, b = _stage_words(key), _stage_words(_stage_key(stage))
+    return a == b or "".join(a) == "".join(b)
+
+
+def _stage_starts(key: str, stage: str) -> bool:
+    """'tech' starts 'Technical interview'; 'tech int' and 'hm scr' start each word in turn."""
+    full = _stage_key(stage)
+    if full.startswith(key):
+        return True
+    a, b = _stage_words(key), _stage_words(full)
+    return len(a) <= len(b) and all(y.startswith(x) for x, y in zip(a, b))
 
 
 def _stage_plan(names: list[str | dict[str, Any]]) -> list[tuple[str, str]]:

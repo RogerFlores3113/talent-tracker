@@ -6,6 +6,9 @@
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
+//   data-print                on a button: open the browser's print dialog (print or save as PDF)
+//   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
+//                             (a submit button's own data-busy wins when that button sent it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -59,9 +62,30 @@
     copyText(text, note, btn.dataset.copyMsg || "Copied");
   });
 
+  document.addEventListener("click", e => {
+    if (e.target.closest && e.target.closest("button[data-print]")) window.print();
+  });
+
   document.addEventListener("submit", e => {
     const form = e.target;
-    if (form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) e.preventDefault();
+    if (form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) { e.preventDefault(); return; }
+    if (form.dataset && form.dataset.busy) {
+      // A big import takes a while: say so, and don't let a second click send it again.
+      if (form.dataset.sent) { e.preventDefault(); return; }
+      form.dataset.sent = "1";
+      form.setAttribute("aria-busy", "true");
+      const note = form.querySelector("[data-busy-note]");
+      // The button that sent it can say what it does instead ("Check again" saves nothing).
+      if (note) note.textContent = (e.submitter && e.submitter.dataset.busy) || form.dataset.busy;
+    }
+  });
+  // Coming back to a page from the browser's history: let its forms be sent again.
+  window.addEventListener("pageshow", () => {
+    document.querySelectorAll("form[data-sent]").forEach(f => {
+      delete f.dataset.sent; f.removeAttribute("aria-busy");
+      const note = f.querySelector("[data-busy-note]");
+      if (note) note.textContent = "";
+    });
   });
 
   document.addEventListener("change", e => {
