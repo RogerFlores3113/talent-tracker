@@ -6,6 +6,7 @@
 <div class="sec-head">
   <div>
     <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %} {{ sample_badge(job.id in sample_ids()[1]) }}</h1>
+    {% set ai_note = ai_status_note(job.id) %}{% if ai_note %}<p class="fine ai-status"><a href="/changes?who=ai">{{ ai_note }}</a></p>{% endif %}
     <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
     <p class="fine job-facts">{{ nums.active }} in the running · {{ nums.hired }} {{ nums.word }}{% if nums.openings > 1 %}, {{ nums.openings }} openings{% endif %}{% if nums.out %} · {{ nums.out }} out{% endif %}
       {%- if job.hiring_manager %} · Hiring manager: {% if job.hiring_manager_email %}<a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager }}</a>{% else %}{{ job.hiring_manager }}{% endif %}{% elif job.hiring_manager_email %} · Hiring manager: <a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager_email }}</a>{% endif %}

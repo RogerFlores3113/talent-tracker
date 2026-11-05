@@ -253,6 +253,37 @@ def ai_identity_changes(store: Store, now: datetime | None = None, days: int = 7
     return out
 
 
+def ai_pipeline_changes(store: Store, now: datetime | None = None, days: int = 7) -> list[dict[str, Any]]:
+    """Today items for what the AI app did to pipelines lately (and nobody undid): people it moved out
+    of a job, and jobs it closed or put on hold."""
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
+    out_by_job: dict[int, dict[str, Any]] = {}
+    for r in store._rows(
+            """SELECT a.id, a.job_id, a.at, j.title FROM ai_actions a JOIN jobs j ON j.id = a.job_id
+               JOIN timeline t ON t.id = a.target_id
+               JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(t.body)
+               WHERE a.kind = 'stage_move' AND a.undone_at IS NULL AND a.at >= ? AND s.outcome = 'lost'
+               ORDER BY a.id DESC""", (since,)):
+        item = out_by_job.setdefault(r["job_id"], {"id": r["id"], "at": r["at"], "title": r["title"], "n": 0})
+        item["n"] += 1
+    items = [{"key": f"aimove:{i['id']}", "kind": "ai_change", "rank": 1, "when": i["at"], "job_id": job_id,
+              "title": f"Your AI app moved {i['n']} {'person' if i['n'] == 1 else 'people'} out of {i['title']}. "
+                       "Review or undo.", "detail": "", "href": "/changes?who=ai&since=7"}
+             for job_id, i in out_by_job.items()]
+    words = {"closed": "closed", "on_hold": "put {} on hold"}
+    for job in store._rows("SELECT id, title FROM jobs WHERE status IN ('closed', 'on_hold') AND updated_at >= ?",
+                           (since,)):
+        change = store.ai_status_change(job["id"])
+        if change and change["at"] >= since:
+            verb = words[change["status"]]
+            what = verb.format(job["title"]) if "{}" in verb else f"{verb} {job['title']}"
+            items.append({"key": f"aistatus:{job['id']}:{change['at']}", "kind": "ai_change", "rank": 1,
+                          "when": change["at"], "job_id": job["id"], "title": f"Your AI app {what}.", "detail": "",
+                          "href": "/changes?who=ai&since=7"})
+    return items
+
+
 # ------------------------------------------------------------------ jobs
 def _offer_like(job: dict[str, Any]) -> bool:
     """Someone sits in an in-play stage named like Offer (Offer, Offer out, Verbal offer)."""
@@ -403,7 +434,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 else f"/jobs/{s['job_id']}" if s.get("job_id") else "/",
             })
 
-    items += ai_identity_changes(store, now)
+    items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now)
     if on("flag_stuck"):
         limit = _int(cfg, "stuck_days", 7)
         for a in store.open_applications():
