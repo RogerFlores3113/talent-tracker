@@ -14,6 +14,8 @@ Rules the tools enforce (from the product decisions):
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -24,7 +26,7 @@ from pydantic import BaseModel, Field
 from . import __version__, actions, recipes
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import JOB_STATUSES, TIMELINE_KINDS, Store, snippet_text, split_tags
+from .store import JOB_STATUSES, TIMELINE_KINDS, NotFound, Store, now_iso, snippet_text, split_tags, to_dt
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -95,6 +97,21 @@ def _line(c: dict[str, Any]) -> str:
     return ", ".join(b for b in bits if b)
 
 
+def _local(iso: str | None) -> str:
+    """A UTC timestamp as this computer's local time, e.g. 'Thu Nov 12, 3:00 PM PST'."""
+    dt = to_dt(iso)
+    if dt is None:
+        return ""
+    dt = dt.astimezone()
+    hour = dt.hour % 12 or 12
+    return f"{dt:%a %b} {dt.day}, {hour}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'} {dt.tzname() or ''}".strip()
+
+
+def _days_since(iso: str | None) -> int:
+    dt = to_dt(iso)
+    return max(0, (datetime.now(timezone.utc) - dt).days) if dt else 0
+
+
 def _result(text: str, data: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=data)
 
@@ -139,25 +156,41 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                           tag: str | None = None, limit: int = 10) -> CallToolResult:
         """Search saved candidates by any words: skills, past or current companies, titles, names, places.
 
-        Matches whole words, with the last word as a prefix ("pyth" finds "Python").
-        Shorthand like sf, nyc, swe or ml also matches the long form.
+        An email address or LinkedIn URL as the query finds that exact person, so use it to check for duplicates.
+        Matches whole words, with the last word as a prefix ("pyth" finds "Python"). Filler words like "who" or
+        "people" are ignored. Shorthand like sf, nyc, ml, js, k8s or frontend also matches the other spelling.
+        If nobody has every word, you get the closest matches (marked as such). There is no typo tolerance,
+        so if a search finds nothing, retry with other spellings or fewer words.
         Leave query empty to list the most recently updated candidates.
         location / title narrow by a substring of those fields; tag narrows to one exact skill tag.
         """
-        res = search.search(query, location=location, title=title, tag=tag, limit=max(1, min(limit, 50)))
+        q = (query or "").strip()
+        is_id, _ = store.lookup_exact(q)
+        limit = max(1, min(limit, 50))
+        res = (store.search_candidates(q, limit=limit) if is_id
+               else search.search(q, location=location, title=title, tag=tag, limit=limit))
         results = []
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
                                                  "tags", "email", "linkedin_url", "last_contacted_at", "updated_at")}
             if h.snippet:
                 c["match"] = snippet_text(h.snippet)
+            c["app_url"] = app_url(f"/candidates/{c['id']}")
             results.append(_slim(c))
-        lines = [f"{res.total} match{'' if res.total == 1 else 'es'}" + (f", showing {len(results)}" if res.total > len(results) else "") + ":"]
-        lines += [f"- {_line(c)}" + (f". Match: {c['match']}" if c.get("match") else "") for c in results]
-        if not results:
-            lines = ["No saved candidates match. Try fewer words, or no filters."]
-        return _result("\n".join(lines), {"total": res.total, "results": results,
-                                          "app_url": app_url("/?q=" + quote(query or ""))})
+        what = "email" if "@" in q else "LinkedIn URL"
+        if is_id:
+            head = f"Exact match for that {what}:" if results else (
+                f"No saved candidate has that {what}. Try searching their name too.")
+        elif res.closest:
+            head = "No exact matches. Closest matches:"
+        else:
+            head = (f"{res.total} match{'' if res.total == 1 else 'es'}"
+                    + (f", showing {len(results)}" if res.total > len(results) else "") + ":")
+        lines = [head] + [f"- {_line(c)}" + (f". Match: {c['match']}" if c.get("match") else "") for c in results]
+        if not results and not is_id:
+            lines = ["No saved candidates match. Try fewer or different words, or no filters."]
+        return _result("\n".join(lines), {"total": res.total, "results": results, "closest": res.closest,
+                                          "exact": res.exact, "app_url": app_url("/?q=" + quote(q))})
 
     @mcp.tool(annotations=READ, meta=tool_meta("candidate"))
     def get_candidate(candidate_id: int) -> CallToolResult:
@@ -263,7 +296,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Logging the same item twice is harmless.
         """
         entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app")
-        return {"logged": _slim(entry), "last_contacted_at": store.get_candidate(candidate_id)["last_contacted_at"]}
+        out: dict[str, Any] = {"logged": _slim(entry),
+                               "last_contacted_at": store.get_candidate(candidate_id)["last_contacted_at"]}
+        if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
+            out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
+                              "Use add_to_pipeline if they should be.")
+        return out
 
     # ------------------------------------------------------------------ jobs
     @mcp.tool(annotations=READ)
@@ -283,22 +321,34 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=EDIT)
     def update_job(job_id: int, title: str | None = None, company: str | None = None, location: str | None = None,
                    description: str | None = None, status: str | None = None) -> dict[str, Any]:
-        """Change a job's details. status: open, on_hold or closed. Empty string clears a text field."""
-        if status is not None and status not in JOB_STATUSES:
-            raise ValueError(f"status must be one of {', '.join(JOB_STATUSES)}")
+        """Change a job's details. status: open, on hold (or paused) or closed. Empty string clears a text field."""
         return _slim(store.update_job(job_id, **_given(title=title, company=company, location=location,
                                                        description=description, status=status)))
 
     @mcp.tool(annotations=EDIT)
-    def edit_job_stages(job_id: int, rename: dict[str, str] | None = None, add: list[str] | None = None,
+    def edit_job_stages(job_id: int, rename: dict[str, str] | None = None,
+                        add: list[str | dict[str, str]] | None = None,
                         order: list[str] | None = None) -> dict[str, Any]:
-        """Customize a job's stages. rename maps old name to new name (candidates stay put); add appends new
-        working stages before the closing ones; order lists stage names in the order you want (others keep
+        """Customize a job's stages. rename maps old name to new name (candidates stay put).
+        add takes new stage names; each lands before the closing stages unless you place it:
+        "Take-home after Screening" or {"name": "Take-home", "after": "Screening"}. Closing names like
+        Placed or Not a fit count as hired or out. order lists stage names in the order you want (others keep
         their place after them). Stages can't be removed here."""
         for old, new in (rename or {}).items():
             store.rename_stage(job_id, old, new)
-        for name in add or []:
-            store.add_stage(job_id, name)
+        for item in add or []:
+            if isinstance(item, dict):
+                store.add_stage(job_id, str(item.get("name") or ""), after=item.get("after") or None)
+                continue
+            name, after = item, None
+            m = re.match(r"^(.+?)\s+after\s+(.+)$", item.strip(), flags=re.I)
+            if m:
+                try:
+                    store.resolve_stage(job_id, m.group(2))
+                    name, after = m.group(1), m.group(2)
+                except ValueError:
+                    pass  # "after" is part of the stage's own name
+            store.add_stage(job_id, name, after=after)
         if order:
             store.reorder_stages(job_id, order)
         return {"job_id": job_id, "stages": [s["name"] for s in store.job_stages(job_id)]}
@@ -307,25 +357,61 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=WRITE)
     def add_to_pipeline(candidate_id: int, job_id: int, stage: str | None = None,
                         notes: str | None = None) -> dict[str, Any]:
-        """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there)."""
-        return _slim(store.add_to_pipeline(candidate_id, job_id, stage, notes))
+        """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there).
+        A stage can be given by the start of its name ("tech" for "Technical interview")."""
+        already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
+        out = _slim(store.add_to_pipeline(candidate_id, job_id, stage, notes))
+        if already:
+            out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
+        return out
 
     @mcp.tool(annotations=WRITE)
     def move_stage(candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> dict[str, Any]:
-        """Move a candidate to another of the job's stages, optionally with a note."""
+        """Move a candidate to another of the job's stages, optionally with a note.
+        The start of a stage name is enough when it's unambiguous ("tech" for "Technical interview")."""
         return _slim(store.move_stage(candidate_id, job_id, stage, notes))
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
     def job_pipeline(job_id: int) -> CallToolResult:
-        """Everyone in a job's pipeline, grouped by the job's stages in order."""
+        """Everyone in a job's pipeline, grouped by the job's stages in order, with days in stage and next interview.
+
+        The text is written to paste straight to a hiring manager as a status update (no ids in it).
+        """
         job = store.get_job(job_id)
+        now = now_iso()
+        next_iv: dict[int, str] = {}
+        for t in store.upcoming_interviews(days=365):
+            if t["at"] >= now and t.get("job_id") in (job_id, None):
+                next_iv.setdefault(t["candidate_id"], t["at"])
         stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [
             _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "current_title": a["current_title"],
-                   "since": a["stage_changed_at"]}) for a in s["candidates"]]} for s in store.pipeline_by_stage(job_id)]
-        lines = [f"{job['title']} (job {job_id}, {job['status']})"]
+                   "current_company": a["current_company"], "since": a["stage_changed_at"],
+                   "days_in_stage": _days_since(a["stage_changed_at"]), "next_interview": next_iv.get(a["candidate_id"]),
+                   "app_url": app_url(f"/candidates/{a['candidate_id']}")})
+            for a in s["candidates"]]} for s in store.pipeline_by_stage(job_id)]
+
+        total = sum(len(s["candidates"]) for s in stages)
+        active = sum(len(s["candidates"]) for s in stages if s["outcome"] == "open")
+        head = job["title"] + (f" at {job['company']}" if job.get("company") else "") + (
+            f" ({job['location']})" if job.get("location") else "")
+        lines = [head, f"Status: {job['status'].replace('_', ' ')}. {total} candidate{'' if total == 1 else 's'}, "
+                       f"{active} still in the running."]
         for s in stages:
-            names = ", ".join(f"{c['name']} (id {c['candidate_id']})" for c in s["candidates"]) or "none"
-            lines.append(f"- {s['name']} ({len(s['candidates'])}): {names}")
+            if not s["candidates"]:
+                continue
+            people = []
+            for c in s["candidates"]:
+                d = c.get("days_in_stage", 0)
+                bits = [c.get("current_title"), f"{d} day{'' if d == 1 else 's'} in stage"]
+                if c.get("next_interview"):
+                    bits.append("next interview " + _local(c["next_interview"]))
+                people.append(f"{c['name']} ({', '.join(b for b in bits if b)})")
+            lines.append(f"- {s['name']} ({len(s['candidates'])}): " + "; ".join(people))
+        empty = [s["name"] for s in stages if not s["candidates"]]
+        if not total:
+            lines.append("No one in this pipeline yet.")
+        elif empty:
+            lines.append("No one in: " + ", ".join(empty) + ".")
         return _result("\n".join(lines), {"job": _slim(job), "stages": stages, "app_url": app_url(f"/jobs/{job_id}")})
 
     # ------------------------------------------------------------- dashboard
@@ -341,7 +427,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         else:
             text = "\n".join(
                 f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")
-                + (f" at {i['when']}" if i["kind"] == "interview" else "")
+                + (f" at {_local(i['when'])}" if i["kind"] == "interview" and i.get("when") else "")
                 + "".join(f" [{k} {i[k]}]" for k in ("candidate_id", "job_id", "suggestion_id") if i.get(k))
                 for i in items)
             if res["stale_more"]:
@@ -378,8 +464,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.prompt(title="Source candidates for a job")
     def source_candidates(job_id: str = "") -> str:
         """Find people who fit a job and save the good ones. Give a Talent Search job id, or leave empty."""
-        job = store.get_job(int(job_id)) if job_id.strip().isdigit() else None
-        return recipes.source_for_job(job)
+        ref = (job_id or "").strip()
+        try:
+            job = store.get_job(int(ref)) if ref.isdigit() else None
+        except NotFound:
+            return recipes.source_for_job(None, missing_job=ref)
+        return recipes.source_for_job(job, missing_job=ref if ref and job is None else None)
 
     @mcp.prompt(title="Save someone from LinkedIn")
     def save_from_linkedin(url: str) -> str:
