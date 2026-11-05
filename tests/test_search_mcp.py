@@ -15,6 +15,8 @@ from test_mcp import call, structured, text
 
 @pytest.fixture
 def pst(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset isn't available on Windows")
     monkeypatch.setenv("TZ", "America/Los_Angeles")
     time.tzset()
     yield
