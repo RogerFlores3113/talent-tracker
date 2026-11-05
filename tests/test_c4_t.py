@@ -288,3 +288,17 @@ def test_an_old_submittal_or_an_undone_one_does_not_warn(store):
     assert reports.stage_group("Hiring manager screen") == "interview"
     assert reports.stage_group("Recruiter screen") == "screening" and reports.stage_group("Sourced") == "sourcing"
     assert json.dumps(reports.report(store, "acme"), default=str)  # the report is plain data
+
+
+def test_client_time_zone_works_without_a_time_zone_list(store, monkeypatch):
+    """Windows without tzdata: US client zones still show in their own time, with EST or EDT."""
+    def no_db(name):
+        raise reports.ZoneInfoNotFoundError(name)
+    monkeypatch.setattr(reports, "ZoneInfo", no_db)
+    import zoneinfo
+    monkeypatch.setattr(zoneinfo, "ZoneInfo", no_db)
+    winter = datetime(2026, 12, 1, 19, 0, tzinfo=timezone.utc).isoformat()
+    summer = datetime(2027, 7, 1, 19, 0, tzinfo=timezone.utc).isoformat()
+    assert reports.in_zone(winter, "America/New_York", "%-I:%M %p %Z") == "2:00 PM EST"
+    assert reports.in_zone(summer, "America/New_York", "%-I:%M %p %Z") == "3:00 PM EDT"
+    assert reports.normalize_tz("Europe/London") == "Europe/London"  # can't check it here, so it's kept

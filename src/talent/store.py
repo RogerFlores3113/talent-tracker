@@ -633,6 +633,9 @@ _ZONE_WORDS = {
 _US_ZONES = {"America/Los_Angeles": (-8, True), "America/Denver": (-7, True), "America/Phoenix": (-7, False),
              "America/Chicago": (-6, True), "America/New_York": (-5, True), "America/Anchorage": (-9, True),
              "Pacific/Honolulu": (-10, False), "UTC": (0, False)}
+_US_ABBR = {"America/Los_Angeles": ("PST", "PDT"), "America/Denver": ("MST", "MDT"), "America/Phoenix": ("MST", "MST"),
+            "America/Chicago": ("CST", "CDT"), "America/New_York": ("EST", "EDT"), "America/Anchorage": ("AKST", "AKDT"),
+            "Pacific/Honolulu": ("HST", "HST")}
 _ZONE_TAIL = re.compile(r"^(?P<rest>.*\S)\s+\(?(?P<zone>[A-Za-z]+(?:/[A-Za-z0-9_+-]+)+|[A-Za-z]{1,8})\)?$")
 DATE_HELP = ("Use a form like 2026-11-09, 2026-11-09 1:00 PM, 2026-11-09T13:00:00-08:00 or "
              "2026-11-09 1:00 PM America/Los_Angeles (PT, ET, CT and MT work too).")
@@ -659,7 +662,10 @@ class _USZone(tzinfo):
         return timedelta(hours=1) if dt is not None and self._is_dst(dt) else timedelta(0)
 
     def tzname(self, dt: datetime | None) -> str:
-        return self._name
+        abbr = _US_ABBR.get(self._name)
+        if not abbr:
+            return self._name
+        return abbr[1] if dt is not None and self._is_dst(dt) else abbr[0]
 
 
 def zone_named(name: str) -> tzinfo | None:

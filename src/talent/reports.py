@@ -22,7 +22,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import actions
-from .store import NotFound, Store, _stage_key, now_iso, parse_when, stage_outcome, to_dt
+from .store import NotFound, Store, _stage_key, now_iso, parse_when, stage_outcome, to_dt, zone_named
 
 DEFAULT_DAYS = 7
 MOVES_SHOWN = 40  # moves listed in the text, then "and 12 more"
@@ -69,7 +69,7 @@ def _zone(name: str | None) -> Any:
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError, OSError):
-        return None
+        return zone_named(name)  # no time zone list here (Windows without tzdata): US zones still work
 
 
 def in_zone(iso: str | None, tz_name: str | None, fmt: str = "%a %b %-d, %-I:%M %p %Z") -> str:
@@ -88,7 +88,11 @@ def normalize_tz(value: str | None) -> str | None:
     v = TZ_ALIASES.get(v.lower(), v)
     if _zone(v) is not None:
         return v
-    have_db = _zone("America/New_York") is not None
+    try:
+        ZoneInfo("America/New_York")
+        have_db = True
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        have_db = False
     if not have_db and re.fullmatch(r"[A-Za-z_]+(?:/[A-Za-z0-9_+-]+){0,2}", v):
         return v  # this computer has no time zone list to check against; times show in its own zone meanwhile
     raise ValueError(f"Couldn't find the time zone {value!r}. Use a name like America/New_York, Europe/London "
