@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import actions, reports
-from .store import NotFound, Store, to_dt
+from .store import NotFound, Store, now_iso, to_dt
 
 DAYS_KEY = "chase_days"
 DEFAULT_DAYS = 5
@@ -46,6 +46,93 @@ def set_chase_days(store: Store, value: Any) -> int:
         raise ValueError("Give the days as a number from 1 to 90.")
     actions._put_setting(store, DAYS_KEY, str(n))
     return n
+
+
+MAX_KEY = "chase_max_days"
+STAGES_KEY = "chase_stages"
+PAGE_SHOWN = 25  # people per manager on the chase page (then "Show all"), and per nudge in client_chase's data
+TOOL_GROUPS = 30  # nudges client_chase gives at most; the page has the rest
+# Stages the chase leaves out unless the recruiter says to count them: the client is busy with these, not sitting on
+# a decision (an onsite loop, reference or background checks).
+_SKIP_WORDS = re.compile(r"\b(on\W?site|references?|ref check|background check|background)\b", re.I)
+
+
+def chase_max_days(store: Store) -> int | None:
+    """The optional upper limit: people waiting longer than this are left out (very old ATS rows). None: no limit."""
+    raw = store._row("SELECT value FROM settings WHERE key = ?", (MAX_KEY,))
+    try:
+        n = int(raw["value"]) if raw and raw["value"] else 0
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else None
+
+
+def set_chase_max_days(store: Store, value: Any) -> int | None:
+    """Set the upper limit in days (empty or 0 takes it off). It has to be more than the chase days."""
+    text = str(value if value is not None else "").strip()
+    if text in ("", "0"):
+        actions._drop_setting(store, MAX_KEY)
+        return None
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError("Give the oldest wait as a number of days, or leave it empty for no limit.") from None
+    days = chase_days(store)
+    if not days < n <= 3650:
+        raise ValueError(f"Give the oldest wait as more than {days} days (the chase days) and at most 3650, or leave "
+                         "it empty for no limit.")
+    actions._put_setting(store, MAX_KEY, str(n))
+    return n
+
+
+def skipped_by_default(stage: str) -> bool:
+    """Onsite and reference or background check stages stay off the chase unless the recruiter counts them."""
+    return bool(_SKIP_WORDS.search(stage or ""))
+
+
+def _stage_picks(store: Store) -> dict[str, bool]:
+    raw = reports._get_json(store, STAGES_KEY)
+    return {str(k).lower(): bool(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def counts_stage(store: Store, stage: str, picks: dict[str, bool] | None = None) -> bool:
+    """Whether the chase counts people in this stage: the recruiter's pick, else the default."""
+    picks = _stage_picks(store) if picks is None else picks
+    name = (stage or "").strip().lower()
+    return picks[name] if name in picks else not skipped_by_default(name)
+
+
+def stage_choices(store: Store) -> list[dict[str, Any]]:
+    """The client-facing stages on open jobs, for the chase page's pick: [{"name", "counted", "default"}]."""
+    own = actions.inhouse(store)
+    picks = _stage_picks(store)
+    seen: dict[str, str] = {}
+    for jobs in reports._all_jobs(store).values():
+        for j in jobs:
+            if j["status"] != "open":
+                continue
+            groups = reports.stage_groups(store, j["id"])
+            want = _waiting_groups(store, j["id"], own)
+            for st in store.job_stages(j["id"]):
+                if st["outcome"] == "open" and groups.get(st["name"].lower()) in want:
+                    seen.setdefault(st["name"].lower(), st["name"])
+    return [{"name": name, "counted": counts_stage(store, name, picks), "default": not skipped_by_default(name)}
+            for low, name in sorted(seen.items())]
+
+
+def set_stage_picks(store: Store, shown: list[str], counted: list[str]) -> dict[str, bool]:
+    """Save the chase page's stage pick: of the stages shown, the ticked ones count. A pick that matches the default
+    is dropped, so new defaults still apply."""
+    picks = _stage_picks(store)
+    ticked = {c.strip().lower() for c in counted if c and c.strip()}
+    for name in {x.strip().lower() for x in shown if x and x.strip()}:
+        on = name in ticked
+        if on == (not skipped_by_default(name)):
+            picks.pop(name, None)
+        else:
+            picks[name] = on
+    reports._put_json(store, STAGES_KEY, dict(sorted(picks.items())[:200]))
+    return picks
 
 
 def _chased_key(key: str, manager: str) -> str:
@@ -81,6 +168,20 @@ def _mailto(to: str | None, subject: str, body: str, cc: list[str] | None = None
     full = head + f"&body={quote(body, safe='')}"
     long = len(full) > reports.MAIL_LIMIT
     return {"href": head if long else full, "to": to, "long": long}
+
+
+def cc_main_link(rep: dict[str, Any], text: str) -> dict[str, Any] | None:
+    """For an agency's per-manager update: the same email with the client's main contact on Cc, as an offer next
+    to the manager-only one. {"href", "to", "cc", "long"} or None (in-house, a client update, no main contact, or
+    the manager is the main contact)."""
+    if rep.get("manager") is None or rep.get("inhouse"):
+        return None
+    to = rep.get("email")
+    main = reports._contact_email((rep.get("client") or {}).get("contacts"))
+    if not to or not main or main.lower() == to.lower():
+        return None
+    link = _mailto(to, reports.title(rep), text, cc=[main])
+    return {**link, "cc": [main]} if link else None
 
 
 def manager_email(c: dict[str, Any], jobs: list[dict[str, Any]], manager: str | None, own: bool) -> str | None:
@@ -159,6 +260,22 @@ def earlier_to_client(store: Store, candidate_id: int, job_id: int, now: datetim
 
 
 # ------------------------------------------------------------------ submittal
+_KEPT = re.compile(r"^kept from the shortlist\.\s*(why they fit:\s*)?", re.I)
+_SYSTEM_NOTES = (re.compile(r"^[\w .]{1,40} link \(it only opens inside "), re.compile(r"^reason: position filled$", re.I))
+
+
+def screen_note(text: str | None) -> str | None:
+    """A note as the write-up's "From my screen" shows it: the recruiter's own words and the fit line, never the
+    app's own notes ("Kept from the Shortlist.", a lead link, a close reason). None to leave it out."""
+    t = (text or "").strip()
+    m = _KEPT.match(t)
+    if m:
+        t = t[m.end():].strip()
+    if not t or any(p.match(t) for p in _SYSTEM_NOTES):
+        return None
+    return t
+
+
 def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
     """The submittal draft for one person and job: {"subject", "body", "to", "email", "client", "manager"}. Built from
     their profile, the newest screen notes on this job, and comp and availability when a note or the profile says
@@ -174,10 +291,10 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
         """SELECT body FROM timeline WHERE candidate_id = ? AND kind IN ('note', 'call', 'meeting')
            AND (job_id = ? OR job_id IS NULL) AND coalesce(body, '') <> ''
            AND NOT (json_valid(data) AND json_extract(data, '$.struck_at') IS NOT NULL)
-           ORDER BY (job_id IS NULL), at DESC, id DESC LIMIT ?""", (candidate_id, job_id, WRITEUP_NOTES))]
+           ORDER BY (job_id IS NULL), at DESC, id DESC LIMIT ?""", (candidate_id, job_id, WRITEUP_NOTES * 3))]
     if app and (app.get("notes") or "").strip() and app["notes"].strip() not in notes:
         notes.insert(0, app["notes"].strip())
-    notes = notes[:WRITEUP_NOTES]
+    notes = list(dict.fromkeys(n for n in (screen_note(x) for x in notes) if n))[:WRITEUP_NOTES]
     texts = [*notes, cand.get("about") or ""]
     comp, avail = _found(texts, _COMP), _found(texts, _AVAIL)
     hist = store.work_history(candidate_id)[:3]
@@ -186,7 +303,7 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
     now_role = ", ".join(x for x in (
         " at ".join(x for x in (cand.get("current_title"), cand.get("current_company")) if x), cand.get("location")) if x)
     if now_role:
-        lines.append(f"Now: {now_role}")
+        lines.append(f"{'Now' if cand.get('current_title') or cand.get('current_company') else 'Based in'}: {now_role}")
     if hist:
         lines.append("Before: " + "; ".join(
             " at ".join(x for x in (h.get("title"), h.get("company")) if x) for h in hist if h.get("title") or h.get("company")))
@@ -249,17 +366,25 @@ def _waiting_groups(store: Store, job_id: int, own: bool) -> set[str]:
 
 
 def chase_list(store: Store, key: str | None = None, now: datetime | None = None,
-               days: int | None = None) -> list[dict[str, Any]]:
+               days: int | None = None, left_out: dict[str, int] | None = None) -> list[dict[str, Any]]:
     """Everyone in a client-facing stage (Submitted, Client review, a hiring manager interview) for at least `days`
     by their stage date, with no interview booked on that job, one group per client and hiring manager:
     [{"client", "key", "slug", "manager", "manager_key", "to", "people": [...], "chased_at", "text", "email"}].
-    Oldest first within a group; groups with the longest wait first."""
+    Oldest first within a group; groups with the longest wait first. Stages the chase doesn't count (Onsite and
+    reference checks by default) and waits past the optional upper limit are left out, counted in `left_out`
+    ({"stages", "too_old"}) when given."""
     from .importers import imported_placements
 
     now = now or datetime.now(timezone.utc)
     days = days or chase_days(store)
     own = actions.inhouse(store)
     cutoff = now - timedelta(days=days)
+    oldest = chase_max_days(store)
+    too_old = now - timedelta(days=oldest) if oldest else None
+    picks = _stage_picks(store)
+    left = left_out if left_out is not None else {}
+    left.setdefault("stages", 0)
+    left.setdefault("too_old", 0)
     booked = {(r["candidate_id"], r.get("job_id")) for r in store.upcoming_interviews(days=60, now=now)}
     booked_any = {cid for cid, jid in booked if jid is None}
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -281,6 +406,12 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                     continue
                 if (a["candidate_id"], j["id"]) in booked or a["candidate_id"] in booked_any:
                     continue  # an interview is booked: they're not waiting on an answer yet
+                if not counts_stage(store, a["stage"], picks):
+                    left["stages"] += 1
+                    continue
+                if too_old and since < too_old and a["candidate_id"] not in undated:
+                    left["too_old"] += 1
+                    continue
                 c = c or reports.client(store, ck)
                 mk = reports.manager_key(j.get("hiring_manager"))
                 grp = groups.setdefault((ck, mk), {
@@ -380,5 +511,60 @@ def set_interview_job(store: Store, interview_id: int, job_id: int) -> dict[str,
     return store.get_interview(interview_id)
 
 
-__all__ = ["chase_days", "chase_list", "chase_text", "interview_jobs", "mark_chased", "nudge_text",
+def attach_interview_job(store: Store, entry: dict[str, Any], job_id: int | None) -> dict[str, Any]:
+    """After the AI app logs an interview with job_id: when the log matched one already there with no job (the same
+    interview logged again, as the reply asks), give it that job, as an AI change Undo takes back.
+    {"job_id": the job it has now, "set": True when this call set it, "skipped": why the job wasn't saved}."""
+    if entry.get("kind") != "interview" or job_id is None:
+        return {"job_id": entry.get("job_id"), "set": False, "skipped": None}
+    have = entry.get("job_id")
+    if have == job_id:
+        return {"job_id": have, "set": False, "skipped": None}
+    job = store.get_job(job_id)
+    if have is not None:
+        other = store.get_job(have)
+        return {"job_id": have, "set": False, "skipped": (
+            f"That interview was already logged for {other['title']}, so it stays there and wasn't moved to "
+            f"{job['title']}.")}
+    if job_id not in {p["job_id"] for p in store.candidate_pipelines(entry["candidate_id"])}:
+        return {"job_id": None, "set": False, "skipped": (
+            f"That interview was already logged with no job, and it still has none: this person isn't on "
+            f"{job['title']}. Add them with add_to_pipeline, then log it again with job_id.")}
+    with store._write():
+        store._conn.execute("UPDATE timeline SET job_id = ? WHERE id = ? AND kind = 'interview' AND job_id IS NULL",
+                            (job_id, entry["id"]))
+        store._log_ai("interview_job", candidate_id=entry["candidate_id"], job_id=job_id, target_id=entry["id"],
+                      old={"job_id": None}, new={"job_id": job_id, "summary": entry.get("body")})
+    store._touch_job(job_id)
+    entry["job_id"] = job_id
+    return {"job_id": job_id, "set": True, "skipped": None}
+
+
+def ai_job_blocker(store: Store, a: dict[str, Any]) -> str | None:
+    """Why the AI app's job for an interview can't be taken back (short, for Changes), or None."""
+    t = store._row("SELECT job_id, data FROM timeline WHERE id = ? AND kind = 'interview'", (a["target_id"],))
+    if t is None:
+        return "that interview is gone from the timeline"
+    if t["job_id"] != (a.get("new_data") or {}).get("job_id"):
+        return "its job was changed again since"
+    return None
+
+
+def ai_job_undo(store: Store, a: dict[str, Any]) -> str:
+    """Undo the AI app setting an interview's job: it goes back to having no job."""
+    reason = ai_job_blocker(store, a)
+    if reason:
+        raise ValueError(reason[:1].upper() + reason[1:] + ".")
+    old = (a.get("old_data") or {}).get("job_id")
+    with store._write():
+        store._conn.execute("UPDATE timeline SET job_id = ? WHERE id = ?", (old, a["target_id"]))
+        store._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?",
+                            (now_iso(), a["id"]))
+    if a.get("job_id"):
+        store._touch_job(a["job_id"])
+    return a["summary"]
+
+
+__all__ = ["attach_interview_job", "chase_days", "chase_max_days", "counts_stage", "set_chase_max_days",
+           "set_stage_picks", "stage_choices", "chase_list", "chase_text", "interview_jobs", "mark_chased", "nudge_text",
            "set_chase_days", "set_interview_job", "submit", "submit_stage", "today_items", "writeup"]

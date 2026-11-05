@@ -4,19 +4,22 @@
 {% block body %}
 <div class="sec-head"><h1>Waiting on feedback</h1>
   <a class="btn small no-print" href="/clients">All {{ 'reports' if own else 'clients' }}</a></div>
-<p class="lead">{% if groups %}{% set n = groups | sum(attribute='people', start=[]) | length %}{{ n }} {{ 'person has' if n == 1 else 'people have' }} waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage with no interview booked. One nudge per hiring manager: copy or email it, then mark them as chased.{% else %}Nobody has waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage. Nothing to chase.{% endif %}</p>
+<p class="lead">{% if groups %}{% set n = groups | sum(attribute='people', start=[]) | length %}{{ n }} {{ 'person has' if n == 1 else 'people have' }} waited {% if max_days %}{{ days }} to {{ max_days }} days{% else %}{{ days }} days or more{% endif %} in a {{ 'hiring manager' if own else 'client' }} stage with no interview booked. One nudge per hiring manager: copy or email it, then mark them as chased.{% else %}Nobody has waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage. Nothing to chase.{% endif %}</p>
 
-{% for g in groups %}{% set tid = 'chase-text-' ~ loop.index %}
-<section class="panel report" id="chase-{{ slug(g.key) }}-{{ slug(g.manager_key) or 'none' }}">
+{% if left_out.stages or left_out.too_old %}<p class="fine">Left out: {% if left_out.stages %}{{ left_out.stages }} in stages the chase doesn't count{% endif %}{% if left_out.stages and left_out.too_old %}, {% endif %}{% if left_out.too_old %}{{ left_out.too_old }} waiting more than {{ max_days }} days{% endif %}. Change it below.</p>{% endif %}
+
+{% for g in groups %}{% set tid = 'chase-text-' ~ loop.index %}{% set anchor = 'chase-' ~ slug(g.key) ~ '-' ~ (slug(g.manager_key) or 'none') %}{% set all_here = show_all == anchor %}
+<section class="panel report" id="{{ anchor }}">
   <div class="sec-head"><h2><a href="/clients/{{ g.slug }}">{{ g.client }}</a>{% if g.manager %}: {{ g.manager }}{% endif %}</h2>
     <span class="copy-status no-print">{% if g.chased_at %}<span class="fine">Last chased {{ g.chased_at | ago }}</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span></span></div>
   <table class="dense">
     <thead><tr><th>Person</th><th>Job</th><th>Stage</th><th>Waiting</th></tr></thead>
-    <tbody>{% for p in g.people %}
+    <tbody>{% for p in (g.people if all_here else g.people[:shown]) %}
     <tr><td><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a></td><td><a href="/jobs/{{ p.job_id }}">{{ p.job }}</a></td><td>{{ p.stage }}</td>
       <td class="nowrap">{% if p.date_unknown %}<span class="muted">date unknown (imported)</span>{% else %}{{ p.days }} days <span class="muted">since {{ p.since | local('%b %-d') }}</span>{% endif %}</td></tr>
     {% endfor %}</tbody>
   </table>
+  {% if g.people | length > shown %}<p class="fine no-print">{% if all_here %}Showing all {{ g.people | length }}. <a href="/clients/chase#{{ anchor }}">Show fewer</a>{% else %}Showing the {{ shown }} longest waits. <a href="/clients/chase?all={{ anchor | urlencode }}#{{ anchor }}">Show all {{ g.people | length }}</a>{% endif %}</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ g.text }}</pre>
   <div class="actions-inline no-print">
     {% if g.email %}<a class="btn small" href="{{ g.email.href }}">Email {{ g.email.to }}</a>{% if g.email.long %} <span class="fine">Too long to fill in by link: copy it first, then paste it in.</span>{% endif %}
@@ -30,8 +33,16 @@
 <section class="panel no-print">
   <form method="post" action="/clients/chase/days" class="tablebar">
     <label class="inline-label">List people waiting at least <input type="number" name="days" min="1" max="90" value="{{ days }}"> days</label>
+    <label class="inline-label">and at most <input type="number" name="max_days" min="{{ days + 1 }}" max="3650" value="{{ max_days or '' }}" placeholder="no limit"> days</label>
     <button class="btn small" type="submit">Save</button>
   </form>
+  <p class="fine">Leave the most empty for no limit. A limit keeps very old rows from an import out of every nudge.</p>
+  {% if stage_choices %}<form method="post" action="/clients/chase/stages" class="tablebar">
+    <span class="inline-label">Stages the chase counts:</span>
+    {% for st in stage_choices %}<input type="hidden" name="shown" value="{{ st.name }}"><label class="inline-label"><input type="checkbox" name="count" value="{{ st.name }}"{% if st.counted %} checked{% endif %}> {{ st.name }}</label>
+    {% endfor %}<button class="btn small" type="submit">Save stages</button>
+  </form>
+  <p class="fine">Onsite and reference check stages are left out at first: the client is busy with those, not sitting on a decision. Tick one to count it.</p>{% endif %}
   <p class="fine">Waiting counts from the stage date (a file's own date after an import). Someone with an interview booked isn't waiting. Email opens your own mail app; nothing is sent from here. Marking a manager as chased keeps them off Today for {{ days }} days.</p>
 </section>
 {% endblock %}

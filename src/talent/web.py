@@ -1571,17 +1571,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def chase_page(request: Request):
         """Everyone waiting on a client's feedback, per client and hiring manager, with a nudge for each."""
         days = chase.chase_days(store)
-        return page(request, "chase.html", groups=chase.chase_list(store, days=days), days=days,
-                    slug=reports.slug)
+        left: dict[str, int] = {}
+        groups = chase.chase_list(store, days=days, left_out=left)
+        return page(request, "chase.html", groups=groups, days=days, slug=reports.slug, left_out=left,
+                    shown=chase.PAGE_SHOWN, show_all=str(request.query_params.get("all") or "")[:200],
+                    max_days=chase.chase_max_days(store), stage_choices=chase.stage_choices(store))
 
     @app.post("/clients/chase/days")
     async def chase_days_form(request: Request):
         form = await request.form()
         try:
             n = chase.set_chase_days(store, form.get("days"))
+            top = chase.set_chase_max_days(store, form.get("max_days")) if "max_days" in form else \
+                chase.chase_max_days(store)
         except ValueError as exc:
             return RedirectResponse("/clients/chase?" + urlencode({"flash_error": str(exc)}), status_code=303)
-        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Now listing people waiting {n} days or more."}),
+        span = f"{n} to {top} days" if top else f"{n} days or more"
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Now listing people waiting {span}."}),
+                                status_code=303)
+
+    @app.post("/clients/chase/stages")
+    async def chase_stages_form(request: Request):
+        """Which client-facing stages the chase counts (Onsite and reference checks are left out by default)."""
+        form = await request.form()
+        chase.set_stage_picks(store, [str(x) for x in form.getlist("shown")][:200],
+                              [str(x) for x in form.getlist("count")][:200])
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": "Saved which stages the chase counts."}),
                                 status_code=303)
 
     def client_or_404(slug: str) -> dict[str, Any]:
@@ -1604,7 +1619,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         span = (None, None) if error else (since or None, until or None)
         parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
         sections = [{"rep": r, "text": (t := reports.report_text(r)), "email": (e := reports.email_link(r, t)),
-                     "mailto": e["href"] if e else None, "notes": reports.recruiter_notes(r)} for r in parts]
+                     "mailto": e["href"] if e else None, "notes": reports.recruiter_notes(r),
+                     "cc_email": chase.cc_main_link(r, t)} for r in parts]
         early = c.get("update_day") if c.get("update_day") and reports._day_start(
             c.get("update_day"), datetime.now(timezone.utc)) is None else None
         return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
