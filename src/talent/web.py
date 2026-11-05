@@ -25,8 +25,9 @@ from starlette.background import BackgroundTask
 from . import __version__, actions, importers, integrations, paths, recipes
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
-from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, JOB_STATUSES,
-                    STAGE_OUTCOMES, TIMELINE_KINDS, NotFound, Store, _labels, snippet_html, split_tags, to_dt)
+from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS,
+                    INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
+                    Store, _labels, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -178,6 +179,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["version"] = __version__
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["job_label"] = actions.job_label
+    env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -267,6 +269,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return store.get_job(job_id)
         except NotFound:
             raise HTTPException(404, "Job not found")
+
+    def _todos(job_id: int) -> list[dict[str, Any]]:
+        today = datetime.now().astimezone().date().isoformat()
+        return [{**s, "due_text": actions.due_text(s.get("due_on"), today),
+                 "overdue": bool(s.get("due_on") and s["due_on"] < today)} for s in store.open_suggestions(job_id)]
 
     # ------------------------------------------------------------ overview
     @app.get("/", response_class=HTMLResponse)
@@ -420,17 +427,63 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         kind, body = str(form.get("kind") or "note"), str(form.get("body") or "")
         follow_up = str(form.get("follow_up") or "").strip()
         notice = ""
+        day, day_error = None, ""
+        if follow_up:
+            try:
+                day = actions.parse_day(follow_up)
+            except ValueError as exc:
+                day_error = str(exc)
+        logged = False
         try:
-            day = actions.parse_day(follow_up) if follow_up else None
-            if body.strip() or kind != "note" or not day:  # a follow-up date alone needs no note
+            if body.strip() or kind != "note" or not (day or day_error):  # a follow-up date alone needs no note
                 store.log(candidate_id, kind, body, at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+                logged = True
             if day:
-                actions.schedule_followup(store, candidate_id, day, job_id=job_id)
+                actions.schedule_followup(store, candidate_id, day, job_id=job_id, note=body.strip() or None)
                 notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
         except (ValueError, NotFound) as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
                                     status_code=303)
+        if day_error:  # keep what they wrote, and say what was wrong with the date
+            msg = ("Saved, but the follow-up wasn't added. " if logged else "The follow-up wasn't added. ") + day_error
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': msg})}#timeline", status_code=303)
         return RedirectResponse(f"/candidates/{candidate_id}{'?' + urlencode({'notice': notice}) if notice else ''}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}")
+    async def interview_form(request: Request, candidate_id: int, entry_id: int):
+        """Reschedule, cancel, restore or record the outcome of an interview. Nothing is deleted."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        op = str(form.get("op") or "")
+        try:
+            if op == "reschedule":
+                at = str(form.get("at") or "").strip()
+                if not at:
+                    raise ValueError("Pick the new date and time.")
+                iv = store.update_interview(entry_id, at=at, candidate_id=candidate_id)
+                notice = f"Moved the interview to {_local(iv['at'])}."
+            elif op == "cancel":
+                store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
+                notice = "Interview cancelled. It stays on the timeline, marked cancelled."
+            elif op == "restore":
+                store.update_interview(entry_id, restore=True, candidate_id=candidate_id)
+                notice = "Interview back on the schedule."
+            elif op == "outcome":
+                outcome = str(form.get("outcome") or "")
+                if outcome not in INTERVIEW_OUTCOME_LABELS:
+                    raise ValueError("Pick how the interview went.")
+                store.update_interview(entry_id, outcome=outcome, note=str(form.get("note") or ""),
+                                       candidate_id=candidate_id)
+                notice = f"Saved: {INTERVIEW_OUTCOME_LABELS[outcome]}."
+            else:
+                raise ValueError("Couldn't change that interview. Reload the page and try again.")
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
                                 status_code=303)
 
     @app.post("/candidates/{candidate_id}/undo/{timeline_id}")
@@ -616,7 +669,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def jobs_page(request: Request, status: str = ""):
         jobs = store.list_jobs(status if status in JOB_STATUSES else None)
         hints = actions.twin_hints(jobs)
-        return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status)
+        rollup = actions.company_rollup(store)
+        companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
+        return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status,
+                    rollup=rollup, companies=companies,
+                    digest_text=actions.status_digest(store) if rollup else "")
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
@@ -625,7 +682,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
         form = await request.form()
-        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description")}
+        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", *JOB_EXTRA_FIELDS)}
         stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
         twins = store.similar_open_jobs(data["title"], data["company"])
         try:
@@ -642,6 +699,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_detail(request: Request, job_id: int, view: str = "", q: str = ""):
         job = job_or_404(job_id)
+        omit = [o for o in request.query_params.getlist("omit") if o.strip()]
         if view in ("board", "table"):
             store.set_settings(pipeline_view=view)
         view = view if view in ("board", "table") else store.setting("pipeline_view")
@@ -651,7 +709,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job),
-                   next_iv=actions.next_interviews(store, job_id), status_text=actions.job_status_text(store, job_id))
+                   next_iv=actions.next_interviews(store, job_id), omit=omit,
+                   status_text=actions.job_status_text(store, job_id, omit_stages=omit),
+                   nums=actions.job_numbers(store, job_id), todos=_todos(job_id))
         if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
             return page(request, "_add_results.html", **ctx)
         return page(request, "job.html", **ctx)
@@ -660,12 +720,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     async def update_job(request: Request, job_id: int):
         job_or_404(job_id)
         form = await request.form()
-        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", "status")
-                if k in form}
+        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", "status",
+                                                    *JOB_EXTRA_FIELDS) if k in form}
         try:
             store.update_job(job_id, **data)
         except ValueError as exc:
-            return page(request, "job_form.html", j={**store.get_job(job_id), **data}, error=str(exc))
+            return page(request, "job_form.html", j={**store.get_job(job_id), **data}, error=str(exc),
+                        stages=store.job_stages(job_id), outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
+        if set(data) == {"status"} and data["status"] == "closed":
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': 'Job closed. Its pipeline is kept.'})}",
+                                    status_code=303)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
     @app.get("/jobs/{job_id}/edit", response_class=HTMLResponse)
@@ -683,7 +747,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if op == "add":
                 store.add_stage(job_id, str(form.get("new_name") or ""), after=str(form.get("after") or "") or None)
             elif op == "rename":
-                store.rename_stage(job_id, name, str(form.get("new_name") or ""))
+                store.rename_stage(job_id, name, str(form.get("new_name") or ""),
+                                   outcome=str(form.get("outcome") or "") or None)
             elif op in ("up", "down"):
                 names = [s["name"] for s in store.job_stages(job_id)]
                 i = [n.lower() for n in names].index(name.lower())
@@ -707,7 +772,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         cid = str(form.get("candidate_id") or "")
         error = None
         try:
-            store.move_stage(int(cid), job_id, str(form.get("stage") or ""))
+            store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None)
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
@@ -748,6 +813,26 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="Couldn't snooze that. Reload the page and try again.")
         store.snooze(key, int(days))
         return back(request, notice=f"Snoozed for {days} day{'' if days == '1' else 's'}.")
+
+    @app.post("/actions/todo")
+    async def add_todo(request: Request):
+        """Add a to-do to Today from Today or a job page, optionally about a job and from a day on."""
+        form = await request.form()
+        job = str(form.get("job_id") or "")
+        due = str(form.get("due") or "").strip()
+        try:
+            job_id = int(job) if job.isdigit() else None
+            if job_id is not None:
+                store.get_job(job_id)
+            s = actions.add_followup(store, str(form.get("text") or ""), due or None, job_id=job_id, source="App")
+        except NotFound:
+            return back(request, error="That job is gone. Reload the page and try again.")
+        except ValueError as exc:
+            msg = str(exc).replace("A suggestion needs some text.", "Write what the to-do is.")
+            return back(request, error=msg)
+        when = f" It shows on Today from {actions.local_time(s['due_on'] + 'T12:00:00', '%a %b %-d')}." \
+            if s.get("due_on") and s["due_on"] > datetime.now().astimezone().date().isoformat() else ""
+        return back(request, notice="To-do added." + when)
 
     @app.post("/actions/suggestions/{suggestion_id}/done")
     def suggestion_done(request: Request, suggestion_id: int):

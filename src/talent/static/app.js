@@ -6,6 +6,7 @@
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
+//   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 (function () {
   "use strict";
 
@@ -65,6 +66,16 @@
   document.addEventListener("change", e => {
     const el = e.target;
     if (el.matches && el.matches("select[data-autosubmit]") && el.form) el.form.submit();
+    // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
+    const form = el.closest && el.closest("form.stage-form");
+    if (!form) return;
+    if (el.matches("select[data-stage-pick]")) {
+      const o = el.selectedOptions && el.selectedOptions[0];
+      const reason = form.querySelector(".reason");
+      if (o && o.dataset.out && reason) { reason.hidden = false; return; }
+      if (reason) reason.hidden = true;
+    }
+    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
   });
 
   // Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.

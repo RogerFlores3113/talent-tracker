@@ -1,5 +1,6 @@
-<form method="post" action="/jobs/{{ job.id }}/move" hx-post="/jobs/{{ job.id }}/move" hx-target="#pipeline" hx-trigger="change" class="stage-form">
+<form method="post" action="/jobs/{{ job.id }}/move" hx-post="/jobs/{{ job.id }}/move" hx-target="#pipeline" hx-trigger="submit" class="stage-form">
   <input type="hidden" name="candidate_id" value="{{ a.candidate_id }}"><input type="hidden" name="view" value="{{ view }}">
-  <select name="stage" aria-label="Stage for {{ a.candidate_name }}">{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select>
+  <select name="stage" aria-label="Stage for {{ a.candidate_name }}" data-stage-pick>{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}{{ ' data-out=1' if s.outcome == 'lost' and s.name | lower != a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select>
+  <span class="reason" hidden><select name="notes" aria-label="Reason for {{ a.candidate_name }}"><option value="">Pick a reason</option>{% for r in ['Not a fit', 'Withdrew', 'Took another offer', 'Compensation', 'No response', 'Client passed', 'Other'] %}<option value="Reason: {{ r }}">{{ r }}</option>{% endfor %}</select><button class="btn small" type="submit">Move without a reason</button></span>
   <noscript><button class="btn small" type="submit">Move</button></noscript>
 </form>

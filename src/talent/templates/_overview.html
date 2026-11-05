@@ -39,9 +39,11 @@
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
           <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','ai_change':'AI change','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
-          <a class="item-title" href="{{ i.href }}">{{ i.title }}</a>
+          <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
+          {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> {% endif %}<span class="fine">{{ i.due_text }}</span>{% endif %}
+          {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
           {% if i.kind == 'thin' and i.jobs | length > 1 %}
-          <div class="fine">{% for j in i.jobs %}<a href="/jobs/{{ j.id }}">{{ job_label(j.title, j.company) }}</a> ({{ j.active_count }} active){{ '; ' if not loop.last else '.' }} {% endfor %}{{ i.aim }}</div>
+          <div class="fine">{% for j in i.jobs %}<a href="/jobs/{{ j.id }}">{{ j.name }}</a> has {{ j.active_count or 'no' }} active, aim for at least {{ j.aim_min }}{{ '; ' if not loop.last else '.' }} {% endfor %}</div>
           {% elif i.kind == 'stale' and i.candidates %}
           <div class="fine">Oldest: {% for c in i.candidates %}<a href="/candidates/{{ c.id }}#refresh">{{ c.name }}</a>{{ ', ' if not loop.last }}{% endfor %}{% if today.stale_total > i.candidates | length %} and {{ today.stale_total - i.candidates | length }} more{% endif %}.</div>
           {% else %}
@@ -65,6 +67,28 @@
       </li>
     {% endfor %}
     </ul>
+    {% if today.next_week %}
+    <div class="later">
+      <h3>Next week</h3>
+      <ul class="items">
+      {% for i in today.next_week %}
+        <li class="item kind-interview">
+          <div class="item-main">
+            <span class="kind">Interview</span>
+            <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge(i.candidate_id in sample[0]) }}{% if i.on_hold %} <span class="badge">job on hold</span>{% endif %}
+            <div class="fine">{{ i.when | local }}{% if i.detail %} · {{ i.detail }}{% endif %}</div>
+          </div>
+        </li>
+      {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    <form method="post" action="/actions/todo" class="inline add-todo">
+      <input type="text" name="text" placeholder="Add a to-do, like Send Acme the weekly update" required aria-label="New to-do">
+      {% if jobs %}<select name="job_id" aria-label="Job (optional)"><option value="">No job</option>{% for j in jobs %}<option value="{{ j.id }}">{{ job_label(j.title, j.company) }}{% if j.location %} ({{ j.location }}){% endif %}</option>{% endfor %}</select>{% endif %}
+      <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
+      <button class="btn small" type="submit">Add to-do</button>
+    </form>
     {% if today.hidden or today.scheduled %}<p class="fine">
       {%- if today.hidden %}{{ today.hidden }} snoozed.{% endif %}
       {%- if today.scheduled %} {{ today.scheduled }} follow-up{{ '' if today.scheduled == 1 else 's' }} scheduled for later.{% endif %}</p>{% endif %}

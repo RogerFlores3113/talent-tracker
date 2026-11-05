@@ -7,6 +7,9 @@
   <div>
     <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %} {{ sample_badge(job.id in sample_ids()[1]) }}</h1>
     <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+    <p class="fine job-facts">{{ nums.active }} in the running · {% if nums.openings > 1 %}{{ nums.hired }} of {{ nums.openings }} {{ nums.word }}{% else %}{{ nums.hired }} {{ nums.word }}{% endif %}{% if nums.out %} · {{ nums.out }} out{% endif %}
+      {%- if job.hiring_manager %} · Hiring manager: {% if job.hiring_manager_email %}<a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager }}</a>{% else %}{{ job.hiring_manager }}{% endif %}{% elif job.hiring_manager_email %} · Hiring manager: <a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager_email }}</a>{% endif %}
+      {%- if job.target_date %} · Target {{ (job.target_date ~ 'T12:00:00') | local('%b %-d, %Y') }}{% endif %}</p>
   </div>
   <div class="actions-inline">
     <nav class="seg" aria-label="View">
@@ -18,6 +21,13 @@
   </div>
 </div>
 
+{% if nums.filled and job.status == 'open' %}
+<div class="flash filled" role="status">
+  <form method="post" action="/jobs/{{ job.id }}" class="inline"><input type="hidden" name="status" value="closed">
+    <strong>This role is filled. Close it?</strong> <button class="btn small primary" type="submit">Close the job</button>
+    <span class="fine">The pipeline and history are kept.</span></form>
+</div>
+{% endif %}
 <div class="addbar">
   <form method="get" action="/jobs/{{ job.id }}" hx-get="/jobs/{{ job.id }}" hx-target="#add-results" hx-trigger="input delay:200ms, search, submit" class="inline">
     <input type="search" name="q" value="{{ q }}" placeholder="Add someone you already have: search by name or skill" aria-label="Find a candidate to add" autocomplete="off">
@@ -32,8 +42,28 @@
 
 <div id="pipeline" data-move-url="/jobs/{{ job.id }}/move">{% include "_pipeline.html" %}</div>
 {% if job.description %}<details class="panel"><summary>Job description</summary><p class="about">{{ job.description }}</p></details>{% endif %}
-<details class="panel"><summary>Status update for the hiring manager</summary>
-  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, and the next interviews in your time zone.</p>
+<section class="panel todos" id="todos">
+  <h2>To-dos for this job</h2>
+  {% if todos %}<ul class="todo-list">{% for t in todos %}
+    <li>{{ t.text }}{% if t.candidate_name %} <span class="muted">· {{ t.candidate_name }}</span>{% endif %}{% if t.note %} <span class="fine">· {{ t.note }}</span>{% endif %}
+      {% if t.due_text %}{% if t.overdue %} <span class="badge overdue">Overdue</span>{% endif %} <span class="fine">{{ t.due_text }}</span>{% endif %}
+      <form method="post" action="/actions/suggestions/{{ t.id }}/done" class="inline"><button class="btn small" type="submit">Done</button></form></li>
+  {% endfor %}</ul>{% endif %}
+  <form method="post" action="/actions/todo" class="inline add-todo">
+    <input type="hidden" name="job_id" value="{{ job.id }}">
+    <input type="text" name="text" placeholder="Add a to-do, like Send the weekly update" required aria-label="New to-do for this job">
+    <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
+    <button class="btn small" type="submit">Add to-do</button>
+  </form>
+</section>
+<details class="panel" id="status" {{ 'open' if omit }}><summary>Status update for the hiring manager</summary>
+  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone.</p>
+  <form method="get" action="/jobs/{{ job.id }}#status" class="inline omit-stages">
+    <span class="fine">Leave out:</span>
+    {% set omitted = omit | map('lower') | list %}
+    {% for s in stages %}<label class="inline-label"><input type="checkbox" name="omit" value="{{ s.name }}" {{ 'checked' if s.name | lower in omitted }}> {{ s.name }}</label>{% endfor %}
+    <button class="btn small" type="submit">Update the text</button>
+  </form>
   <pre class="code status-text">{{ status_text }}</pre>
 </details>
 <form method="post" action="/jobs/{{ job.id }}/delete" data-confirm="Delete {{ job_label(job.title, job.company) }}? This removes the job and its pipeline. The candidates stay saved.">
