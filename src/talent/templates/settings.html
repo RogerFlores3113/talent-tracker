@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Settings · Talent Search{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+{% if saved %}<p class="flash">Saved.</p>{% endif %}
+{% if errors %}<p class="flash warn" role="alert">Nothing was saved. Fix the highlighted number{{ 's' if errors | length > 1 }} and save again.</p>{% endif %}
+<form method="post" action="/settings" class="stack">
+  <section class="panel">
+    <h2>What shows on Today</h2>
+    {% for key, label, help in flags %}
+    <label class="check"><input type="checkbox" name="{{ key }}" value="1" {{ 'checked' if s[key] == '1' }}>
+      <span><strong>{{ label }}</strong> <span class="fine">{{ help }}</span></span></label>
+    {% endfor %}
+    <div class="form three">
+      {% for key, label in thresholds %}
+      <label>{{ label }}<input type="number" name="{{ key }}" min="1" max="9999" value="{{ s[key] }}"{% if errors[key] %} aria-invalid="true" aria-describedby="err-{{ key }}"{% endif %}>
+        {% if errors[key] %}<span class="error" id="err-{{ key }}">{{ errors[key] }}</span>{% endif %}</label>
+      {% endfor %}
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Pipeline view</h2>
+    {% for v, label in [('board', 'Board, with a column per stage'), ('table', 'Table, grouped by stage')] %}
+    <label class="check"><input type="radio" name="pipeline_view" value="{{ v }}" {{ 'checked' if s.pipeline_view == v }}> <span>{{ label }}</span></label>
+    {% endfor %}
+  </section>
+  <div><button class="btn primary" type="submit">Save settings</button></div>
+</form>
+
+<section class="panel">
+  <h2>Your data</h2>
+  <p>Everything is in one file on this computer:</p>
+  <pre class="code">{{ db_file }}</pre>
+  <p class="actions-inline"><a class="btn" href="/backup">Download a backup</a> <a class="btn" href="/export.csv">Export candidates as CSV</a> <a class="btn" href="/import">Import a CSV</a></p>
+  <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
+</section>
+
+{% if sample_people or sample_jobs %}
+<section class="panel">
+  <h2>Sample data</h2>
+  <p>You have {{ sample_people }} sample candidate{{ '' if sample_people == 1 else 's' }} and {{ sample_jobs }} sample job{{ '' if sample_jobs == 1 else 's' }}, marked Sample. Removing them leaves everything you added yourself.</p>
+  <form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs? Your own data stays.')"><button class="btn" type="submit">Remove sample data</button></form>
+</section>
+{% endif %}
+{% endblock %}

@@ -18,7 +18,8 @@ SRC = os.path.join(HERE, "..", "src")
 hidden = (
     collect_submodules("uvicorn")
     + collect_submodules("mcp", filter=lambda name: not name.startswith("mcp.cli"))
-    + ["talent.web", "talent.mcp_server", "talent.sample_data", "talent.typesense_index"]
+    + ["talent.web", "talent.mcp_server", "talent.sample_data", "talent.typesense_index",
+       "talent.actions", "talent.recipes", "talent.importers", "talent.mcp_views", "python_multipart"]
 )
 
 a = Analysis(
@@ -61,6 +62,6 @@ if sys.platform == "darwin":
         coll,
         name="Talent Search.app",
         bundle_identifier="dev.rogerflores.talentsearch",
-        version="0.0.1",
+        version="0.0.2",
         info_plist={"NSHighResolutionCapable": True, "LSUIElement": False},
     )

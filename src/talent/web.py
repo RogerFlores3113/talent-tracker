@@ -1,21 +1,41 @@
 """The app window: a local web UI on 127.0.0.1 opened in the user's browser."""
 from __future__ import annotations
 
+import os
+import re
+import secrets
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
-from . import __version__, integrations
-from .paths import resource_dir
-from .store import CANDIDATE_FIELDS, NotFound, Store, snippet_html
+from . import __version__, actions, importers, integrations, recipes
+from .sample_data import load_sample_data, remove_sample_data, sample_ids
+from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
+from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, FIELD_LABELS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS,
+                    NotFound, Store, _labels, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+MAX_UPLOAD = 10 * 1024 * 1024
+ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
+UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
+TABLE_SORTS = {
+    "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
+    "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
+    "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at",
+}
 
 
 class CandidateIn(BaseModel):
@@ -30,80 +50,259 @@ class CandidateIn(BaseModel):
     about: str | None = None
     tags: str | list[str] | None = None
     source: str | None = None
+    last_contacted_at: str | None = None
+
+
+def _ago(iso: str | None) -> str:
+    dt = to_dt(iso)
+    if not dt:
+        return "never"
+    days = (datetime.now(timezone.utc) - dt).days
+    if days < 0:
+        return "upcoming"
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 60:
+        return f"{days} days ago"
+    if days < 730:
+        return f"{days // 30} months ago"
+    return f"{days // 365} years ago"
+
+
+def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
+    dt = to_dt(iso)
+    if not dt:
+        return ""
+    local = dt.astimezone()
+    try:
+        return local.strftime(fmt)
+    except ValueError:  # Windows strftime has no %-d
+        return local.strftime(fmt.replace("%-", "%#"))
+
+
+def _shown(field: str, value: Any) -> str:
+    if value in (None, "", []):
+        return ""
+    if field == "work_history":
+        n = len(value) if isinstance(value, list) else 0
+        return f"{n} role{'' if n == 1 else 's'}"
+    if field == "last_contacted_at":
+        return str(value)[:10]
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text if len(text) <= 60 else text[:57].rstrip() + "..."
+
+
+def change_lines(data: Any) -> list[str]:
+    """A change entry's old and new values: ['Company: Acme to Initech', 'Cleared email (was ana@x.com)']."""
+    if not isinstance(data, dict) or not isinstance(data.get("new"), dict):
+        return []
+    old = data.get("old") if isinstance(data.get("old"), dict) else {}
+    out = []
+    for k, v in data["new"].items():
+        label = FIELD_LABELS.get(k, k.replace("_", " "))
+        cap = label[:1].upper() + label[1:]
+        was, now = _shown(k, old.get(k)), _shown(k, v)
+        if not now:
+            out.append(f"Cleared {label}" + (f" (was {was})" if was else ""))
+        elif not was:
+            out.append(f"{cap}: {now} (was empty)")
+        else:
+            out.append(f"{cap}: {was} to {now}")
+    return out
+
+
+def profile_label(url: str | None) -> str:
+    """'LinkedIn' only for a linkedin.com address (or a subdomain of it), else 'Profile'."""
+    host = (urlsplit(url or "").hostname or "").lower()
+    return "LinkedIn" if host == "linkedin.com" or host.endswith(".linkedin.com") else "Profile"
+
+
+def _history_from_text(text: str) -> list[dict[str, Any]]:
+    """One role per line: Title | Company | Start | End."""
+    out = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split("|")] + ["", "", "", ""]
+        out.append({"title": parts[0], "company": parts[1], "start": parts[2], "end": parts[3]})
+    return out
+
+
+def _history_to_text(entries: list[dict[str, Any]]) -> str:
+    return "\n".join(" | ".join(e.get(k) or "" for k in ("title", "company", "start", "end")).rstrip(" |")
+                     for e in entries)
 
 
 def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     search = search or SearchService(store, TypesenseIndex.from_env())
-    app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None)
+    app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     res = resource_dir()
     templates = Jinja2Templates(directory=str(res / "templates"))
-    templates.env.filters["snippet"] = snippet_html
-    templates.env.filters["date"] = lambda iso: (iso or "")[:10]
+    env = templates.env
+    env.filters["snippet"] = snippet_html
+    env.filters["date"] = lambda iso: (iso or "")[:10]
+    env.filters["ago"] = _ago
+    env.filters["local"] = _local
+    env.filters["claude_link"] = recipes.claude_link
+    env.filters["change_lines"] = change_lines
+    env.filters["profile_label"] = profile_label
+    env.globals["version"] = __version__
+    env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["job_label"] = actions.job_label
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
         # The server only listens on 127.0.0.1, but a web page in the same browser
         # could still try to reach it. Block DNS-rebinding (foreign Host header)
-        # and cross-site form posts (foreign Origin) before any handler runs.
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if host not in LOCAL_HOSTS:
+        # and cross-site requests (CSRF) before any handler runs.
+        host_header = (request.headers.get("host") or "").strip().lower()
+        if _hostname(host_header) not in LOCAL_HOSTS:
             return PlainTextResponse("Forbidden", status_code=403)
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        fetch_site = (request.headers.get("sec-fetch-site") or "").lower()
+        if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
-            if origin and origin != "null" and urlsplit(origin).hostname not in LOCAL_HOSTS:
+            if origin is not None:
+                # Sandboxed frames, file:// pages and some redirects send "null": never ours.
+                # Otherwise the origin must be exactly this server, port included.
+                if origin.strip().lower() == "null" or urlsplit(origin.strip().lower()).netloc != host_header:
+                    return PlainTextResponse("Forbidden", status_code=403)
+            elif fetch_site and fetch_site not in ("same-origin", "none"):
                 return PlainTextResponse("Forbidden", status_code=403)
-        return await call_next(request)
+            # With neither header (curl, scripts, very old browsers) we allow it: browsers
+            # always send at least one of them on a cross-site request, so this can't be CSRF.
+        elif request.url.path in DOWNLOADS and fetch_site in ("cross-site", "same-site"):
+            return PlainTextResponse("Forbidden", status_code=403)
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
 
-    def page(request: Request, name: str, **ctx: Any) -> HTMLResponse:
-        return templates.TemplateResponse(request, name, {"engine": search.engine, **ctx})
+    def page(request: Request, name: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
+        return templates.TemplateResponse(request, name, {"engine": search.engine, **ctx}, status_code=status_code)
 
-    # ------------------------------------------------------------ pages
+    def is_htmx(request: Request) -> bool:
+        return bool(request.headers.get("HX-Request"))
+
+    def back(request: Request, default: str = "/", notice: str = "", error: str = "") -> RedirectResponse:
+        """Redirect to the page the form was on, with an optional one-line message (shown by base.html)."""
+        ref = request.headers.get("referer") or ""
+        target = urlsplit(ref)
+        path, query = (target.path, target.query) if target.hostname in LOCAL_HOSTS and target.path else \
+            (urlsplit(default).path, urlsplit(default).query)
+        params = [(k, v) for k, v in parse_qsl(query) if k not in ONE_SHOT_PARAMS]
+        params += [(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v]
+        return RedirectResponse(path + ("?" + urlencode(params) if params else ""), status_code=303)
+
+    def cand_or_404(candidate_id: int) -> dict[str, Any]:
+        try:
+            return store.get_candidate(candidate_id)
+        except NotFound:
+            raise HTTPException(404, "Candidate not found")
+
+    def job_or_404(job_id: int) -> dict[str, Any]:
+        try:
+            return store.get_job(job_id)
+        except NotFound:
+            raise HTTPException(404, "Job not found")
+
+    # ------------------------------------------------------------ overview
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, q: str = "", location: str = "", title: str = ""):
-        result = search.search(q, location=location or None, title=title or None, limit=50)
-        if request.headers.get("HX-Request") and request.headers.get("HX-Target") == "results":
-            return page(request, "_results.html", result=result, q=q, total_all=store.count_candidates())
-        return page(request, "index.html", result=result, q=q, location=location, title=title,
-                    total_all=store.count_candidates())
+    def home(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
+        searching = bool(q or location or title or tag)
+        result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50)
+        ctx = dict(result=result, q=q, location=location, title=title, tag=tag, total_all=store.count_candidates(),
+                   searching=searching)
+        if is_htmx(request) and request.headers.get("HX-Target") == "results":
+            if not searching:
+                return page(request, "_overview.html", **ctx, **overview_ctx())
+            return page(request, "_results.html", **ctx)
+        return page(request, "index.html", **ctx, **overview_ctx())
+
+    def overview_ctx() -> dict[str, Any]:
+        people, sample_jobs = sample_ids(store)
+        return {"today": actions.action_items(store), "jobs": store.list_jobs("open"),
+                "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
+                "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
     @app.get("/search", response_class=HTMLResponse)
-    def search_fragment(request: Request, q: str = "", location: str = "", title: str = ""):
-        result = search.search(q, location=location or None, title=title or None, limit=50)
-        return page(request, "_results.html", result=result, q=q, total_all=store.count_candidates())
+    def search_fragment(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
+        result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50)
+        return page(request, "_results.html", result=result, q=q, total_all=store.count_candidates(), searching=True)
 
+    # ------------------------------------------------------------ table
+    @app.get("/candidates", response_class=HTMLResponse)
+    def table(request: Request, q: str = "", tag: str = "", sort: str = "updated", dir: str = "desc",
+              page_no: int = 1):
+        per = 100
+        sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
+        direction = "ASC" if dir == "asc" else "DESC"
+        if q.strip():
+            result = search.search(q, tag=tag or None, limit=per, offset=(page_no - 1) * per)
+            rows, total = [h.candidate for h in result.hits], result.total
+        else:
+            where, params = "", []
+            if tag:
+                where, params = "WHERE c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ?)", [tag]
+            total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
+            rows = [store._hydrate(r) for r in store._rows(
+                f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
+                (*params, per, (page_no - 1) * per))]
+        return page(request, "table.html", rows=rows, total=total, q=q, tag=tag, sort=sort, dir=dir,
+                    page_no=page_no, pages=max(1, (total + per - 1) // per), tags=store.list_tags(40))
+
+    # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
-    def new_candidate(request: Request):
-        return page(request, "candidate_form.html", c={}, error=None)
+    def new_candidate(request: Request, job_id: int | None = None):
+        return page(request, "candidate_form.html", c={}, history_text="", error=None, job_id=job_id)
 
     @app.post("/candidates", response_class=HTMLResponse)
     async def create_candidate_form(request: Request):
-        data = _form_fields(await request.form())
+        form = await request.form()
+        data = _form_fields(form)
+        history = _history_from_text(str(form.get("work_history", "")))
         try:
-            cand, _ = store.upsert_candidate(**data)
+            cand, created = store.upsert_candidate(work_history=history or None, **data)
+            job_id = str(form.get("job_id") or "")
+            if job_id.isdigit():
+                store.add_to_pipeline(cand["id"], int(job_id))
+                return RedirectResponse(f"/jobs/{job_id}", status_code=303)
         except ValueError as exc:
-            return page(request, "candidate_form.html", c=data, error=str(exc))
-        return RedirectResponse(f"/candidates/{cand['id']}", status_code=303)
+            return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
+                        error=str(exc), job_id=form.get("job_id"))
+        dest = f"/candidates/{cand['id']}" + ("" if created else "?merged=1")
+        return RedirectResponse(dest, status_code=303)
 
     @app.get("/candidates/{candidate_id}", response_class=HTMLResponse)
-    def candidate_detail(request: Request, candidate_id: int, edit: bool = False):
-        try:
-            c = store.get_candidate(candidate_id)
-        except NotFound:
-            raise HTTPException(404, "Candidate not found")
+    def candidate_detail(request: Request, candidate_id: int, edit: bool = False, merged: bool = False):
+        cand_or_404(candidate_id)
+        c = store.candidate_detail(candidate_id)
         if edit:
-            return page(request, "candidate_form.html", c=c, error=None)
-        return page(request, "candidate.html", c=c, pipelines=store.candidate_pipelines(candidate_id))
+            return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
+                        error=None, job_id=None)
+        in_jobs = {p["job_id"] for p in c["pipelines"]}
+        open_jobs = store.list_jobs("open")
+        hints = actions.twin_hints(open_jobs)
+        other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
+        stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
+        return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
+                    kinds=[k for k in TIMELINE_KINDS if k != "stage"],
+                    refresh_prompt=recipes.save_from_linkedin(c.get("linkedin_url") or c["name"]))
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
-        data = _form_fields(await request.form(), keep_blank=True)
+        cand_or_404(candidate_id)
+        form = await request.form()
+        data = _form_fields(form, keep_blank=True)
+        history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
         try:
-            store.update_candidate(candidate_id, **data)
-        except NotFound:
-            raise HTTPException(404, "Candidate not found")
+            store.update_candidate(candidate_id, work_history=history, **data)
         except ValueError as exc:
-            return page(request, "candidate_form.html", c={"id": candidate_id, **data}, error=str(exc))
+            return page(request, "candidate_form.html", c={"id": candidate_id, **data},
+                        history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
         return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
 
     @app.post("/candidates/{candidate_id}/delete")
@@ -112,14 +311,381 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             store.delete_candidate(candidate_id)
         except NotFound:
             raise HTTPException(404, "Candidate not found")
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/?deleted=1", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/log", response_class=HTMLResponse)
+    async def log_entry(request: Request, candidate_id: int):
+        cand_or_404(candidate_id)
+        form = await request.form()
+        job = str(form.get("job_id") or "")
+        job_id = int(job) if job.isdigit() else None
+        kind, body = str(form.get("kind") or "note"), str(form.get("body") or "")
+        follow_up = str(form.get("follow_up") or "").strip()
+        notice = ""
+        try:
+            day = actions.parse_day(follow_up) if follow_up else None
+            if body.strip() or kind != "note" or not day:  # a follow-up date alone needs no note
+                store.log(candidate_id, kind, body, at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+            if day:
+                actions.schedule_followup(store, candidate_id, day, job_id=job_id)
+                notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
+        except (ValueError, NotFound) as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}{'?' + urlencode({'notice': notice}) if notice else ''}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/undo/{timeline_id}")
+    def undo_change_form(candidate_id: int, timeline_id: int):
+        cand_or_404(candidate_id)
+        try:
+            cand = store.undo_change(timeline_id, candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That change isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        notice = f"Undid the change to {_labels(cand['_restored'])}."
+        if cand["_skipped"]:
+            notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/contacted")
+    def mark_contacted(candidate_id: int):
+        cand_or_404(candidate_id)
+        store.log(candidate_id, "message", "Marked as contacted", source="App")
+        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/jobs")
+    async def add_candidate_to_job(request: Request, candidate_id: int):
+        cand_or_404(candidate_id)
+        form = await request.form()
+        job = str(form.get("job_id") or "")
+        if job.isdigit():
+            store.add_to_pipeline(candidate_id, int(job))
+        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+
+    # ----------------------------------------------------------- paste
+    @app.get("/paste", response_class=HTMLResponse)
+    def paste_page(request: Request):
+        return page(request, "paste.html", text="", prompt=recipes.save_from_text(""))
+
+    @app.post("/paste", response_class=HTMLResponse)
+    async def paste_preview(request: Request):
+        form = await request.form()
+        text = str(form.get("text") or "")
+        if not text.strip():
+            return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
+                        error="Paste some profile or resume text first.")
+        guess = importers.quick_parse(text)
+        dupe = store.find_duplicate(guess.get("email"), guess.get("linkedin_url"))
+        return page(request, "candidate_form.html", c=guess, history_text="", error=None, job_id=None,
+                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text))
+
+    # ----------------------------------------------------------- csv
+    @app.get("/import", response_class=HTMLResponse)
+    def import_page(request: Request):
+        return page(request, "import.html", step="upload")
+
+    @app.post("/import", response_class=HTMLResponse)
+    async def import_preview(request: Request):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not getattr(upload, "filename", ""):
+            return page(request, "import.html", step="upload", error="Choose a CSV file first.")
+        data = await upload.read(MAX_UPLOAD + 1)
+        if len(data) > MAX_UPLOAD:
+            return page(request, "import.html", step="upload", error="That file is over 10 MB. Split it and try again.")
+        try:
+            header, rows = importers.read_csv(importers.decode(data))
+        except ValueError as exc:
+            return page(request, "import.html", step="upload", error=str(exc))
+        _sweep_uploads()
+        token = secrets.token_hex(8)
+        fd = os.open(imports_dir() / f"{token}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        mapping = importers.guess_mapping(header)
+        return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
+                    mapping=mapping, targets=importers.IMPORT_TARGETS, filename=upload.filename,
+                    has_name=any(m in ("name", "first_name", "last_name") for m in mapping))
+
+    @app.post("/import/run", response_class=HTMLResponse)
+    async def import_run(request: Request):
+        form = await request.form()
+        token = str(form.get("token") or "")
+        _sweep_uploads()
+        path = imports_dir() / f"{token}.csv"
+        if not token.isalnum() or not path.exists():
+            return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
+        header, rows = importers.read_csv(importers.decode(path.read_bytes()))
+        mapping = [str(form.get(f"col{i}") or "") for i in range(len(header))]
+        mapping = [m if m in importers.IMPORT_TARGETS else "" for m in mapping]
+        if not any(m in ("name", "first_name", "last_name") for m in mapping):
+            return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5],
+                        total=len(rows), mapping=mapping, targets=importers.IMPORT_TARGETS,
+                        error="Pick which column holds the name.", has_name=False)
+        try:
+            result = importers.import_rows(store, header, rows, mapping,
+                                           source=str(form.get("source") or "CSV import"))
+        except ValueError as exc:  # the backup before importing failed, so nothing changed
+            return page(request, "import.html", step="upload", error=str(exc))
+        finally:
+            path.unlink(missing_ok=True)  # our own private copy of the upload
+        return page(request, "import.html", step="done", result=result)
+
+    def _sweep_uploads() -> None:
+        """Uploads nobody finished importing are deleted after an hour."""
+        cutoff = time.time() - UPLOAD_TTL
+        for f in imports_dir().glob("*.csv"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+
+    @app.get("/export.csv")
+    def export_csv():
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        return Response(importers.export_csv(store), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="talent-search-{stamp}.csv"'})
+
+    @app.get("/backup")
+    def backup():
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        fd, name = tempfile.mkstemp(prefix="download-", suffix=".db", dir=backups_dir())  # 0600, private folder
+        os.close(fd)
+        tmp = Path(name)
+        store.backup_to(tmp)
+        return FileResponse(tmp, filename=f"talent-search-backup-{stamp}.db", media_type="application/octet-stream",
+                            background=BackgroundTask(lambda: tmp.unlink(missing_ok=True)))
 
     @app.post("/sample-data")
     def sample_data():
-        from .sample_data import load_sample_data
-
         load_sample_data(store)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/?sample=1", status_code=303)
+
+    @app.post("/sample-data/remove")
+    def sample_data_remove(request: Request):
+        people, jobs = remove_sample_data(store)
+        msg = (f"Removed the sample data: {people} candidate{'' if people == 1 else 's'} and "
+               f"{jobs} job{'' if jobs == 1 else 's'}." if people or jobs else "There was no sample data to remove.")
+        return back(request, notice=msg)
+
+    # ------------------------------------------------------------ jobs
+    @app.get("/jobs", response_class=HTMLResponse)
+    def jobs_page(request: Request, status: str = ""):
+        jobs = store.list_jobs(status if status in JOB_STATUSES else None)
+        hints = actions.twin_hints(jobs)
+        return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status)
+
+    @app.get("/jobs/new", response_class=HTMLResponse)
+    def new_job(request: Request):
+        return page(request, "job_form.html", j={}, error=None)
+
+    @app.post("/jobs", response_class=HTMLResponse)
+    async def create_job(request: Request):
+        form = await request.form()
+        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description")}
+        stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
+        twins = store.similar_open_jobs(data["title"], data["company"])
+        try:
+            job = store.add_job(**data, stages=stages or None)
+        except ValueError as exc:
+            return page(request, "job_form.html", j=data, error=str(exc))
+        if twins:
+            ids = ", ".join(f"#{j['id']}" for j in twins)
+            notice = (f"Created. Heads up: open job {ids} has the same title and company. "
+                      "If it's a duplicate, close one of them.")
+            return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': notice})}", status_code=303)
+        return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
+
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    def job_detail(request: Request, job_id: int, view: str = "", q: str = ""):
+        job = job_or_404(job_id)
+        if view in ("board", "table"):
+            store.set_settings(pipeline_view=view)
+        view = view if view in ("board", "table") else store.setting("pipeline_view")
+        add_results = []
+        if q.strip():
+            in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
+            add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
+        ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
+                   q=q, add_results=add_results, prompt=recipes.source_for_job(job),
+                   next_iv=actions.next_interviews(store, job_id), status_text=actions.job_status_text(store, job_id))
+        if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
+            return page(request, "_add_results.html", **ctx)
+        return page(request, "job.html", **ctx)
+
+    @app.post("/jobs/{job_id}", response_class=HTMLResponse)
+    async def update_job(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", "status")
+                if k in form}
+        try:
+            store.update_job(job_id, **data)
+        except ValueError as exc:
+            return page(request, "job_form.html", j={**store.get_job(job_id), **data}, error=str(exc))
+        return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    @app.get("/jobs/{job_id}/edit", response_class=HTMLResponse)
+    def edit_job(request: Request, job_id: int):
+        return page(request, "job_form.html", j=job_or_404(job_id), error=None, stages=store.job_stages(job_id),
+                    outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
+
+    @app.post("/jobs/{job_id}/stages", response_class=HTMLResponse)
+    async def edit_stages(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        op = str(form.get("op") or "")
+        name = str(form.get("stage") or "")
+        try:
+            if op == "add":
+                store.add_stage(job_id, str(form.get("new_name") or ""), after=str(form.get("after") or "") or None)
+            elif op == "rename":
+                store.rename_stage(job_id, name, str(form.get("new_name") or ""))
+            elif op in ("up", "down"):
+                names = [s["name"] for s in store.job_stages(job_id)]
+                i = [n.lower() for n in names].index(name.lower())
+                j = i - 1 if op == "up" else i + 1
+                if 0 <= j < len(names):
+                    names[i], names[j] = names[j], names[i]
+                    store.reorder_stages(job_id, names)
+            elif op == "outcome":
+                store.set_stage_outcome(job_id, name, str(form.get("outcome") or "open"))
+            elif op == "remove":
+                store.remove_empty_stage(job_id, name)
+        except ValueError as exc:
+            return page(request, "job_form.html", j=store.get_job(job_id), error=str(exc),
+                        stages=store.job_stages(job_id), outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
+        return RedirectResponse(f"/jobs/{job_id}/edit#stages", status_code=303)
+
+    @app.post("/jobs/{job_id}/move", response_class=HTMLResponse)
+    async def move(request: Request, job_id: int):
+        job = job_or_404(job_id)
+        form = await request.form()
+        cid = str(form.get("candidate_id") or "")
+        error = None
+        try:
+            store.move_stage(int(cid), job_id, str(form.get("stage") or ""))
+        except (ValueError, NotFound) as exc:
+            error = str(exc)
+        if is_htmx(request):
+            view = str(form.get("view") or store.setting("pipeline_view"))
+            return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
+                        stages=store.job_stages(job_id), view=view, error=error,
+                        next_iv=actions.next_interviews(store, job_id))
+        return back(request, f"/jobs/{job_id}", error=error or "")
+
+    @app.post("/jobs/{job_id}/delete")
+    def delete_job_form(job_id: int):
+        """App window only. The AI has no tool to delete a job."""
+        job = job_or_404(job_id)
+        store.delete_job(job_id)
+        return RedirectResponse("/jobs?" + urlencode({"notice": f"Deleted {actions.job_label(job['title'], job.get('company'))}. "
+                                                      "The candidates are still saved."}), status_code=303)
+
+    @app.post("/jobs/{job_id}/add")
+    async def add_existing(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        cid = str(form.get("candidate_id") or "")
+        if cid.isdigit():
+            store.add_to_pipeline(int(cid), job_id)
+        return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    # ------------------------------------------------------- dashboard acts
+    @app.post("/actions/snooze")
+    async def snooze(request: Request):
+        form = await request.form()
+        key = str(form.get("key") or "")
+        days = str(form.get("days") or "7")
+        if not key or not days.isdigit() or not 0 < int(days) < 3650:
+            return back(request, error="Couldn't snooze that. Reload the page and try again.")
+        store.snooze(key, int(days))
+        return back(request, notice=f"Snoozed for {days} day{'' if days == '1' else 's'}.")
+
+    @app.post("/actions/suggestions/{suggestion_id}/done")
+    def suggestion_done(request: Request, suggestion_id: int):
+        try:
+            actions.complete_followup(store, suggestion_id)
+        except NotFound:
+            return back(request, error="That follow-up is already gone.")
+        return back(request, notice="Marked done.")
+
+    @app.post("/actions/advance")
+    async def advance(request: Request):
+        form = await request.form()
+        cid, jid, stage = (str(form.get(k) or "") for k in ("candidate_id", "job_id", "stage"))
+        if not (cid.isdigit() and jid.isdigit() and stage):
+            return back(request, error="Couldn't move that candidate. Reload the page and try again.")
+        try:
+            app_row = store.move_stage(int(cid), int(jid), stage)
+        except (ValueError, NotFound) as exc:
+            return back(request, error=str(exc))
+        return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
+
+    # ---------------------------------------------------------- settings etc
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request, saved: bool = False):
+        return render_settings(request, saved=saved)
+
+    def render_settings(request: Request, saved: bool = False, s: dict[str, str] | None = None,
+                        errors: dict[str, str] | None = None, status_code: int = 200) -> HTMLResponse:
+        people, jobs = sample_ids(store)
+        return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
+                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
+                    sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()))
+
+    @app.post("/settings", response_class=HTMLResponse)
+    async def save_settings(request: Request):
+        form = await request.form()
+        values: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        for key, _, _ in actions.FLAGS:
+            values[key] = "1" if form.get(key) else "0"
+        for key, _ in actions.THRESHOLDS:
+            raw = str(form.get(key) or "").strip()
+            if not raw:
+                continue  # left blank: keep what was there
+            if raw.isdigit() and 0 < int(raw) < 10000:
+                values[key] = str(int(raw))
+            else:
+                values[key] = raw
+                errors[key] = "Use a whole number from 1 to 9999."
+        if form.get("pipeline_view") in ("board", "table"):
+            values["pipeline_view"] = str(form.get("pipeline_view"))
+        if errors:
+            return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
+        store.set_settings(**values)
+        return RedirectResponse("/settings?saved=1", status_code=303)
+
+    @app.get("/recipes", response_class=HTMLResponse)
+    def recipes_page(request: Request):
+        items = [(r, recipes.render(r.key)) for r in recipes.RECIPES]
+        return page(request, "recipes.html", items=items, jobs=store.list_jobs("open"),
+                    job_prompts={j["id"]: recipes.source_for_job(j) for j in store.list_jobs("open")})
+
+    @app.get("/privacy", response_class=HTMLResponse)
+    def privacy(request: Request):
+        return page(request, "privacy.html", data_folder=str(data_dir().resolve()))
+
+    @app.get("/report", response_class=HTMLResponse)
+    def report_page(request: Request, where: str = ""):
+        return page(request, "report.html", link=None, where=where, env_line=recipes.environment_line())
+
+    @app.post("/report", response_class=HTMLResponse)
+    async def report_build(request: Request):
+        form = await request.form()
+        summary = str(form.get("summary") or "").strip()
+        if not summary:
+            return page(request, "report.html", link=None, error="Say in a few words what went wrong.",
+                        env_line=recipes.environment_line(), where=str(form.get("where") or ""))
+        link = recipes.issue_url(summary, str(form.get("details") or ""), where=str(form.get("where") or "app"))
+        return page(request, "report.html", link=link, summary=summary, env_line=recipes.environment_line(),
+                    where=str(form.get("where") or ""))
 
     # ----------------------------------------------------- AI app setup
     @app.get("/connect", response_class=HTMLResponse)
@@ -129,13 +695,15 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             "connect.html",
             claude_on=integrations.claude_connected(),
             codex_on=integrations.codex_connected(),
+            lmstudio_on=integrations.lmstudio_connected(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
         )
 
     @app.post("/connect/{target}", response_class=HTMLResponse)
     def connect(request: Request, target: str):
-        fn = {"claude": integrations.connect_claude, "codex": integrations.connect_codex}.get(target)
+        fn = {"claude": integrations.connect_claude, "codex": integrations.connect_codex,
+              "lmstudio": integrations.connect_lmstudio}.get(target)
         if fn is None:
             raise HTTPException(404)
         try:
@@ -150,9 +718,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         return {"ok": True, "version": __version__, "search": search.engine, "candidates": store.count_candidates()}
 
     @app.get("/api/candidates")
-    def api_search(q: str = "", location: str | None = None, title: str | None = None,
+    def api_search(q: str = "", location: str | None = None, title: str | None = None, tag: str | None = None,
                    limit: int = 25, offset: int = 0):
-        r = search.search(q, location=location, title=title, limit=min(limit, 200), offset=offset)
+        r = search.search(q, location=location, title=title, tag=tag, limit=max(1, min(limit, 200)),
+                          offset=max(0, offset))
         return {"total": r.total, "engine": r.engine,
                 "results": [{**h.candidate, "snippet": h.snippet} for h in r.hits]}
 
@@ -167,7 +736,7 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     @app.get("/api/candidates/{candidate_id}")
     def api_get(candidate_id: int):
         try:
-            return store.get_candidate(candidate_id)
+            return store.candidate_detail(candidate_id)
         except NotFound:
             raise HTTPException(404, "Candidate not found")
 
@@ -187,7 +756,26 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         except NotFound:
             raise HTTPException(404, "Candidate not found")
 
+    @app.get("/api/today")
+    def api_today():
+        return actions.action_items(store)
+
+    @app.exception_handler(404)
+    async def not_found(request: Request, exc):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": getattr(exc, "detail", "Not found")}, status_code=404)
+        detail = getattr(exc, "detail", None)
+        return page(request, "message.html", status_code=404, title="Not found",
+                    message=detail if detail and detail != "Not Found" else "That page doesn't exist.")
+
     return app
+
+
+def _hostname(host_header: str) -> str:
+    """'127.0.0.1:8765' -> '127.0.0.1', '[::1]:8765' -> '[::1]', 'localhost' -> 'localhost'."""
+    if host_header.startswith("["):
+        return host_header.split("]", 1)[0] + "]"
+    return host_header.rsplit(":", 1)[0] if host_header.count(":") == 1 else host_header
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:
@@ -198,3 +786,6 @@ def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:
             if v.strip() or keep_blank:
                 out[f] = v
     return out
+
+
+__all__ = ["create_app", "DEFAULT_SETTINGS", "split_tags"]

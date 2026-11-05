@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chips %}
+{% block title %}Candidates · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <h1>Candidates <span class="muted">{{ total }}</span></h1>
+  <div class="actions-inline"><a class="btn" href="/export.csv">Export CSV</a> <a class="btn primary" href="/candidates/new">Add</a></div>
+</div>
+<form class="tablebar" method="get" action="/candidates">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search candidates">
+  <select name="tag" aria-label="Filter by skill" onchange="this.form.submit()">
+    <option value="">Any skill</option>
+    {% for t in tags %}<option value="{{ t.tag }}" {{ 'selected' if t.tag | lower == tag | lower }}>{{ t.tag }} ({{ t.count }})</option>{% endfor %}
+  </select>
+  <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">
+  <button class="btn" type="submit">Go</button>
+  {% if q or tag %}<a href="/candidates" class="small">Clear</a>{% endif %}
+</form>
+{% if q %}<p class="fine">Sorted by best match.</p>{% endif %}
+<div class="table-wrap">
+<table class="dense">
+  <thead><tr>
+    {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated')] %}
+    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ {'tag': tag, 'sort': key, 'dir': 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))} | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
+    {% endfor %}
+    <th>Skills</th>
+  </tr></thead>
+  <tbody>
+  {% for c in rows %}
+    <tr>
+      <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a></td>
+      <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td><td>{{ c.location or '' }}</td>
+      <td class="nowrap">{{ c.last_contacted_at | date if c.last_contacted_at else '' }}</td>
+      <td class="nowrap">{{ c.updated_at | date }}</td>
+      <td>{{ chips(c.tags[:4]) }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="none">No candidates{{ ' match that' if q or tag }}.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if pages > 1 %}
+<p class="pager">
+  {% if page_no > 1 %}<a href="/candidates?{{ {'q': q, 'tag': tag, 'sort': sort, 'dir': dir, 'page_no': page_no - 1} | urlencode }}">Previous</a>{% endif %}
+  Page {{ page_no }} of {{ pages }}
+  {% if page_no < pages %}<a href="/candidates?{{ {'q': q, 'tag': tag, 'sort': sort, 'dir': dir, 'page_no': page_no + 1} | urlencode }}">Next</a>{% endif %}
+</p>
+{% endif %}
+{% endblock %}

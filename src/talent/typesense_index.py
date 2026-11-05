@@ -47,7 +47,7 @@ def to_document(c: dict[str, Any]) -> dict[str, Any]:
     doc = {"id": str(c["id"]), "name": c["name"], "updated_ts": int(datetime.fromisoformat(c["updated_at"]).timestamp())}
     for f in ("current_title", "current_company", "location", "about", "tags"):
         if c.get(f):
-            doc[f] = c[f]
+            doc[f] = ", ".join(c[f]) if isinstance(c[f], list) else c[f]
     return doc
 
 
@@ -185,6 +185,9 @@ class SearchService:
         return "typesense" if self.index is not None and time.monotonic() >= self._down_until else "built-in"
 
     def search(self, query: str = "", **kw: Any) -> SearchResult:
+        if kw.get("tag"):  # exact skill-tag filter lives in SQLite
+            return self.store.search_candidates(query, **kw)
+        kw.pop("tag", None)
         if self.index is not None and time.monotonic() >= self._down_until:
             try:
                 self.index.sync(self.store)

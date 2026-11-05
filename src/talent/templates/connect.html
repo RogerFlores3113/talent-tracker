@@ -2,40 +2,46 @@
 {% block title %}Connect AI · Talent Search{% endblock %}
 {% block body %}
 <h1>Connect your AI app</h1>
-<p class="lead">Once connected, you can ask your AI app to find, save and update candidates here, in plain English.</p>
+<p class="lead">Once connected, ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
 
 <div class="connect-grid">
+  {% for key, name, on, blurb in [
+      ('claude', 'Claude Desktop', claude_on, 'Adds Talent Search to Claude. Results show up as cards right in the chat.'),
+      ('codex', 'Codex', codex_on, 'Works for the Codex app and the codex command.'),
+      ('lmstudio', 'LM Studio', lmstudio_on, 'For local models. Pick one that supports tool use, like Qwen 3 or Llama 3.1.')] %}
   <section class="panel">
-    <h2>Claude Desktop</h2>
-    <p>{% if claude_on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}Adds Talent Search to Claude's tools.{% endif %}</p>
-    <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result">Connect to Claude</button>
-    <div id="claude-result"></div>
+    <h2>{{ name }}</h2>
+    <p>{% if on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
+    <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result">{{ 'Reconnect' if on else 'Connect' }} {{ name }}</button>
+    <div id="{{ key }}-result" aria-live="polite"></div>
   </section>
+  {% endfor %}
   <section class="panel">
-    <h2>Codex</h2>
-    <p>{% if codex_on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}Works for the Codex app and command line.{% endif %}</p>
-    <button class="btn primary" hx-post="/connect/codex" hx-target="#codex-result">Connect to Codex</button>
-    <div id="codex-result"></div>
+    <h2>ChatGPT and others</h2>
+    <p>Apps that run local MCP servers (Cursor, Windsurf, Jan and others) can use the settings under “By hand” below.</p>
+    <p class="fine">Ollama on its own can't use tools like this. Use it through LM Studio or another MCP app instead.</p>
   </section>
 </div>
 
 <section class="panel">
   <h2>Try asking</h2>
   <ul class="plain">
-    <li>“Save this person as a candidate:” and paste a LinkedIn profile or resume.</li>
+    <li>“Save this person to Talent Search:” and paste a LinkedIn link or resume.</li>
     <li>“Who do I have in Austin with Rust experience?”</li>
-    <li>“Create a Senior Backend Engineer job and add my three best Go candidates to it.”</li>
-    <li>“Move Priya to interviewing for the Data Lead role.”</li>
+    <li>“Create a Senior Backend Engineer job and add my three best Go candidates.”</li>
+    <li>“Move Priya to Interviewing for the Data Lead role.”</li>
+    <li>“What should I do today?”</li>
   </ul>
+  <p><a href="/recipes">More ready-made requests</a></p>
 </section>
 
 <details class="panel">
-  <summary>Using a different AI app?</summary>
-  <p>Most apps that support MCP (Cursor, LM Studio and others) accept this. Paste it into the app's MCP settings.</p>
+  <summary>By hand</summary>
+  <p>Paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
   <pre class="code" id="json-snip">{{ json_snippet }}</pre>
-  <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('json-snip').innerText);this.textContent='Copied'">Copy</button>
+  <button class="btn" onclick="copyText(document.getElementById('json-snip').innerText, this, 'Copied')">Copy</button>
   <p>Codex settings (config.toml):</p>
   <pre class="code" id="codex-snip">{{ codex_snippet }}</pre>
-  <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('codex-snip').innerText);this.textContent='Copied'">Copy</button>
+  <button class="btn" onclick="copyText(document.getElementById('codex-snip').innerText, this, 'Copied')">Copy</button>
 </details>
 {% endblock %}

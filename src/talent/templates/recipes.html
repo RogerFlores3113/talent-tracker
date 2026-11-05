@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons %}
+{% block title %}AI recipes · Talent Search{% endblock %}
+{% block body %}
+<h1>AI recipes</h1>
+<p class="lead">Ready-made requests for your AI app. Each one copies the prompt and opens Claude. In Codex, ChatGPT or LM Studio, use Copy and paste it into a new chat. <a href="/connect">Connect your AI app</a> first.</p>
+<div class="recipes">
+{% for r, prompt in items %}
+  <section class="recipe">
+    <h2>{{ r.title }}</h2>
+    <p class="fine">{{ r.blurb }}</p>
+    {% if r.key == 'source_for_job' and jobs %}
+      {% for j in jobs %}<div class="recipe-job"><span>{{ j.title }}{% if j.company %} <span class="muted">{{ j.company }}</span>{% endif %}</span>{{ recipe_buttons(job_prompts[j.id], "Source for this job", small=True) }}</div>{% endfor %}
+    {% else %}
+      {{ recipe_buttons(prompt, "Do it with Claude") }}
+    {% endif %}
+    <details><summary class="fine">See the prompt</summary><pre class="code wrap">{{ prompt }}</pre></details>
+  </section>
+{% endfor %}
+</div>
+<p class="fine">Your AI app can also list these itself: in Claude, look for Talent Search under the + menu's prompts.</p>
+{% endblock %}

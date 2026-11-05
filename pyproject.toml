@@ -1,6 +1,6 @@
 [project]
 name = "talent-search"
-version = "0.0.1"
+version = "0.0.2"
 description = "Local-first candidate database for recruiters, searchable from a web UI and from any MCP client."
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
@@ -11,6 +11,7 @@ dependencies = [
     "httpx>=0.27",
     "mcp>=1.9,<2",
     "platformdirs>=4.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]

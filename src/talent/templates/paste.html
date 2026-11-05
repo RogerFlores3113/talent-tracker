@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons %}
+{% block title %}Paste a profile · Talent Search{% endblock %}
+{% block body %}
+<h1>Paste a resume or profile</h1>
+<p class="lead">Copy the text from a LinkedIn page, a resume or an email and paste it here.</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="/paste" class="stack">
+  <textarea id="paste-text" name="text" rows="14" placeholder="Paste here" autofocus>{{ text }}</textarea>
+  <div class="choice-row">
+    <section class="option static">
+      <strong>Quick fill, on this computer</strong>
+      <span>Finds the name, email, phone and links. Nothing leaves your computer.</span>
+      <button class="btn primary" type="submit">Fill the form</button>
+    </section>
+    <section class="option static">
+      <strong>Let Claude do it</strong>
+      <span>Fills every field, including skills and work history. The text goes to your AI app.</span>
+      {{ recipe_buttons(prompt, "Do it with Claude", fill="paste-text") }}
+    </section>
+  </div>
+</form>
+{% endblock %}

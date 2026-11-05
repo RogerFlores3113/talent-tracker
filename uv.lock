@@ -1073,7 +1073,7 @@ wheels = [
 
 [[package]]
 name = "talent-search"
-version = "0.0.1"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -1081,6 +1081,7 @@ dependencies = [
     { name = "jinja2" },
     { name = "mcp" },
     { name = "platformdirs" },
+    { name = "python-multipart" },
     { name = "uvicorn" },
 ]
 
@@ -1097,6 +1098,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1" },
     { name = "mcp", specifier = ">=1.9,<2" },
     { name = "platformdirs", specifier = ">=4.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

@@ -1,6 +1,11 @@
 # Talent Search: design
 
-Status: v0.0.1 slice built (candidate store, search page, MCP server, desktop packaging).
+Product decisions live in the Claude Doc "Talent Tracker: Product Decisions".
+
+Status: v0.0.2 in progress. Built: candidate store with skills, work history and timeline; jobs with
+custom stages, board and table; Today page (interviews, follow-ups, stuck, thin pipelines, out-of-date
+profiles); CSV import and export, backups, paste-a-resume; removable sample data; MCP server with in-chat
+views; desktop packaging for Mac and Windows.
 Last updated: 2026-11-04.
 
 ## 1. What it is
@@ -70,21 +75,30 @@ migrations are append-only (`store._MIGRATIONS`).
 | linkedin_url | normalized (`https://linkedin.com/in/x`); unique when present (dedupe key) |
 | current_title, current_company, location | filterable |
 | about | 2-4 sentence summary; the main search text |
-| tags | comma-separated for now |
+| tags | display copy; the structured list lives in `candidate_tags` (case-insensitive, deduped) |
 | source | where they were found ("LinkedIn", "referral from Sam") |
-| created_at, updated_at | `updated_at` is "last updated" in the UI |
+| last_contacted_at | set by contact kinds on the timeline (call, email, message, meeting, past interview); never moves backwards; separate from `updated_at` |
+| history_text | past roles flattened for search (from `work_history`) |
+| created_at, updated_at | `updated_at` is "profile updated" in the UI |
 
 **jobs**: id, title, company, location, description, status (`open`, `on_hold`, `closed`), timestamps.
 
+**job_stages** (schema v2): per job, ordered, with an outcome (`open`, `hired`,
+`lost`) so renamed or custom stages still count correctly. New jobs get the
+default eight; recruiters rename, add, reorder and remove empty ones.
+
 **applications** (a candidate in a job's pipeline): candidate_id, job_id (unique
-pair), stage, notes, created_at, stage_changed_at. Stages: `sourced, contacted,
-screening, interviewing, offer, hired, rejected, withdrawn`.
+pair), stage (a name from that job's stages, matched case-insensitively),
+notes, created_at, stage_changed_at.
 
-**activity**: application_id, kind (`stage`, `note`; later `email`, `call`,
-`interview`), detail, at. Feeds the dashboard and history.
+**work_history**: per candidate, ordered roles (title, company, start, end, summary).
 
-**action items** (planned): computed by rules, not stored (see section 6), with
-a small `dismissed_actions` table so a recruiter can snooze one.
+**timeline**: per candidate, kind (`note, call, email, message, meeting,
+interview, stage`), body, at, optional job_id, source. Stage changes are
+written here automatically. Replaces v1's `activity` (copied over by the migration).
+
+**suggestions** (AI follow-ups), **snoozes** (Today items hidden until a date),
+**settings** (dashboard toggles and thresholds, pipeline view).
 
 Dedupe: `save_candidate` merges into an existing row when email or LinkedIn
 matches, and only non-empty incoming fields overwrite. An AI re-saving a sparse
@@ -111,17 +125,32 @@ profile can't blank out what the recruiter filled in.
 
 ## 5. MCP server
 
-Transport: stdio, launched by the AI app. Tools (all return trimmed JSON):
+Transport: stdio, launched by the AI app. 16 tools, 7 prompts, 4 view resources.
+**There is no delete tool**: the AI can search, add, update (including
+clearing a field with an empty string) and move stages, never delete.
 
 | tool | purpose |
 |---|---|
-| `search_candidates(query, location?, title?, limit)` | ranked search with highlighted match |
-| `get_candidate(id)` | full record plus jobs and stages |
-| `save_candidate(name, ...)` | add or merge by email/LinkedIn |
+| `search_candidates(query, location?, title?, tag?, limit)` | ranked search with highlighted match; in-chat results view |
+| `get_candidate(id)` | full record, work history, jobs, timeline; in-chat card |
+| `save_candidate(name, ..., work_history?)` | add or merge by email/LinkedIn; warns on same-name matches |
 | `update_candidate(id, ...)` | edit fields; empty string clears |
-| `delete_candidate(id)` | description tells the model to confirm first |
-| `create_job`, `list_jobs` | job postings with pipeline counts |
-| `add_to_pipeline`, `move_stage`, `job_pipeline` | per-job pipeline |
+| `log_activity(candidate_id, kind, summary, when?, job_id?)` | timeline entry; how Gmail/Calendar data arrives via the AI app's own connectors |
+| `create_job`, `update_job`, `list_jobs`, `edit_job_stages` | jobs with custom stages |
+| `add_to_pipeline`, `move_stage`, `job_pipeline` | per-job pipeline; in-chat board |
+| `list_action_items`, `add_suggestion`, `complete_suggestion` | Today page; in-chat list |
+| `report_problem(summary, details)` | returns a prefilled GitHub issue link; sends nothing |
+
+**In-chat views (MCP Apps, `text/html;profile=mcp-app`):** four self-contained
+HTML views (`ui://talent-search/...`) declared on tools via `_meta.ui.resourceUri`.
+They speak the host's postMessage JSON-RPC (`ui/initialize`, then render
+`ui/notifications/tool-result` structuredContent), build the DOM with
+`createElement` only, load nothing external, and offer "Open in Talent Search"
+via `ui/open-link`. Every tool also returns plain text so hosts without views work.
+
+**Prompts:** plan_my_day, source_candidates, save_from_linkedin, save_from_text,
+log_recent_emails, log_calendar_interviews, refresh_stale_profiles. The same
+text powers the app's AI recipes page (copy, then `claude://claude.ai/new?q=`).
 
 Server instructions tell the model to search before adding, write a useful
 `about`, and fill title/company/location.
@@ -132,8 +161,10 @@ Server instructions tell the model to search before adding, write a useful
 - **Codex:** we write `[mcp_servers.talent-search]` into `~/.codex/config.toml`
   the same careful way. OpenAI's docs say the ChatGPT desktop app, Codex CLI and
   IDE extension share this config ([Codex MCP docs](https://developers.openai.com/codex/mcp)).
-- **Anything else** (Cursor, LM Studio for local models): copy-paste JSON on the
-  Connect page.
+- **LM Studio** (local models): we merge our entry into `~/.lmstudio/mcp.json`,
+  same shape as Claude's. Ollama has no MCP client of its own, so the app says
+  to use it through LM Studio or another MCP app.
+- **Anything else** (Cursor, Jan): copy-paste JSON on the Connect page.
 - **Next:** ship a `.mcpb` bundle so Claude Desktop installs it by double-click
   ([MCPB docs](https://claude.com/docs/connectors/building/mcpb)). The docs
   recommend Node servers and don't say whether a prebuilt binary works, so the
@@ -141,18 +172,26 @@ Server instructions tell the model to search before adding, write a useful
 - **ChatGPT web / remote clients** need a remote MCP endpoint, which arrives
   with hosted mode (streamable HTTP + OAuth).
 
-## 6. Recruiter dashboard (next milestone)
+## 6. App window (v0.0.2)
 
-- **Jobs board:** each open job with counts per stage; click into a kanban-style
-  pipeline (HTMX drag or simple stage buttons).
-- **Candidate page:** history timeline from `activity`.
-- **Action items**, computed on read from simple rules (thresholds editable later):
-  - contacted, no change in 3+ days: "Follow up with X"
-  - screening/interviewing, no change in 5+ days: "Nudge the hiring team about X"
-  - offer, 3+ days: "Check in on X's offer"
-  - open job with fewer than 5 active candidates: "Source more for Job"
-  - candidate not updated in 6+ months: "Refresh X's profile" (good AI task)
-- **MCP:** `list_action_items` so a recruiter can ask Claude "what should I do today?"
+- **Today** (`/`): search bar on top; below it, action items, open jobs with
+  stage counts, and recently updated people. Items are computed on read
+  (`actions.py`): interviews in the next 7 days, AI suggestions, stuck in a
+  stage (default 7 days), thin pipelines (fewer than 5 active), stale profiles
+  (180 days, top 5). Each kind can be switched off and its threshold changed in
+  Settings; any item can be snoozed for a week.
+- **Candidates** (`/candidates`): dense, sortable table with skill filter and paging.
+- **Candidate page:** skills, last contacted with a one-click "I contacted them
+  today", work history, jobs with a stage menu, timeline with a log form, and
+  "Refresh with Claude".
+- **Jobs:** list with status tabs; each job has a board (drag or menu) or a
+  table grouped by stage (the choice is remembered), add-existing search,
+  "Source with Claude", and a stages editor.
+- **Add:** option cards (AI app, paste a resume, CSV import, form). Paste runs
+  a local parser and shows the form to check; the Claude option sends the whole
+  text in a prompt.
+- **AI recipes, Connect AI, Settings** (toggles, backup, export), **Privacy**,
+  **Report a problem** (prefilled GitHub issue, nothing sent from the app).
 
 ## 7. Scraping (optional, later)
 
@@ -203,8 +242,9 @@ Hosted mode also gives ChatGPT and other remote clients an MCP endpoint
 
 ## 10. Roadmap
 
-1. **v0.2 desktop polish:** jobs board and pipeline UI, action items, CSV
-   import/export, backup button, icon, installers, `.mcpb` for Claude.
+1. **v0.2 desktop polish:** ~~jobs board and pipeline UI, action items, CSV
+   import/export, backup button~~ (done in 0.0.2), icon, installers, `.mcpb` for Claude.
+   Built-in bring-your-own-key chat comes after this, not before.
 2. **v0.3 trust:** code signing and notarization, auto-update check.
 3. **v0.4 smarter search:** semantic similarity, saved searches, "refresh stale
    profiles" AI workflow.

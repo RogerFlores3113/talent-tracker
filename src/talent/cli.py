@@ -7,20 +7,38 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
 import webbrowser
+from pathlib import Path
 
 import httpx
 
-from .paths import data_dir, db_path, is_frozen
+from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, port_file
 
-DEFAULT_PORT = 8765
+
+def _private(path: Path) -> Path:
+    """Create the file readable by this user only (0600), and tighten an existing one. Not on Windows."""
+    if os.name != "nt":
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return path
+
+
+def _write_port_file(port: int) -> None:
+    try:  # so the AI app's "Open in Talent Search" links point at the right port
+        _private(port_file()).write_text(str(port))
+    except OSError:
+        pass
 
 
 def _setup_logging(to_stderr: bool) -> None:
-    handlers: list[logging.Handler] = [logging.FileHandler(data_dir() / "app.log", encoding="utf-8")]
+    handlers: list[logging.Handler] = [logging.FileHandler(_private(data_dir() / "app.log"), encoding="utf-8")]
     if to_stderr and sys.stderr is not None:
         handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -61,6 +79,7 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         return
     port = _pick_port(port)
     app = create_app(Store(db_path()))
+    _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
     if open_browser:
         threading.Timer(1.2, webbrowser.open, args=[url]).start()
@@ -80,6 +99,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
     sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
+    sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
+    imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
+    imp.add_argument("file")
+    exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
+    exp.add_argument("file")
     args = parser.parse_args(argv)
     cmd = args.cmd or "app"
 
@@ -108,9 +132,32 @@ def main(argv: list[str] | None = None) -> None:
         if index is None:
             sys.exit("Set TYPESENSE_URL and TYPESENSE_API_KEY first. Built-in search needs no index.")
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
-    elif cmd in ("connect-claude", "connect-codex"):
+    elif cmd in ("import-csv", "export-csv"):
+        from pathlib import Path
+
+        from . import importers
+        from .store import Store
+
+        store = Store(db_path())
+        if cmd == "export-csv":
+            Path(args.file).write_text(importers.export_csv(store), encoding="utf-8", newline="")
+            print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
+        else:
+            header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
+            mapping = importers.guess_mapping(header)
+            if not any(m in ("name", "first_name", "last_name") for m in mapping):
+                sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
+            r = importers.import_rows(store, header, rows, mapping)
+            print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
+                  f"skipped {r['skipped_rows']}.")
+            for line in (r["skipped"] + r["warnings"])[:20]:
+                print("  " + line)
+    elif cmd in ("connect-claude", "connect-codex", "connect-lmstudio"):
         from . import integrations
 
-        fn = integrations.connect_claude if cmd == "connect-claude" else integrations.connect_codex
+        fn = {"connect-claude": integrations.connect_claude, "connect-codex": integrations.connect_codex,
+              "connect-lmstudio": integrations.connect_lmstudio}[cmd]
         result = fn()
-        print(f"Updated {result['path']}. Restart the app to load Talent Search.")
+        if not result.get("installed", True):
+            sys.exit(result["message"])
+        print(f"Updated {result['path']}. {result.get('next_step') or 'Restart the app to load Talent Search.'}")

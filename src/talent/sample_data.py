@@ -1,7 +1,10 @@
 """Made-up candidates so a new user can try search before adding real people."""
 from __future__ import annotations
 
-from .store import Store
+import json
+from datetime import datetime, timedelta, timezone
+
+from .store import NotFound, Store
 
 SAMPLES = [
     ("Maya Okafor", "Senior Backend Engineer", "Ledgerline", "Austin, TX",
@@ -39,13 +42,133 @@ SAMPLES = [
 ]
 
 
+HISTORY = {
+    "Maya Okafor": [("Senior Backend Engineer", "Ledgerline", "2021", ""), ("Backend Engineer", "Stripe", "2017", "2021")],
+    "Priya Natarajan": [("Data Science Lead", "Harvest Analytics", "2020", ""), ("Economist", "Federal Reserve Bank of NY", "2015", "2020")],
+    "Kenji Watanabe": [("Site Reliability Engineer", "Cloudmere", "2019", ""), ("Systems Engineer", "Rackspace", "2014", "2019")],
+    "Omar Haddad": [("Data Engineer", "Streamwise", "2022", ""), ("Analytics Engineer", "Squarespace", "2019", "2022")],
+}
+
+JOBS = [
+    ("Senior Backend Engineer", "Acme Payments", "Austin, TX or remote",
+     "Go or Rust, payments or ledger experience, 6+ years. Owns the settlement service.",
+     [("Maya Okafor", "Interviewing", 3), ("Kenji Watanabe", "Screening", 12), ("Noah Williams", "Contacted", 4),
+      ("Arjun Mehta", "Sourced", 20), ("Sofia Marchetti", "Rejected", 9)]),
+    ("Data Lead", "Acme Payments", "New York, NY",
+     "Leads a small data science team. Forecasting, experiments, Python and SQL.",
+     [("Priya Natarajan", "Offer", 2), ("Omar Haddad", "Sourced", 1)]),
+]
+
+
+def _ago(days: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0).isoformat()
+
+
 def load_sample_data(store: Store) -> int:
+    """Add the sample people, two jobs with pipelines, and enough history to fill the Today page.
+
+    Running it twice doesn't duplicate anything.
+    """
     added = 0
+    ids: dict[str, int] = {}
+    new_people: list[int] = []
+    new_jobs: list[int] = []
     for name, title, company, location, about, tags in SAMPLES:
         slug = name.lower().replace(" ", ".").replace("'", "")
-        _, created = store.upsert_candidate(
-            name=name, current_title=title, current_company=company, location=location,
-            about=about, tags=tags, email=f"{slug}@example.com", source="Sample data",
+        history = [{"title": t, "company": c, "start": a, "end": b} for t, c, a, b in HISTORY.get(name, [])]
+        cand, created = store.upsert_candidate(
+            work_history=history or None, name=name, current_title=title, current_company=company,
+            location=location, about=about, tags=tags, email=f"{slug}@example.com", source="Sample data",
         )
+        ids[name] = cand["id"]
         added += created
+        if created:
+            new_people.append(cand["id"])
+    if not added:
+        return 0
+
+    db = store._conn
+    # A couple of profiles that haven't been touched in a long time, so "stale profile" has something to show.
+    for name, days in (("Liam O'Connor", 400), ("Chloe Dubois", 250)):
+        db.execute("UPDATE candidates SET updated_at = ?, created_at = ? WHERE id = ?", (_ago(days), _ago(days), ids[name]))
+
+    existing = {j["title"] for j in store.list_jobs()}
+    for title, company, location, description, people in JOBS:
+        if title in existing:
+            continue
+        job = store.add_job(title, company=company, location=location, description=description)
+        new_jobs.append(job["id"])
+        for name, stage, days in people:
+            store.add_to_pipeline(ids[name], job["id"])
+            if stage != "Sourced":
+                store.move_stage(ids[name], job["id"], stage)
+            # Backdate the stage change so some candidates show as stuck.
+            db.execute("UPDATE applications SET stage_changed_at = ? WHERE candidate_id = ? AND job_id = ?",
+                       (_ago(days), ids[name], job["id"]))
+            db.execute("UPDATE timeline SET at = ? WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'",
+                       (_ago(days), ids[name], job["id"]))
+        if title == "Senior Backend Engineer":
+            when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=17, minute=0, second=0, microsecond=0)
+            store.log(ids["Maya Okafor"], "interview", "Systems design round with the payments team",
+                      at=when, job_id=job["id"], source="Sample data")
+            store.log(ids["Kenji Watanabe"], "call", "Intro call. Open to Austin, wants to stay hands-on.",
+                      at=_ago(12), job_id=job["id"], source="Sample data")
+            store.add_suggestion("Follow up with Noah Williams about the backend role", candidate_id=ids["Noah Williams"],
+                                 job_id=job["id"], source="Sample data")
+    db.commit()
+    people, jobs = sample_ids(store)
+    _save_ids(store, people | set(new_people), jobs | set(new_jobs))
     return added
+
+
+# Which rows are sample data, so the app can badge them and remove exactly those.
+# Kept in the settings table as JSON lists of ids.
+CANDIDATE_KEY, JOB_KEY = "sample_candidate_ids", "sample_job_ids"
+
+
+def _ids(raw: str | None) -> set[int]:
+    try:
+        return {int(i) for i in json.loads(raw or "[]")}
+    except (ValueError, TypeError):
+        return set()
+
+
+def _save_ids(store: Store, people: set[int], jobs: set[int]) -> None:
+    with store._lock, store._conn:
+        for key, ids in ((CANDIDATE_KEY, people), (JOB_KEY, jobs)):
+            if ids:
+                store._conn.execute(
+                    "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(sorted(ids))))
+            else:
+                store._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
+def sample_ids(store: Store) -> tuple[set[int], set[int]]:
+    """(candidate ids, job ids) that came from the sample data and still exist."""
+    cfg = store.settings()
+    people, jobs = _ids(cfg.get(CANDIDATE_KEY)), _ids(cfg.get(JOB_KEY))
+    if people:
+        marks = ",".join("?" * len(people))
+        people = {r["id"] for r in store._rows(f"SELECT id FROM candidates WHERE id IN ({marks})", sorted(people))}
+    if jobs:
+        marks = ",".join("?" * len(jobs))
+        jobs = {r["id"] for r in store._rows(f"SELECT id FROM jobs WHERE id IN ({marks})", sorted(jobs))}
+    return people, jobs
+
+
+def remove_sample_data(store: Store) -> tuple[int, int]:
+    """Delete exactly the sample candidates and jobs. Returns (candidates, jobs) removed."""
+    people, jobs = sample_ids(store)
+    for cid in people:
+        try:
+            store.delete_candidate(cid)
+        except NotFound:
+            pass
+    for jid in jobs:
+        try:
+            store.delete_job(jid)
+        except NotFound:
+            pass
+    _save_ids(store, set(), set())
+    return len(people), len(jobs)

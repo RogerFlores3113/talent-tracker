@@ -1,0 +1,9 @@
+{% if q and not add_results %}<p class="fine">No one else matches “{{ q }}”. <a href="/candidates/new?job_id={{ job.id }}">Add someone new</a></p>{% endif %}
+{% if add_results %}
+<ul class="addlist">
+  {% for c in add_results %}
+  <li><span><strong>{{ c.name }}</strong> <span class="muted">{{ c.current_title or '' }}{% if c.current_company %} at {{ c.current_company }}{% endif %}</span></span>
+    <form method="post" action="/jobs/{{ job.id }}/add" class="inline"><input type="hidden" name="candidate_id" value="{{ c.id }}"><button class="btn small primary" type="submit">Add to {{ stages[0].name if stages else 'pipeline' }}</button></form></li>
+  {% endfor %}
+</ul>
+{% endif %}

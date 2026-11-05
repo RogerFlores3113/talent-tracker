@@ -1,30 +1,92 @@
 {% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons, chips, sub %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
+{% set qp = request.query_params %}
+{% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
 <article class="profile">
   <div class="head">
     <div>
       <h1>{{ c.name }}</h1>
-      <p class="sub">{{ c.current_title or '' }}{% if c.current_company %} at {{ c.current_company }}{% endif %}{% if c.location %} · {{ c.location }}{% endif %}</p>
+      <p class="sub">{{ sub(c) }}</p>
+      {{ chips(c.tags) }}
     </div>
     <a class="btn" href="/candidates/{{ c.id }}?edit=1">Edit</a>
   </div>
+
+  <div class="contact-line">
+    <span>Last contacted: <strong>{{ c.last_contacted_at | ago if c.last_contacted_at else 'never' }}</strong>{% if c.last_contacted_at %} ({{ c.last_contacted_at | date }}){% endif %}</span>
+    <form method="post" action="/candidates/{{ c.id }}/contacted"><button class="btn small" type="submit">I contacted them today</button></form>
+  </div>
+
   {% if c.about %}<p class="about">{{ c.about }}</p>{% endif %}
   <dl class="facts">
     {% if c.email %}<dt>Email</dt><dd><a href="mailto:{{ c.email }}">{{ c.email }}</a></dd>{% endif %}
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
-    {% if c.linkedin_url %}<dt>LinkedIn</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') }}</a></dd>{% endif %}
-    {% if c.website %}<dt>Website</dt><dd>{{ c.website }}</dd>{% endif %}
-    {% if c.tags %}<dt>Tags</dt><dd>{{ c.tags }}</dd>{% endif %}
+    {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}</a></dd>{% endif %}
+    {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}</a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
     {% if c.source %}<dt>Found via</dt><dd>{{ c.source }}</dd>{% endif %}
-    <dt>Last updated</dt><dd>{{ c.updated_at | date }}</dd>
+    <dt>Profile updated</dt><dd>{{ c.updated_at | date }} ({{ c.updated_at | ago }})</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
   </dl>
-  {% if pipelines %}
-  <h2>Jobs</h2>
-  <ul class="plain">{% for a in pipelines %}<li>{{ a.job_title }}{% if a.job_company %} ({{ a.job_company }}){% endif %}: <span class="stage">{{ a.stage }}</span> since {{ a.stage_changed_at | date }}</li>{% endfor %}</ul>
+
+  {% if c.work_history %}
+  <h2>Work history</h2>
+  <ul class="history">
+    {% for w in c.work_history %}<li><strong>{{ w.title or 'Role' }}</strong>{% if w.company %} at {{ w.company }}{% endif %}{% if w.start or w.end %} <span class="muted">{{ w.start or '' }} to {{ w.end or 'now' }}</span>{% endif %}{% if w.summary %}<div class="fine">{{ w.summary }}</div>{% endif %}</li>{% endfor %}
+  </ul>
   {% endif %}
-  <form method="post" action="/candidates/{{ c.id }}/delete" onsubmit="return confirm('Delete this candidate for good?')">
+
+  <h2>Jobs</h2>
+  {% if c.pipelines %}
+  <ul class="jobstages">
+    {% for p in c.pipelines %}
+    <li>
+      <a href="/jobs/{{ p.job_id }}">{{ p.job_title }}</a>{% if p.job_company %} <span class="muted">{{ p.job_company }}</span>{% endif %}
+      <form method="post" action="/jobs/{{ p.job_id }}/move" class="inline">
+        <input type="hidden" name="candidate_id" value="{{ c.id }}">
+        <select name="stage" aria-label="Stage for {{ p.job_title }}" onchange="this.form.submit()">
+          {% for s in stages[p.job_id] %}<option {{ 'selected' if s.name | lower == p.stage | lower }}>{{ s.name }}</option>{% endfor %}
+        </select>
+      </form>
+      <span class="fine">since {{ p.stage_changed_at | ago }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="none">Not in any job yet.</p>{% endif %}
+  {% if other_jobs %}
+  <form method="post" action="/candidates/{{ c.id }}/jobs" class="inline">
+    <select name="job_id" aria-label="Add to job">{% for j in other_jobs %}<option value="{{ j.id }}">{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}{% if j.hint %} · {{ j.hint }}{% endif %}</option>{% endfor %}</select>
+    <button class="btn small" type="submit">Add to job</button>
+  </form>
+  {% endif %}
+
+  <h2 id="timeline">Timeline</h2>
+  {% if qp.get('error') %}<p class="error">{{ qp.get('error') }}</p>{% endif %}
+  <form method="post" action="/candidates/{{ c.id }}/log" class="logform">
+    <select name="kind" aria-label="Kind">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
+    <input type="text" name="body" placeholder="What happened? (for an interview, add the date)" aria-label="Note">
+    <input type="datetime-local" name="at" aria-label="When (leave blank for now)" title="When (leave blank for now)">
+    {% if c.pipelines %}<select name="job_id" aria-label="Job"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ job_label(p.job_title, p.job_company) }}</option>{% endfor %}</select>{% endif %}
+    <label class="followup">Follow up on <input type="date" name="follow_up" aria-label="Follow up on (optional)" title="Optional. Adds a follow-up to Today on this day."></label>
+    <button class="btn small primary" type="submit">Add</button>
+  </form>
+  {% if c.timeline %}
+  <ul class="timeline">
+    {% for t in c.timeline %}
+    <li class="t-{{ t.kind }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+      {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
+      {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
+      {% if t.kind == 'change' and t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.kind == 'change' and t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="none">Nothing logged yet. Notes, calls, emails and stage changes show up here.</p>{% endif %}
+
+  <h2 id="refresh">Refresh with AI</h2>
+  <p class="fine">Ask Claude to look up their current role and update this profile.</p>
+  {{ recipe_buttons(refresh_prompt, "Refresh with Claude") }}
+
+  <form method="post" action="/candidates/{{ c.id }}/delete" data-msg="Delete {{ c.name }} for good? This also removes their timeline and job stages." onsubmit="return confirm(this.dataset.msg)">
     <button class="link danger" type="submit">Delete candidate</button>
   </form>
 </article>
