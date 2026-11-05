@@ -1114,7 +1114,10 @@ def quick_parse(text: str) -> dict[str, Any]:
         out["source"] = "LinkedIn"
     elif marks == 0:
         out["source"] = "Resume"
-    if tags := _skills_section(raw):
+    # A link pasted under Skills (often the profile URL LinkedIn puts at the end) is never a skill.
+    url_like = re.compile(r"(?i)://|^www\.|@|^[\w-]+(\.[\w-]+)*\.[a-z]{2,}/|"
+                          r"^[\w-]+(\.[\w-]+)*\.(com|org|net|edu|gov|co\.uk)$")
+    if tags := [t for t in _skills_section(raw) if not url_like.search(t.strip())]:
         out["tags"] = tags
     if history := _experience_section(raw):
         out["work_history"] = history

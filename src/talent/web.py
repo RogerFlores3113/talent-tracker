@@ -837,7 +837,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         held = actions.held_jobs(store)
         return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status,
                     rollup=rollup, companies=companies, held=held,
-                    digest_text=actions.status_digest(store) if rollup or held else "")
+                    digest_text=actions.status_digest(store) if rollup or held else "",
+                    hidden_notes=actions.digest_hidden_notes(store) if rollup else [])
 
     @app.post("/jobs/wording")
     async def save_wording(request: Request):
@@ -845,12 +846,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         on = str(form.get("inhouse") or "") == "1"
         actions.set_inhouse(store, on)
-        notice = "Using in-house wording." if on else "Using agency wording."
-        return RedirectResponse("/jobs?" + urlencode({"notice": notice}), status_code=303)
+        notice = ("Using in-house wording, since you hire for your own company." if on
+                  else "Using agency wording, since you hire for clients.")
+        go = str(form.get("next") or "")
+        go = go if go in ("/", "/settings", "/jobs") else "/jobs"
+        return RedirectResponse(go + "?" + urlencode({"notice": notice}), status_code=303)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
-        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS)
+        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS,
+                    copy_jobs=store.list_jobs(None))
 
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
@@ -858,14 +863,21 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", *JOB_EXTRA_FIELDS)}
         stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
         picked = str(form.get("stage_set") or "default")
+        copy_from = str(form.get("copy_from") or "").strip()
         twins = store.similar_open_jobs(data["title"], data["company"])
         try:
-            stages, out_note = actions.with_out_stages(stages or actions.stage_set(picked))
+            if stages:
+                chosen = stages
+            elif copy_from.isdigit():
+                chosen = actions.new_job_stages(store, from_job_id=int(copy_from))
+            else:
+                chosen = actions.stage_set(picked)
+            stages, out_note = actions.with_out_stages(chosen)
             job = store.add_job(**data, stages=stages or None)
         except ValueError as exc:
             return page(request, "job_form.html", j={**data, "stages": str(form.get("stages") or ""),
-                                                     "stage_set": picked}, error=str(exc),
-                        stage_sets=actions.STAGE_SETS)
+                                                     "stage_set": picked, "copy_from": copy_from}, error=str(exc),
+                        stage_sets=actions.STAGE_SETS, copy_jobs=store.list_jobs(None))
         notes = ["Created."] if twins or out_note else []
         if twins:
             ids = ", ".join(f"#{j['id']}" for j in twins)
@@ -893,6 +905,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),
+                   hidden_note=actions.hidden_note(store, job_id, omit),
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
                    close=actions.close_out_plan(store, job_id),
@@ -980,6 +993,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         op = str(form.get("op") or "")
         name = str(form.get("stage") or "")
+        notice = ""
         try:
             if op == "add":
                 store.add_stage(job_id, str(form.get("new_name") or ""), after=str(form.get("after") or "") or None)
@@ -994,13 +1008,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     names[i], names[j] = names[j], names[i]
                     store.reorder_stages(job_id, names)
             elif op == "outcome":
-                store.set_stage_outcome(job_id, name, str(form.get("outcome") or "open"))
+                res = actions.change_stage_outcome(store, job_id, name, str(form.get("outcome") or "open"))
+                notice = res["notice"]
+                if res["asks"]:  # people already in the stage who still have interviews: offer to cancel
+                    return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': res['asks'][0]['candidate_id'], 'notice': notice})}#pipeline",
+                                            status_code=303)
             elif op == "remove":
                 store.remove_empty_stage(job_id, name)
         except ValueError as exc:
             return page(request, "job_form.html", j=store.get_job(job_id), error=str(exc),
                         stages=store.job_stages(job_id), outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
-        return RedirectResponse(f"/jobs/{job_id}/edit#stages", status_code=303)
+        return RedirectResponse(f"/jobs/{job_id}/edit" + (f"?{urlencode({'notice': notice})}" if notice else "")
+                                + "#stages", status_code=303)
 
     @app.post("/jobs/{job_id}/move", response_class=HTMLResponse)
     async def move(request: Request, job_id: int):
@@ -1318,6 +1337,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
+        if who in ("", "app"):  # what a stage counts as, changed in the app
+            for c in actions.stage_outcome_changes(store, since)[:limit]:
+                rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
+                             "text": c["text"], "undoable": c["undoable"], "undone": not c["undoable"],
+                             "undo_url": f"/changes/stage-outcome/{c['id']}/undo"})
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
 
@@ -1389,6 +1413,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             ": " + _listed(undone) if undone else "") + "."
         if skipped:
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/changes/stage-outcome/{change_id}/undo")
+    def undo_stage_outcome(request: Request, change_id: int):
+        try:
+            notice = actions.undo_stage_outcome(store, change_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
         return back(request, "/changes", notice=notice)
 
     @app.post("/changes/close-out/{batch_id}/undo")
@@ -1508,6 +1542,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             values["pipeline_view"] = str(form.get("pipeline_view"))
         if errors:
             return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
+        if form.get("hiring_for") in ("own", "clients"):
+            actions.set_inhouse(store, form.get("hiring_for") == "own")
         store.set_settings(**values)
         return RedirectResponse("/settings?saved=1", status_code=303)
 

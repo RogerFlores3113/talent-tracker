@@ -48,7 +48,14 @@ LOST_STAGE_NAMES = frozenset({
     "not interested", "no hire", "dropped out", "turned down", "archived",
     "passed", "pass", "no go", "ghosted", "not moving forward", "rejected by client", "client rejected",
     "declined offer", "not selected", "did not proceed",
+    "client passed", "client pass", "client declined", "client decline", "hiring team passed", "team passed",
+    "not progressed", "not progressing", "unsuccessful", "candidate withdrew", "withdrew application",
 })
+# A stage whose name ends with one of these words is an exit ("Client declined", "Screen rejected")...
+_LOST_LAST_WORDS = frozenset({"declined", "rejected", "withdrew", "withdrawn"})
+# ...and "passed" is one when someone passed on the person ("Client passed"), not when they passed a step
+# ("Screen passed" is still in play).
+_PASSED_BY = frozenset({"client", "clients", "hiring", "team", "manager", "hm", "company", "we", "employer"})
 _OUTCOME_ALIASES = {"in play": "open", "active": "open", "won": "hired", "hire": "hired", "placed": "hired",
                     "out": "lost", "no": "lost", "rejected": "lost", "closed": "lost"}
 
@@ -65,7 +72,14 @@ def normalize_job_status(value: str | None) -> str:
 def stage_outcome(name: str) -> str:
     """Guess a stage's outcome from its name: 'hired' for wins, 'lost' for exits, else 'open'."""
     key = re.sub(r"[\W_]+", " ", name or "").strip().lower()
-    return "hired" if key in WON_STAGE_NAMES else "lost" if key in LOST_STAGE_NAMES else "open"
+    if key in WON_STAGE_NAMES:
+        return "hired"
+    words = key.split()
+    if key in LOST_STAGE_NAMES or (words and len(words) <= 4 and (
+            words[-1] in _LOST_LAST_WORDS or words[0] in ("rejected", "declined", "withdrew", "withdrawn")
+            or (words[-1] in ("passed", "pass") and words[0] in _PASSED_BY))):
+        return "lost"
+    return "open"
 
 
 def normalize_outcome(value: str | None) -> str | None:
@@ -980,6 +994,32 @@ def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     body = r"\s+".join(re.escape(p) for p in base.split())
     tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
     return re.compile(rf"\b{body}{tail}", re.I)
+
+
+# Index columns to quote a match from, most useful first: about, skills, title, company, location, past roles, name.
+_SNIPPET_ORDER = (4, 5, 1, 2, 3, 6, 0)
+_HL_RE = re.compile(f"{HL_START}(.*?){HL_END}", re.S)
+
+
+def _match_snippet(snippets: list[str | None], patterns: list[list[re.Pattern[str]]]) -> str | None:
+    """One 'Match:' line that shows every query word found, not only the first: the most useful column's
+    excerpt, then the other columns that add a word it doesn't show ('…runs **Kubernetes**… · **Austin**')."""
+    picked: list[str] = []
+    covered: set[int] = set()
+    seen: set[str] = set()
+    for snip in snippets:
+        marked = [fold(m) for m in _HL_RE.findall(snip or "")]
+        if not marked:
+            continue
+        words = {i for i, ps in enumerate(patterns) for m in marked if any(p.search(m) for p in ps)}
+        new_words = set(marked) - seen
+        if not picked or words - covered or (new_words and len(covered) < len(patterns) and not words):
+            picked.append(snip)
+            covered |= words
+            seen |= set(marked)
+        if len(covered) == len(patterns) or len(picked) == 3:
+            break
+    return " · ".join(picked) if picked else None
 
 
 def _excerpt(body: str, pattern: re.Pattern[str], width: int = 60) -> str:
@@ -2307,17 +2347,19 @@ class Store:
                                      snippet=_excerpt(body, pattern) if body else None))
             return out
 
+        patterns = [[_word_pattern(f, t.prefix) for f in (*t.forms, *t.names)] for t in terms]
+
         def ranked(match: str, exclude: list[int], closest: bool) -> tuple[int, Callable[[int, int], list]]:
             ex = " AND c.id NOT IN (SELECT value FROM json_each(?))" if exclude else ""
             args = (match, *params, *([json.dumps(exclude)] if exclude else []))
             n = self._row(f"SELECT count(*) AS n {base}{ex}", args)["n"]
 
             def fetch(off: int, k: int) -> list[SearchHit]:
+                snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}"
+                                  for i in _SNIPPET_ORDER)
                 rows = self._rows(
                     # column weights: name, title, company, location, about, tags, past roles
-                    f"""SELECT c.*,
-                               snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
-                               snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
+                    f"""SELECT c.*, {snips},
                                bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
                         {base}{ex}
                         ORDER BY _score, c.id LIMIT ? OFFSET ?""",
@@ -2325,9 +2367,7 @@ class Store:
                 )
                 out = []
                 for r in rows:
-                    about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
-                    if HL_START in (about_snip or ""):
-                        snippet = about_snip  # the About text is the most useful context to show
+                    snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
                     score = r.pop("_score")
                     out.append(SearchHit(candidate=self._hydrate(r), score=score, closest=closest,
                                          snippet=snippet if HL_START in (snippet or "") else None))
@@ -2361,8 +2401,8 @@ class Store:
     def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
         """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
 
-        A job they're in whose title or company has the word, or a note, call, email or interview
-        on their timeline that mentions it. Read at query time, so nothing extra is stored."""
+        A job they're in whose title or company has the word, where they were found (Found via), or a note,
+        call, email or interview on their timeline that mentions it. Read at query time, so nothing extra is stored."""
         found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
         patterns = [_word_pattern(f, term.prefix) for f in term.forms]
         likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
@@ -2379,6 +2419,10 @@ class Store:
             if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
                 job = r["title"] + (f" ({r['company']})" if r["company"] else "")
                 found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+        for r in self._rows(  # where they came from ("Referral from Alex")
+                f"SELECT id, source FROM candidates WHERE {any_like.format(col='source')} ORDER BY id", likes):
+            if r["id"] not in found and first(r["source"]):
+                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, patterns[0])
         marks = ", ".join("?" for _ in _SEARCHED_KINDS)
         for r in self._rows(
                 f"SELECT candidate_id, body FROM timeline WHERE kind IN ({marks}) AND ({any_like.format(col='body')})"
