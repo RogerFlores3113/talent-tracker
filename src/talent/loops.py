@@ -14,7 +14,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from . import actions, interviews
-from .store import NotFound, Store, as_local, shown_zone, to_dt
+from .store import NotFound, Store, as_local, now_iso, shown_zone, to_dt
 
 TEMPLATE_PREFIX = "loop_template:"  # settings key per job
 MAX_SESSIONS = 8
@@ -92,6 +92,71 @@ def save_template(store: Store, job_id: int, text: str, hours: str | None = None
         return {"sessions": [], "hours": [start, end]}
     actions._put_setting(store, f"{TEMPLATE_PREFIX}{job_id}", json.dumps({"sessions": sessions, "hours": [start, end]}))
     return {"sessions": sessions, "hours": [start, end]}
+
+
+def clean_sessions(sessions: Any) -> list[dict[str, Any]]:
+    """Sessions an AI app sends ([{label, minutes, interviewers}], or the template's own text) as saved sessions."""
+    if isinstance(sessions, str):
+        return parse_template(sessions)
+    if not isinstance(sessions, (list, tuple)) or not sessions:
+        raise ValueError("Send at least one session, like {\"label\": \"System design\", \"minutes\": 60, "
+                         "\"interviewers\": [\"Priya Nair\", \"Sam Okoye\"]}.")
+    lines = []
+    for x in sessions:
+        if isinstance(x, str):
+            lines.append(x)
+            continue
+        if not isinstance(x, dict):
+            raise ValueError("Each session is an object with a label, minutes and interviewers.")
+        name = str(x.get("label") or x.get("name") or x.get("session") or "").strip()
+        who = x.get("interviewers") if x.get("interviewers") is not None else x.get("interviewer")
+        who = ", ".join(str(w).strip() for w in who if str(w).strip()) if isinstance(who, (list, tuple)) else str(who or "")
+        if "|" in name or "|" in who:
+            raise ValueError("Leave the | character out of session names and interviewer names.")
+        mins = x.get("minutes") if x.get("minutes") is not None else x.get("duration")
+        try:
+            mins = int(float(mins)) if mins not in (None, "") else interviews.SESSION_MINUTES
+        except (TypeError, ValueError):
+            raise ValueError(f"{name or 'A session'}: minutes is a number between 15 and 240.") from None
+        lines.append(f"{name} | {mins} | {who}")
+    return parse_template("\n".join(lines))
+
+
+def ai_set_template(store: Store, job_id: int, sessions: Any, hours: str | None = None) -> dict[str, Any]:
+    """The AI app sets a job's loop template (never removes one or any interview). One logged AI action
+    (loop_template), so it shows on Changes and Undo puts the old template back."""
+    store.get_job(job_id)
+    clean = clean_sessions(sessions)
+    if not clean:
+        raise ValueError("Send at least one session.")
+    old = get_template(store, job_id)
+    start, end = parse_hours(hours) if hours else (tuple(old["hours"]) if old else DEFAULT_HOURS)
+    new = save_template(store, job_id, template_text(clean), f"{start}-{end}")
+    with store._write():
+        action = store._log_ai("loop_template", job_id=job_id, old={"template": old}, new={"template": new},
+                               body=f"{len(clean)} session{'' if len(clean) == 1 else 's'}")
+    return {"sessions": new["sessions"], "hours": new["hours"], "replaced": old is not None, "action_id": action}
+
+
+def ai_blocker(store: Store, a: dict[str, Any]) -> str | None:
+    now = get_template(store, a["job_id"]) if a.get("job_id") else None
+    return None if now == (a.get("new_data") or {}).get("template") else "the loop template was changed again since"
+
+
+def ai_undo(store: Store, a: dict[str, Any]) -> str:
+    reason = ai_blocker(store, a)
+    if reason:
+        raise ValueError(reason[:1].upper() + reason[1:] + ".")
+    old = (a.get("old_data") or {}).get("template")
+    with store._write():
+        if old:
+            store._conn.execute(
+                "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (f"{TEMPLATE_PREFIX}{a['job_id']}", json.dumps(old)))
+        else:
+            store._conn.execute("DELETE FROM settings WHERE key = ?", (f"{TEMPLATE_PREFIX}{a['job_id']}",))
+        store._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), a["id"]))
+    return a["summary"]
 
 
 # ------------------------------------------------------------ what is already booked
@@ -175,8 +240,8 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     cand = store.get_candidate(candidate_id)
     tpl = get_template(store, job_id)
     if not tpl:
-        raise ValueError("This job has no loop template yet. Add one on the job's Loop page: one session per line, "
-                         "like: System design | 60 | Priya Nair, Sam Okoye")
+        raise ValueError("This job has no loop template yet. Add one on the job's Loop page (one session per line, "
+                         "like: System design | 60 | Priya Nair, Sam Okoye), or with set_loop_template.")
     h0, h1 = tpl["hours"]
     out_of = [u.strip() for u in (unavailable or []) if u and u.strip()][:10]
     days = _working_days(_first_day(start, now), HORIZON_DAYS)
