@@ -32,7 +32,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase
 from . import decide, interviews, offers, sessions
-from . import outreach
+from . import outreach, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
@@ -239,8 +239,9 @@ class Prospect(BaseModel):
     company: str | None = Field(None, description="Current company",
                                 validation_alias=AliasChoices("company", "current_company"))
     location: str | None = None
-    fit: str | None = Field(None, description="One line on why they fit this job (notes works too)",
-                            validation_alias=AliasChoices("fit", "notes", "why"))
+    fit: str | None = Field(None, description="One line on why they fit this job (reason, why and notes work too)",
+                            validation_alias=AliasChoices("fit", "reason", "notes", "why"))
+    email: str | None = Field(None, description="Their email, when you know it; saved with them if kept")
     source: str | None = Field(None, description="Where you found them; LinkedIn when there's a LinkedIn link")
     about: str | None = Field(None, description="2 to 4 sentences on the person; saved with them if kept")
     tags: list[str] | None = Field(None, description="Skills, saved with them if kept",
@@ -260,10 +261,19 @@ class PersonIn(BaseModel):
     current_company: str | None = Field(None, validation_alias=AliasChoices("current_company", "company"))
     location: str | None = None
     about: str | None = None
+    headline: str | None = Field(None, description="Their headline; saved as the current title (and company)")
+    notes: str | None = Field(None, description="Anything else worth keeping; saved as about, or a note")
     tags: list[str] | None = Field(None, validation_alias=AliasChoices("tags", "skills"))
     work_history: list[WorkEntry] | None = None
     source: str | None = None
     create_anyway: bool = False
+
+
+def split_headline(headline: str) -> tuple[str, str | None]:
+    """'Staff Engineer at Stripe' -> ('Staff Engineer', 'Stripe'); any other headline is the title as it is."""
+    text = " ".join(headline.split())
+    m = re.match(r"^(.{2,}?)\s+(?:at|@)\s+([^|,;]{2,80})$", text)
+    return (m.group(1), m.group(2).strip()) if m else (text, None)
 
 
 def _slim(c: dict[str, Any]) -> dict[str, Any]:
@@ -832,6 +842,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         current_company: str | None = None,
         location: str | None = None,
         about: str | None = None,
+        headline: str | None = None,
+        notes: str | None = None,
         tags: list[str] | None = None,
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
@@ -844,6 +856,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         was kept). A new title or company also updates the current role in the saved work history. Tags are
         skills ("Python", "B2B sales") and are added to existing ones. work_history, if given, replaces the saved
         list (most recent first). `source` is where you found them (e.g. "LinkedIn").
+        headline is a LinkedIn headline: it becomes the current title ("Staff Engineer at Stripe" also sets the
+        company). notes is anything else worth keeping: it becomes about, or a note on their timeline when they
+        already have an about. These names work too: title, company, skills, bio and summary.
         If no email or LinkedIn URL matches but someone with the same name is already saved, nothing is saved and
         you get possible_duplicates: show them to the recruiter and ask. If it's the same person, use
         update_candidate on their id. If it's someone new, call save_candidate again with create_anyway=true.
@@ -856,9 +871,23 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return _result(f"{warning}\n{DATA_NOTE}\n- Name sent: {' '.join(name.split())[:200]}",
                            {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
                             "incoming_name": name, "warning": warning, "data_note": DATA_NOTE})
+        notes_text, headline_unused = (notes or "").strip(), ""
+        if headline and headline.strip():  # a LinkedIn headline is the current title, and "X at Y" the company too
+            head_title, head_company = split_headline(headline)
+            if (current_title or "").strip():
+                headline_unused = headline.strip()
+            else:
+                current_title = head_title
+                if head_company and not (current_company or "").strip():
+                    current_company = head_company
         lead, lead_url = linkedin_lead_tool(linkedin_url), (linkedin_url or "").strip()
         if lead:  # a Sales Navigator or Recruiter link: kept as a note, and the AI asks for the /in/ link
             linkedin_url = None
+        note_as_about = False
+        if notes_text and not (about or "").strip():
+            saved_now = store.find_duplicate(email, linkedin_url)
+            if saved_now is None or not (saved_now.get("about") or "").strip():
+                about, note_as_about = notes_text, True  # the notes are the about when there is none yet
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source)
@@ -931,7 +960,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if ignored:
             out["ignored_fields"] = ignored
             notes.append(f"Not saved, because save_candidate has no field for them: {', '.join(ignored)}. Put "
-                         "skills in tags and anything else worth keeping in about.")
+                         "skills in tags and anything else worth keeping in about or notes. It takes: name, email, phone, "
+                         "linkedin_url, website, current_title (or title, headline), current_company (or company), "
+                         "location, about (or notes), tags (or skills), work_history, source.")
+        if headline_unused and (headline_unused.casefold() != (current_title or "").strip().casefold()):
+            notes.append(f"Did not use the headline {headline_unused[:80]!r}, as you also sent a current_title. "
+                         "Put it in notes or about if you want it kept.")
+        if notes_text and not note_as_about and len(notes_text) <= 4000:  # they have an about already: keep a note
+            if not store._row("SELECT 1 FROM timeline WHERE candidate_id = ? AND kind = 'note' AND body = ?",
+                              (cand["id"], notes_text)):
+                store.log(cand["id"], "note", notes_text, source="AI app")
+            out["notes_saved_as"] = "a note on their timeline"
         if lead:
             store.log(cand["id"], "note", _lead_note(lead, lead_url), source="AI app")
             out["linkedin_note"] = _lead_ask(lead)
@@ -1828,7 +1867,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         or with the buttons on the Shortlist card in the chat.
 
         Up to 25 people per call, each with name, linkedin_url (their linkedin.com/in/ link), title, company,
-        location and fit (one line on why they fit this job). Add about (2 to 4 sentences), tags (skills) and
+        location, email and fit (one line on why they fit this job; reason works too). Add about (2 to 4 sentences), tags (skills) and
         work_history when you know them: a kept person is saved with them, so search finds them later.
         People already proposed, kept or passed on for this
         job, or already in its pipeline, are skipped and named in the reply. People already saved are flagged
@@ -1846,8 +1885,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if ignored:
             shown = ", ".join(x[:40] for x in ignored[:8]) + (f" and {len(ignored) - 8} more" if len(ignored) > 8 else "")
             sentence += (f" Not saved, as the Shortlist doesn't take {'it' if len(ignored) == 1 else 'them'}: {shown}. "
-                         "It takes name, linkedin_url, title, company, location, fit, source, about, tags and "
-                         "work_history.")
+                         "It takes name, linkedin_url, title (or headline), company, location, email, fit (or reason), "
+                         "source, about, tags and work_history.")
         lines = [sentence]
         if added:
             lines += [f"Added {DATA_NOTE}", *prospect_lines(added)]
@@ -2735,13 +2774,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     _check_arguments(mcp)
     _track_session(mcp, store, session, started)
+    wording.install(mcp, store)  # own-company mode: "you" for "the recruiter" in what the tools say
     return mcp
 
 
 # Other names AI apps often send for a field, per tool.
 ARG_ALIASES = {
-    "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags"},
-    "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags"},
+    "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
+                       "summary": "about", "linkedin": "linkedin_url"},
+    "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
+                         "summary": "about", "linkedin": "linkedin_url"},
+    "record_offer": {"base_salary": "salary", "base": "salary", "compensation": "salary", "comp": "salary",
+                     "start": "start_date", "starts": "start_date", "deadline": "answer_by",
+                     "respond_by": "answer_by", "answer_date": "answer_by", "note": "notes"},
     "move_stage": {"note": "notes"},
     "add_to_pipeline": {"note": "notes"},
     "log_activity": {"body": "summary", "candidates": "candidate_ids", "people": "candidate_ids"},
@@ -2765,7 +2810,7 @@ def _check_ids(tool: Any, name: str, args: dict[str, Any]) -> None:
     for key, value in args.items():
         spec = props.get(key) or {}
         types = {spec.get("type"), *(o.get("type") for o in spec.get("anyOf", []))}
-        if "integer" not in types or not isinstance(value, str) or re.fullmatch(r"\s*\d+\s*", value):
+        if "integer" not in types or "string" in types or not isinstance(value, str) or re.fullmatch(r"\s*\d+\s*", value):
             continue
         if value.strip() == "" and "null" in types:
             continue
