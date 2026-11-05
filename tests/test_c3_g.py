@@ -30,7 +30,15 @@ def text(result):
     return "\n".join(c.text for c in content)
 
 
+try:  # notices travel in a signed cookie once that change is merged
+    from conftest import flash_of
+except ImportError:
+    flash_of = None
+
+
 def flash(r, key="notice"):
+    if flash_of is not None:
+        return flash_of(r, key) or ""
     return parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
 
 
@@ -125,7 +133,7 @@ def test_one_undo_from_changes_and_a_hand_built_post(store):
     start = datetime.now(timezone.utc) - timedelta(hours=1)
     for since in (start.strftime("%Y-%m-%dT%H:%M:%SZ"), start.strftime("%Y-%m-%dT%H:%M:%S") + " 00:00"):
         r = c.post("/changes/undo-ai", data={"since": since}, follow_redirects=False)
-        assert "flash_error" not in r.headers["location"], since
+        assert not flash(r, "flash_error"), since
 
 
 def test_undo_from_the_timeline_marks_the_log(store):
