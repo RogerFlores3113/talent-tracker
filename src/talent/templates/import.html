@@ -32,9 +32,15 @@
   {% if preview %}<section class="panel" aria-label="What this import will do">
     <p><strong>{{ preview_lines[0] }}</strong></p>
     {% for line in preview_lines[1:] %}<p class="fine">{{ line }}</p>{% endfor %}
-    {% if preview.changes or preview.skipped or preview.possible_duplicates or preview.warnings %}
+    {% if preview.missing_stages %}{% set n = preview.missing_stages | length %}<label class="check"><input type="checkbox" name="add_stages" value="1" {{ 'checked' if add_stages }}>
+      <span>Add the missing stage{{ '' if n == 1 else 's' }} to {{ 'its job' if n == 1 else 'their jobs' }}, in the sheet's order: {% for m in preview.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}{% if n > 10 %}, and {{ n - 10 }} more{% endif %}.
+      Left unticked, those people go in the job's first stage. Changed it? Check again to see the result.</span></label>{% endif %}
+    {% if preview.changes or preview.skipped or preview.possible_duplicates or preview.warnings or preview.merged_rows %}
     <details><summary>Details</summary><ul class="plain">
-      {% for s in (preview.changes + preview.skipped + preview.possible_duplicates + preview.warnings)[:100] %}<li>{{ s }}</li>{% endfor %}
+      {% for s in (preview.changes + preview.skipped + preview.possible_duplicates + preview.merged_rows + preview.warnings)[:100] %}<li>{{ s }}</li>{% endfor %}
+    </ul></details>{% endif %}
+    {% if preview.stage_fallbacks %}<details><summary>Put in a different stage ({{ preview.stage_fallbacks | length }})</summary><ul class="plain">
+      {% for s in preview.stage_fallbacks[:100] %}<li>{{ s }}</li>{% endfor %}
     </ul></details>{% endif %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}
@@ -51,6 +57,9 @@
 <p class="fine">Undo works until something else changes. After that, the backup is under Automatic backups in <a href="/settings#backups">Settings</a>.</p>{% endif %}
 {% if result.skipped %}<details class="panel"><summary>Skipped rows ({{ result.skipped | length }})</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 {% if result.warnings %}<details class="panel"><summary>Imported, with a cell left blank ({{ result.warnings | length }})</summary><ul class="plain">{% for s in result.warnings[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
+{% if result.stage_fallbacks %}<details class="panel"><summary>Put in a different stage ({{ result.stage_fallbacks | length }})</summary><ul class="plain">{% for s in result.stage_fallbacks[:200] %}<li>{{ s }}</li>{% endfor %}</ul>{% if result.stage_fallbacks | length > 200 %}<p class="fine">And {{ result.stage_fallbacks | length - 200 }} more.</p>{% endif %}</details>{% endif %}
+{% if result.merged_rows %}<details class="panel"><summary>Rows saved as one person ({{ result.merged_rows | length }})</summary><ul class="plain">{% for s in result.merged_rows[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
+{% if result.stages_added and result.missing_stages %}<p class="fine">Added {{ result.missing_stages | length }} new stage{{ '' if result.missing_stages | length == 1 else 's' }}: {% for m in result.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
 {% if result.changes %}<details class="panel"><summary>What changed on updated people ({{ result.changes | length }})</summary><ul class="plain">{% for s in result.changes[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 {% if result.possible_duplicates %}<details class="panel" open><summary>Possible duplicates to check ({{ result.possible_duplicates | length }})</summary><ul class="plain">{% for s in result.possible_duplicates[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 {% if result.pipelines_added or result.jobs_created %}<p class="fine">Put {{ result.pipelines_added }} {{ 'person' if result.pipelines_added == 1 else 'people' }} in job pipelines{% if result.jobs_created %} and made {{ result.jobs_created | length }} new job{{ '' if result.jobs_created | length == 1 else 's' }}: {{ result.jobs_created[:10] | join(', ') }}{% endif %}.</p>{% endif %}

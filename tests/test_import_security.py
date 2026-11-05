@@ -129,7 +129,7 @@ def test_import_page_survives_a_bad_row(store):
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "linkedin_url"})
     assert r.status_code == 200 and "skipped 1 row" in r.text
-    assert "ana@x.com belongs to Ana but this row says X, so it was left alone" in r.text
+    assert "the email is Ana&#39;s, id 1, and the LinkedIn is Bob&#39;s, id 2), so it was left alone" in r.text
 
 
 def test_export_then_import_keeps_phone_and_formula_text(store, tmp_path):

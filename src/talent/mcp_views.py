@@ -76,7 +76,21 @@ function savedText(s){if(s==null||s===false)return null;if(typeof s==="string")r
  if(Array.isArray(changed)&&changed.length)return"Updated: "+changed.map(f=>FIELD[f]||String(f).replace(/_/g," ")).join(", ");
  if(s.status==="unchanged"||s.status==="same")return"Already saved, nothing new";
  return s.label||s.text||(s.status?String(s.status):null)}
+function person(p,extra){const sub=[p.current_title,p.current_company&&("at "+p.current_company)].filter(Boolean).join(" ")+(p.location?" · "+p.location:"");
+ return el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name),appLink(p.app_url,"Open "+p.name+" in Talent Search")),
+  sub?el("div",{class:"muted small"},sub):null,
+  el("div",{class:"contact"},p.email?el("span",{},p.email):null,profileLink(p.linkedin_url)),extra||null)}
+function notSaved(c){
+ const wrap=el("div",{});
+ wrap.append(el("div",{class:"card"},el("div",{class:"row"},el("h1",{},c.incoming_name||"Not saved",el("span",{class:"badge"},"Not saved"))),
+  c.warning?el("p",{},c.warning):null));
+ if(c.existing)wrap.append(el("h2",{},"Already saved"),person(c.existing));
+ if(c.possible_duplicates&&c.possible_duplicates.length){wrap.append(el("h2",{},"Saved with this name"));
+  for(const d of c.possible_duplicates){const diff=d.differences||[];
+   wrap.append(person(d,diff.length?el("ul",{class:"small"},diff.map(x=>el("li",{},x.field+": saved ",el("b",{},x.saved),", yours ",el("b",{},x.yours)))):el("div",{class:"small muted"},"Nothing you sent differs from what's saved.")))}}
+ return wrap}
 function render(c){
+ if(!c.name&&!c.candidate&&(c.conflict||c.needs_confirmation))return notSaved(c);
  if(!c.name&&c.candidate)c=Object.assign({},c.candidate,{saved_status:c.saved_status,app_url:c.app_url||c.candidate.app_url});
  const saved=savedText(c.saved_status);
  const sub=[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")+(c.location?" · "+c.location:"");
@@ -89,9 +103,9 @@ function render(c){
   c.about?el("p",{},c.about):null,
   el("div",{class:"small muted"},"Last contacted: "+(c.last_contacted_at?day(c.last_contacted_at):"never")+" · Updated "+day(c.updated_at)),
  );
- if(c.pipelines&&c.pipelines.length)card.append(el("h2",{},"Jobs"),el("ul",{},c.pipelines.map(p=>el("li",{},p.job_title+": ",el("b",{},p.stage)))));
+ if(c.pipelines&&c.pipelines.length)card.append(el("h2",{},"Jobs"),el("ul",{},c.pipelines.map(p=>el("li",{},p.job_title+(p.job_company?" ("+p.job_company+")":"")+": ",el("b",{},p.stage)))));
  if(c.work_history&&c.work_history.length)card.append(el("h2",{},"Work history"),el("ul",{},c.work_history.map(w=>el("li",{},[w.title,w.company&&("at "+w.company)].filter(Boolean).join(" ")+((w.start||w.end)?" ("+(w.start||"")+" to "+(w.end||"now")+")":"")))));
- if(c.timeline&&c.timeline.length)card.append(el("h2",{},"Recent activity"),el("ul",{},c.timeline.slice(0,6).map(t=>el("li",{},el("span",{class:"kind"},t.kind)," ",day(t.at)+(t.body?": "+t.body:"")))));
+ if(c.timeline&&c.timeline.length)card.append(el("h2",{},"Recent activity"),el("ul",{},c.timeline.slice(0,6).map(t=>el("li",{},el("span",{class:"kind"},t.kind)," ",day(t.at)+(t.body?": "+t.body:"")+(t.job_title?" ("+t.job_title+(t.job_company?", "+t.job_company:"")+")":"")))));
  return card}""",
     "results": r"""
 function render(d){

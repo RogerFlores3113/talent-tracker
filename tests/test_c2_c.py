@@ -29,10 +29,10 @@ def test_linkedin_connections_csv_in_one_step(store):
     header, rows = importers.read_csv(LINKEDIN_EXPORT)
     assert header[:3] == ["First Name", "Last Name", "URL"] and len(rows) == 2
     mapping = importers.guess_mapping(header, rows)
-    assert mapping == ["first_name", "last_name", "linkedin_url", "email", "current_company", "current_title", ""]
+    assert mapping == ["first_name", "last_name", "linkedin_url", "email", "current_company", "current_title", "note"]
     assert importers.default_source(header) == "LinkedIn connections"
     r = importers.import_rows(store, header, rows, mapping, source="LinkedIn connections", backup=False)
-    assert r["added"] == 2 and r["not_imported"] == ["Connected On"]
+    assert r["added"] == 2 and r["not_imported"] == []  # Connected On becomes a dated timeline note
     maya = store.find_by_name("Maya Okafor")[0]
     assert maya["linkedin_url"] == "https://linkedin.com/in/maya-okafor"
     assert (maya["current_title"], maya["current_company"], maya["source"]) == (
@@ -140,7 +140,7 @@ def test_role_client_status_build_pipelines(store):
     assert stages == {"Priya Raman": "Screening", "Tom Nguyen": "Offer", "Bo Park": "Hired"}
     designer = [j for j in store.list_jobs() if j["title"] == "Designer"][0]
     assert [p["stage"] for p in store.pipeline(designer["id"])] == ["Sourced"]
-    assert any("no stage called 'Phone call maybe' on Designer, so they went in Sourced" in w for w in r["warnings"])
+    assert "Row 4: put in Sourced, since Designer has no stage called 'Phone call maybe'" in r["stage_fallbacks"]
     # Importing again adds nobody twice and makes no second job.
     r = importers.import_rows(store, header, rows, mapping, backup=False)
     assert r["pipelines_added"] == 0 and r["jobs_created"] == []
