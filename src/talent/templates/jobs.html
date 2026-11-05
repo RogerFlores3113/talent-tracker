@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Jobs · Talent Search{% endblock %}
+{% from "_macros.html" import sample_badge %}
 {% block body %}
+{% set sample_jobs = sample_ids()[1] %}
 <div class="sec-head"><h1>Jobs</h1><a class="btn primary" href="/jobs/new">New job</a></div>
 <nav class="tabs" aria-label="Job status">
   {% for key, label in [('', 'All'), ('open', 'Open'), ('on_hold', 'On hold'), ('closed', 'Closed')] %}
@@ -14,8 +16,8 @@
 <ul class="cards">
 {% for j in jobs %}
   <li><a class="card" href="/jobs/{{ j.id }}">
-    <div class="row1"><strong>{{ j.title }}</strong><span class="when">{% if j.status != 'open' %}<span class="badge">{{ j.status | replace('_', ' ') }}</span> {% endif %}{{ j.active_count }} active · {{ j.pipeline_count }} total</span></div>
-    {% if j.company or j.location %}<div class="row2">{{ j.company or '' }}{% if j.company and j.location %} · {% endif %}{{ j.location or '' }}</div>{% endif %}
+    <div class="row1"><strong>{{ j.title }}{% if j.company %}<span class="co">, {{ j.company }}</span>{% endif %} {{ sample_badge(j.id in sample_jobs) }}</strong><span class="when">{% if j.status != 'open' %}<span class="badge">{{ j.status | replace('_', ' ') }}</span> {% endif %}{{ j.active_count }} active · {{ j.pipeline_count }} total</span></div>
+    {% if j.location %}<div class="row2">{{ j.location }}</div>{% endif %}
     <div class="stagebar">{% for s in j.stage_counts %}<span class="{{ 'has' if s.count }} o-{{ s.outcome }}">{{ s.name }} <b>{{ s.count }}</b></span>{% endfor %}</div>
   </a></li>
 {% endfor %}

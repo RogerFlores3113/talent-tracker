@@ -841,6 +841,19 @@ class Store:
                 self._conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*fields.values(), job_id))
         return self.get_job(job_id)
 
+    def delete_job(self, job_id: int) -> None:
+        """App window only: remove a job, its stages and its pipeline. The candidates stay.
+
+        Timeline entries keep their text but lose the job link; to-dos about a
+        candidate stay, without the job. The AI has no tool for this.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE suggestions SET job_id = NULL WHERE job_id = ? AND candidate_id IS NOT NULL",
+                               (job_id,))
+            cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        if cur.rowcount == 0:
+            raise NotFound(f"No job with id {job_id}")
+
     def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
         sql = """SELECT j.*,
                         count(a.id) AS pipeline_count,

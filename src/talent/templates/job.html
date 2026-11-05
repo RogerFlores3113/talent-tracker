@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons %}
+{% from "_macros.html" import recipe_buttons, sample_badge %}
 {% block title %}{{ job.title }} · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block body %}
 <div class="sec-head">
   <div>
-    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %} {{ sample_badge(job.id in sample_ids()[1]) }}</h1>
     <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
   </div>
   <div class="actions-inline">
@@ -13,6 +13,7 @@
       <a href="/jobs/{{ job.id }}?view=board" class="{{ 'on' if view == 'board' }}">Board</a>
       <a href="/jobs/{{ job.id }}?view=table" class="{{ 'on' if view == 'table' }}">Table</a>
     </nav>
+    <span class="copy-status"><button type="button" class="btn" data-text="{{ status_text }}" onclick="copyText(this.dataset.text, this.nextElementSibling, 'Copied. Paste it into an email or chat.')">Copy status update</button><span class="fine" role="status"></span></span>
     <a class="btn" href="/jobs/{{ job.id }}/edit">Edit job and stages</a>
   </div>
 </div>
@@ -31,6 +32,14 @@
 
 <div id="pipeline">{% include "_pipeline.html" %}</div>
 {% if job.description %}<details class="panel"><summary>Job description</summary><p class="about">{{ job.description }}</p></details>{% endif %}
+<details class="panel"><summary>Status update for the hiring manager</summary>
+  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, and the next interviews in your time zone.</p>
+  <pre class="code status-text">{{ status_text }}</pre>
+</details>
+<form method="post" action="/jobs/{{ job.id }}/delete" data-msg="Delete {{ job_label(job.title, job.company) }}? This removes the job and its pipeline. The candidates stay saved." onsubmit="return confirm(this.dataset.msg)">
+  <button class="link danger" type="submit">Delete job</button>
+  <span class="fine">The candidates stay in your database. To keep the job's history, close it instead under Edit job and stages.</span>
+</form>
 {% endblock %}
 {% block scripts %}
 <script>

@@ -1,16 +1,30 @@
-{% from "_macros.html" import recipe_buttons, chips, sub %}
-{% if total_all == 0 and not jobs %}
-<div class="welcome">
-  <h1>Welcome to Talent Search</h1>
-  <p class="lead">Your own candidate database, on this computer. Pick a way to start.</p>
+{% from "_macros.html" import recipe_buttons, chips, sub, sample_badge %}
+{% set sample = sample_ids() %}
+{% macro start_options(with_sample) -%}
   <div class="options">
     <a class="option" href="/connect"><strong>Connect your AI app</strong><span>Then paste a LinkedIn link into Claude and say “save this person”.</span></a>
     <a class="option" href="/import"><strong>Import a spreadsheet</strong><span>Bring in a CSV from Excel, Google Sheets or another tool.</span></a>
     <a class="option" href="/paste"><strong>Paste a resume</strong><span>We pull out the name, email and links for you to check.</span></a>
-    <form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Delete them any time.</span></button></form>
+    {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button.</span></button></form>{% endif %}
   </div>
+{%- endmacro %}
+{% if total_all == 0 and not jobs %}
+<div class="welcome">
+  <h1>Welcome to Talent Search</h1>
+  <p class="lead">Your own candidate database, on this computer. Pick a way to start.</p>
+  {{ start_options(True) }}
 </div>
 {% else %}
+{% if real_count == 0 %}
+<section class="welcome panel">
+  <div class="sec-head">
+    <h2>Add your first real candidate</h2>
+    {% if has_sample %}<form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs? Your own data stays.')"><button class="btn small" type="submit">Remove sample data</button></form>{% endif %}
+  </div>
+  {% if has_sample %}<p class="fine">You're looking at made-up sample data, marked Sample. Remove it when you're ready.</p>{% endif %}
+  {{ start_options(False) }}
+</section>
+{% endif %}
 <div class="overview">
   <section class="today">
     <div class="sec-head">
@@ -24,9 +38,15 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','stuck':'Stuck','thin':'Thin pipeline','stale':'Stale profile'}[i.kind] }}</span>
-          <a class="item-title" href="{{ '/candidates/' ~ i.candidate_id if i.candidate_id else '/jobs/' ~ i.job_id }}">{{ i.title }}</a>
+          <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
+          <a class="item-title" href="{{ i.href }}">{{ i.title }}</a>
+          {% if i.kind == 'thin' and i.jobs | length > 1 %}
+          <div class="fine">{% for j in i.jobs %}<a href="/jobs/{{ j.id }}">{{ job_label(j.title, j.company) }}</a> ({{ j.active_count }} active){{ '; ' if not loop.last else '.' }} {% endfor %}{{ i.aim }}</div>
+          {% elif i.kind == 'stale' and i.candidates %}
+          <div class="fine">Oldest: {% for c in i.candidates %}<a href="/candidates/{{ c.id }}#refresh">{{ c.name }}</a>{{ ', ' if not loop.last }}{% endfor %}{% if today.stale_total > i.candidates | length %} and {{ today.stale_total - i.candidates | length }} more{% endif %}.</div>
+          {% else %}
           <div class="fine">{% if i.kind == 'interview' %}{{ i.when | local }}{% if i.detail %} · {% endif %}{% endif %}{{ i.detail }}</div>
+          {% endif %}
         </div>
         <div class="item-acts">
           {% if i.kind == 'stuck' and i.next_stage %}
@@ -34,9 +54,9 @@
           {% elif i.kind == 'suggestion' %}
           <form method="post" action="/actions/suggestions/{{ i.suggestion_id }}/done"><button class="btn small" type="submit">Done</button></form>
           {% elif i.kind == 'thin' %}
-          <a class="btn small" href="/jobs/{{ i.job_id }}">Add people</a>
+          <a class="btn small" href="{{ i.href }}">{{ 'Add people' if i.job_id else 'See jobs' }}</a>
           {% elif i.kind == 'stale' %}
-          <a class="btn small" href="/candidates/{{ i.candidate_id }}#refresh">Refresh</a>
+          <a class="btn small" href="{{ i.href }}">{{ 'Refresh' if i.candidate_id else 'See the oldest' }}</a>
           {% endif %}
           {% if i.kind != 'suggestion' %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
@@ -45,8 +65,9 @@
       </li>
     {% endfor %}
     </ul>
-    {% if today.stale_more %}<p class="fine">And {{ today.stale_more }} more stale profile{{ '' if today.stale_more == 1 else 's' }}. <a href="/candidates?sort=updated&dir=asc">See the oldest</a></p>{% endif %}
-    {% if today.hidden %}<p class="fine">{{ today.hidden }} snoozed.</p>{% endif %}
+    {% if today.hidden or today.scheduled %}<p class="fine">
+      {%- if today.hidden %}{{ today.hidden }} snoozed.{% endif %}
+      {%- if today.scheduled %} {{ today.scheduled }} follow-up{{ '' if today.scheduled == 1 else 's' }} scheduled for later.{% endif %}</p>{% endif %}
   </section>
 
   <section>
@@ -55,8 +76,8 @@
     <ul class="cards">
     {% for j in jobs %}
       <li><a class="card" href="/jobs/{{ j.id }}">
-        <div class="row1"><strong>{{ j.title }}</strong><span class="when">{{ j.active_count }} active{% if j.hired_count %} · {{ j.hired_count }} hired{% endif %}</span></div>
-        {% if j.company or j.location %}<div class="row2">{{ j.company or '' }}{% if j.company and j.location %} · {% endif %}{{ j.location or '' }}</div>{% endif %}
+        <div class="row1"><strong>{{ j.title }}{% if j.company %}<span class="co">, {{ j.company }}</span>{% endif %} {{ sample_badge(j.id in sample[1]) }}</strong><span class="when">{{ j.active_count }} active{% if j.hired_count %} · {{ j.hired_count }} hired{% endif %}</span></div>
+        {% if j.location %}<div class="row2">{{ j.location }}</div>{% endif %}
         <div class="stagebar">{% for s in j.stage_counts if s.outcome == 'open' %}<span class="{{ 'has' if s.count }}">{{ s.name }} <b>{{ s.count }}</b></span>{% endfor %}</div>
       </a></li>
     {% endfor %}
@@ -68,7 +89,7 @@
     <ul class="cards">
     {% for c in recent %}
       <li><a class="card" href="/candidates/{{ c.id }}">
-        <div class="row1"><strong>{{ c.name }}</strong><span class="when">Updated {{ c.updated_at | ago }}</span></div>
+        <div class="row1"><strong>{{ c.name }} {{ sample_badge(c.id in sample[0]) }}</strong><span class="when">Updated {{ c.updated_at | ago }}</span></div>
         <div class="row2">{{ sub(c) }}</div>
       </a></li>
     {% endfor %}
