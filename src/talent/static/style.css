@@ -231,3 +231,19 @@ section.welcome.panel { margin-bottom: 20px; }
   .panel { border: none; padding: 0; margin: 0 0 16px; }
   .code { border: none; background: #fff; font-size: 12pt; white-space: pre-wrap; }
 }
+/* Onsite loops on Today: one card, its sessions inside */
+.sessions { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.sessions li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.session-acts { display: inline-flex; gap: 4px; }
+.session-acts form { margin: 0; }
+/* Decide view and Interviews week */
+.decide { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.decide .finalist { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.decide .finalist h3 { margin: 0 0 4px; }
+.decide .iv { border-top: 1px solid var(--line); padding: 6px 0; }
+.decide blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--line); white-space: pre-wrap; }
+.week { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 8px; overflow-x: auto; }
+.week .day { border: 1px solid var(--line); border-radius: 10px; padding: 8px; min-height: 80px; }
+.week .day h3 { font-size: 13px; margin: 0 0 6px; }
+.week .slot { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin-bottom: 6px; font-size: 13px; }
+.week .clash { border-color: #c0392b; }

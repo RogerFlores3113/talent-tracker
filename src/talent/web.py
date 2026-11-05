@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
+from . import decide, interviews
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
@@ -1403,6 +1404,102 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="That follow-up is already gone.")
         return back(request, notice="Marked done.")
 
+    # ------------------------------------------------- deciding and interviews
+    def _ids(raw: str) -> list[int]:
+        return [int(x) for x in re.split(r"[,\s]+", raw or "") if x.isdigit()][:6]
+
+    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
+    def decide_page(request: Request, job_id: int, ids: str = ""):
+        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+        job = job_or_404(job_id)
+        try:
+            d = decide.finalists(store, job_id, _ids(ids) or None)
+        except ValueError as exc:
+            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+        return page(request, "decide.html", job=job, people=d["people"], more=d["more"], offer_stage=d["offer_stage"],
+                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))),
+                    pass_label="Hiring team passed" if actions.inhouse(store) else "Client passed")
+
+    @app.post("/jobs/{job_id}/decide")
+    async def decide_form(request: Request, job_id: int):
+        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes."""
+        job_or_404(job_id)
+        form = await request.form()
+        offer = str(form.get("offer") or "")
+        if not offer.isdigit():
+            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer.")
+        passed = [int(v) for v in form.getlist("pass") if str(v).isdigit()]
+        try:
+            res = decide.record_decision(store, job_id, int(offer), passed, reason=str(form.get("reason") or "") or None,
+                                         note=str(form.get("note") or "") or None, by="app")
+        except (ValueError, NotFound) as exc:
+            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+        notice = f"Recorded: {res['text']}." + (
+            f" Cancelled {res['cancelled']} interview{'' if res['cancelled'] == 1 else 's'} still ahead." if res["cancelled"]
+            else "") + " You can undo it under Changes."
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}/feedback")
+    async def feedback_form(request: Request, candidate_id: int, entry_id: int):
+        """Add one interviewer's feedback to an interview, from the Decide view or the profile."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        nxt = str(form.get("next") or "")
+        nxt = nxt if safe_local_path(nxt.split("?", 1)[0]) else f"/candidates/{candidate_id}"
+        try:
+            store.add_interview_feedback(entry_id, str(form.get("text") or ""), str(form.get("interviewer") or "") or None,
+                                         candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        except ValueError as exc:
+            return back(request, nxt, error=str(exc))
+        sep = "&" if "?" in nxt else "?"
+        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
+
+    @app.get("/interviews", response_class=HTMLResponse)
+    def interviews_page(request: Request, week: str = ""):
+        """Monday to Friday: every session booked across all jobs, grouped into loops, with clashes flagged."""
+        from datetime import date
+        try:
+            day = date.fromisoformat(week) if week else None
+        except ValueError:
+            day = None
+        return page(request, "interviews.html", w=interviews.week(store, day))
+
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}/session")
+    async def add_session_form(request: Request, candidate_id: int, entry_id: int):
+        """Add another session on the same day and job as this interview, so an onsite loop can be built here."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        try:
+            iv = store.get_interview(entry_id, candidate_id)
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        at = str(form.get("time") or "").strip()
+        try:
+            if not re.fullmatch(r"\d{1,2}:\d{2}", at):
+                raise ValueError("Pick a start time for the new session.")
+            day = _local(iv["at"], "%Y-%m-%d")
+            new = store.log(candidate_id, "interview", str(form.get("body") or ""), at=f"{day}T{at}",
+                            job_id=iv.get("job_id"), source="App",
+                            interviewer=str(form.get("interviewer") or "") or None)
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#iv-{entry_id}",
+                                    status_code=303)
+        notice = f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#iv-{new['id']}",
+                                status_code=303)
+
+    @app.post("/changes/decision/{batch_id}/undo")
+    def undo_decision_form(request: Request, batch_id: int):
+        try:
+            notice = decide.undo_decision(store, batch_id, by="app")
+        except NotFound:
+            return back(request, "/changes", error="That decision is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
     @app.post("/actions/advance")
     async def advance(request: Request):
         form = await request.form()
@@ -1410,7 +1507,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not (cid.isdigit() and jid.isdigit() and stage):
             return back(request, error="Couldn't move that candidate. Reload the page and try again.")
         try:
-            app_row = store.move_stage(int(cid), int(jid), stage, by="app")
+            app_row = store.move_stage(int(cid), int(jid), stage, notes=str(form.get("notes") or "").strip() or None,
+                                       by="app")
         except (ValueError, NotFound) as exc:
             return back(request, error=str(exc))
         return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
@@ -1481,6 +1579,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "confirm": "Undo this keep? They go back on the Shortlist and out of the job. People it "
                                         "saved are taken out again if nobody worked on them since; a backup is "
                                         "saved first."})
+        if who in ("", "app"):  # a decision recorded in the Decide view: one row, with its own undo
+            for b in decide.decision_batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}/decide",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "undo_url": f"/changes/decision/{b['id']}/undo", "undo_label": "Undo this decision",
+                             "confirm": "Undo this decision? Everyone goes back to the stage they were in, and the "
+                                        "interviews it cancelled are put back."})
         if who in ("", "app"):  # what a stage counts as, changed in the app
             for c in actions.stage_outcome_changes(store, since)[:limit]:
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",

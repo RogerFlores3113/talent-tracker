@@ -16,6 +16,7 @@
       <a href="/" class="{{ 'on' if path == '/' }}">Today</a>
       <a href="/candidates" class="{{ 'on' if path.startswith('/candidates') and path != '/candidates/new' }}">Candidates</a>
       <a href="/jobs" class="{{ 'on' if path.startswith('/jobs') }}">Jobs</a>
+      <a href="/interviews" class="{{ 'on' if path == '/interviews' }}">Interviews</a>
       <a href="/clients" class="{{ 'on' if path.startswith('/clients') }}">{{ 'Reports' if inhouse() else 'Clients' }}</a>
       <a href="/candidates/new" class="{{ 'on' if path in ('/candidates/new', '/paste', '/import') }}">Add</a>
       <a href="/recipes" class="{{ 'on' if path == '/recipes' }}">AI recipes</a>

@@ -20,6 +20,7 @@ URIS = {
     "today": "ui://talent-search/action-items.html",
     "shortlist": "ui://talent-search/shortlist.html",
     "saved": "ui://talent-search/batch-save.html",
+    "decide": "ui://talent-search/finalists.html",
 }
 
 _CSS = r"""
@@ -107,7 +108,8 @@ function render(c){
  );
  if(c.pipelines&&c.pipelines.length)card.append(el("h2",{},"Jobs"),el("ul",{},c.pipelines.map(p=>el("li",{},p.job_title+(p.job_company?" ("+p.job_company+")":"")+": ",el("b",{},p.stage)))));
  if(c.work_history&&c.work_history.length)card.append(el("h2",{},"Work history"),el("ul",{},c.work_history.map(w=>el("li",{},[w.title,w.company&&("at "+w.company)].filter(Boolean).join(" ")+((w.start||w.end)?" ("+(w.start||"")+" to "+(w.end||"now")+")":"")))));
- if(c.timeline&&c.timeline.length)card.append(el("h2",{},"Recent activity"),el("ul",{},c.timeline.slice(0,6).map(t=>el("li",{},el("span",{class:"kind"},t.kind)," ",day(t.at)+(t.body?": "+t.body:"")+(t.job_title?" ("+t.job_title+(t.job_company?", "+t.job_company:"")+")":"")))));
+ if(c.timeline&&c.timeline.length)card.append(el("h2",{},"Recent activity"),el("ul",{},c.timeline.slice(0,6).map(t=>el("li",{},el("span",{class:"kind"},t.kind)," ",day(t.at)+(t.body?": "+t.body:"")+(t.job_title?" ("+t.job_title+(t.job_company?", "+t.job_company:"")+")":"")+(t.interviewer?", with "+t.interviewer:""),
+  t.outcome_note?el("div",{class:"small"},"How it went: "+t.outcome_note):null,(t.feedback||[]).map(f=>el("div",{class:"small"},"Feedback from "+(f.by||"an interviewer")+": "+f.text))))));
  return card}""",
     "results": r"""
 function render(d){
@@ -139,7 +141,7 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
+const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",interview_result:"Interview result",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
@@ -185,6 +187,25 @@ function render(d){
  if(d.warning)wrap.append(el("div",{class:"card small"},d.warning));
  for(const[k,label]of GROUPS){const rs=d[k]||[];if(!rs.length)continue;wrap.append(el("h2",{},label+" ("+rs.length+")"));for(const r of rs)wrap.append(row(r))}
  if(d.batch_id)wrap.append(el("p",{class:"small muted"},"You can undo this whole batch in Talent Search, under Changes."));
+ return wrap}""",
+    "decide": r"""
+function iv(i){return el("div",{class:"pc"},el("div",{class:"row"},el("b",{},i.name),el("span",{class:"badge"},i.outcome)),
+ el("div",{class:"small muted"},when(i.at)+(i.interviewer?" · with "+i.interviewer:"")),
+ i.note?el("div",{class:"small"},"How it went: "+i.note):null,
+ (i.feedback||[]).map(f=>el("div",{class:"small"},el("b",{},(f.by||"Interviewer")+": "),f.text)))}
+function render(d){
+ const wrap=el("div",{});const j=d.job||{};
+ wrap.append(el("div",{class:"row"},el("h1",{},"Finalists: "+j.title+(j.company?" · "+j.company:"")),appLink(d.app_url,"Decide in Talent Search")));
+ const ps=d.people||[];
+ if(!ps.length){wrap.append(el("p",{class:"empty"},"Nobody has interviewed or reached a late stage yet."));return wrap}
+ const board=el("div",{class:"board"});
+ for(const p of ps){const sub=[p.stage,p.days_in_process!=null?p.days_in_process+" days in process":null].filter(Boolean).join(" · ");
+  board.append(el("div",{class:"col"},el("h3",{},el("span",{},p.name),appLink(p.app_url,"Open")),
+   el("div",{class:"small muted"},sub),p.source?el("div",{class:"small muted"},"Source: "+p.source+(p.referrer?" (referred by "+p.referrer+")":"")):null,
+   (p.interviews||[]).length?(p.interviews||[]).map(iv):el("div",{class:"small muted"},"No interviews logged."),
+   (p.todos||[]).map(t=>el("div",{class:"small"},"To-do: "+t.text))))}
+ wrap.append(board);
+ if(d.more&&d.more.length)wrap.append(el("p",{class:"small muted"},"Also in late stages: "+d.more.map(m=>m.name).join(", ")));
  return wrap}""",
 }
 

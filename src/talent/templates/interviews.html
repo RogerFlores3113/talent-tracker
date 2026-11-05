@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Interviews · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>Interviews</h1>
+    <p class="sub">{{ w.start.strftime('%a %b %-d') }} to {{ w.end.strftime('%a %b %-d') }} · {{ w.total }} session{{ '' if w.total == 1 else 's' }} across all jobs</p>
+  </div>
+  <nav class="seg" aria-label="Week">
+    <a href="/interviews?week={{ w.prev.isoformat() }}">Previous week</a>
+    <a href="/interviews">This week</a>
+    <a href="/interviews?week={{ w.next.isoformat() }}">Next week</a>
+  </nav>
+</div>
+
+{% if w.clashes %}
+<section class="panel" id="clashes">
+  <h2>{{ w.clashes | length }} clash{{ '' if w.clashes | length == 1 else 'es' }} to fix</h2>
+  <ul>{% for c in w.clashes %}<li>{{ c.text }}.</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="panel">
+  {% if not w.total %}<p class="none">Nothing booked this week. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
+  <div class="week">
+  {% for d in w.days %}
+    <div class="day">
+      <h3>{{ d.label }}</h3>
+      {% for lp in d.loops %}
+      <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
+        <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}
+        {% if lp.job %}<div class="fine">{{ lp.job }}</div>{% endif %}
+        {% if lp.split %}<div class="fine">Some sessions of this loop are on another day.</div>{% endif %}
+        <ul class="sessions">
+        {% for x in lp.sessions %}
+          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ interview_outcomes[x.status] }}</span>{% endif %}
+            <a class="link small" href="{{ x.href }}">Change</a></li>
+        {% endfor %}
+        </ul>
+      </div>
+      {% else %}<p class="fine">Nothing booked.</p>{% endfor %}
+    </div>
+  {% endfor %}
+  </div>
+</section>
+
+{% if w.load %}
+<section class="panel">
+  <h2>Interviewer load</h2>
+  <ul>{% for e in w.load %}<li>{{ e.name }}: {{ e.count }} session{{ '' if e.count == 1 else 's' }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}

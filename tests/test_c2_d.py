@@ -49,7 +49,7 @@ def test_interview_reschedule_cancel_and_outcome_in_the_store(store):
     past = store.log(ana, "interview", "Screen", at=_at(-1), job_id=job["id"])
     done = store.update_interview(past["id"], outcome="no show", note="Didn't join")
     assert done["status"] == "no_show" and done["data"]["outcome_note"] == "Didn't join"
-    with pytest.raises(ValueError, match="passed, not passed or no show"):
+    with pytest.raises(ValueError, match="passed, not passed, no show"):
         store.update_interview(past["id"], outcome="great")
     with pytest.raises(ValueError, match="Say what to change"):
         store.update_interview(past["id"])
