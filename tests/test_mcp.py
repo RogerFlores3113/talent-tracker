@@ -8,6 +8,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult
 
 from talent.mcp_server import build_server
+from talent.mcp_views import URIS
 
 
 def call(server, tool, **args):
@@ -46,7 +47,7 @@ def test_tools_are_listed_and_none_delete(store):
 def test_ui_resources_are_self_contained(store):
     server = build_server(store)
     resources = anyio.run(server.list_resources)
-    assert len(resources) == 4
+    assert len(resources) == len(URIS)
     for r in resources:
         assert str(r.uri).startswith("ui://") and r.mimeType == "text/html;profile=mcp-app"
         body = anyio.run(lambda: server.read_resource(r.uri))

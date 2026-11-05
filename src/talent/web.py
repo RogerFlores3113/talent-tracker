@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, backups, importers, integrations, paths, recipes
+from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -258,6 +258,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
     env.globals["move_reasons"] = lambda: actions.reasons(store)
+    env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -1063,6 +1064,84 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if skipped:
             notice += f" Didn't fill the {_and(skipped)}: another saved candidate has it."
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
+
+    # ------------------------------------------------------------ shortlist
+    def to_shortlist(job_id: int, notice: str = "", error: str = "") -> RedirectResponse:
+        q = urlencode([(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v])
+        return RedirectResponse(f"/jobs/{job_id}/shortlist" + (f"?{q}" if q else ""), status_code=303)
+
+    @app.get("/jobs/{job_id}/shortlist", response_class=HTMLResponse)
+    def shortlist_page(request: Request, job_id: int, choose: str = ""):
+        """People the AI app proposed for this job. Keep saves (or links) them and adds them to the first stage;
+        Pass sets them aside with an optional reason, so they aren't proposed for this job again."""
+        job = job_or_404(job_id)
+        rows = shortlist.listed(store, job_id, "proposed")
+        for r in rows:
+            r["check_lines"] = shortlist.check_lines(r.get("checks") or {})
+        decided = shortlist.listed(store, job_id, "all", with_checks=False)
+        return page(request, "shortlist.html", job=job, rows=rows, counts=shortlist.counts(store, job_id),
+                    kept=[r for r in decided if r["status"] == "kept"],
+                    passed=[r for r in decided if r["status"] == "passed"],
+                    first_stage=(store.job_stages(job_id) or [{"name": "the first stage"}])[0]["name"],
+                    choose=int(choose) if choose.isdigit() else None)
+
+    @app.post("/jobs/{job_id}/shortlist/keep-all")
+    def shortlist_keep_all(job_id: int):
+        job_or_404(job_id)
+        done = shortlist.keep_all(store, job_id)
+        n, left = len(done["kept"]), done["left"]
+        stage = done["kept"][0]["stage"] if done["kept"] else ""
+        notice = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {stage}" if n else "") + "."
+                  + (f" {len(left)} need your choice first: {_and(left)}." if left else ""))
+        return to_shortlist(job_id, notice=notice)
+
+    @app.post("/jobs/{job_id}/shortlist/pass-all")
+    async def shortlist_pass_all(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        n = shortlist.pass_all(store, job_id, str(form.get("reason") or ""))
+        return to_shortlist(job_id, notice=f"Passed on {n} {'person' if n == 1 else 'people'}. They won't be "
+                                           "proposed for this job again." if n else "Nobody was waiting.")
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/keep")
+    async def shortlist_keep(request: Request, job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        link = str(form.get("link_id") or "")
+        try:
+            done = shortlist.keep(store, job_id, prospect_id, link_id=int(link) if link.isdigit() else None,
+                                  as_new=str(form.get("as_new") or "") == "1")
+        except shortlist.NeedsChoice as exc:
+            return RedirectResponse(f"/jobs/{job_id}/shortlist?{urlencode({'choose': prospect_id, 'flash_error': str(exc)})}"
+                                    f"#p{prospect_id}", status_code=303)
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        c = done["candidate"]
+        if done["already"]:
+            notice = f"Kept {c['name']}. They were already in this job, in {done['stage']}."
+        else:
+            notice = (f"{'Saved' if done['created'] else 'Kept'} {c['name']} and added them to {done['stage']}"
+                      + ("." if done["created"] else ", linked to the person you already had."))
+        return to_shortlist(job_id, notice=notice)
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/pass")
+    async def shortlist_pass(request: Request, job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        try:
+            p = shortlist.pass_on(store, job_id, prospect_id, str(form.get("reason") or ""))
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        return to_shortlist(job_id, notice=f"Passed on {p['name']}. They won't be proposed for this job again.")
+
+    @app.post("/jobs/{job_id}/shortlist/{prospect_id}/put-back")
+    def shortlist_put_back(job_id: int, prospect_id: int):
+        job_or_404(job_id)
+        try:
+            p = shortlist.put_back(store, job_id, prospect_id)
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
+        return to_shortlist(job_id, notice=f"Put {p['name']} back on the Shortlist.")
 
     # ------------------------------------------------------- dashboard acts
     @app.post("/actions/snooze")

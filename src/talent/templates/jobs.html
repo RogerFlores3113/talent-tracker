@@ -32,7 +32,7 @@
 <ul class="cards">
 {% for j in jobs %}
   <li><a class="card" href="/jobs/{{ j.id }}">
-    <div class="row1"><strong>{{ j.title }}{% if j.company %}<span class="co">, {{ j.company }}</span>{% endif %}{% if j.hint and not j.location %} <span class="co">{{ j.hint }}</span>{% endif %} {{ sample_badge(j.id in sample_jobs) }}</strong><span class="when">{% if j.status != 'open' %}<span class="badge">{{ j.status | replace('_', ' ') }}</span> {% endif %}{{ j.active_count }} active · {% if (j.openings or 1) > 1 %}{{ j.hired_count }} hired, {{ j.openings }} openings · {% endif %}{{ j.pipeline_count }} total</span></div>
+    <div class="row1"><strong>{{ j.title }}{% if j.company %}<span class="co">, {{ j.company }}</span>{% endif %}{% if j.hint and not j.location %} <span class="co">{{ j.hint }}</span>{% endif %} {{ sample_badge(j.id in sample_jobs) }}{% set waiting = shortlist_waiting(j.id) %}{% if waiting %} <span class="badge shortlist" title="Waiting on the Shortlist">{{ waiting }} on the Shortlist</span>{% endif %}</strong><span class="when">{% if j.status != 'open' %}<span class="badge">{{ j.status | replace('_', ' ') }}</span> {% endif %}{{ j.active_count }} active · {% if (j.openings or 1) > 1 %}{{ j.hired_count }} hired, {{ j.openings }} openings · {% endif %}{{ j.pipeline_count }} total</span></div>
     {% if j.location %}<div class="row2">{{ j.location }}</div>{% endif %}
     {% if j.status != 'open' %}{% set ai_note = ai_status_note(j.id) %}{% if ai_note %}<div class="row2 fine">{{ ai_note }}</div>{% endif %}{% endif %}
     <div class="stagebar">{% for s in j.stage_counts %}<span class="{{ 'has' if s.count }} o-{{ s.outcome }}">{{ s.name }} <b>{{ s.count }}</b></span>{% endfor %}</div>

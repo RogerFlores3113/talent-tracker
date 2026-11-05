@@ -18,6 +18,7 @@ URIS = {
     "results": "ui://talent-search/search-results.html",
     "pipeline": "ui://talent-search/pipeline-board.html",
     "today": "ui://talent-search/action-items.html",
+    "shortlist": "ui://talent-search/shortlist.html",
 }
 
 _CSS = r"""
@@ -137,7 +138,7 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date"};
+const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
@@ -146,6 +147,22 @@ function render(d){
   i.detail?el("div",{class:"small muted"},i.detail):null);
  for(const i of d.items)wrap.append(card(i));
  if(d.next_week&&d.next_week.length){wrap.append(el("h2",{},"Next week"));for(const i of d.next_week)wrap.append(card(i))}
+ return wrap}""",
+    "shortlist": r"""
+function prospect(p){const sub=[p.title,p.company&&("at "+p.company)].filter(Boolean).join(" ")+(p.location?" · "+p.location:"");
+ const badge=p.status==="passed"?"Passed":p.status==="kept"?"Kept":null;
+ return el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
+  sub?el("div",{class:"muted small"},sub):null,p.fit?el("div",{class:"small"},p.fit):null,
+  p.pass_reason?el("div",{class:"small muted"},"Reason: "+p.pass_reason):null,
+  (p.check_lines&&p.check_lines.length)?el("ul",{class:"small"},p.check_lines.map(x=>el("li",{},x))):null)}
+function render(d){
+ const wrap=el("div",{});const rows=d.added||d.prospects||[];const c=d.counts||{};
+ wrap.append(el("div",{class:"row"},el("h1",{},"Shortlist"+(d.job?": "+d.job.title+(d.job.company?" · "+d.job.company:""):"")),appLink(d.app_url,"Review in Talent Search")));
+ wrap.append(el("div",{class:"small muted"},(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"));
+ if(d.added)wrap.append(el("h2",{},"Added now"));
+ if(!rows.length)wrap.append(el("p",{class:"empty"},"Nobody here."));
+ for(const p of rows)wrap.append(prospect(p));
+ if(d.skipped&&d.skipped.length){wrap.append(el("h2",{},"Skipped"),el("ul",{class:"small"},d.skipped.map(x=>el("li",{},x.name+": "+x.reason))))}
  return wrap}""",
 }
 
