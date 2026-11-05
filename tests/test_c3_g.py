@@ -94,7 +94,7 @@ def test_undo_all_reverts_every_kind_in_reverse_order(store):
     msg = flash(r)
     assert msg.startswith("Undid 9 AI changes: Changed Senior Backend Engineer (Acme): status Open to Closed;"), msg
     assert "Left" not in msg, msg
-    assert msg.endswith("; and 3 more.")  # more than 6, so the rest are counted
+    assert "; and 3 more." in msg  # more than 6, so the rest are counted (c5 A: then the backup note)
     assert store.count_candidates() == 0 and store.list_jobs(None) == []
     assert store._row("SELECT done_at FROM suggestions WHERE id = ?", (todo,))["done_at"] is None
     assert store._row("SELECT 1 FROM suggestions WHERE id = ?", (sid,)) is None

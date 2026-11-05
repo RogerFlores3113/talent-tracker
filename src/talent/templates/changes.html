@@ -4,7 +4,7 @@
 <div class="sec-head">
   <h1>Changes</h1>
 </div>
-<p class="lead">Every edit to a candidate's details, each CSV import, each Keep from a Shortlist, and everything your AI app wrote: people it added (a batch it saved is one row), pipeline adds and stage moves, jobs it made or edited, stage edits and to-dos. Newest first. Undo puts things back as they were, including interviews it cancelled or moved. Activity it logged, like notes, interviews and how an interview went, stays on the timeline.</p>
+<p class="lead">Every edit to a candidate's details, each CSV import, each Keep from a Shortlist or Review, and everything your AI app wrote: people it added (a batch it saved is one row), pipeline adds and stage moves, jobs it made or edited, stage edits, to-dos, the notes, calls, emails and interviews it logged, and how it said an interview went. Newest first. Undo puts things back as they were, including interviews it cancelled or moved and outcomes it recorded. A note or interview it logged is struck out instead: it stays on the timeline, marked struck, and leaves reports, search, the schedule and your AI app's reads.</p>
 <form class="tablebar" method="get" action="/changes">
   <select name="who" aria-label="Who made the change" data-autosubmit>
     <option value="">Anyone</option>
@@ -20,12 +20,20 @@
 
 {% if ai_pending %}
 {% set since_text = ai_since | local('%a %b %-d, %-I:%M %p %Z') %}
-<form method="post" action="/changes/undo-ai" class="panel" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ since_text }}? People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are.">
+<div class="panel">
+<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ since_text }}? A backup is saved first. People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are.">
   <input type="hidden" name="since" value="{{ ai_since_epoch }}">
   <button class="btn" type="submit">Undo all AI changes since {{ since_text }}</button>
-  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone, newest first.</span>
+  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone, newest first. A backup is saved first.</span>
 </form>
+<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo every change your AI app made in the time you picked? A backup is saved first. Things you edited yourself since then stay as they are.">
+  <label class="inline-label fine">Or undo all from the last
+    <select name="window" aria-label="How far back to undo">{% for k, label in undo_windows.items() %}<option value="{{ k }}" {{ 'selected' if k == undo_window }}>{{ label }}</option>{% endfor %}</select></label>
+  <button class="btn small" type="submit">Undo</button>
+</form>
+</div>
 {% endif %}
+{% if undo_last and not (request.state.flash or {}).get('notice') %}<p class="fine" role="status">Last Undo all AI, {{ undo_last.at | local('%a %b %-d, %-I:%M %p') }}: {{ undo_last.notice }}</p>{% endif %}
 
 {% if rows %}
 <ul class="timeline changes">
@@ -33,8 +41,13 @@
   <li>
     <a href="{{ r.href }}"><strong>{{ r.name }}</strong></a>
     <span class="when" title="{{ r.at | local }}">{{ r.at | local('%b %-d, %Y, %-I:%M %p') }}</span>
-    <span class="muted">· {{ who_options[r.who] }}</span>
+    <span class="muted">· {{ r.who_label or who_options[r.who] }}</span>
     <div>{{ r.text }}</div>
+    {% if r.children %}{% set n = r.children | length %}<details class="import-people"><summary>{{ n }} {{ 'person' if n == 1 else 'people' }} with changed details</summary>
+      <ul class="timeline changes">{% for c in r.children[:50] %}<li><a href="{{ c.href }}"><strong>{{ c.name }}</strong></a> <span class="muted">{{ c.text }}</span>
+        {% if c.undoable %}<form method="post" action="{{ c.undo_url }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif c.undone %}<span class="fine">Undone</span>{% endif %}</li>{% endfor %}</ul>
+      {% if n > 50 %}<p class="fine">And {{ n - 50 }} more. Each is on that person's timeline.</p>{% endif %}
+    </details>{% endif %}
     {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"{% if r.confirm %} data-confirm="{{ r.confirm }}"{% endif %}><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
     {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>
     {% elif r.record %}<div class="fine">Kept as a record. There is nothing to undo.</div>

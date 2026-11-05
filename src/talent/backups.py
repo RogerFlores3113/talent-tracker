@@ -19,7 +19,8 @@ from .store import Store, now_iso
 # backup_before_import names files "before-<reason>-YYYY-mm-dd-HHMMSS[-n].db".
 NAME_RE = re.compile(r"^before-(?P<reason>[a-z0-9]+(?:-[a-z0-9]+)*?)-(?P<stamp>\d{4}-\d{2}-\d{2}-\d{6})(?:-\d+)?\.db$")
 REASONS = {"import": "Before an import", "delete": "Before a delete", "merge": "Before a merge",
-           "sample-removal": "Before removing sample data", "restore": "Before a restore"}
+           "sample-removal": "Before removing sample data", "restore": "Before a restore",
+           "undo-ai": "Before undoing AI changes"}
 UNDO_KEY = "last_import_undo"  # settings row: which backup undoes the newest import, and the data right after it
 LISTED = 60
 
@@ -162,7 +163,8 @@ def record_import(store: Store, result: dict[str, Any], file_name: str | None, t
     entry = {"at": now_iso(), "file": (file_name or "").strip()[:120], "rows": total, "added": result.get("added", 0),
              "updated": result.get("updated", 0), "unchanged": result.get("unchanged", 0),
              "skipped": result.get("skipped_rows", 0), "pipelines": result.get("pipelines_added", 0),
-             "notes": result.get("notes", 0), "changed": bool(backup), "backup": backup}
+             "notes": result.get("notes", 0), "moved": len(result.get("moved") or []), "changed": bool(backup),
+             "backup": backup, "started": result.get("run")}  # started: so Changes tucks its per-person rows under it
     log = [entry] + import_log(store)
     value = json.dumps(log[:IMPORT_LOG_KEPT])
     with store._lock, store._conn:
@@ -190,6 +192,8 @@ def import_text(entry: dict[str, Any]) -> str:
             parts.append(f"{int(entry[key]):,} {word}")
     if entry.get("pipelines"):
         parts.append(f"{int(entry['pipelines']):,} put in job pipelines")
+    if entry.get("moved"):
+        parts.append(f"{int(entry['moved']):,} stage move{'' if entry['moved'] == 1 else 's'}")
     if entry.get("notes"):
         parts.append(f"{int(entry['notes']):,} note{'' if entry['notes'] == 1 else 's'} added")
     if not entry.get("changed"):

@@ -78,7 +78,8 @@ def test_a_file_out_of_pipeline_order_gives_no_hint(store):
             "Cy,cy@x.com,Engineer,Acme,Sourced\n")  # Offer before Sourced: sorted some other way
     _run(store, text, backup=False)
     names = _stages(store, job["id"])
-    assert names.index("Panel") == names.index("Hired") - 1  # the usual spot, before the closing stages
+    # Cycle 5: stages go in by meaning, so a panel sits after the interview and before the offer.
+    assert names.index("Interviewing") < names.index("Panel") == names.index("Offer") - 1
 
 
 def test_stage_dates_order_the_added_stages(store):
@@ -190,7 +191,7 @@ def test_already_in_gets_its_own_panel_and_long_lists_are_capped(store):
     r = c.post("/import/run", data={"token": token, "filename": "ats.csv", **_cols(
         ["name", "email", "job_title", "job_company", "stage", ""]), "add_stages": "1"})
     assert "Already in that job (25)" in r.text and "Imported, with a cell left blank" not in r.text
-    assert "already in Engineer (Acme) at Offer, so they were left there: 25" in r.text
+    assert "already in Engineer (Acme) at Offer (the file says Screening), so they were left there: 25" in r.text
     assert "Download the full list (CSV)" in r.text and f"/import/{token}/result.csv?panel=already_in" in r.text
     assert "Not imported: Owner." in r.text
     csv_text = c.get(f"/import/{token}/result.csv?panel=already_in").text

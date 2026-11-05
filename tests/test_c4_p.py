@@ -91,16 +91,16 @@ def test_ai_interview_cancel_undone_one_at_a_time_and_outcome_is_a_record(store)
     r = c.post(f"/changes/ai/{cancel['id']}/undo", follow_redirects=False)
     assert flash_of(r).startswith("Undid: Cancelled an interview with Priya Raman")
     assert store.get_interview(iv["id"])["status"] == "scheduled"
-    # An outcome is listed as a record, not undoable, and isn't counted.
+    # c5 G, changed on purpose: an AI outcome is undoable now (it used to be kept as a record).
     past = store.log(cid, "interview", "Phone screen", at=_iso(-1), job_id=jid)
     call(server, "update_interview", interview_id=past["id"], outcome="passed")
     rec = store.ai_actions()[0]
-    assert rec["kind"] == "interview_outcome" and not rec["undoable"] and not rec["undo_pending"]
+    assert rec["kind"] == "interview_outcome" and rec["undoable"] and rec["undo_pending"]
     page = c.get("/changes").text
     assert "Recorded how an interview with Priya Raman went: Passed" in page
-    assert "Kept as a record" in page
+    assert "Kept as a record" not in page
     r = c.post("/changes/undo-ai", data={"since": "1"}, follow_redirects=False)
-    assert store.get_interview(past["id"])["data"]["outcome"] == "passed"
+    assert "outcome" not in store.get_interview(past["id"])["data"]
     assert "Left" not in flash_of(r)
 
 

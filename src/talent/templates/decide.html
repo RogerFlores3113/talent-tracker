@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Decide · {{ job.title }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+  </div>
+  {% include "_job_tabs.html" %}
+</div>
+
+<section class="panel" id="decide">
+  <div class="sec-head"><h2>{% if people %}Compare {{ people | length }} finalist{{ '' if people | length == 1 else 's' }}{% else %}No finalists yet{% endif %}</h2></div>
+  {% if not people %}
+  <p class="none">Finalists are people still in play who have interviewed for this job or reached a late stage. Log interviews on their profiles, and they show up here.</p>
+  {% else %}
+  <p class="fine">Every interview with who ran it, how it went and what each interviewer said. Add feedback under any interview that has taken place.</p>
+  <div class="decide">
+  {% for p in people %}
+    <article class="finalist" id="c{{ p.candidate_id }}">
+      <h3><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a></h3>
+      <div class="fine">{{ p.current_title or '' }}{% if p.current_company %} at {{ p.current_company }}{% endif %}</div>
+      <div class="fine"><strong>{{ p.stage }}</strong>{% if p.days_in_process is not none %} · {{ p.days_in_process }} day{{ '' if p.days_in_process == 1 else 's' }} in process{% endif %}</div>
+      {% if p.source %}<div class="fine">Found via {{ p.source }}{% if p.referrer %} (referred by {{ p.referrer }}){% endif %}</div>{% endif %}
+      {% if p.still_to_come %}<div class="fine"><strong>{{ p.name }} has {{ p.still_to_come }} interview{{ '' if p.still_to_come == 1 else 's' }} still to come</strong></div>{% endif %}
+      {% if not p.interviews %}<p class="fine">No interviews logged for this job.</p>{% endif %}
+      {% for i in p.interviews %}
+      <div class="iv" id="iv-{{ i.interview_id }}">
+        <div><strong>{{ i.name }}</strong>{% if i.interviewer %} <span class="fine">with {{ i.interviewer }}</span>{% endif %}</div>
+        <div class="fine">{{ i.at | local(IV_TIME) }} · <span class="badge">{{ i.outcome }}</span></div>
+        {% if i.note %}<blockquote>{{ i.note }}</blockquote>{% endif %}
+        {% for f in i.feedback %}<blockquote><span class="fine">{{ f.by or 'Interviewer' }}{% if f.source == 'AI app' %} (via your AI app){% endif %}:</span> {{ f.text }}</blockquote>{% endfor %}
+        {% if not i.upcoming %}
+        <details>
+          <summary class="link small">Add feedback</summary>
+          <form method="post" action="/candidates/{{ p.candidate_id }}/interviews/{{ i.interview_id }}/feedback" class="stack">
+            <input type="hidden" name="next" value="/jobs/{{ job.id }}/decide{% if ids %}?ids={{ ids }}{% endif %}">
+            <input type="text" name="interviewer" maxlength="200" placeholder="Who said it" value="{{ i.interviewer or '' }}" aria-label="Interviewer">
+            <textarea name="text" rows="3" maxlength="4000" required placeholder="What they thought, in their words" aria-label="Feedback"></textarea>
+            <button class="btn small" type="submit">Save feedback</button>
+          </form>
+        </details>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% for t in p.todos %}<div class="fine">To-do: {{ t.text }}</div>{% endfor %}
+    </article>
+  {% endfor %}
+  </div>
+  {% if more %}
+  <p class="fine">Also in late stages: {% for m in more %}{{ m.name }} ({{ m.stage }}){{ ', ' if not loop.last }}{% endfor %}. <a href="/jobs/{{ job.id }}/decide?ids={{ (people | map(attribute='candidate_id') | list + more | map(attribute='candidate_id') | list)[:6] | join(',') }}">Compare them too</a></p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if people | length >= 1 %}
+<section class="panel" id="record">
+  <div class="sec-head"><h2>Record the decision</h2></div>
+  {% if not offer_stage %}
+  <p class="none">This job has no Offer stage. Add one under <a href="/jobs/{{ job.id }}/edit#stages">Edit job</a>, then record the decision here.</p>
+  {% else %}
+  <form method="post" action="/jobs/{{ job.id }}/decide" class="stack" data-decide="{{ out_stage }}">
+    <fieldset>
+      <legend>Who gets the offer? They move to {{ offer_stage }}.</legend>
+      {% for p in people %}<label class="inline-label"><input type="radio" name="offer" value="{{ p.candidate_id }}" data-name="{{ p.name }}" required> {{ p.name }}</label>{% endfor %}
+    </fieldset>
+    <fieldset>
+      <legend>Pass on. Tick each person to pass on; they move to {{ out_stage }}.</legend>
+      {% for p in people %}<label class="inline-label"><input type="checkbox" name="pass" value="{{ p.candidate_id }}" data-name="{{ p.name }}"{% if p.still_to_come %} data-ahead="{{ p.still_to_come }}"{% endif %}> {{ p.name }}{% if p.still_to_come %} <span class="fine">({{ p.still_to_come }} interview{{ '' if p.still_to_come == 1 else 's' }} still to come)</span>{% endif %}</label>{% endfor %}
+      <p class="fine">Nobody is ticked to start. Anyone you don't tick stays where they are. The person who gets the offer is never passed on, even if ticked here.</p>
+    </fieldset>
+    <label>Reason for passing <select name="reason">{% for label, _ in move_reasons() %}<option value="{{ label }}"{% if label == pass_label %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Note for the offer (optional) <input type="text" name="note" maxlength="500" placeholder="Why, in a line"></label>
+    <button class="btn primary" type="submit">Record decision</button>
+    <p class="fine">One change: Undo under Changes puts everyone back where they were.</p>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

@@ -97,11 +97,11 @@ def test_save_shows_the_candidate_view_and_keeps_history_in_step(store):
     out = data(res)
     assert out["saved_status"] == "Saved" and out["name"] == "Maya Okafor" and out["app_url"].endswith(
         f"/candidates/{out['id']}") and out["candidate"]["id"] == out["id"] and text(res).startswith("Saved.")
-    # A promotion at the same company updates the current role in place.
+    # A promotion at the same company ends the old title and adds the new one (changed in the cycle 5 re-review).
     out = data(call(server, "save_candidate", name="Maya Okafor", email="maya@x.com",
                     current_title="Senior Backend Engineer"))
     assert out["saved_status"].startswith("Updated: title") and "work_history" in out["changed"]
-    assert [w["title"] for w in store.work_history(out["id"])] == ["Senior Backend Engineer", "Dev"]
+    assert [w["title"] for w in store.work_history(out["id"])] == ["Senior Backend Engineer", "Backend Engineer", "Dev"]
     # A new company ends the old role and puts the new one on top.
     out = data(call(server, "save_candidate", name="Maya Okafor", email="maya@x.com", current_title="Staff Engineer",
                     current_company="Ramp"))

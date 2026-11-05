@@ -31,7 +31,7 @@
     <span class="fine">The pipeline and history are kept.</span></form>
   {% endif %}
   {% if close %}
-  <p>{% if close.closed %}This job is closed, but {% endif %}{{ close.count }} {{ 'person is' if close.count == 1 else 'people are' }} still in play: {{ close.names }}.</p>
+  <p>{% if close.closed %}This job is closed, but {% endif %}{{ close.count }} {{ 'person is' if close.count == 1 else 'people are' }} still in play: {{ close.names }}.{% if shown_active is defined and shown_active < close.count %} <span class="fine">That counts every stage. The status update says {{ shown_active }} in process, since it leaves out {{ close.count - shown_active }} in internal stages.</span>{% endif %}</p>
   {% set cancel_ivs = ' and cancel ' ~ close.interviews ~ ' upcoming interview' ~ ('' if close.interviews == 1 else 's') if close.interviews else '' %}
   <form method="post" action="/jobs/{{ job.id }}/close-out" class="inline" data-confirm="Move {{ close.count }} {{ 'person' if close.count == 1 else 'people' }} to {{ close.stage }} with the reason Position filled{{ cancel_ivs }}?">
     <button class="btn small" type="submit">Move the other {{ close.count }} to {{ close.stage }} (Position filled){{ ' and cancel their upcoming interviews' if close.interviews }}</button>
@@ -64,7 +64,7 @@
   <form method="post" action="/actions/todo" class="inline add-todo">
     <input type="hidden" name="job_id" value="{{ job.id }}">
     <input type="text" name="text" placeholder="Add a to-do, like Send the weekly update" required aria-label="New to-do for this job">
-    <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
+    <label class="inline-label">Show from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>

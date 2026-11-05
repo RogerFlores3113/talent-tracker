@@ -26,12 +26,16 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist, reports
+from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
+from . import decide, interviews
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
-                    INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    HL_END, HL_START, Store, _labels, dropped_text, fold_name, snippet_html, split_tags, to_dt)
+                    INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
+                    JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
+                    HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
+                    split_tags, to_dt)
+from .store import as_local
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -54,10 +58,14 @@ LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open
 FLASH_KEYS = ("notice", "flash_error", "error")
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
+FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
+UNDO_AI_LAST = "undo_ai_last"  # settings key: what the last Undo all AI did, shown on Changes for a day
 REDIRECTS = {301, 302, 303, 307, 308}
 log = logging.getLogger(__name__)
 CHANGE_WHO = {"ai": "Your AI app", "import": "CSV import", "app": "You, in the app"}
 CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
+# "Undo all AI changes from the last ...": hours back.
+UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"}
 CHANGES_SHOWN = 300
 TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
@@ -109,7 +117,7 @@ def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
         return ""
-    local = dt.astimezone()
+    local = as_local(dt)
     try:
         return local.strftime(fmt)
     except ValueError:  # Windows strftime has no %-d
@@ -122,7 +130,7 @@ def _local_date(iso: str | None) -> str:
     if "T" not in v:
         return v[:10]
     dt = to_dt(v)
-    return dt.astimezone().date().isoformat() if dt else v[:10]
+    return as_local(dt).date().isoformat() if dt else v[:10]
 
 
 def _shown(field: str, value: Any) -> str:
@@ -232,9 +240,13 @@ def _flash_sig(key: str, raw: str) -> str:
 
 
 def encode_flash(key: str, messages: dict[str, str]) -> str:
-    kept = {k: (v if len(v) <= FLASH_CHARS else v[:FLASH_CHARS - 3].rstrip() + "...") for k, v in messages.items()}
-    raw = base64.urlsafe_b64encode(json.dumps(kept).encode()).decode().rstrip("=")
-    return raw + "." + _flash_sig(key, raw)
+    limit = FLASH_CHARS
+    while True:  # names in other scripts take several bytes each: shorten until the cookie surely fits
+        kept = {k: (v if len(v) <= limit else v[:limit - 3].rstrip() + "...") for k, v in messages.items()}
+        raw = base64.urlsafe_b64encode(json.dumps(kept).encode()).decode().rstrip("=")
+        if len(raw) <= FLASH_COOKIE_CHARS or limit <= 80:
+            return raw + "." + _flash_sig(key, raw)
+        limit = limit * 2 // 3
 
 
 def decode_flash(value: str, key: str | None = None) -> dict[str, str]:
@@ -260,10 +272,26 @@ def safe_local_path(path: str) -> bool:
             and not any(ch.isspace() or ord(ch) < 32 for ch in path))
 
 
+def tuck_import_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Changes shows one row per import: the per-person edits it made go under it (its "children"), not
+    beside it. An edit is the import's when it was written while that import ran."""
+    imports = [r for r in rows if r.get("span")]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("by_import"):
+            home = next((i for i in imports if i["span"][0] <= r["at"] <= i["span"][1]), None)
+            if home is not None:
+                home.setdefault("children", []).append(r)
+                continue
+        out.append(r)
+    return out
+
+
 def create_app(store: Store, search: SearchService | None = None, key: str | None = None) -> FastAPI:
     search = search or SearchService(store, TypesenseIndex.from_env())
     key = key or paths.app_key()
     cookie_name = key_cookie_name(key)
+    reports.apply_zone(store)  # times show in the recruiter's own zone
     flash_name = flash_cookie_name(key)
     locked_logged = [float("-inf")]  # monotonic time can be under 60s on a just-booted computer
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
@@ -274,20 +302,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["date"] = _local_date
     env.filters["ago"] = _ago
     env.filters["local"] = _local
+    env.filters["day"] = actions.day_text  # a date, Windows-safe
     env.globals["IV_TIME"] = IV_TIME
-    env.globals["local_zone"] = lambda: datetime.now().astimezone().tzname() or ""
+    env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
+    env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
+    env.globals["user_zone"] = lambda: reports.user_zone(store)
+    env.globals["shown_zone_name"] = lambda: reports.user_zone(store) or reports.fallback_zone(store)
+    env.globals["common_zones"] = reports.COMMON_ZONES
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
     env.globals["version"] = __version__
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
+    env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
+    env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
+    env.globals["interview_form_choices"] = INTERVIEW_FORM_CHOICES  # the profile's How it went menu
+    env.globals["interview_label"] = interview_label  # 'Strong yes', 'Mixed', 'Passed'
+    env.globals["interview_note"] = interview_note
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
     env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
+    env.globals["stage_groups_of"] = lambda job_id: {  # each stage's funnel step (in-house has no Submitted)
+        k: ("screening" if g == "submitted" and actions.inhouse(store) else g)
+        for k, g in reports.stage_groups(store, job_id).items()}
+    env.globals["funnel_choices"] = lambda: reports.funnel_choices(actions.inhouse(store))
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -634,11 +676,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 notice = "Interview back on the schedule."
             elif op == "outcome":
                 outcome = str(form.get("outcome") or "")
-                if outcome not in INTERVIEW_OUTCOME_LABELS:
+                if outcome not in INTERVIEW_OUTCOME_LABELS and outcome not in dict(INTERVIEW_FORM_CHOICES):
                     raise ValueError("Pick how the interview went.")
-                store.update_interview(entry_id, outcome=outcome, note=str(form.get("note") or ""),
-                                       candidate_id=candidate_id)
-                notice = f"Saved: {INTERVIEW_OUTCOME_LABELS[outcome]}."
+                iv = store.update_interview(entry_id, outcome=outcome, note=str(form.get("note") or ""),
+                                            candidate_id=candidate_id)
+                notice = f"Saved: {interview_label(iv['data']) or 'how it went'}."
             else:
                 raise ValueError("Couldn't change that interview. Reload the page and try again.")
         except NotFound:
@@ -666,6 +708,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if cand["_skipped"]:
             notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/timeline/{timeline_id}/strike")
+    def strike_entry(candidate_id: int, timeline_id: int):
+        """Strike out a note, call, email, message, meeting or interview the AI app logged. It stays, marked struck."""
+        cand_or_404(candidate_id)
+        try:
+            store.strike_entry(timeline_id, candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That entry isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        notice = "Struck it out. It stays on the timeline, but reports, search and your AI app leave it out."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/timeline/{timeline_id}/unstrike")
+    def unstrike_entry(candidate_id: int, timeline_id: int):
+        cand_or_404(candidate_id)
+        try:
+            store.unstrike_entry(timeline_id, candidate_id=candidate_id)
+        except NotFound:
+            raise HTTPException(404, "That entry isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': 'Put it back.'})}#timeline",
                                 status_code=303)
 
     @app.post("/candidates/{candidate_id}/contacted")
@@ -724,9 +794,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         fd = os.open(imports_dir() / f"{token}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        mapping = importers.guess_mapping(header, rows)
-        return map_step(request, token, header, rows, mapping, importers.default_source(header),
-                        _file_name(upload.filename))
+        mapping, prof = importers.mapping_for(store, header, rows)
+        return map_step(request, token, header, rows, mapping,
+                        (prof or {}).get("source") or importers.default_source(header), _file_name(upload.filename),
+                        add_stages=bool((prof or {}).get("add_stages", True)),
+                        move_stages=True, client=(prof or {}).get("client"),
+                        replace_stages=bool((prof or {}).get("replace_stages", True)))
 
     def _file_name(name: Any) -> str:
         """The uploaded file's own name, without any folder, for Changes and the backup list."""
@@ -745,12 +818,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
-                 add_stages: bool = True) -> HTMLResponse:
+                 add_stages: bool = True, move_stages: bool = True, client: str | None = None,
+                 reopen_jobs: bool = False, replace_stages: bool = True) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
+        prof = importers.sync_profile(store, header)
+        client = (client or "").strip()[:120]
         preview = None
         if has_name and len(rows) <= PREVIEW_MAX_ROWS:
             try:
-                preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages)
+                preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
+                                                   move_stages=move_stages, profile={**(prof or {}), "client": client},
+                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -760,7 +838,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
-                    button_label=importers.button_label(preview, len(rows)), add_stages=add_stages)
+                    button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
+                    move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
+                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -782,7 +862,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
                         str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
-                        add_stages=form.get("add_stages") == "1")
+                        add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
+                        client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
+                        replace_stages=form.get("replace_stages") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -795,23 +877,64 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
+        move_stages = form.get("move_stages") == "1"
+        reopen_jobs, replace_stages = form.get("reopen_jobs") == "1", form.get("replace_stages") == "1"
+        client = str(form.get("client") or "").strip()[:120]
         filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
             return map_step(request, token, header, rows, mapping, source, filename,
-                            error="Pick which column holds the name.", add_stages=add_stages)
+                            error="Pick which column holds the name.", add_stages=add_stages,
+                            move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
+                            replace_stages=replace_stages)
+        prof = importers.sync_profile(store, header) or {}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
-                                           file_name=filename or None)
+                                           file_name=filename or None, move_stages=move_stages,
+                                           profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
+                                           replace_stages=replace_stages)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
+        importers.save_sync_profile(store, header, mapping, result, file_name=filename, source=source,
+                                    add_stages=add_stages, move_stages=move_stages, client=client,
+                                    replace_stages=replace_stages)
         backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
             result["backup_name"] = Path(result["backup"]).name
         _save_lists(token, "result", result)
+        ask = set(importers.openings_to_ask(store))
+        new_jobs = [store.get_job(i) for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
-                    panels=importers.result_panels(result))
+                    panels=importers.result_panels(result), new_jobs=new_jobs[:30],
+                    closed_lines=importers.closed_job_lines(result))
+
+    @app.get("/import/openings", response_class=HTMLResponse)
+    def import_openings_page(request: Request):
+        """Jobs an import made, asked once how many openings each has."""
+        jobs = []
+        for i in importers.openings_to_ask(store):
+            try:
+                jobs.append(store.get_job(i))
+            except LookupError:
+                continue
+        return page(request, "import.html", step="openings", new_jobs=jobs[:50])
+
+    @app.post("/import/openings")
+    async def import_openings(request: Request):
+        form = await request.form()
+        answers: dict[int, int | None] = {}
+        for key, value in form.items():
+            if key.startswith("openings_") and key[9:].isdigit():
+                v = str(value or "").strip()
+                answers[int(key[9:])] = int(v) if v.isdigit() and 0 < int(v) < 1000 else None
+        name = str(form.get("backup") or "")
+        keep_undo = bool(name) and backups.import_undo_state(store, name) == "ok"
+        n = importers.answer_openings(store, answers)
+        if keep_undo:  # answering the import's own question doesn't take its Undo away
+            backups.remember_import(store, name)
+        what = f"Saved openings for {n} job{'' if n == 1 else 's'}." if n else "Okay, we won't ask about those again."
+        return RedirectResponse("/jobs?" + urlencode({"notice": what}), status_code=303)
 
     @app.get("/import/{token}/{which}.csv")
     def import_list_csv(token: str, which: str, panel: str = ""):
@@ -938,8 +1061,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
-        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS,
-                    copy_jobs=store.list_jobs(None))
+        return page(request, "job_form.html", j={"stage_set": actions.default_stage_set(store)}, error=None,
+                    stage_sets=actions.STAGE_SETS, copy_jobs=store.list_jobs(None))
 
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
@@ -956,8 +1079,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 chosen = actions.new_job_stages(store, from_job_id=int(copy_from))
             else:
                 chosen = actions.stage_set(picked)
+            from_set = not stages and not copy_from.isdigit()
             stages, out_note = actions.with_out_stages(chosen)
             job = store.add_job(**data, stages=stages or None)
+            if from_set:
+                actions.apply_set_groups(store, job["id"], picked)
         except ValueError as exc:
             return page(request, "job_form.html", j={**data, "stages": str(form.get("stages") or ""),
                                                      "stage_set": picked, "copy_from": copy_from}, error=str(exc),
@@ -993,6 +1119,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
                    close=actions.close_out_plan(store, job_id),
+                   shown_active=actions.job_numbers(store, job_id, actions._omitted(store, job_id, omit))["active"],
                    ask=actions.exit_interviews(store, int(ask_cancel), job_id) if ask_cancel.isdigit() else None)
         if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
             return page(request, "_add_results.html", **ctx)
@@ -1094,8 +1221,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     names[i], names[j] = names[j], names[i]
                     store.reorder_stages(job_id, names)
             elif op == "outcome":
-                res = actions.change_stage_outcome(store, job_id, name, str(form.get("outcome") or "open"))
+                picked = str(form.get("outcome") or "open")
+                step = picked.split(":", 1)[1] if picked.startswith("open:") else None
+                res = actions.change_stage_outcome(store, job_id, name, "open" if step else picked)
                 notice = res["notice"]
+                if step:  # In play, counted as this funnel step in client reports
+                    got = reports.set_stage_group(store, job_id, name, step)
+                    word = (reports.INHOUSE_LABELS if actions.inhouse(store) else reports.GROUP_LABELS)[step]
+                    notice = " ".join(x for x in (notice, f"Reports now count {got['stage']} as {word}.") if x)
                 if res["asks"]:  # people already in the stage who still have interviews: offer to cancel
                     return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': res['asks'][0]['candidate_id'], 'notice': notice})}#pipeline",
                                             status_code=303)
@@ -1272,6 +1405,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def clients_page(request: Request):
         return page(request, "clients.html", rows=reports.overview(store), no_company=reports.no_company_jobs(store))
 
+    @app.get("/clients/due", response_class=HTMLResponse)
+    def clients_due_page(request: Request):
+        """The Friday send-out: every update due this week, ready to copy, email and mark as sent."""
+        return page(request, "due.html", due=reports.due_updates(store), num=reports._num)
+
     def client_or_404(slug: str) -> dict[str, Any]:
         try:
             return reports.client(store, reports.unslug(slug))
@@ -1291,13 +1429,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         # In-house with hiring managers named, one update per manager; else the one client update.
         span = (None, None) if error else (since or None, until or None)
         parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
-        sections = [{"rep": r, "text": (t := reports.report_text(r)), "mailto": reports.mailto(r, t),
-                     "notes": reports.recruiter_notes(r)} for r in parts]
+        sections = [{"rep": r, "text": (t := reports.report_text(r)), "email": (e := reports.email_link(r, t)),
+                     "mailto": e["href"] if e else None, "notes": reports.recruiter_notes(r)} for r in parts]
         return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
                     submittals=reports.submittals(store, c["key"]),
                     updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
-                    labels=reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS,
-                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=reports.update_due(c),
+                    labels=rep.get("labels") or (reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS),
+                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=bool(reports.due_parts(store, c["key"])),
+                    num=reports._num, ai_moves=[m for x in sections for m in x["rep"]["ai_moves"]],
                     since_day=_local(rep["since"], "%Y-%m-%d"),
                     until_day=_local(rep["until"], "%Y-%m-%d"))
 
@@ -1318,12 +1457,41 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """Mark this update as sent: keep a copy, and start the next one from now."""
         c = client_or_404(slug)
         form = await request.form()
+        back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
+        manager = str(form["manager"]) if "manager" in form else None  # one hiring manager's update, in-house
+        since, until = str(form.get("since") or "") or None, str(form.get("until") or "") or None
         try:
-            reports.mark_sent(store, c["key"], str(form.get("since") or "") or None, str(form.get("until") or "") or None)
+            # The confirm named the AI moves the page showed; one made since then stops it, so it's seen first.
+            seen = {int(v) for v in str(form.get("ai_seen") or "").split(",") if v.strip().isdigit()}
+            new = [m for m in reports.unreviewed_in(store, c["key"], manager, since, until)
+                   if m["action_id"] not in seen]
+            if new:
+                it = "it" if len(new) == 1 else "them"
+                raise ValueError(f"Not marked as sent: the update has {len(new)} move{'' if len(new) == 1 else 's'} "
+                                 f"your AI app made that you haven't seen here yet: {reports.ai_moves_list(new)}. "
+                                 f"Check {it} on this page, then mark the update as sent.")
+            done = reports.mark_sent(store, c["key"], since, until, manager=manager)
         except ValueError as exc:
-            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
-        notice = "Marked as sent. A copy is kept below, and the next update starts from now."
-        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+            return RedirectResponse(f"{back}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        who = f"{done['manager']}'s update" if done.get("manager") else (
+            "The update for jobs with no hiring manager" if manager is not None else "")
+        if back == "/clients/due":
+            notice = f"Marked {who or 'the update to ' + c['name']} as sent. A copy is kept on its page."
+        else:
+            notice = (f"Marked {who} as sent. A copy is kept below, and their next update starts from now." if who
+                      else "Marked as sent. A copy is kept below, and the next update starts from now.")
+        return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/clients/{slug}/ai-reviewed")
+    async def client_ai_reviewed(request: Request, slug: str):
+        """The recruiter has looked at the AI's moves in this update: stop flagging them."""
+        c = client_or_404(slug)
+        form = await request.form()
+        back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
+        n = reports.mark_ai_reviewed(store, [str(v) for v in form.getlist("action_id")])
+        notice = (f"Marked {n} AI move{'' if n == 1 else 's'} as reviewed." if n
+                  else "Those AI moves were already marked as reviewed.")
+        return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/clients/{slug}/updates/{update_id}/undo")
     def client_sent_undo(slug: str, update_id: int):
@@ -1336,12 +1504,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.get("/clients/{slug}/pipeline.csv")
-    def client_csv(slug: str, since: str = "", until: str = ""):
+    def client_csv(slug: str, since: str = "", until: str = "", out: str = ""):
         c = client_or_404(slug)
         rep, _ = client_report_or_error(c, since, until)
         stamp = datetime.now().strftime("%Y-%m-%d")
         name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
-        return Response(reports.pipeline_csv(rep), media_type="text/csv; charset=utf-8",
+        return Response(reports.pipeline_csv(rep, with_out=out == "1"), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
     # ------------------------------------------------------- dashboard acts
@@ -1375,6 +1543,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         store.snooze(key, int(days))
         return back(request, notice=f"Snoozed for {days} day{'' if days == '1' else 's'}.")
 
+    @app.post("/actions/snooze-import")
+    async def snooze_import(request: Request):
+        """Snooze every stuck reminder about people one import or sync brought in."""
+        form = await request.form()
+        run = str(form.get("run") or "")[:40]
+        n = actions.snooze_import(store, run) if run else 0
+        if not n:
+            return back(request, error="Nothing to snooze. Those reminders may be gone already.")
+        return back(request, notice=f"Snoozed {n} stuck reminder{'' if n == 1 else 's'} from that import for "
+                                    f"{actions.STUCK_SNOOZE_DAYS} days.")
+
     @app.post("/actions/todo")
     async def add_todo(request: Request):
         """Add a to-do to Today from Today or a job page, optionally about a job and from a day on."""
@@ -1403,6 +1582,102 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="That follow-up is already gone.")
         return back(request, notice="Marked done.")
 
+    # ------------------------------------------------- deciding and interviews
+    def _ids(raw: str) -> list[int]:
+        return [int(x) for x in re.split(r"[,\s]+", raw or "") if x.isdigit()][:6]
+
+    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
+    def decide_page(request: Request, job_id: int, ids: str = ""):
+        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+        job = job_or_404(job_id)
+        try:
+            d = decide.finalists(store, job_id, _ids(ids) or None)
+        except ValueError as exc:
+            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+        return page(request, "decide.html", job=job, people=d["people"], more=d["more"], offer_stage=d["offer_stage"],
+                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))),
+                    pass_label="Hiring team passed" if actions.inhouse(store) else "Client passed")
+
+    @app.post("/jobs/{job_id}/decide")
+    async def decide_form(request: Request, job_id: int):
+        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes."""
+        job_or_404(job_id)
+        form = await request.form()
+        offer = str(form.get("offer") or "")
+        if not offer.isdigit():
+            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer.")
+        passed = [int(v) for v in form.getlist("pass") if str(v).isdigit()]
+        try:
+            res = decide.record_decision(store, job_id, int(offer), passed, reason=str(form.get("reason") or "") or None,
+                                         note=str(form.get("note") or "") or None, by="app")
+        except (ValueError, NotFound) as exc:
+            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+        notice = f"Recorded: {res['text']}." + (
+            f" Cancelled {res['cancelled']} interview{'' if res['cancelled'] == 1 else 's'} still ahead." if res["cancelled"]
+            else "") + " You can undo it under Changes."
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}/feedback")
+    async def feedback_form(request: Request, candidate_id: int, entry_id: int):
+        """Add one interviewer's feedback to an interview, from the Decide view or the profile."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        nxt = str(form.get("next") or "")
+        nxt = nxt if safe_local_path(nxt.split("?", 1)[0]) else f"/candidates/{candidate_id}"
+        try:
+            store.add_interview_feedback(entry_id, str(form.get("text") or ""), str(form.get("interviewer") or "") or None,
+                                         candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        except ValueError as exc:
+            return back(request, nxt, error=str(exc))
+        sep = "&" if "?" in nxt else "?"
+        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
+
+    @app.get("/interviews", response_class=HTMLResponse)
+    def interviews_page(request: Request, week: str = ""):
+        """Monday to Friday: every session booked across all jobs, grouped into loops, with clashes flagged."""
+        from datetime import date
+        try:
+            day = date.fromisoformat(week) if week else None
+        except ValueError:
+            day = None
+        return page(request, "interviews.html", w=interviews.week(store, day))
+
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}/session")
+    async def add_session_form(request: Request, candidate_id: int, entry_id: int):
+        """Add another session on the same day and job as this interview, so an onsite loop can be built here."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        try:
+            iv = store.get_interview(entry_id, candidate_id)
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        at = str(form.get("time") or "").strip()
+        try:
+            if not re.fullmatch(r"\d{1,2}:\d{2}", at):
+                raise ValueError("Pick a start time for the new session.")
+            day = _local(iv["at"], "%Y-%m-%d")
+            new = store.log(candidate_id, "interview", str(form.get("body") or ""), at=f"{day}T{at}",
+                            job_id=iv.get("job_id"), source="App",
+                            interviewer=str(form.get("interviewer") or "") or None)
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#iv-{entry_id}",
+                                    status_code=303)
+        notice = f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#iv-{new['id']}",
+                                status_code=303)
+
+    @app.post("/changes/decision/{batch_id}/undo")
+    def undo_decision_form(request: Request, batch_id: int):
+        try:
+            notice = decide.undo_decision(store, batch_id, by="app")
+        except NotFound:
+            return back(request, "/changes", error="That decision is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
     @app.post("/actions/advance")
     async def advance(request: Request):
         form = await request.form()
@@ -1410,7 +1685,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not (cid.isdigit() and jid.isdigit() and stage):
             return back(request, error="Couldn't move that candidate. Reload the page and try again.")
         try:
-            app_row = store.move_stage(int(cid), int(jid), stage, by="app")
+            app_row = store.move_stage(int(cid), int(jid), stage, notes=str(form.get("notes") or "").strip() or None,
+                                       by="app")
         except (ValueError, NotFound) as exc:
             return back(request, error=str(exc))
         return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
@@ -1435,11 +1711,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 d = _json_or_none(r["data"]) or {}
                 lines = change_lines(d)
                 rows.append({"at": r["at"], "who": d.get("by") if d.get("by") in CHANGE_WHO else "app",
+                             "who_label": "You, in Claude" if d.get("via") == "claude" else None,
                              "name": r["candidate_name"], "href": f"/candidates/{r['candidate_id']}#timeline",
                              "text": ("Undo: " if (r["body"] or "").startswith("Undid") else "")
                              + ("; ".join(lines) if lines else r["body"] or ""),
                              "undoable": bool(d.get("old")) and not d.get("undone_at") and not d.get("merged"),
-                             "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo"})
+                             "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo",
+                             "by_import": d.get("by") == "import"})
         if who in ("", "ai"):
             ai = store.ai_actions(since, limit)
             for a in ai:
@@ -1449,6 +1727,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
                 elif a["job_id"]:
                     name, href = a["job_title"], f"/jobs/{a['job_id']}"
+                elif a["kind"].startswith("client_"):
+                    d = a.get("new_data") or {}
+                    name, href = d.get("_client") or "Client", f"/clients/{reports.slug(d.get('_key') or '')}"
                 else:
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
@@ -1465,6 +1746,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     first = min(a["children"])
                     rows[-1].update(undo_label="Undo this batch", undo_from_url=f"/changes/ai/{first}/undo-from",
                                     from_count=sum(1 for b in ai if b["id"] >= first and b["undo_pending"]))
+        if who in ("", "app"):  # a Keep or Pass on Review (a kept change is also an AI row, with its Undo)
+            for r in review.decided(store, since, limit):
+                name, href = (r["candidate_name"], f"/candidates/{r['candidate_id']}#timeline") if r["candidate_id"] \
+                    else (r["job_title"] or "AI change", f"/jobs/{r['job_id']}" if r["job_id"] else "/review")
+                result = r.get("result") or ""
+                verb = "Passed" if r["status"] == "passed" and not result.startswith("Couldn't") else "Kept"
+                text = f"{verb} on Review: {r['summary']}" + (f". {result}" if result.startswith("Couldn't") else "")
+                rows.append({"at": r["decided_at"], "who": "app", "name": name, "href": href, "text": text,
+                             "undoable": False, "undone": False,
+                             "hint": "Its change is listed as your AI app's, with Undo." if verb == "Kept" and
+                             not result.startswith("Couldn't") else None})
         if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
             rows.extend(import_change_rows(since)[:limit])
         if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
@@ -1481,11 +1773,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "confirm": "Undo this keep? They go back on the Shortlist and out of the job. People it "
                                         "saved are taken out again if nobody worked on them since; a backup is "
                                         "saved first."})
+        if who in ("", "app"):  # a decision recorded in the Decide view: one row, with its own undo
+            for b in decide.decision_batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}/decide",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "undo_url": f"/changes/decision/{b['id']}/undo", "undo_label": "Undo this decision",
+                             "confirm": "Undo this decision? Everyone goes back to the stage they were in, and the "
+                                        "interviews it cancelled are put back."})
         if who in ("", "app"):  # what a stage counts as, changed in the app
             for c in actions.stage_outcome_changes(store, since)[:limit]:
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
                              "text": c["text"], "undoable": c["undoable"], "undone": not c["undoable"],
                              "undo_url": f"/changes/stage-outcome/{c['id']}/undo"})
+        rows = tuck_import_rows(rows)
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
 
@@ -1505,6 +1805,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             out.append({"at": e["at"], "who": "import", "name": "CSV import", "href": "/settings#backups",
                         "text": backups.import_text(e), "undoable": state == "ok", "undone": False, "hint": hint,
                         "undo_url": f"/changes/import/{name}/undo", "undo_label": "Undo this import",
+                        "span": (e.get("started") or e["at"], e["at"]),
                         "confirm": "Undo this import? Your data goes back to how it was just before it. A copy with "
                                    "the import in it is backed up first."})
         return out
@@ -1534,7 +1835,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
-                    ai_since_epoch=int(to_dt(ai_since).timestamp()))
+                    undo_last=last_undo_ai(),
+                    ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
+                    undo_window={"1": "24", "7": "168", "30": "720"}.get(since, "24"))
 
     @app.post("/changes/{timeline_id}/undo")
     def undo_from_changes(request: Request, timeline_id: int):
@@ -1562,6 +1865,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """Undo these AI changes, newest first, skipping ones already undone, and say what happened."""
         undone, skipped = [], []
         backup = ai_backup()
+        saved = None
+        if any(a["undo_pending"] for a in todo):  # several changes at once: keep a copy from just before
+            try:
+                saved = importers.backup_before_import(store, reason="undo-ai")
+            except ValueError as exc:
+                return back(request, "/changes", error=str(exc))
+            backup = lambda: None  # noqa: E731 (that copy also covers people and jobs it takes out)
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
             if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
                 continue
@@ -1577,7 +1887,26 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             ": " + _listed(undone) if undone else "") + "."
         if skipped:
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
+        if saved is not None and undone:
+            notice += " A backup from just before is under Automatic backups in Settings."
+        remember_undo_ai(notice)
         return back(request, "/changes", notice=notice)
+
+    def remember_undo_ai(notice: str) -> None:
+        """Keep what an Undo all AI did, so Changes still says so if the one-time message didn't arrive."""
+        at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with store._write():
+            store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
+                                " SET value = excluded.value", (UNDO_AI_LAST, json.dumps({"at": at, "notice": notice})))
+
+    def last_undo_ai() -> dict[str, str] | None:
+        """The last Undo all AI, from the last 24 hours ({"at", "notice"}), or None."""
+        try:
+            last = json.loads(store.setting(UNDO_AI_LAST) or "null")
+            fresh = isinstance(last, dict) and to_dt(last.get("at")) > datetime.now(timezone.utc) - timedelta(days=1)
+        except (TypeError, ValueError):
+            return None
+        return {"at": str(last["at"]), "notice": str(last.get("notice") or "")} if fresh else None
 
     @app.post("/changes/stage-outcome/{change_id}/undo")
     def undo_stage_outcome(request: Request, change_id: int):
@@ -1632,11 +1961,94 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.post("/changes/undo-ai")
     async def undo_ai_since(request: Request):
         form = await request.form()
-        start = since_iso(str(form.get("since") or ""))
+        window = str(form.get("window") or "")
+        if window in UNDO_WINDOWS:  # the window picked next to the button
+            start = (datetime.now(timezone.utc) - timedelta(hours=int(window))).replace(microsecond=0).isoformat()
+        else:
+            start = since_iso(str(form.get("since") or ""))
         if not start:
             return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
         return undo_ai_batch(request, store.ai_actions(start, limit=1_000_000),
                              "There were no AI changes to undo in that time.")
+
+    @app.post("/changes/ai/{action_id}/confirm")
+    def confirm_ai_action(request: Request, action_id: int):
+        """Yes on Today's "Your AI app marked X hired. Right?" (or a job it closed): it stays, and Today stops asking."""
+        try:
+            a = store.confirm_ai_action(action_id)
+        except NotFound:
+            return back(request, "/", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/", error=str(exc))
+        return back(request, "/", notice=f"Kept: {a['summary']}.")
+
+    # ---------------------------------------------------------- AI review queue
+    @app.get("/review", response_class=HTMLResponse)
+    def review_page(request: Request):
+        return page(request, "review.html", groups=review.sessions(store), cautious=review.cautious(store),
+                    kinds=review.KINDS)
+
+    def _review_done(request: Request, res: dict[str, list[str]], kept: bool, none: str):
+        done, left = res["done"], res["left"]
+        if not done and not left:
+            return back(request, "/review", notice=none)
+        verb = "Kept" if kept else "Passed"
+        notice = f"{verb} {len(done)} change{'' if len(done) == 1 else 's'}" + (": " + _listed(done) if done else "") + "."
+        if left:
+            notice += f" Left {len(left)}: {_listed(left)}."
+        return back(request, "/review", notice=notice)
+
+    @app.post("/review/{review_id}/keep")
+    def review_keep(request: Request, review_id: int):
+        try:
+            what = review.keep(store, review_id)
+        except NotFound as exc:
+            return back(request, "/review", error=str(exc))
+        except ValueError as exc:
+            return back(request, "/review", error=str(exc))
+        return back(request, "/review", notice=f"Kept: {what}. You can still undo it on Changes.")
+
+    @app.post("/review/{review_id}/pass")
+    def review_pass(request: Request, review_id: int):
+        try:
+            what = review.pass_(store, review_id)
+        except NotFound as exc:
+            return back(request, "/review", error=str(exc))
+        except ValueError as exc:
+            return back(request, "/review", error=str(exc))
+        return back(request, "/review", notice=f"Passed: {what}. Nothing was changed.")
+
+    @app.post("/review/{op}-session")
+    async def review_session(request: Request, op: str):
+        """Keep all or Pass all of one AI session's waiting changes."""
+        if op not in ("keep", "pass"):
+            raise HTTPException(404)
+        form = await request.form()
+        session = str(form.get("session") or "")
+        ids = [r["id"] for r in review.pending(store, session=session)] if session else \
+            [r["id"] for r in review.pending(store) if not r.get("session")]
+        return _review_done(request, review.decide_many(store, ids, op == "keep"), op == "keep",
+                            "Nothing from that session waits for review.")
+
+    @app.post("/settings/cautious")
+    async def set_cautious(request: Request):
+        form = await request.form()
+        on = form.get("ai_cautious") == "1"
+        review.set_cautious(store, on)
+        msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job, client and interview "
+               "changes, and notes now wait on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
+
+    @app.post("/settings/time-zone")
+    async def set_time_zone(request: Request):
+        """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
+        form = await request.form()
+        try:
+            name = reports.save_user_zone(store, str(form.get("time_zone") or ""))
+        except ValueError as exc:
+            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#time-zone", status_code=303)
+        msg = f"Times now show in {name}." if name else "Times now show in this computer's time zone."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#time-zone", status_code=303)
 
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)
@@ -1777,11 +2189,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")
-    def health(request: Request):
-        """Open without the key so a second launch can find the running app. Says nothing about the data."""
-        if not request.state.unlocked:
-            return {"ok": True, "version": __version__}
-        return {"ok": True, "version": __version__, "search": search.engine, "candidates": store.count_candidates()}
+    def health(request: Request, nonce: str = ""):
+        """Open without the key so a second launch can find the running app. Says nothing about the data.
+        With a nonce it also answers `proof` (paths.health_proof), so the launcher can tell this app from
+        another program on the port before it sends a launch code. The proof is bound to the port this
+        request really arrived on (the socket's, not a header), so a relay on another port can't use it."""
+        out: dict[str, Any] = {"ok": True, "version": __version__}
+        server = request.scope.get("server") or ()
+        if nonce and len(nonce) <= 128 and len(server) == 2 and isinstance(server[1], int):
+            out["proof"] = paths.health_proof(key, nonce, server[1])
+        if request.state.unlocked:
+            out.update(search=search.engine, candidates=store.count_candidates())
+        return out
 
     @app.get("/api/candidates")
     def api_search(q: str = "", location: str | None = None, title: str | None = None, tag: str | None = None,

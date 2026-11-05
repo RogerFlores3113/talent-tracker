@@ -97,6 +97,9 @@ def normalize_outcome(value: str | None) -> str | None:
 # "last contacted" when they happened in the past.
 TIMELINE_KINDS = ("note", "call", "email", "message", "meeting", "interview", "stage")
 CONTACT_KINDS = {"call", "email", "message", "meeting", "interview"}
+# Other words for a timeline kind: an InMail, LinkedIn message or DM is logged as a message.
+KIND_ALIASES = {"inmail": "message", "linkedin": "message", "linkedin message": "message", "dm": "message",
+                "direct message": "message", "text": "message", "sms": "message"}
 # "change" entries are the audit trail: written only by the store itself when a
 # candidate's fields change (old values kept in timeline.data so they can be undone).
 # Nobody can log one by hand, so it is not in TIMELINE_KINDS.
@@ -554,6 +557,28 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _fill_linkedin_keys,
     ),
+    # v10: the AI review queue. In Cautious mode (settings ai_cautious) the AI app's overwrites, moves into a
+    # hired or out stage, job closes and notes wait here until the recruiter keeps (applies, once) or passes
+    # (drops) them. session is the MCP server process that sent it. ai_actions.confirmed_at: the recruiter
+    # said Yes to an AI hire or job close on Today.
+    """
+    CREATE TABLE ai_review (
+        id           INTEGER PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        candidate_id INTEGER REFERENCES candidates(id) ON DELETE CASCADE,
+        job_id       INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+        session      TEXT,
+        summary      TEXT NOT NULL,
+        payload      TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'kept', 'passed')),
+        created_at   TEXT NOT NULL,
+        decided_at   TEXT,
+        result       TEXT
+    );
+    CREATE INDEX ai_review_status_idx ON ai_review(status, id);
+    CREATE INDEX ai_review_candidate_idx ON ai_review(candidate_id, status);
+    ALTER TABLE ai_actions ADD COLUMN confirmed_at TEXT;
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -563,14 +588,47 @@ AI_ACTION_KINDS = {
     "prospects_proposed": "Proposed people for a Shortlist",
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
+    "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
+    "interview_feedback": "Added interview feedback",
+    "note_logged": "Logged activity",
 }
-# AI actions listed on Changes as a record only: there is nothing to put back.
-AI_RECORD_KINDS = frozenset({"interview_outcome"})
+# AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
+# outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
+INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback", "interview_outcome")
+# AI actions listed on Changes as a record only: there is nothing to put back. (None any more.)
+AI_RECORD_KINDS: frozenset[str] = frozenset()
 # How many saved values (cleared or replaced) the AI app may change on one person in an hour.
 AI_EDIT_BUDGET = 3
 AI_EDIT_WINDOW_MINUTES = 60
 # How many saved values the AI app may clear (empty), across everyone, in an hour.
 AI_CLEAR_CAP = 10
+# How many saved values the AI app may replace or clear in an hour, across everyone (job closes and job edits
+# that replace a value count too), and from how many a Today alert says so.
+AI_OVERWRITE_CAP = 30
+AI_OVERWRITE_ALERT = 15
+# How many entries (notes, calls, emails...) the AI app may log on one person in an hour.
+AI_NOTE_CAP = 10
+# Timeline kinds the recruiter can strike when the AI app logged them. A struck interview is also marked
+# cancelled, so it leaves Today, Interviews, Decide and reports (Put back undoes both).
+STRIKE_KINDS = ("note", "call", "email", "message", "meeting", "interview")
+# SQL: a timeline row (alias t) that nobody struck out.
+NOT_STRUCK = "NOT (json_valid(t.data) AND json_extract(t.data, '$.struck_at') IS NOT NULL)"
+
+
+def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int:
+    """How many saved values one logged AI action replaced or cleared, for the hourly cap: a job's or a client's
+    saved fields, each renamed stage (or 1 for a new order), and 1 for a Mark as sent or an interview's cancel,
+    new time or outcome."""
+    if kind in ("job_edit", "client_edit"):
+        return sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+    if kind == "stages_edit":
+        was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
+        now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
+        renamed = sum(1 for s in now if s.get("id") in was and s.get("name") != was[s["id"]].get("name"))
+        kept = [s.get("id") for s in now if s.get("id") in was]
+        moved = kept != [i for i in was if i in set(kept)]
+        return renamed + int(moved)
+    return 1
 AI_SOURCE = "AI app"
 
 
@@ -626,7 +684,7 @@ def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
     if not m:
         return None
     g = m.groupdict()
-    now = datetime.now(zone) if zone is not None else datetime.now().astimezone()
+    now = datetime.now(zone) if zone is not None else as_local(datetime.now(timezone.utc))
     today = now.date()
     if g["word"]:
         day = today + timedelta(days={"today": 0, "tomorrow": 1, "yesterday": -1}[g["word"].lower()])
@@ -655,7 +713,7 @@ def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
 def _parse_loose(s: str, zone: tzinfo | None = None) -> datetime | None:
     """The date shapes people type in spreadsheets. None if it isn't one of them."""
     if s.lower() == "now":
-        return datetime.now().astimezone()
+        return as_local(datetime.now(timezone.utc))
     relative = _parse_relative(s, zone)
     if relative is not None:
         return relative
@@ -761,6 +819,25 @@ def zone_named(name: str) -> tzinfo | None:
     return None
 
 
+USER_ZONE_KEY = "user_time_zone"  # settings row: the recruiter's own time zone, when it isn't this computer's
+_SHOWN_ZONE: list[tzinfo | None] = [None]  # None: this computer's own zone
+
+
+def shown_zone() -> tzinfo | None:
+    """The zone times show in and typed times are read in: the recruiter's saved one, else this computer's."""
+    return _SHOWN_ZONE[0]
+
+
+def set_shown_zone(zone: tzinfo | str | None) -> None:
+    _SHOWN_ZONE[0] = zone_named(zone) if isinstance(zone, str) and zone.strip() else (
+        zone if isinstance(zone, tzinfo) else None)
+
+
+def as_local(dt: datetime) -> datetime:
+    """A time on the recruiter's clock (see shown_zone)."""
+    return dt.astimezone(_SHOWN_ZONE[0])
+
+
 def _split_zone(s: str) -> tuple[str, tzinfo | None]:
     """'2026-11-10 14:00 America/Los_Angeles' -> ('2026-11-10 14:00', its zone). A trailing word that isn't a
     zone (like PM) stays put. An unknown IANA-looking name is an error, so a typo isn't read as local time."""
@@ -805,7 +882,8 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
                     raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
                 dt = loose
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=zone) if zone is not None else dt.astimezone()  # else local time
+        dt = dt.replace(tzinfo=zone) if zone is not None else (  # else local time
+            dt.replace(tzinfo=_SHOWN_ZONE[0]) if _SHOWN_ZONE[0] is not None else dt.astimezone())
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -891,6 +969,13 @@ def _names_line_up(ta: list[str], tb: list[str]) -> bool:
     # Both have a last name: it must be compatible, or appear among the other's later names
     # ('Ana Ruiz' and 'Ana Ruiz-Lopez'). A shared first name alone is not enough.
     return _compatible(ta[-1], tb[-1]) or ta[-1] in tb[1:] or tb[-1] in ta[1:]
+
+
+def looks_like_name(query: str | None) -> bool:
+    """A search shaped like a person's name: two to four capitalized words ("Dana Okafor", "Mary-Kate O'Neil")."""
+    words = (query or "").split()
+    return 2 <= len(words) <= 4 and all(re.fullmatch(r"[^\W\d_][\w'.-]*", w) and w[:1].isupper()
+                                         and not (len(w) > 2 and w.isupper()) for w in words)
 
 
 def same_person_name(a: str | None, b: str | None) -> bool:
@@ -1445,14 +1530,28 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
     if kind == "save_batch":
         return _batch_summary(new, job if r.get("job_title") else None)
+    if kind == "client_sent":
+        return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
+            f" ({new['manager']})" if new.get("manager") else "")
+    if kind == "client_edit":
+        return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
     what = f": {new['summary']}" if new.get("summary") else ""
     if kind == "interview_cancel":
         return f"Cancelled an interview with {name}{what}"
     if kind == "interview_move":
         return f"Moved an interview with {name} to a new time{what}"
     if kind == "interview_outcome":
-        label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
+        label = interview_label(new.get("data")) or ""
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
+    if kind == "interview_feedback":
+        who = r.get("body") or ""
+        return f"Added interview feedback on {name}" + (f" from {who}" if who else "") + what
+    if kind == "note_logged":
+        what = new.get("kind") or "note"
+        body = " ".join(str(new.get("body") or "").split())
+        body = body[:80] + ("..." if len(body) > 80 else "")
+        return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
+                + (f": {body}" if body else ""))
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -1500,6 +1599,11 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("job", jid), (kind, jid))
     if kind.startswith("interview_"):
         return (("person", cid), ("interview", r.get("target_id")))
+    if kind.startswith("client_"):
+        return (("client", (r.get("new_data") or {}).get("_key")),)
+    if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
+        thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
+        return (("person", cid), (thing, r.get("target_id")))
     return (("todo", r.get("target_id")),)
 
 
@@ -1532,6 +1636,8 @@ class Store:
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
         self._refresh_linkedin_keys()
+        row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
+        set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:
@@ -1735,17 +1841,9 @@ class Store:
             out["last_contacted_at"] = parse_when(out["last_contacted_at"])
         return out
 
-    def _canonical_tag(self, tag: str, candidate_id: int) -> str:
-        """The spelling other candidates already use for this tag ("React" beats a new "react")."""
-        row = self._conn.execute(
-            "SELECT tag FROM candidate_tags WHERE tag = ? AND candidate_id <> ?"
-            " GROUP BY tag COLLATE BINARY ORDER BY count(*) DESC, min(rowid) LIMIT 1",
-            (tag, candidate_id),
-        ).fetchone()
-        return row[0] if row else tag
-
     def _sync_tags(self, candidate_id: int, tags_text: str | None) -> None:
-        tags = [self._canonical_tag(t, candidate_id) for t in stored_tags(tags_text)]
+        """Skills keep the spelling they were given ("Go" stays "Go"); filters and search ignore case."""
+        tags = stored_tags(tags_text)
         text = join_tags(tags)
         if text != tags_text:  # keep the search copy in the same spelling
             self._conn.execute("UPDATE candidates SET tags = ? WHERE id = ?", (text, candidate_id))
@@ -1903,9 +2001,10 @@ class Store:
     def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
                               merged: dict[str, Any]) -> list[dict[str, Any]] | None:
         """When a save changes the title or company, the saved work history follows, so it doesn't
-        still show the old role "to now". Same company: the current role is updated in place.
-        New company: the current role gets an end year and the new role goes on top. None when
-        nothing needs to change (or there is no saved history to keep in step)."""
+        still show the old role "to now". A new title (same company or not) or a new company: the
+        current role gets an end year and the new role goes on top. Filling a blank title or company
+        on the current role updates it in place. None when nothing needs to change (or there is no
+        saved history to keep in step)."""
         def same(a: Any, b: Any) -> bool:
             return (a or "").strip().casefold() == (b or "").strip().casefold()
 
@@ -1920,8 +2019,14 @@ class Store:
         current = (top.get("end") or "").strip().lower() in ("", "present", "now", "current", "today")
         if current and same(top.get("title"), title) and same(top.get("company"), company):
             return None
-        if current and (same(top.get("company"), company) or not top.get("company")):
+        fills = (not top.get("title") or not title or same(top.get("title"), title)) and \
+            (not top.get("company") or not company or same(top.get("company"), company))
+        if current and fills:
             return [{**top, "title": title or top.get("title"), "company": company or top.get("company")}, *history[1:]]
+        if current and same(top.get("company"), company):  # a new title there: the old one ends, the new starts
+            year = str(datetime.now().year)
+            return [{"title": title, "company": top.get("company"), "start": year, "end": None, "summary": None},
+                    {**top, "end": year}, *history[1:]]
         rest = [{**top, "end": str(datetime.now().year)} if current else top, *history[1:]]
         return [{"title": title, "company": company, "start": None, "end": None, "summary": None}, *rest]
 
@@ -1940,19 +2045,21 @@ class Store:
         return c
 
     def update_candidate(self, candidate_id: int, work_history: list[dict[str, Any]] | None = None, *,
-                         by: str = "app", **data: Any) -> dict[str, Any]:
+                         by: str = "app", via: str | None = None, **data: Any) -> dict[str, Any]:
         """Change fields (a blank clears one). Only real changes are written, and each call that
         changes something leaves a "change" entry on the timeline with the old values, so it can
         be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
-        carries "_changed", the fields that actually changed."""
+        carries "_changed", the fields that actually changed. via="claude": the recruiter did it with a button in
+        Claude (Changes says so)."""
         fields = self._prepare(data)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
-        return self._update(candidate_id, fields, work_history, by=by)
+        return self._update(candidate_id, fields, work_history, by=by, via=via)
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
-                *, by: str, merge: bool = False, derived: tuple[str, ...] = ()) -> dict[str, Any]:
+                *, by: str, merge: bool = False, derived: tuple[str, ...] = (),
+                via: str | None = None) -> dict[str, Any]:
         with self._lock, self._conn:
             old, new = self._diff(candidate_id, fields, work_history)
             clash = self._clash(candidate_id, new)
@@ -1962,7 +2069,7 @@ class Store:
                 self._apply(candidate_id, new)
                 body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
                 self._record_change(candidate_id, old, new, by, body,
-                                    derived=tuple(k for k in derived if k in new))
+                                    derived=tuple(k for k in derived if k in new), via=via)
         cand = self.get_candidate(candidate_id)
         cand["_changed"] = list(new)
         return cand
@@ -1996,7 +2103,8 @@ class Store:
             self._write_history(candidate_id, new["work_history"] or [])
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
-                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = ()) -> int:
+                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = (),
+                       via: str | None = None) -> int:
         by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
         data: dict[str, Any] = {"by": by, "old": old, "new": new}
@@ -2004,6 +2112,8 @@ class Store:
             data["undo_of"] = undo_of
         if derived:  # changed only because another field did (work history following a new title)
             data["derived"] = list(derived)
+        if via:  # where the recruiter did it, when not in the app window ("claude": a card's button)
+            data["via"] = via
         tid = self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by], json.dumps(data)),
@@ -2104,6 +2214,11 @@ class Store:
         data["undone_at"] = ts
         self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
         self._ai_undone(entry["id"], ("pipeline_add", "stage_move"))
+        if entry.get("source") == AI_SOURCE:  # the note the AI app sent with the move goes too (kept, struck out)
+            for note in self._rows("SELECT * FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'note'"
+                                   " AND source = ? AND at = ?", (cid, move["job_id"], AI_SOURCE, entry["at"])):
+                if not (json.loads(note["data"]) if note.get("data") else {}).get("struck_at"):
+                    self._strike(note, by)
         cand = self.get_candidate(cid)
         cand["_restored"], cand["_skipped"] = ["job stage" if move.get("old") else "job pipeline"], []
         return cand
@@ -2226,9 +2341,22 @@ class Store:
                 if kind == "todo_added":
                     return "that to-do is done" if s is None or s["done_at"] else None
                 return None if s is not None and s["done_at"] == new.get("done_at") else "that to-do was changed since"
-            if kind in ("interview_cancel", "interview_move"):
+            if kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
+            if kind.startswith("client_"):
+                from .reports import ai_client_blocker  # here: reports imports this module
+                return ai_client_blocker(self, a)
+            if kind == "note_logged":
+                t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
+                if t is None:
+                    return "it is gone from the timeline"
+                data = json.loads(t["data"] or "{}") or {}
+                if data.get("struck_at"):
+                    return "it was struck out already"
+                if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
+                    return "that interview was changed again since"
+                return None
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2240,6 +2368,8 @@ class Store:
         if t is None:
             return "That interview is gone from the timeline."
         data = json.loads(t["data"]) if t.get("data") else {}
+        if data.get("struck_at"):
+            return "That interview was struck out."
         if t["at"] != new.get("at") or data != (new.get("data") or {}):
             return "That interview was changed again since."
         return None
@@ -2282,6 +2412,162 @@ class Store:
         """Whether the AI app may clear n more saved values now (at most AI_CLEAR_CAP an hour, across everyone)."""
         return n <= 0 or self.ai_clears_this_hour()["count"] + n <= AI_CLEAR_CAP
 
+    def ai_overwrites_this_hour(self, minutes: int = AI_EDIT_WINDOW_MINUTES) -> dict[str, Any]:
+        """Saved values the AI app replaced or cleared in the last hour, across everyone, job edits and closes
+        included: {"count", "people", "jobs", "last"}. Undone ones still count, like clears."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n, people, jobs, last = 0, set(), set(), None
+        for r in self._rows("SELECT candidate_id, data, created_at FROM timeline WHERE kind = ? AND source = ?"
+                            " AND created_at >= ?", (CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived = set(data.get("derived") or ())
+            hit = sum(1 for k, v in (data.get("old") or {}).items() if k not in derived and v not in (None, "", []))
+            if hit:
+                n, last = n + hit, max(last or "", r["created_at"])
+                people.add(r["candidate_id"])
+        for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
+                            " AND kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " 'interview_move', 'interview_outcome')", (since,)):
+            try:
+                old = json.loads(r["old_data"] or "{}") or {}
+                new = json.loads(r["new_data"] or "{}") or {}
+            except ValueError:
+                continue
+            hit = _overwrite_count(r["kind"], old, new)
+            if hit:
+                n, last = n + hit, max(last or "", r["at"])
+                if r["job_id"]:
+                    jobs.add(r["job_id"])
+                if r["candidate_id"]:
+                    people.add(r["candidate_id"])
+        return {"count": n, "people": len(people), "jobs": len(jobs), "last": last}
+
+    def ai_overwrites_left(self, n: int) -> bool:
+        """Whether the AI app may replace or clear n more saved values now (AI_OVERWRITE_CAP an hour, everyone)."""
+        return n <= 0 or self.ai_overwrites_this_hour()["count"] + n <= AI_OVERWRITE_CAP
+
+    def ai_notes_this_hour(self, candidate_id: int, minutes: int = AI_EDIT_WINDOW_MINUTES) -> int:
+        """Entries (notes, calls, emails, interviews, notes sent with a move or an add...) and interview feedback the
+        AI app logged on this person in the last hour, plus those waiting for review. Struck-out or undone ones
+        don't count, so a recruiter who cleaned up can still have the AI app log what is real."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        logged = self._row(f"SELECT count(*) AS n FROM timeline t WHERE t.candidate_id = ? AND t.source = ?"
+                           f" AND t.created_at >= ? AND t.kind NOT IN ('stage', ?) AND {NOT_STRUCK}",
+                           (candidate_id, AI_SOURCE, since, CHANGE_KIND))["n"]
+        feedback = self._row("SELECT count(*) AS n FROM ai_actions WHERE candidate_id = ? AND kind = 'interview_feedback'"
+                             " AND at >= ? AND undone_at IS NULL", (candidate_id, since))["n"]
+        waiting = self._row("SELECT count(*) AS n FROM ai_review WHERE candidate_id = ? AND status = 'pending'"
+                            " AND kind IN ('note', 'feedback') AND created_at >= ?", (candidate_id, since))["n"]
+        return logged + feedback + waiting
+
+    def mark_ai_note(self, entry: dict[str, Any]) -> int | None:
+        """Log a note, call, email, message or meeting the AI app just added, so Changes lists it and the
+        recruiter (or Undo all AI) can strike it out. Re-logging the same entry adds nothing."""
+        if entry.get("source") != AI_SOURCE or entry.get("kind") not in STRIKE_KINDS:
+            return None
+        with self._write():
+            if self._row("SELECT 1 FROM ai_actions WHERE kind = 'note_logged' AND target_id = ?", (entry["id"],)):
+                return None
+            new = {"kind": entry["kind"], "body": (entry.get("body") or "")[:300], "at": entry["at"]}
+            if entry["kind"] == "interview":  # as logged, so Undo can tell when it was changed since
+                raw = entry.get("data")
+                new["data"] = (json.loads(raw) if isinstance(raw, str) else raw) or {}
+            return self._log_ai("note_logged", candidate_id=entry["candidate_id"], job_id=entry.get("job_id"),
+                                target_id=entry["id"], new=new)
+
+    def _last_contact(self, candidate_id: int) -> str | None:
+        """When this person was last contacted, worked out from what is on the timeline and not struck out."""
+        marks = ", ".join("?" * len(CONTACT_KINDS))
+        r = self._row(f"""SELECT max(t.at) AS at FROM timeline t WHERE t.candidate_id = ? AND {NOT_STRUCK}
+                            AND ((t.kind IN ({marks}) AND t.at <= ?) OR (t.kind = 'stage' AND lower(t.body) = 'contacted'))""",
+                      (candidate_id, *sorted(CONTACT_KINDS), now_iso()))
+        return r["at"] if r else None
+
+    def _strike(self, entry: dict[str, Any], by: str) -> dict[str, Any]:
+        """Strike out one timeline entry (see strike_entry). Call inside a transaction."""
+        data = json.loads(entry["data"]) if entry.get("data") else {}
+        data.update(struck_at=now_iso(), struck_by=by if by in CHANGE_SOURCES else "app")
+        if entry["kind"] == "interview" and data.get("status") != "cancelled":  # off every schedule; Put back restores
+            data.update(status="cancelled", cancelled_at=data["struck_at"], struck_cancelled=True)
+        self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
+        cid = entry["candidate_id"]
+        if entry["kind"] in CONTACT_KINDS:
+            row = self._row("SELECT last_contacted_at FROM candidates WHERE id = ?", (cid,)) or {}
+            if row.get("last_contacted_at") == entry["at"]:  # it set "last contacted": work it out without it
+                self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?",
+                                   (self._last_contact(cid), cid))
+        if entry["kind"] == "note" and entry.get("job_id") and entry.get("body"):  # a move note is the job's note too
+            self._conn.execute("UPDATE applications SET notes = NULL WHERE candidate_id = ? AND job_id = ? AND notes = ?",
+                               (cid, entry["job_id"], entry["body"]))
+        self._ai_undone(entry["id"], ("note_logged",), "struck out")
+        return {**entry, "data": data}
+
+    def strike_entry(self, timeline_id: int, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Strike out a note, call, email, message or meeting the AI app logged. It stays on the timeline,
+        marked struck, but leaves reports, the AI app's reads, search and "last contacted"."""
+        with self._write():
+            entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
+            if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
+                raise NotFound(f"No timeline entry with id {timeline_id}")
+            if entry["kind"] not in STRIKE_KINDS or entry.get("source") != AI_SOURCE:
+                raise ValueError("Only notes, calls, emails, messages, meetings and interviews your AI app logged can be "
+                             "struck out.")
+            if (json.loads(entry["data"]) if entry.get("data") else {}).get("struck_at"):
+                raise ValueError("That entry is already struck out.")
+            return self._strike(entry, by)
+
+    def unstrike_entry(self, timeline_id: int, *, candidate_id: int | None = None) -> dict[str, Any]:
+        """Put a struck-out entry back as it was."""
+        with self._write():
+            entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
+            if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
+                raise NotFound(f"No timeline entry with id {timeline_id}")
+            data = json.loads(entry["data"]) if entry.get("data") else {}
+            if not data.get("struck_at"):
+                raise ValueError("That entry isn't struck out.")
+            data.pop("struck_at", None)
+            data.pop("struck_by", None)
+            if data.pop("struck_cancelled", None):  # an interview: back on the schedule as it was
+                data.pop("cancelled_at", None)
+                data["status"] = "scheduled"
+            self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data) if data else None, timeline_id))
+            if entry["kind"] in CONTACT_KINDS and entry["at"] <= now_iso():
+                self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
+                                   " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
+                                   (entry["at"], entry["candidate_id"], entry["at"]))
+            self._conn.execute("UPDATE ai_actions SET undone_at = NULL, undo_note = NULL WHERE kind = 'note_logged'"
+                               " AND target_id = ?", (timeline_id,))
+        return {**entry, "data": data}
+
+    def confirm_ai_action(self, action_id: int) -> dict[str, Any]:
+        """The recruiter said Yes to an AI hire move or job close on Today (or kept it on Review, marked it reviewed
+        on a client page, or kept a contacts change): it stays, and nothing asks about it again. This one mark is
+        the "reviewed" state every page reads."""
+        a = self.ai_action(action_id)
+        if a["kind"] not in ("stage_move", "pipeline_add", "job_edit", "client_edit"):
+            raise ValueError("Only an AI move, job change or client change can be confirmed.")
+        if a["undone_at"]:
+            raise ValueError("That change was undone.")
+        with self._write():
+            self._conn.execute("UPDATE ai_actions SET confirmed_at = coalesce(confirmed_at, ?) WHERE id = ?",
+                               (now_iso(), action_id))
+        return self.ai_action(action_id)
+
+    def job_diff(self, job_id: int, **data: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(old, new) of the job fields update_job would really change, normalized the same way."""
+        job = self.get_job(job_id)
+        if "status" in data:
+            data = {**data, "status": normalize_job_status(data["status"])}
+        extras = _job_extras({k: v for k, v in data.items() if k in JOB_EXTRA_FIELDS})
+        if "openings" in extras and extras["openings"] is None:
+            extras["openings"] = 1
+        fields = {**{k: _clean(v) for k, v in data.items() if k not in JOB_EXTRA_FIELDS}, **extras}
+        new = {k: v for k, v in fields.items() if job.get(k) != v}
+        return {k: job.get(k) for k in new}, new
+
     def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
                       work_history: list[dict[str, Any]] | None = None) -> list[str]:
         """The saved (non-empty) fields this update would clear or replace."""
@@ -2310,11 +2596,12 @@ class Store:
         job = self._row("SELECT status, status_by FROM jobs WHERE id = ?", (job_id,))
         if not job or job["status_by"] != "ai":
             return None
-        for r in self._rows("SELECT new_data, at, undone_at FROM ai_actions WHERE job_id = ? AND kind = 'job_edit'"
-                            " ORDER BY id DESC", (job_id,)):
+        for r in self._rows("SELECT id, new_data, at, undone_at, confirmed_at FROM ai_actions WHERE job_id = ?"
+                            " AND kind = 'job_edit' ORDER BY id DESC", (job_id,)):
             status = (json.loads(r["new_data"] or "{}") or {}).get("status")
             if status:
-                return {"status": status, "at": r["at"]} if not r["undone_at"] and status == job["status"] else None
+                return ({"status": status, "at": r["at"], "id": r["id"], "confirmed_at": r["confirmed_at"]}
+                        if not r["undone_at"] and status == job["status"] else None)
         return None
 
     def undo_ai_action(self, action_id: int, *, by: str = "app",
@@ -2331,6 +2618,9 @@ class Store:
         kind, what = a["kind"], a["summary"]
         if kind == "save_batch":
             return self._undo_save_batch(a, by, before_delete)
+        if kind.startswith("client_"):
+            from .reports import ai_client_undo  # here: reports imports this module
+            return ai_client_undo(self, a, by)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
@@ -2359,6 +2649,12 @@ class Store:
                 before_delete()
             self.delete_job(a["job_id"])
             return what
+        if kind == "note_logged":
+            reason = self._ai_blocker(a)
+            if reason and reason != "it was struck out already":
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
+            self.strike_entry(a["target_id"], by=by)
+            return what + " (struck out, kept on the timeline)"
         old, new = a["old_data"] or {}, a["new_data"] or {}
         with self._write():
             note = None
@@ -2378,14 +2674,12 @@ class Store:
                 self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
             elif kind == "prospects_proposed":
                 note = self._undo_proposed(action_id, new)
-            elif kind in ("interview_cancel", "interview_move"):
+            elif kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 if reason:
                     raise ValueError(reason)
                 self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                    (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
-            elif kind in AI_RECORD_KINDS:
-                raise ValueError("How an interview went stays on the timeline as a record.")
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -2629,8 +2923,9 @@ class Store:
 
     def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._rows(
-            "SELECT tag, count(*) AS count FROM candidate_tags GROUP BY tag COLLATE NOCASE"
-            " ORDER BY count DESC, tag COLLATE NOCASE LIMIT ?",
+            "SELECT (SELECT t2.tag FROM candidate_tags t2 WHERE t2.tag = t.tag COLLATE NOCASE GROUP BY t2.tag"
+            " COLLATE BINARY ORDER BY count(*) DESC, min(t2.rowid) LIMIT 1) AS tag, count(*) AS count"
+            " FROM candidate_tags t GROUP BY t.tag COLLATE NOCASE ORDER BY count DESC, tag COLLATE NOCASE LIMIT ?",
             (limit,),
         )
 
@@ -2667,9 +2962,11 @@ class Store:
         Logging the same thing twice (same kind, time and text) is a no-op, so
         an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
         """
-        kind = (kind or "").strip().lower()
+        kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
+        kind = KIND_ALIASES.get(kind, kind)
         if kind not in TIMELINE_KINDS or kind in ("stage", CHANGE_KIND):
-            raise ValueError(f"kind must be one of {', '.join(k for k in TIMELINE_KINDS if k != 'stage')}")
+            raise ValueError(f"kind must be one of {', '.join(k for k in TIMELINE_KINDS if k != 'stage')} "
+                             "(an InMail, LinkedIn message or DM is a message)")
         body = _clean(body)
         if kind == "note" and not body:
             raise ValueError("A note needs some text.")
@@ -2697,6 +2994,9 @@ class Store:
                     (candidate_id, job_id, kind, body, when, now_iso(), _clean(source)),
                 ).lastrowid
                 if kind in CONTACT_KINDS and when <= now_iso():
+                    if self._contact_from_stamp(candidate_id):  # the real outreach replaces a move's stamp
+                        self._conn.execute("UPDATE candidates SET last_contacted_at = NULL WHERE id = ?",
+                                           (candidate_id,))
                     self._conn.execute(
                         "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
@@ -2724,6 +3024,8 @@ class Store:
                                  and not r["data"].get("undone_at") and not r["data"].get("merged"))
             if r["kind"] == "interview":
                 r["status"] = interview_status(r["data"])
+            r["struck"] = bool(r["data"] and r["data"].get("struck_at"))
+            r["strikable"] = r["kind"] in STRIKE_KINDS and r.get("source") == AI_SOURCE and not r["struck"]
         return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -2780,14 +3082,21 @@ class Store:
             data["status"] = "scheduled"
             data.pop("cancelled_at", None)
         if outcome is not None:
-            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower())
-            value = INTERVIEW_OUTCOMES.get(key)
+            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower()).strip(" .!")
+            value = INTERVIEW_OUTCOMES.get(key) or INTERVIEW_VERDICTS.get(key)
             if value is None:
-                raise ValueError("The outcome must be passed, not passed or no show.")
+                raise ValueError("Outcome must be one of: passed, not passed, no show, or the interviewer's word: "
+                                 "strong yes, yes, mixed, no, strong no.")
             if new_at > ts:
                 raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
                                  "went after it takes place, or change its time first.")
+            if data.get("verdict") is None and _legacy_verdict(data) and note is None:
+                data["outcome_note"] = interview_note(data)  # the old word leaves the note; the new outcome replaces it
             data["outcome"], data["outcome_at"] = value, ts
+            if key in INTERVIEW_VERDICTS:  # "strong yes": the interviewer's word is kept as the verdict
+                data["verdict"] = key.replace(" ", "_")
+            else:
+                data.pop("verdict", None)
             if data.get("status") == "cancelled":
                 data["status"] = "scheduled"
         if note is not None:
@@ -2811,7 +3120,7 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
-            if by == "ai":  # on Changes: a cancel or a new time can be undone, an outcome is listed as a record
+            if by == "ai":  # on Changes: a cancel, a new time or an outcome can be undone (put back as it was)
                 kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
                         else "interview_outcome" if outcome is not None or note is not None else None)
                 if kind:
@@ -2822,6 +3131,38 @@ class Store:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                     " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
+        return self.get_interview(entry_id)
+
+    def add_interview_feedback(self, entry_id: int, text: str, interviewer: str | None = None, *,
+                               candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Add one interviewer's free-text feedback to an interview (kept in its data as `feedback`, a list of
+        {by, text, at, source}). Several people can each add theirs; the same words from the same person twice
+        are kept once. Nothing is ever removed. An AI app's feedback is listed on Changes, where Undo takes it back.
+        """
+        iv = self.get_interview(entry_id, candidate_id)
+        body = _clean(text)
+        if not body:
+            raise ValueError("Feedback needs some text: what the interviewer said.")
+        if len(body) > FEEDBACK_LIMIT:
+            raise ValueError(f"That feedback is too long ({len(body):,} characters). The limit is {FEEDBACK_LIMIT:,}, "
+                             "so nothing was saved.")
+        who = _clean(interviewer) or None
+        if who and len(who) > 200:
+            raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
+        if iv["status"] == "cancelled":
+            raise ValueError("That interview was cancelled, so it has no feedback. Put it back first if it happened.")
+        data = dict(iv["data"])
+        notes = [f for f in data.get("feedback") or [] if isinstance(f, dict)]
+        if any((f.get("by") or "").casefold() == (who or "").casefold() and f.get("text") == body for f in notes):
+            return iv
+        source = CHANGE_SOURCES.get(by, by)
+        data["feedback"] = [*notes, {"by": who, "text": body, "at": now_iso(), "source": source}]
+        with self._write():
+            self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry_id))
+            if by == "ai":
+                self._log_ai("interview_feedback", candidate_id=iv["candidate_id"], job_id=iv.get("job_id"),
+                             target_id=entry_id, body=who, old={"at": iv["at"], "data": iv["data"]},
+                             new={"at": iv["at"], "data": data, "summary": iv.get("body")})
         return self.get_interview(entry_id)
 
     # ---------------------------------------------------------------- search
@@ -2902,6 +3243,17 @@ class Store:
         extras_by_term = [self._extra_matches(t) for t in terms]
         if fix_typos:
             fixes = self._spelling_fixes(terms, extras_by_term)
+            held, quiet = self._name_words(query, terms, fixes) if fixes else (set(), False)
+            if held:  # a name is never spell-corrected: "Dana Okafor" is not "data Okafor"
+                all_fixes, fixes = fixes, {w: f for w, f in fixes.items() if w not in held}
+                if not fixes and not quiet:
+                    fixed = query
+                    for word, fix in all_fixes.items():
+                        fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+                    res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
+                                                 limit=limit, offset=offset, fix_typos=False)
+                    res.suggestion = fixed
+                    return res
             if fixes:
                 fixed = query
                 for word, fix in fixes.items():
@@ -3010,6 +3362,7 @@ class Store:
         who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
         for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
                 f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
+                "NOT (json_valid(data) AND json_extract(data, '$.struck_at') IS NOT NULL) AND "  # struck out: not found
                 f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
                 " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
             if r["candidate_id"] not in found:
@@ -3041,6 +3394,26 @@ class Store:
         return [r["id"] for r in self._rows(
             f"SELECT c.id FROM candidates c WHERE {clause} ORDER BY c.updated_at DESC, c.id DESC",
             (json.dumps(keep), *params))]
+
+    def _name_words(self, query: str, terms: list[_Term], fixes: dict[str, str]) -> tuple[set[str], bool]:
+        """(the words of a fix that may be part of a person's name, whether to stay quiet about them).
+
+        A capitalized word in a query shaped like a name (two to four capitalized words), or next to a word
+        some saved person's name has, is a name: no fix, and no "Did you mean" either when the other word is
+        a saved name. In a short query with a saved name in it, a lowercase word gets "Did you mean" only."""
+        caps = {fold(w) for w in re.findall(r"[^\W\d_][\w'-]*", query or "")
+                if w[:1].isupper() and not (len(w) > 1 and w.isupper())}
+        named = self._named(terms, set(fixes))
+        held = {w for w in fixes if w in caps and (named or looks_like_name(query))}
+        if named and len((query or "").split()) <= 4:
+            return set(fixes), held == set(fixes)
+        return held, False
+
+    def _named(self, terms: list[_Term], skip: set[str]) -> bool:
+        """Whether another word of the query is in some saved person's name."""
+        return any(self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1",
+                             (f'name : "{t.form}"',))
+                   for t in terms if t.form not in skip and t.form.isalpha())
 
     def _spelling_fixes(self, terms: list[_Term], extras_by_term: list[dict]) -> dict[str, str]:
         """Query words nobody has -> the closest saved word, when one is close enough."""
@@ -3452,6 +3825,8 @@ class Store:
                 ).lastrowid
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, None, s["name"])
+                if s["name"].lower() == "contacted":
+                    self._stamp_contacted(candidate_id, ts)
                 if _clean(notes):
                     self._conn.execute(
                         "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
@@ -3459,6 +3834,24 @@ class Store:
                         (candidate_id, job_id, _clean(notes), ts, ts, AI_SOURCE if by == "ai" else None),
                     )
         return self.get_application(app_id)
+
+    def _stamp_contacted(self, candidate_id: int, ts: str) -> None:
+        """Someone went into Contacted. Last contacted comes from logged outreach; with none logged yet,
+        the move itself counts once. Call inside a transaction."""
+        self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ? AND last_contacted_at IS NULL",
+                           (ts, candidate_id))
+
+    def _contact_from_stamp(self, candidate_id: int) -> bool:
+        """Whether last contacted is only the time of a move into Contacted, with no logged outreach behind it."""
+        row = self._conn.execute("SELECT last_contacted_at AS at FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
+        if not row or not row["at"]:
+            return False
+        kinds = ", ".join("?" * len(CONTACT_KINDS))
+        if self._conn.execute(f"SELECT 1 FROM timeline WHERE candidate_id = ? AND at = ? AND kind IN ({kinds})",
+                              (candidate_id, row["at"], *sorted(CONTACT_KINDS))).fetchone():
+            return False
+        return bool(self._conn.execute("SELECT 1 FROM timeline WHERE candidate_id = ? AND at = ? AND kind = 'stage'"
+                                       " AND lower(body) = 'contacted'", (candidate_id, row["at"])).fetchone())
 
     def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None, *,
                    by: str | None = None) -> dict[str, Any]:
@@ -3488,9 +3881,7 @@ class Store:
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, app["stage"], s["name"])
                 if s["name"].lower() == "contacted":
-                    self._conn.execute(
-                        "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
-                        " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (ts, candidate_id, ts))
+                    self._stamp_contacted(candidate_id, ts)
             if _clean(notes):
                 self._conn.execute("UPDATE applications SET notes = ? WHERE id = ?", (_clean(notes), app["id"]))
                 self._conn.execute(
@@ -3708,17 +4099,73 @@ def _job_extras(data: dict[str, Any]) -> dict[str, Any]:
 # Interviews are timeline entries; their state lives in timeline.data. One with no data is scheduled.
 INTERVIEW_OUTCOMES = {"passed": "passed", "pass": "passed", "not passed": "not_passed", "failed": "not_passed",
                       "did not pass": "not_passed", "no show": "no_show", "noshow": "no_show"}
-INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show"}
+INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show", "mixed": "Mixed"}
+# How interviewers often say it. Each is kept as the interview's verdict (data.verdict, shown as its outcome) and
+# counts as a result: passed, not passed, or mixed (neither, so nothing moves on by itself).
+INTERVIEW_VERDICTS = {"strong yes": "passed", "yes": "passed", "lean yes": "passed", "mixed": "mixed",
+                      "strong no": "not_passed", "no": "not_passed", "lean no": "not_passed"}
+VERDICT_LABELS = {"strong_yes": "Strong yes", "yes": "Yes", "lean_yes": "Lean yes", "mixed": "Mixed",
+                  "lean_no": "Lean no", "no": "No", "strong_no": "Strong no"}
+# The outcome values an AI app may send (update_interview lists these as its schema enum).
+INTERVIEW_OUTCOME_CHOICES = ("passed", "not passed", "no show", "strong yes", "yes", "mixed", "no", "strong no")
+# What the app offers when recording how an interview went (Today's buttons, the profile's menu): value, label.
+INTERVIEW_RESULT_CHOICES = (("strong yes", "Strong yes"), ("yes", "Yes"), ("mixed", "Mixed"), ("no", "No"),
+                            ("no show", "No show"))
+INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:4], ("strong no", "Strong no"), ("passed", "Passed"),
+                          ("not passed", "Not passed"), ("no show", "No show"))
+FEEDBACK_LIMIT = 4000  # one interviewer's feedback on one interview
 LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
                   " AND json_extract(t.data, '$.outcome') IS NULL")
 
 
 def interview_status(data: dict[str, Any] | None) -> str:
-    """'scheduled', 'cancelled', or the recorded outcome ('passed', 'not_passed', 'no_show')."""
+    """'scheduled', 'cancelled', or the recorded result ('passed', 'not_passed', 'mixed', 'no_show')."""
     data = data or {}
     if data.get("status") == "cancelled":
         return "cancelled"
-    return data.get("outcome") or "scheduled"
+    return interview_result(data) or "scheduled"
+
+
+def _legacy_verdict(data: dict[str, Any]) -> str | None:
+    """Before verdicts were kept on their own, 'mixed' was saved as passed with the word at the start of the note
+    ('Mixed.' or 'Strong yes. Loved the takehome'). Read that word back, so old interviews still say Mixed."""
+    m = re.match(r"\s*(strong yes|lean yes|yes|mixed|strong no|lean no|no)\s*(?:\.|$)", data.get("outcome_note") or "",
+                 re.I)
+    if not m or data.get("outcome") not in ("passed", "not_passed"):
+        return None
+    word = m.group(1).lower()
+    return word.replace(" ", "_") if {"mixed": "passed"}.get(word, INTERVIEW_VERDICTS[word]) == data["outcome"] else None
+
+
+def interview_verdict(data: dict[str, Any] | None) -> str | None:
+    """The interviewer's verdict (strong_yes, yes, lean_yes, mixed, lean_no, no, strong_no), or None."""
+    data = data or {}
+    if not data.get("outcome"):
+        return None
+    v = data.get("verdict")
+    return v if v in VERDICT_LABELS else _legacy_verdict(data)
+
+
+def interview_result(data: dict[str, Any] | None) -> str | None:
+    """How it went, as a result: passed, not_passed, mixed or no_show (None while it has no outcome)."""
+    data = data or {}
+    return "mixed" if interview_verdict(data) == "mixed" else data.get("outcome") or None
+
+
+def interview_label(data: dict[str, Any] | None) -> str | None:
+    """How it went, in the interviewer's word when there is one: 'Strong yes', 'Mixed', 'Passed', 'No show'."""
+    v = interview_verdict(data)
+    return VERDICT_LABELS[v] if v else INTERVIEW_OUTCOME_LABELS.get(interview_result(data) or "")
+
+
+def interview_note(data: dict[str, Any] | None) -> str | None:
+    """The outcome note without the verdict word an older save put at its start ('Yes. Loved it' -> 'Loved it')."""
+    data = data or {}
+    note = data.get("outcome_note") or None
+    v = interview_verdict(data)
+    if note and v and not data.get("verdict"):
+        note = re.sub(r"^\s*" + VERDICT_LABELS[v] + r"\s*\.?\s*", "", note, flags=re.I) or None
+    return note
 
 
 STAGE_NAME_LIMIT = 60

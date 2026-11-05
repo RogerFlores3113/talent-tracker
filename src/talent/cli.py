@@ -6,17 +6,20 @@ the browser. AI apps launch it with `mcp` to talk over stdio.
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
+import secrets
 import socket
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
 import httpx
 
-from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, launch_url, port_file
+from .paths import DEFAULT_PORT, app_key, data_dir, db_path, health_proof, is_frozen, launch_url, port_file
 
 
 def _private(path: Path) -> Path:
@@ -45,12 +48,26 @@ def _setup_logging(to_stderr: bool) -> None:
                         handlers=handlers)
 
 
-def _already_running(port: int) -> bool:
+def _probe(port: int) -> str:
+    """Who answers on this port: "ours" (this install's app, proven with an HMAC of a fresh nonce under the
+    app key), "other" (something else is listening there) or "free"."""
+    nonce = secrets.token_urlsafe(24)
     try:
-        r = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=0.5)
-        return r.status_code == 200 and "version" in r.json()
+        r = httpx.get(f"http://127.0.0.1:{port}/api/health", params={"nonce": nonce}, timeout=0.5)
+        body = r.json()
     except (httpx.HTTPError, ValueError):
-        return False
+        return "free" if _port_free(port) else "other"
+    proof = body.get("proof") if isinstance(body, dict) else None
+    # Bound to the port dialed here: a program on this port that passes the nonce on to the real app
+    # elsewhere gets back a proof for the real app's port, which doesn't match.
+    if r.status_code == 200 and isinstance(proof, str) and hmac.compare_digest(proof, health_proof(app_key(), nonce, port)):
+        return "ours"
+    return "other"
+
+
+def _already_running(port: int) -> bool:
+    """This install's app answers on the port. Only then does a launcher send it a launch code."""
+    return _probe(port) == "ours"
 
 
 def _port_free(port: int) -> bool:
@@ -73,13 +90,42 @@ def _recorded_port() -> int | None:
         return None
 
 
+PORT_GRACE = 30  # seconds a just-written port file is trusted while its app is still starting
+
+
+def _forget_port(port: int) -> None:
+    """The recorded port didn't answer as this app (a killed run, or another program there now): drop it, so
+    the AI app's links stop pointing at it. A file written in the last few seconds stays (that app may still
+    be starting)."""
+    path = port_file()
+    try:
+        if _recorded_port() == port and time.time() - path.stat().st_mtime > PORT_GRACE:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _find_running(*ports: int) -> int | None:
+    """The port this install's app answers on: the recorded one first, then these. A recorded port that
+    doesn't answer as ours isn't trusted: it's rewritten when the app is found elsewhere, else dropped."""
+    recorded = _recorded_port()
+    for port in dict.fromkeys(p for p in (recorded, *ports) if p):
+        if _already_running(port):
+            if port != recorded:
+                _write_port_file(port)
+            return port
+    if recorded:
+        _forget_port(recorded)
+    return None
+
+
 def open_window() -> bool:
     """Open (and unlock) the app window of the running app. False when it isn't running."""
-    for port in dict.fromkeys(p for p in (_recorded_port(), DEFAULT_PORT) if p):
-        if _already_running(port):
-            webbrowser.open(launch_url(port))  # a one-time code, never the key itself
-            return True
-    return False
+    port = _find_running(DEFAULT_PORT)
+    if port is None:
+        return False
+    webbrowser.open(launch_url(port))  # a one-time code, never the key itself
+    return True
 
 
 def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
@@ -88,12 +134,21 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     from .store import Store
     from .web import create_app
 
-    if _already_running(port):
+    say = logging.getLogger(__name__)
+    running = _find_running(port, DEFAULT_PORT)  # the recorded port first: the app may be on another one
+    if running is not None:
+        port = running
         # Second double-click: just bring the window back.
         if open_browser:
             webbrowser.open(launch_url(port))
+        say.info("Talent Search is already running at http://127.0.0.1:%s/, so this copy didn't start another. %s",
+                 port, "Opened its window." if open_browser else "Run talent open to open its window.")
         return
+    wanted = port
     port = _pick_port(port)
+    if port != wanted:
+        say.warning("Port %s is in use by another program that isn't this Talent Search, so no launch code was sent "
+                    "to it. Starting on port %s instead.", wanted, port)
     app = create_app(Store(db_path()))
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
@@ -103,7 +158,74 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     logging.getLogger(__name__).info("If the window says it's locked, open Talent Search from its app icon "
                                      "or run: talent open")
     # log_config=None: the frozen windowed build has no console for uvicorn's default handlers.
-    uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
+    finally:  # stopped: the port file no longer says where the app is (a killed run is caught on the next start)
+        if _recorded_port() == port:
+            try:
+                port_file().unlink()
+            except OSError:
+                pass
+
+
+def _sync(args: argparse.Namespace) -> None:
+    """talent sync FILE: read the export the way it was read last time, show what will change, then apply it
+    as one import (one row on Changes, undoable while nothing else changes)."""
+    from . import backups, importers
+    from .store import Store
+
+    path = Path(args.file)
+    try:
+        header, rows = importers.read_csv(importers.decode(path.read_bytes()))
+    except (OSError, ValueError) as exc:
+        sys.exit(f"Couldn't read {path.name}: {exc}")
+    store = Store(db_path())
+    mapping, prof = importers.mapping_for(store, header, rows)
+    prof = prof or {}
+    try:
+        mapping = importers.apply_map(header, mapping, args.map)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    if not any(m in ("name", "first_name", "last_name") for m in mapping):
+        sys.exit("Couldn't find a name column. Use --map, or the app's Import page to match columns by hand.")
+    source = args.source or prof.get("source") or importers.default_source(header)
+    client = args.client if args.client is not None else prof.get("client") or ""
+    opts = {"source": source, "add_stages": bool(prof.get("add_stages", True)), "move_stages": not args.no_move,
+            "profile": {**prof, "client": client}, "reopen_jobs": bool(args.reopen),
+            "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
+    print(("Using the saved matches for this export" + (f" ({prof['file']})" if prof.get("file") else "") + ".")
+          if prof else "No saved profile for these columns yet, so the columns were guessed.")
+    print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping) if m))
+    preview = importers.preview_import(store, header, rows, mapping, **opts)
+    for line in importers.diff_lines(preview):
+        print(line)
+    if preview.get("closed_jobs") and not args.reopen:
+        print("To sync a closed job's rows, open it again in the app, or run this with --reopen.")
+    if args.dry_run:
+        print("Nothing was changed (dry run).")
+        return
+    if not args.yes:
+        try:
+            answer = input("Apply these changes? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Nothing was changed.")
+            return
+    r = importers.import_rows(store, header, rows, mapping, file_name=path.name, **opts)
+    importers.save_sync_profile(store, header, mapping, r, file_name=path.name, source=source,
+                                add_stages=opts["add_stages"], move_stages=opts["move_stages"], client=client,
+                                replace_stages=opts["replace_stages"])
+    backups.record_import(store, r, path.name, len(rows))
+    print(f"Added {r['added']}, updated {r['updated']}, moved {len(r['moved'])}, unchanged {r['unchanged']}, "
+          f"skipped {r['skipped_rows']}.")
+    if r["backup"]:
+        print("Saved as one row on Changes. Undo it there while nothing else has changed.")
+    else:
+        print("Nothing changed, so no backup was needed.")
+    asks = [i for i in r.get("new_job_ids") or [] if i in importers.openings_to_ask(store)]
+    if asks:
+        print(f"{len(asks)} new job(s) made. Set their openings in the app, under Import, or on Today.")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -124,6 +246,20 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("file")
     imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
     imp.add_argument("--source", default=None, help='where these people came from (default "CSV import")')
+    imp.add_argument("--map", default="", metavar="SPEC",
+                     help='match columns by hand, like "Stage Entered=stage_changed_at, Recruiter=tag_column, Owner=skip"')
+    syn = sub.add_parser("sync", help="re-import this week's ATS export: shows what will change, then applies it")
+    syn.add_argument("file")
+    syn.add_argument("--yes", action="store_true", help="apply without asking")
+    syn.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
+    syn.add_argument("--map", default="", metavar="SPEC", help="match columns by hand (see import-csv --map)")
+    syn.add_argument("--client", default=None, help="the client for jobs in a file with no client column")
+    syn.add_argument("--source", default=None, help="where these people came from")
+    syn.add_argument("--no-move", action="store_true", help="don't move people already in a job")
+    syn.add_argument("--reopen", action="store_true",
+                     help="open jobs you closed here again and sync their rows (else their rows are left alone)")
+    syn.add_argument("--keep-default-stages", action="store_true",
+                     help="keep the empty default stages on new jobs that bring their own stages")
     exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
     exp.add_argument("file")
     args = parser.parse_args(argv)
@@ -162,6 +298,8 @@ def main(argv: list[str] | None = None) -> None:
         if index is None:
             sys.exit("Set TYPESENSE_URL and TYPESENSE_API_KEY first. Built-in search needs no index.")
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
+    elif cmd == "sync":
+        _sync(args)
     elif cmd in ("import-csv", "export-csv"):
         from pathlib import Path
 
@@ -174,7 +312,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
         else:
             header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
-            mapping = importers.guess_mapping(header, rows)
+            mapping, _ = importers.mapping_for(store, header, rows)
+            try:
+                mapping = importers.apply_map(header, mapping, args.map)
+            except ValueError as exc:
+                sys.exit(str(exc))
             if not any(m in ("name", "first_name", "last_name") for m in mapping):
                 sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
             source = args.source or importers.default_source(header)
@@ -192,6 +334,7 @@ def main(argv: list[str] | None = None) -> None:
                 from . import backups
 
                 r = importers.import_rows(store, header, rows, mapping, source=source, file_name=Path(args.file).name)
+                importers.save_sync_profile(store, header, mapping, r, file_name=Path(args.file).name, source=source)
                 backups.record_import(store, r, Path(args.file).name, len(rows))
                 print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
                       f"skipped {r['skipped_rows']}, {r['notes']} note{'' if r['notes'] == 1 else 's'} added.")

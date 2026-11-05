@@ -6,6 +6,15 @@
   {% else %}<ul class="plain">{% for s in p.lines %}<li>{{ s }}</li>{% endfor %}</ul>
   {% if p.more %}<p class="fine">And {{ p.more }} more. <a href="/import/{{ token }}/{{ which }}.csv?panel={{ p.key }}">Download the full list (CSV)</a></p>{% endif %}{% endif %}
 </details>{% endmacro %}
+{% macro openings_form(jobs, backup) %}<form method="post" action="/import/openings" class="stack panel" aria-label="Openings for the new jobs">
+  <input type="hidden" name="backup" value="{{ backup or '' }}">
+  <p><strong>How many openings does each new job have?</strong></p>
+  <p class="fine">The import made {{ 'this job' if jobs | length == 1 else 'these jobs' }}. Client updates count hires against openings, so it helps to get this right. We only ask once.</p>
+  <div class="table-wrap"><table class="dense"><tbody>
+  {% for j in jobs %}<tr><td>{{ j.title }}{% if j.company %}, {{ j.company }}{% endif %}</td><td><input type="number" name="openings_{{ j.id }}" value="{{ j.openings or 1 }}" min="1" max="999" aria-label="Openings for {{ j.title }}"></td></tr>{% endfor %}
+  </tbody></table></div>
+  <div><button class="btn primary" type="submit">Save openings</button></div>
+</form>{% endmacro %}
 {% block body %}
 <h1>Import candidates from a CSV</h1>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
@@ -17,7 +26,7 @@
   <p class="fine" data-busy-note role="status" aria-live="polite"></p>
 </form>
 {% elif step == 'map' %}
-<p class="lead">{{ total }} row{{ '' if total == 1 else 's' }}{% if filename %} in {{ filename }}{% endif %}. Check which column goes where. We guessed from the headers.</p>
+<p class="lead">{{ total }} row{{ '' if total == 1 else 's' }}{% if filename %} in {{ filename }}{% endif %}. Check which column goes where. {% if profile %}These are the matches you used last time for a file with these columns{% if profile.file %} ({{ profile.file }}){% endif %}.{% else %}We guessed from the headers.{% endif %}</p>
 <form method="post" action="/import/run" class="stack" data-busy="Working on it. {{ total }} row{{ '' if total == 1 else 's' }} can take {{ 'a minute' if big else 'a few seconds' }}. Keep this page open, the result shows here when it's done.">
   <input type="hidden" name="token" value="{{ token }}">
   <input type="hidden" name="filename" value="{{ filename or '' }}">
@@ -36,6 +45,8 @@
     </tbody>
   </table></div>
   <label>Where these came from <input type="text" name="source" value="{{ source or 'CSV import' }}" maxlength="80"></label>
+  {% if no_client %}<label>Client for these jobs <input type="text" name="client" value="{{ client or '' }}" maxlength="120" placeholder="Leave empty if they're your own jobs"></label>
+  <p class="fine">The file has a job column but no client column. Name the client here and every job in it goes under them. We remember it for this export.</p>{% endif %}
   {% if not has_name %}<p class="flash warn">Pick the column that holds each person's name.</p>{% endif %}
   {% if preview %}<section class="panel" aria-label="What this import will do">
     <p><strong>{{ preview_lines[0] }}</strong></p>
@@ -43,16 +54,25 @@
     {% if preview.missing_stages %}{% set n = preview.missing_stages | length %}<label class="check"><input type="checkbox" name="add_stages" value="1" {{ 'checked' if add_stages }}>
       <span>Add the missing stage{{ '' if n == 1 else 's' }} to {{ 'its job' if n == 1 else 'their jobs' }}, each as its own stage, in pipeline order: {% for m in preview.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}{% if n > 10 %}, and {{ n - 10 }} more{% endif %}.
       Left unticked, those people go in the closest stage by name, or the job's first stage. Changed it? Check again to see the result.</span></label>{% endif %}
+    {% if preview.moved or preview.already_in or move_stages %}{% set n = preview.moved | length %}<label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
+      <span>Move people whose stage in the file is different{% if n %} ({{ n }} will move){% endif %}. Each move is dated from the file's stage date column, or today, and shows in client updates as a real move. Anyone you moved here since the last import stays put unless the file's date is newer.</span></label>{% endif %}
+    {% if preview.jobs_created and (preview.missing_stages or preview.defaults_dropped) %}<label class="check"><input type="checkbox" name="replace_stages" value="1" {{ 'checked' if replace_stages }}>
+      <span>Replace the default stages on the new jobs with the file's own, so their boards don't carry empty Contacted, Screening, Interviewing and Offer stages. A default stays only when the file has no stage of that kind.</span></label>
+    {% elif replace_stages %}<input type="hidden" name="replace_stages" value="1">{% endif %}
+    {% if preview.closed_jobs or reopen_jobs %}<label class="check"><input type="checkbox" name="reopen_jobs" value="1" {{ 'checked' if reopen_jobs }}>
+      <span>Open {{ 'this job' if (preview.closed_jobs or preview.reopened) | length == 1 else 'these jobs' }} again and sync {{ 'its' if (preview.closed_jobs or preview.reopened) | length == 1 else 'their' }} rows: {% for c in (preview.closed_jobs or []) %}{{ c.job }}{{ ', ' if not loop.last }}{% endfor %}{{ preview.reopened | join(', ') }}. Left unticked, a job you closed here stays closed and nobody is added or moved on it. Changed it? Check again to see the result.</span></label>{% endif %}
     {% for p in panels %}{{ panel_list(p, 'preview') }}{% endfor %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}
+  {% if not preview and has_name %}<label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
+    <span>Move people whose stage in the file is different, dated from its stage date column, or today.</span></label>{% endif %}
   {% if big %}<p class="fine">This is a big file: importing {{ total }} rows takes about a minute. Keep this page open until the result shows.</p>{% endif %}
   <div><button class="btn primary" type="submit">{{ button_label or ('Import ' ~ total ~ ' row' ~ ('' if total == 1 else 's')) }}</button>
     <button class="btn" type="submit" formaction="/import/check" data-busy="Checking {{ total }} row{{ '' if total == 1 else 's' }} again. Nothing is saved yet. Keep this page open, the result shows here when it's done.">Check again</button>
     <a class="btn" href="/import">Start over</a></div>
   <p class="fine" data-busy-note role="status" aria-live="polite"></p>
 </form>
-{% else %}
+{% elif step != 'openings' %}
 <p class="flash">Added {{ result.added }}, updated {{ result.updated }}, unchanged {{ result.unchanged }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
 {% if result.backup_name %}<form class="actions-inline" method="post" action="/import/undo" data-confirm="Undo this import? Your data goes back to how it was just before it. A copy with the import in it is backed up first.">
   <input type="hidden" name="backup" value="{{ result.backup_name }}">
@@ -65,6 +85,13 @@
 {% if result.stages_added and result.missing_stages %}<p class="fine">Added {{ result.missing_stages | length }} new stage{{ '' if result.missing_stages | length == 1 else 's' }}: {% for m in result.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
 {% if result.pipelines_added or result.jobs_created %}<p class="fine">Put {{ result.pipelines_added }} {{ 'person' if result.pipelines_added == 1 else 'people' }} in job pipelines{% if result.jobs_created %} and made {{ result.jobs_created | length }} new job{{ '' if result.jobs_created | length == 1 else 's' }}: {{ result.jobs_created[:10] | join(', ') }}{% endif %}.</p>{% endif %}
 {% if result.not_imported %}<p class="fine">Not imported: {{ result.not_imported | join(', ') }}.</p>{% endif %}
+{% for line in closed_lines or [] %}<p class="fine">{{ line }}</p>{% endfor %}
+{% if result.defaults_dropped %}<p class="fine">Left {{ result.defaults_dropped }} empty default stage{{ '' if result.defaults_dropped == 1 else 's' }} off the new jobs, so they show the file's own stages.</p>{% endif %}
+{% if result.moved %}<p class="fine">Moved {{ result.moved | length }} {{ 'person' if result.moved | length == 1 else 'people' }} to the stage the file shows. Each move is on their timeline, where you can undo it.</p>{% endif %}
+{% if new_jobs %}{{ openings_form(new_jobs, result.backup_name) }}{% endif %}
+<p class="fine">We saved how this file was read. Next time you import a file with the same columns, the same matches are used, and on the command line: talent sync FILE</p>
 <p class="actions-inline"><a class="btn primary" href="/candidates">See candidates</a> <a class="btn" href="/import">Import another</a></p>
+{% else %}
+{% if new_jobs %}{{ openings_form(new_jobs, '') }}{% else %}<p class="lead">No jobs are waiting for their number of openings.</p>{% endif %}
 {% endif %}
 {% endblock %}
