@@ -35,6 +35,7 @@
         <span class="muted">{{ p.title or '' }}{% if p.company %} at {{ p.company }}{% endif %}{% if p.location %} · {{ p.location }}{% endif %}</span>
         {% if p.linkedin_url %}<a href="{{ p.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ p.linkedin_url | profile_label }}</a>{% endif %}
         {% if p.fit %}<div class="fit">{{ p.fit }}</div>{% endif %}
+        {% if p.tags %}<div class="fine">Skills: {{ p.tags | join(', ') }}</div>{% endif %}
         {% for line in p.check_lines %}<div class="fine check">{{ line }}</div>{% endfor %}
         <div class="fine">Proposed {{ p.created_at | ago }}{% if p.proposed_by == 'ai' %} by your AI app{% endif %}</div>
       </div>
@@ -63,7 +64,8 @@
 {% if kept %}
 <details class="panel"><summary>Kept ({{ kept | length }})</summary>
   <ul class="prospects done">{% for p in kept %}
-    <li>{% if p.candidate_id %}<a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %} <span class="fine">kept {{ p.decided_at | ago }}</span></li>
+    <li>{% if p.candidate_id %}<a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}{% if p.stage %} <span class="muted">· {{ p.stage }}</span>{% endif %} <span class="fine">kept {{ p.decided_at | ago }}</span>
+      {% if p.thin %}<a class="small" href="/candidates/{{ p.candidate_id }}#refresh">Refresh with Claude</a>{% endif %}</li>
   {% endfor %}</ul>
 </details>
 {% endif %}

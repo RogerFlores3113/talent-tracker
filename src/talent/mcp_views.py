@@ -37,11 +37,16 @@ mark{background:var(--mark);color:inherit;border-radius:2px}a,button.link{color:
 ul{margin:4px 0;padding-left:18px}.kind{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .col.closed{opacity:.6;min-width:120px;flex:.6}.empty{color:var(--muted);padding:12px}.click{cursor:pointer}.click:hover{border-color:var(--accent)}
 .contact{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:13px}
+.acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+.btn{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--chip);color:var(--text);border-radius:7px;padding:3px 10px;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn:disabled{opacity:.55;cursor:default}
+input.reason{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:3px 8px;background:var(--surface);color:var(--text);min-width:180px;flex:1}
+.status{font-size:12px;margin-top:6px}
 .badge{display:inline-block;margin-left:8px;background:var(--chip);color:var(--muted);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:600;vertical-align:middle}
 """
 
 _JS = r"""
-const V=__VERSION__;let nid=1;const pend={};
+const V=__VERSION__;let nid=1;const pend={};let HOST={},META={};
 function post(m){window.parent.postMessage(m,"*")}
 function req(method,params){const id=nid++;return new Promise(r=>{pend[id]=r;post({jsonrpc:"2.0",id,method,params})})}
 function note(method,params){post({jsonrpc:"2.0",method,params:params||{}})}
@@ -60,13 +65,13 @@ function day(iso){if(!iso)return"";const d=new Date(iso);return isNaN(d)?iso:d.t
 function when(iso){if(!iso)return"";const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString(undefined,{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}
 const root=()=>document.getElementById("root");
 window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
- if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.result||{});delete pend[m.id];return}
- if(m.method==="ui/notifications/tool-result"){const d=(m.params&&m.params.structuredContent)||null;root().replaceChildren(d?render(d):el("p",{class:"empty"},"Nothing to show."))}
+ if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
+ if(m.method==="ui/notifications/tool-result"){META=(m.params&&m.params._meta)||{};const d=(m.params&&m.params.structuredContent)||null;root().replaceChildren(d?render(d):el("p",{class:"empty"},"Nothing to show."))}
  else if(m.method==="ui/notifications/host-context-changed")theme(m.params);
  else if(m.method==="ui/resource-teardown"&&m.id!=null)post({jsonrpc:"2.0",id:m.id,result:{}});
 });
 new ResizeObserver(()=>note("ui/notifications/size-changed",{width:document.documentElement.scrollWidth,height:document.documentElement.scrollHeight})).observe(document.documentElement);
-req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-search",version:V},appCapabilities:{}}).then(r=>{theme(r.hostContext);note("ui/notifications/initialized",{})});
+req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-search",version:V},appCapabilities:{}}).then(r=>{HOST=(r&&r.hostCapabilities)||{};theme(r.hostContext);note("ui/notifications/initialized",{})});
 """
 
 _RENDER = {
@@ -115,12 +120,13 @@ function render(d){
  const exact=d.exact_total!=null?d.exact_total:d.total;
  const head=d.closest?"No exact matches. Closest matches:":d.exact?"Exact match":exact+(exact===1?" match":" matches");
  if(d.corrected&&d.suggestion)wrap.append(el("div",{class:"small"},"Showing results for ",el("b",{},d.suggestion)));
+ if(d.no_one_named)wrap.append(el("div",{class:"card small"},"No one named ",el("b",{},d.no_one_named)," is saved."+(d.results.length?" These people share some of the words, under other names.":"")));
  wrap.append(el("div",{class:"row small muted"},el("span",{},head),appLink(d.app_url,"Open search in Talent Search")));
  if(!d.results.length)wrap.append(el("p",{class:"empty"},"No saved candidates match. Try fewer or different words."));
  let shown=false;
  for(const c of d.results){const sub=[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")+(c.location?" · "+c.location:"");
   if(c.closest&&!d.closest&&!shown){shown=true;wrap.append(el("h2",{},"Closest matches, with some of the words"))}
-  wrap.append(openCard("card",c.app_url,el("div",{class:"row"},el("b",{},c.name),c.closest?el("span",{class:"badge"},"Closest match"):null,profileLink(c.linkedin_url)),sub?el("div",{class:"muted small"},sub):null,
+  wrap.append(openCard("card",c.app_url,el("div",{class:"row"},el("b",{},c.name),c.closest?el("span",{class:"badge"},"Closest match"):null,(c.other_name&&!d.no_one_named)?el("span",{class:"badge"},"A different name"):null,profileLink(c.linkedin_url)),sub?el("div",{class:"muted small"},sub):null,
    c.reason?el("div",{class:"small muted"},c.reason):null,
    c.match?el("div",{class:"small"},marked(c.match)):null,(c.tags&&c.tags.length)?el("div",{class:"chips"},c.tags.slice(0,6).map(t=>el("span",{class:"chip"},t))):null))}
  if(d.suggestion&&!d.corrected)wrap.append(el("p",{class:"small"},"Did you mean ",el("b",{},d.suggestion),"?"));
@@ -150,19 +156,56 @@ function render(d){
  if(d.next_week&&d.next_week.length){wrap.append(el("h2",{},"Next week"));for(const i of d.next_week)wrap.append(card(i))}
  return wrap}""",
     "shortlist": r"""
+const KEY="talent-search/shortlist";
+function viewKey(){const k=META&&META[KEY];return k&&k.key?k:null}
+function canAct(){return !!(HOST&&HOST.serverTools&&viewKey())}
+function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ")}
+let countsLine=null;
+function countText(c){c=c||{};return(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"}
+function act(card,p,tool,args){
+ const k=viewKey();const status=card.querySelector(".status");
+ card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=true);
+ status.textContent="Working on it…";
+ req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,prospect_id:p.id,view_key:k.key},args)}).then(r=>{
+  const d=(r&&r.structuredContent)||null;
+  if(r&&r.isError||!d){status.textContent=said(r)||"That didn't work. Try again in Talent Search.";card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=false);return}
+  if(d.counts&&countsLine)countsLine.textContent=countText(d.counts);
+  const next=prospect(Object.assign({},d.prospect,d.needs_choice?{choices:d.matches||[]}:{}));
+  next.querySelector(".status").textContent=d.message||said(r);
+  card.replaceWith(next)});
+}
+function buttons(card,p){
+ const box=el("div",{class:"acts"});
+ const same=(p.choices&&p.choices.length?p.choices:(p.checks&&p.checks.same_name)||[]);
+ const keep=(label,args,primary)=>el("button",{class:"btn"+(primary?" primary":""),onclick:()=>act(card,p,"keep_prospect",args)},label);
+ if(same.length){for(const m of same)box.append(keep("Keep as #"+m.id,{candidate_id:m.id},false));box.append(keep("Keep as someone new",{as_new:true},false))}
+ else box.append(keep("Keep",{},true));
+ const pass=el("button",{class:"btn",onclick:()=>{
+  const why=el("input",{class:"reason",type:"text",maxlength:"300",placeholder:"Reason (optional)","aria-label":"Why you're passing"});
+  const go=el("button",{class:"btn",onclick:()=>act(card,p,"pass_prospect",{reason:why.value})},"Pass");
+  const back=el("button",{class:"btn",onclick:()=>box.replaceWith(buttons(card,p))},"Cancel");
+  why.addEventListener("keydown",e=>{if(e.key==="Enter")go.click()});
+  const form=el("div",{class:"acts"},why,go,back);box.replaceWith(form);why.focus()}},"Pass");
+ box.append(pass);return box}
 function prospect(p){const sub=[p.title,p.company&&("at "+p.company)].filter(Boolean).join(" ")+(p.location?" · "+p.location:"");
  const badge=p.status==="passed"?"Passed":p.status==="kept"?"Kept":null;
- return el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
+ const card=el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
   sub?el("div",{class:"muted small"},sub):null,p.fit?el("div",{class:"small"},p.fit):null,
+  (p.tags&&p.tags.length)?el("div",{class:"chips"},p.tags.slice(0,8).map(t=>el("span",{class:"chip"},t))):null,
   p.pass_reason?el("div",{class:"small muted"},"Reason: "+p.pass_reason):null,
-  (p.check_lines&&p.check_lines.length)?el("ul",{class:"small"},p.check_lines.map(x=>el("li",{},x))):null)}
+  (p.check_lines&&p.check_lines.length)?el("ul",{class:"small"},p.check_lines.map(x=>el("li",{},x))):null,
+  p.choices&&p.choices.length?el("ul",{class:"small"},p.choices.map(m=>el("li",{},"#"+m.id+" "+m.name+(m.current_title?", "+m.current_title:"")+(m.current_company?" at "+m.current_company:"")+((m.pipelines||[]).length?". In "+m.pipelines.map(x=>x.job+": "+x.stage).join("; "):"")))):null);
+ if((p.status||"proposed")==="proposed"&&canAct())card.append(buttons(card,p));
+ card.append(el("div",{class:"status muted",role:"status"}));
+ return card}
 function render(d){
  const wrap=el("div",{});const rows=d.added||d.prospects||[];const c=d.counts||{};
  wrap.append(el("div",{class:"row"},el("h1",{},"Shortlist"+(d.job?": "+d.job.title+(d.job.company?" · "+d.job.company:""):"")),appLink(d.app_url,"Review in Talent Search")));
- wrap.append(el("div",{class:"small muted"},(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"));
+ countsLine=el("div",{class:"small muted"},countText(c));wrap.append(countsLine);
  if(d.added)wrap.append(el("h2",{},"Added now"));
  if(!rows.length)wrap.append(el("p",{class:"empty"},"Nobody here."));
  for(const p of rows)wrap.append(prospect(p));
+ if(rows.some(p=>(p.status||"proposed")==="proposed"))wrap.append(el("p",{class:"small muted"},canAct()?"Keep saves them and adds them to the job. You can undo a keep in Talent Search, under Changes.":"Keep or pass each one in Talent Search."));
  if(d.skipped&&d.skipped.length){wrap.append(el("h2",{},"Skipped"),el("ul",{class:"small"},d.skipped.map(x=>el("li",{},x.name+": "+x.reason))))}
  return wrap}""",
     "saved": r"""
