@@ -2,6 +2,14 @@
 {% set sample_people = sample_ids()[0] %}
 {% set next_iv = next_iv or {} %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if ask %}<div class="flash warn ask-cancel" role="status">
+  <form method="post" action="/jobs/{{ job.id }}/cancel-interviews" class="inline">
+    <input type="hidden" name="candidate_id" value="{{ ask.candidate_id }}">
+    {% for iv in ask.upcoming_interviews %}<input type="hidden" name="interview_id" value="{{ iv.interview_id }}">{% endfor %}
+    <strong>{{ ask.question }}</strong> <button class="btn small primary" type="submit">Cancel {{ 'it' if ask.upcoming_interviews | length == 1 else 'them' }}</button>
+    <a class="btn small" href="/jobs/{{ job.id }}">Keep {{ 'it' if ask.upcoming_interviews | length == 1 else 'them' }}</a>
+    <span class="fine">A cancelled interview stays on the timeline.</span></form>
+</div>{% endif %}
 {% set total = groups | sum(attribute='candidates', start=[]) | length %}
 {% if total == 0 %}
 <div class="empty"><h2>No one in this pipeline yet</h2><p>Search above to add people you already have, or source new ones with AI.</p></div>
@@ -26,10 +34,15 @@
 </table></div>
 {% else %}
 <div class="board" role="list">
+  {% set show = show or '' %}
   {% for g in groups %}
+  {% set n = g.candidates | length %}
+  {% set wide = show | lower == g.name | lower %}
+  {% set cards = g.candidates if wide else g.candidates[:50] %}
   <section class="col o-{{ g.outcome }}" data-stage="{{ g.name }}" role="listitem" aria-label="{{ g.name }}">
-    <h3><span>{{ g.name }}</span><span class="muted">{{ g.candidates | length }}</span></h3>
-    {% for a in g.candidates %}
+    <h3><span>{{ g.name }}</span><span class="muted">{{ n }}</span></h3>
+    {% if n and g.outcome != 'open' %}<details class="fold" {{ 'open' if wide }}><summary class="fine">Show {{ n }}</summary>{% endif %}
+    {% for a in cards %}
     <div class="pc" draggable="true" data-cid="{{ a.candidate_id }}">
       <a href="/candidates/{{ a.candidate_id }}"><strong>{{ a.candidate_name }}</strong></a> {{ sample_badge(a.candidate_id in sample_people) }}
       {% if a.current_title %}<div class="fine">{{ a.current_title }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</div>{% endif %}
@@ -39,6 +52,8 @@
     </div>
     {% else %}<p class="fine drop-hint">Drop here</p>
     {% endfor %}
+    {% if n > cards | length %}<a class="fine show-more" href="/jobs/{{ job.id }}?view=board&amp;show={{ g.name | urlencode }}#pipeline">Show {{ n - cards | length }} more</a>{% endif %}
+    {% if n and g.outcome != 'open' %}</details>{% endif %}
   </section>
   {% endfor %}
 </div>

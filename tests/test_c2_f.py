@@ -11,7 +11,7 @@ from talent.mcp_server import build_server
 from talent.sample_data import load_sample_data, remove_sample_data, sample_ids
 from talent.store import Store
 
-from conftest import local_client
+from conftest import flash_of, local_client
 from test_mcp import call, structured, text
 
 
@@ -20,7 +20,7 @@ def _at(days=2, hours=0):
 
 
 def _msg(r, key="notice"):
-    return parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
+    return flash_of(r, key)
 
 
 def _run(store, csv_text):
@@ -291,11 +291,10 @@ def test_future_todos_are_listed_with_their_day_and_overdue_says_it_once(store):
 # -------------------------------------------------------- 12. hire word
 def test_rollup_uses_the_jobs_hire_word(store):
     store.add_job("Head of Data", company="Northwind", stages=["Sourced", "Submitted", "Placed"])
-    assert "0 of 1 placed." in actions.status_digest(store, "Northwind")
+    assert "none placed yet." in actions.status_digest(store, "Northwind")
     assert actions.company_rollup(store)[0]["word"] == "placed"
-    assert "<th>Placed</th>" in local_client(store).get("/jobs").text
     store.add_job("Backend", company="Northwind")
-    assert "0 of 2 hired." in actions.status_digest(store, "Northwind")
+    assert "2 open jobs, 0 in process, 0 of 2 openings filled." in actions.status_digest(store, "Northwind")
 
 
 # -------------------------------------------------------- 13. dry run

@@ -18,6 +18,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +102,8 @@ FIELD_LIMITS = {
     "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
     "tags": 3000,  # all skills joined into one text
 }
+# Longest timeline entry (a note, a call summary, an email summary) one log call takes.
+NOTE_LIMIT = 20000
 # Where the next new candidate and job id must start, so a deleted id is never handed out again
 # (an old AI chat that says "candidate 3" must not reach someone new). Kept in the settings table.
 ID_MARKS = {"candidates": "last_candidate_id", "jobs": "last_job_id"}
@@ -221,6 +224,28 @@ def _migrate_v4_data(conn: sqlite3.Connection) -> None:
                 conn.execute("UPDATE job_stages SET outcome = 'lost' WHERE id = ?", (sid,))
             elif outcome == "open":
                 break
+
+
+def _migrate_v6_data(conn: sqlite3.Connection) -> None:
+    # The AI app's profile edits and stage moves made before v6 join the new AI action log, so
+    # Changes and "Undo all AI changes" still cover them.
+    for tid, cid, jid, kind, created, raw in conn.execute(
+            "SELECT id, candidate_id, job_id, kind, created_at, data FROM timeline"
+            " WHERE source = 'AI app' AND data IS NOT NULL AND kind IN ('change', 'stage') ORDER BY id").fetchall():
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("by") != "ai":
+            continue
+        if kind == "change" and data.get("old"):
+            what, job_id = "profile", None
+        elif kind == "stage" and isinstance(data.get("pipeline"), dict):
+            what, job_id = ("stage_move" if data["pipeline"].get("old") else "pipeline_add"), jid
+        else:
+            continue
+        conn.execute("INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, at, undone_at)"
+                     " VALUES (?, ?, ?, ?, ?, ?)", (what, cid, job_id, tid, created, data.get("undone_at")))
 
 
 _MIGRATIONS: tuple[Any, ...] = (
@@ -415,7 +440,39 @@ _MIGRATIONS: tuple[Any, ...] = (
         """ + _fts_triggers() + _words_index(),
         _migrate_v5_data,
     ),
+    # v6: a log of every write the AI app makes, with what it replaced, so the recruiter can review
+    # and undo it from Changes. Rows go with the person or job they are about (nothing lingers after
+    # a delete). target_id is the timeline entry or to-do the action made or changed. jobs.status_by says
+    # who set a job's current status ("ai" for "Closed by your AI app").
+    (
+        """
+        CREATE TABLE ai_actions (
+            id           INTEGER PRIMARY KEY,
+            kind         TEXT NOT NULL,
+            candidate_id INTEGER REFERENCES candidates(id) ON DELETE CASCADE,
+            job_id       INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+            target_id    INTEGER,
+            body         TEXT,
+            old_data     TEXT,
+            new_data     TEXT,
+            at           TEXT NOT NULL,
+            undone_at    TEXT,
+            undo_note    TEXT
+        );
+        CREATE INDEX ai_actions_at_idx ON ai_actions(at);
+        CREATE INDEX ai_actions_target_idx ON ai_actions(kind, target_id);
+        ALTER TABLE jobs ADD COLUMN status_by TEXT;
+        """,
+        _migrate_v6_data,
+    ),
 )
+# Kinds of AI action and how each is listed on Changes.
+AI_ACTION_KINDS = {
+    "candidate": "Added a person", "profile": "Edited a profile", "pipeline_add": "Added to a pipeline",
+    "stage_move": "Moved a stage", "job_created": "Created a job", "job_edit": "Edited a job",
+    "stages_edit": "Edited a job's stages", "todo_added": "Added a to-do", "todo_done": "Marked a to-do done",
+}
+AI_SOURCE = "AI app"
 
 
 def now_iso() -> str:
@@ -430,12 +487,16 @@ _TIME = r"(?:[ T,]+(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\
 _DATE_FORMS = (
     # 11/5/2026, 11/5/26, 5.11.2026 (day first only when the first number can't be a month)
     re.compile(r"(?P<a>\d{1,2})[/.-](?P<b>\d{1,2})[/.-](?P<y>\d{4}|\d{2})" + _TIME + r"$", re.I),
-    # 2026/11/05
-    re.compile(r"(?P<y>\d{4})[/.](?P<m>\d{1,2})[/.](?P<d>\d{1,2})" + _TIME + r"$", re.I),
+    # 2026/11/05, and 2026-11-05 1:00 PM (an ISO day with a 12-hour time)
+    re.compile(r"(?P<y>\d{4})[/.-](?P<m>\d{1,2})[/.-](?P<d>\d{1,2})" + _TIME + r"$", re.I),
     # Mar 3, 2026 / March 3rd 2026
     re.compile(r"(?P<mon>[a-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
     # 3 Mar 2026 / 3 March, 2026
     re.compile(r"(?P<d>\d{1,2})(?:st|nd|rd|th)?\s+(?P<mon>[a-z]{3,9})\.?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
+    # No year: Dec 15, 15 Dec, 12/15 (the next one coming)
+    re.compile(r"(?P<mon>[a-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?(?P<y>)" + _TIME + r"$", re.I),
+    re.compile(r"(?P<d>\d{1,2})(?:st|nd|rd|th)?\s+(?P<mon>[a-z]{3,9})\.?(?P<y>)" + _TIME + r"$", re.I),
+    re.compile(r"(?P<a>\d{1,2})/(?P<b>\d{1,2})(?P<y>)" + _TIME + r"$", re.I),
 )
 
 
@@ -453,7 +514,7 @@ def _parse_loose(s: str) -> datetime | None:
         if not m:
             continue
         g = m.groupdict()
-        year = int(g["y"])
+        year = int(g["y"] or datetime.now().year)
         if year < 100:
             year += 2000 if year < 70 else 1900
         if g.get("mon"):
@@ -473,7 +534,10 @@ def _parse_loose(s: str) -> datetime | None:
                 return None
             hour = hour % 12 + (12 if g["ap"].lower().startswith("p") else 0)
         try:
-            return datetime(year, month, day, hour, minute, sec)
+            out = datetime(year, month, day, hour, minute, sec)
+            if not g["y"] and out.date() < datetime.now().date():  # no year: the next one coming
+                out = out.replace(year=year + 1)
+            return out
         except ValueError:
             return None
     return None
@@ -498,8 +562,8 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
         except ValueError:
             loose = _parse_loose(s)
             if loose is None:
-                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-05, 11/5/2026 "
-                                 "or Nov 5, 2026.") from None
+                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-09, "
+                                 "2026-11-09 1:00 PM or Nov 9, 2026.") from None
             dt = loose
     if dt.tzinfo is None:
         dt = dt.astimezone()  # local time
@@ -543,9 +607,46 @@ def _compatible(x: str, y: str) -> bool:
     return x.startswith(y) or y.startswith(x)
 
 
+# Common English nicknames and the first names they stand for. Used only for first names, and only
+# when the last names match too ("Mike Okonkwo" is "Michael Okonkwo", "Mike" alone is not).
+_NICKNAMES = {
+    "michael": "mike mick mickey", "robert": "bob bobby rob robbie bert", "elizabeth": "liz lizzie beth betsy eliza",
+    "william": "bill billy will willy liam", "james": "jim jimmy jamie", "richard": "rick ricky dick rich",
+    "thomas": "tom tommy", "joseph": "joe joey", "charles": "charlie chuck chas", "edward": "ed eddie ted ned",
+    "anthony": "tony", "christopher": "chris kit", "katherine": "kate katie kathy kat", "catherine": "cathy kate",
+    "margaret": "maggie meg peggy", "jennifer": "jen jenny", "rebecca": "becky becca", "patricia": "pat patty trish",
+    "alexander": "alex xander sasha", "alexandra": "alex sasha lexi", "benjamin": "ben benny", "daniel": "dan danny",
+    "matthew": "matt", "nicholas": "nick nicky", "samuel": "sam sammy", "steven": "steve", "stephen": "steve",
+    "jonathan": "jon jonny", "andrew": "andy drew", "gregory": "greg", "timothy": "tim timmy",
+    "kenneth": "ken kenny", "lawrence": "larry", "peter": "pete", "raymond": "ray", "ronald": "ron ronnie",
+    "donald": "don donny", "gerald": "gerry jerry", "frederick": "fred freddie", "francis": "frank",
+    "deborah": "deb debbie", "susan": "sue susie", "victoria": "vicky tori", "abigail": "abby",
+    "barbara": "barb", "dorothy": "dot dottie", "theodore": "ted teddy theo", "zachary": "zach zack",
+    "joshua": "josh", "nathaniel": "nate nat", "nathan": "nate", "jacob": "jake", "harold": "harry hal",
+    "henry": "hank harry", "john": "jack johnny", "leonard": "leo len lenny", "philip": "phil",
+    "phillip": "phil", "vincent": "vince vinny", "walter": "walt wally", "kimberly": "kim", "pamela": "pam",
+    "cynthia": "cindy", "jessica": "jess jessie", "samantha": "sam sammy", "allison": "allie ally",
+    "madeline": "maddie maddy", "eleanor": "ellie nell", "judith": "judy", "sandra": "sandy",
+}
+_NICK_GROUPS: dict[str, set[str]] = {}
+for _formal, _nicks in _NICKNAMES.items():
+    for _n in (_formal, *_nicks.split()):
+        _NICK_GROUPS.setdefault(_n, set()).add(_formal)
+
+
+def same_first_name(x: str, y: str) -> bool:
+    """'mike' and 'michael', 'liz' and 'elizabeth': a common nickname of the same first name."""
+    if x == y:
+        return True
+    gx, gy = _NICK_GROUPS.get(x), _NICK_GROUPS.get(y)
+    return bool(gx and gy and gx & gy)
+
+
 def _names_line_up(ta: list[str], tb: list[str]) -> bool:
     if not _compatible(ta[0], tb[0]):
-        return False
+        # A nickname counts only when both have a last name, which then has to match.
+        if len(ta) == 1 or len(tb) == 1 or not same_first_name(ta[0], tb[0]):
+            return False
     if len(ta) == 1 or len(tb) == 1:  # only a first name on one side
         return True
     # Both have a last name: it must be compatible, or appear among the other's later names
@@ -555,7 +656,8 @@ def _names_line_up(ta: list[str], tb: list[str]) -> bool:
 
 def same_person_name(a: str | None, b: str | None) -> bool:
     """Could these two names be the same person? 'Priya R.' and 'Priya Raman', 'P. Raman' and
-    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman' can; 'Ana Ruiz' and
+    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman', 'Mike Okonkwo' and
+    'Michael Okonkwo' (a common nickname, with the same last name) can; 'Ana Ruiz' and
     'Ben Cole' can't, and neither can 'Maya Smith' and 'Maya Okafor' (same first name, different last)."""
     ta, tb = _name_tokens(a), _name_tokens(b)
     if not ta or not tb or ta == tb or sorted(ta) == sorted(tb):
@@ -650,6 +752,25 @@ def split_tags(value: str | Iterable[str] | None) -> list[str]:
     return out
 
 
+def join_tags(tags: list[str]) -> str | None:
+    """Skills as the candidates.tags text: 'Python, Go'. When a skill has a comma in it (given as a list
+    item, like 'B2B, enterprise sales'), the text uses ';' between skills instead, and ends with ';' when
+    there's only one, so stored_tags reads it back the same."""
+    if not tags:
+        return None
+    if not any("," in t for t in tags):
+        return ", ".join(tags)
+    tags = [t.replace(";", ",") for t in tags]
+    return "; ".join(tags) + (";" if len(tags) == 1 else "")
+
+
+def stored_tags(text: str | None) -> list[str]:
+    """The skills list back from the candidates.tags text (see join_tags)."""
+    if text and ";" in text:
+        return split_tags([p for p in text.split(";")])
+    return split_tags(text)
+
+
 def normalize_linkedin(url: str | None) -> str | None:
     """Canonical form so the same profile pasted two ways dedupes."""
     url = _clean(url)
@@ -716,6 +837,7 @@ class _Term:
     form: str  # one word, or an alias phrase like "san francisco"
     prefix: bool  # the last word while typing: "pyth" finds "Python"
     expansions: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()  # the same first name in the name column: "mike" also finds Michael
 
     @property
     def forms(self) -> tuple[str, ...]:
@@ -723,8 +845,9 @@ class _Term:
 
     def fts(self) -> str:
         term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
-        if self.expansions:
-            term = "(" + " OR ".join([term, *(f'"{e}"' for e in self.expansions)]) + ")"
+        alts = [*(f'"{e}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
+        if alts:
+            term = "(" + " OR ".join([term, *alts]) + ")"
         return term
 
 
@@ -742,6 +865,13 @@ def _query_terms(text: str) -> list[_Term]:
         last = i + step >= len(kept)
         terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
         i += step
+    # A nickname as the first of several words is that first name too ("mike okonkwo" finds Michael
+    # Okonkwo), but only in the name, and only with the rest of the query matching as well.
+    first = terms[0] if len(terms) > 1 else None
+    if first and not first.expansions and first.form in _NICK_GROUPS:
+        group = set().union(*(_NICK_GROUPS.get(n, set()) | {n} for n in _NICK_GROUPS[first.form]))
+        group |= {nick for formal in _NICK_GROUPS[first.form] for nick in _NICKNAMES[formal].split()}
+        terms[0] = _Term(first.form, first.prefix, (), tuple(sorted(group - {first.form})))
     return terms
 
 
@@ -889,6 +1019,71 @@ DEFAULT_SETTINGS: dict[str, str] = {
 }
 
 
+JOB_FIELD_LABELS = {"hiring_manager_email": "hiring manager email", "min_active": "active target",
+                    "target_date": "target date", "hiring_manager": "hiring manager"}
+JOB_STATUS_LABELS = {"open": "Open", "on_hold": "On hold", "closed": "Closed"}
+
+
+def _job_change_body(job: dict[str, Any], fields: dict[str, Any]) -> str:
+    """'status Open to Closed, openings 1 to 2' (long text is just named)."""
+    def shown(k: str, v: Any) -> str:
+        if v in (None, ""):
+            return "empty"
+        if k == "status":
+            return JOB_STATUS_LABELS.get(v, str(v))
+        text = re.sub(r"\s+", " ", str(v)).strip()
+        return text if len(text) <= 40 else text[:37].rstrip() + "..."
+
+    parts = []
+    for k, v in fields.items():
+        label = JOB_FIELD_LABELS.get(k, k)
+        parts.append(f"{label} changed" if k == "description" else f"{label} {shown(k, job.get(k))} to {shown(k, v)}")
+    return ", ".join(parts)
+
+
+_OUTCOME_WORDS = {"open": "in play", "hired": "a hire", "lost": "out"}
+
+
+def _stages_change_body(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> str:
+    """'renamed Offer to Offer out, added Take-home, Parked now counts as out, new order'; '' if nothing changed."""
+    prior = {s["id"]: s for s in before}
+    parts = [f"renamed {prior[s['id']]['name']} to {s['name']}" for s in after
+             if s["id"] in prior and s["name"] != prior[s["id"]]["name"]]
+    parts += [f"added {s['name']}" for s in after if s["id"] not in prior]
+    parts += [f"{s['name']} now counts as {_OUTCOME_WORDS.get(s['outcome'], s['outcome'])}" for s in after
+              if s["id"] in prior and s["outcome"] != prior[s["id"]]["outcome"]]
+    if [s["id"] for s in after if s["id"] in prior] != [s["id"] for s in before if s["id"] in {a["id"] for a in after}]:
+        parts.append("new order")
+    return ", ".join(parts)
+
+
+def _ai_summary(r: dict[str, Any]) -> str:
+    """One plain line for an AI action on Changes and in the undo notice."""
+    name = r.get("candidate_name") or "someone"
+    job = (r.get("job_title") or "a job") + (f" ({r['job_company']})" if r.get("job_company") else "")
+    old, new = r.get("old_data") or {}, r.get("new_data") or {}
+    kind = r["kind"]
+    if kind == "candidate":
+        return f"Added {name}"
+    if kind == "profile":
+        return f"Edited {name}'s profile"
+    if kind == "pipeline_add":
+        return f"Added {name} to {job} in {new.get('stage')}"
+    if kind == "stage_move":
+        return f"Moved {name} from {old.get('stage')} to {new.get('stage')} in {job}"
+    if kind == "job_created":
+        return f"Created the job {job}"
+    if kind == "job_edit":
+        return f"Changed {job}: {r.get('body') or 'details'}"
+    if kind == "stages_edit":
+        return f"Changed the stages of {job}: {r.get('body') or 'stages'}"
+    if kind == "todo_added":
+        return f"Added a to-do: {r.get('todo_text') or 'a to-do'}"
+    if kind == "todo_done":
+        return f"Marked a to-do done: {r.get('todo_text') or 'a to-do'}"
+    return AI_ACTION_KINDS.get(kind, "A change")
+
+
 class Store:
     """Thread-safe wrapper around one SQLite connection."""
 
@@ -897,6 +1092,11 @@ class Store:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._depth = 0  # > 0 inside _write(): nested writes join the outer transaction
+        self._open()
+
+    def _open(self) -> None:
+        """Connect to the database file and bring its schema up to date."""
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -927,6 +1127,25 @@ class Store:
                 except Exception:
                     self._conn.rollback()
                     raise
+
+    @contextmanager
+    def _write(self):
+        """One transaction. Writes made inside another _write() join it, so a batch (edit_job_stages)
+        commits all of its steps or none."""
+        with self._lock:
+            if self._depth:
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            self._depth = 1
+            try:
+                with self._conn:
+                    yield
+            finally:
+                self._depth = 0
 
     @property
     def schema_version(self) -> int:
@@ -979,6 +1198,34 @@ class Store:
             finally:
                 target.close()
 
+    def restore_from(self, source: str | Path) -> None:
+        """Put a backup's data in place of this database's. The file itself stays where it is (so its
+        owner-only permissions and other open connections, like the AI app's, keep working): SQLite
+        copies the backup into it in one step, then the connection is reopened to update an older
+        schema and the write-ahead log is emptied. Ids used since the backup are never handed out again."""
+        if self.path == ":memory:":
+            raise ValueError("There's no database file to restore into.")
+        uri = Path(source).resolve().as_uri() + "?immutable=1"
+        with self._lock:
+            marks = dict(self._conn.execute("SELECT key, value FROM settings WHERE key IN (?, ?)",
+                                            tuple(ID_MARKS.values())).fetchall())
+            tops = {t: self._conn.execute(f"SELECT coalesce(max(id), 0) FROM {t}").fetchone()[0] for t in ID_MARKS}
+            src = sqlite3.connect(uri, uri=True)
+            try:
+                src.backup(self._conn)
+            finally:
+                src.close()
+            self._conn.close()
+            self._open()
+            with self._conn:
+                for table, key in ID_MARKS.items():
+                    mark = str(marks.get(key) or "0")
+                    keep = max(int(mark) if mark.isdigit() else 0, int(tops[table]))
+                    self._conn.execute(
+                        "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value ="
+                        " CAST(max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)", (key, str(keep)))
+        self.checkpoint()
+
     def _next_id(self, table: str) -> int:
         """A fresh id for a new candidate or job, above every id ever used (deleted ones too).
 
@@ -1016,7 +1263,7 @@ class Store:
     @staticmethod
     def _hydrate(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is not None:
-            row["tags"] = split_tags(row.get("tags"))
+            row["tags"] = stored_tags(row.get("tags"))
             row.pop("history_text", None)
         return row
 
@@ -1026,7 +1273,7 @@ class Store:
             raise ValueError(f"Unknown candidate field(s): {', '.join(sorted(unknown))}")
         out = {k: _clean(v) for k, v in data.items()}
         if "tags" in out:
-            out["tags"] = ", ".join(split_tags(out["tags"])) or None
+            out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
         for k, v in out.items():
@@ -1051,8 +1298,8 @@ class Store:
         return row[0] if row else tag
 
     def _sync_tags(self, candidate_id: int, tags_text: str | None) -> None:
-        tags = [self._canonical_tag(t, candidate_id) for t in split_tags(tags_text)]
-        text = ", ".join(tags) or None
+        tags = [self._canonical_tag(t, candidate_id) for t in stored_tags(tags_text)]
+        text = join_tags(tags)
         if text != tags_text:  # keep the search copy in the same spelling
             self._conn.execute("UPDATE candidates SET tags = ? WHERE id = ?", (text, candidate_id))
         self._conn.execute("DELETE FROM candidate_tags WHERE candidate_id = ?", (candidate_id,))
@@ -1061,7 +1308,9 @@ class Store:
             [(candidate_id, t) for t in tags],
         )
 
-    def add_candidate(self, work_history: list[dict[str, Any]] | None = None, **data: Any) -> dict[str, Any]:
+    def add_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
+                      **data: Any) -> dict[str, Any]:
+        """by="ai" also logs the add, so the recruiter can take the person out again from Changes."""
         fields = self._prepare(data)
         if not fields.get("name"):
             raise ValueError("A candidate needs a name.")
@@ -1080,6 +1329,8 @@ class Store:
             self._sync_tags(new_id, fields.get("tags"))
             if work_history:
                 self._write_history(new_id, work_history)
+            if by == "ai":
+                self._log_ai("candidate", candidate_id=new_id)
         return self.get_candidate(new_id)
 
     def find_duplicate(self, email: str | None = None, linkedin_url: str | None = None) -> dict[str, Any] | None:
@@ -1111,12 +1362,23 @@ class Store:
             return [self._hydrate(r) for r in self._rows(
                 "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC",
                 (_clean(name) or "",))]
-        return [self._hydrate(r) for r in self._rows(
-            "SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))]
+        rows = self._rows("SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))
+        tokens = key.split()
+        if len(tokens) > 1 and tokens[0] in _NICK_GROUPS:
+            # 'Mike Okonkwo' also finds 'Michael Okonkwo': same last names, a nickname of the same first name.
+            seen = {r["id"] for r in rows}
+            for r in self._rows("SELECT * FROM candidates WHERE fold_name(name) LIKE ? ORDER BY updated_at DESC",
+                                ("% " + " ".join(tokens[1:]),)):
+                other = _name_tokens(r["name"])
+                if (r["id"] not in seen and other[1:] == tokens[1:] and other[0] != tokens[0]
+                        and same_first_name(other[0], tokens[0])):
+                    rows.append(r)
+        return [self._hydrate(r) for r in rows]
 
     def possible_duplicates(self, candidate_id: int) -> list[dict[str, Any]]:
-        """Other people who may be this same person: the same name (ignoring case and accents),
-        or the same email, LinkedIn URL or phone number."""
+        """Other people who may be this same person: the same name (ignoring case and accents), the
+        same email, LinkedIn URL or phone number, or a name that could be theirs ('Mike Okonkwo' and
+        'Michael Okonkwo', 'Priya R.' and 'Priya Raman') at the same current company."""
         c = self.get_candidate(candidate_id)
         key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
         rows = self._rows(
@@ -1128,6 +1390,13 @@ class Store:
                ORDER BY updated_at DESC LIMIT 10""",
             (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
              phone, phone))
+        if _clean(c.get("current_company")) and len(rows) < 10:
+            seen = {r["id"] for r in rows}
+            rows += [r for r in self._rows(
+                "SELECT * FROM candidates WHERE id <> ? AND lower(trim(current_company)) = lower(trim(?))"
+                " ORDER BY updated_at DESC LIMIT 200", (candidate_id, c["current_company"]))
+                if r["id"] not in seen and len(_name_tokens(r["name"])) > 1 and len(_name_tokens(c["name"])) > 1
+                and same_person_name(r["name"], c["name"])][:10 - len(rows)]
         return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
@@ -1147,7 +1416,7 @@ class Store:
         """
         existing = self.find_duplicate(data.get("email"), data.get("linkedin_url"))
         if existing is None:
-            return self.add_candidate(work_history=work_history, **data), True
+            return self.add_candidate(work_history=work_history, by=by, **data), True
         incoming_name = _clean(data.get("name"))
         if incoming_name and not same_person_name(existing["name"], incoming_name):
             email = _clean(data.get("email"))
@@ -1163,7 +1432,7 @@ class Store:
                 continue
             cur = row.get(k)
             if k == "tags":
-                merged[k] = ", ".join(split_tags(split_tags(cur) + split_tags(v)))
+                merged[k] = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
             elif k in MERGE_OVERWRITES:
                 merged[k] = v
             elif k == "last_contacted_at":
@@ -1271,14 +1540,19 @@ class Store:
             self._write_history(candidate_id, new["work_history"] or [])
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
-                       body: str) -> int:
+                       body: str, undo_of: int | None = None) -> int:
         by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
-        return self._conn.execute(
+        data: dict[str, Any] = {"by": by, "old": old, "new": new}
+        if undo_of:
+            data["undo_of"] = undo_of
+        tid = self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
-             json.dumps({"by": by, "old": old, "new": new})),
+            (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by], json.dumps(data)),
         ).lastrowid
+        if by == "ai":
+            self._log_ai("profile", candidate_id=candidate_id, target_id=tid)
+        return tid
 
     def undo_change(self, timeline_id: int, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
         """Put back the old values from a "change" timeline entry, and log that as a change too.
@@ -1327,7 +1601,8 @@ class Store:
             if skipped:
                 data["undo_skipped"] = skipped
             self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), timeline_id))
-            self._record_change(cid, before, restore, by, "Undid a change to " + _labels(restore))
+            self._record_change(cid, before, restore, by, "Undid a change to " + _labels(restore), undo_of=timeline_id)
+            self._ai_undone(timeline_id, ("profile",))
         cand = self.get_candidate(cid)
         cand["_restored"], cand["_skipped"] = list(restore), skipped
         return cand
@@ -1343,6 +1618,13 @@ class Store:
             data = {"by": "ai", "pipeline": {"job_id": job_id, "old": old_stage, "new": entry["body"]}}
             self._conn.execute("UPDATE timeline SET source = ?, data = ? WHERE id = ?",
                                (CHANGE_SOURCES["ai"], json.dumps(data), entry["id"]))
+            self._log_stage(entry["id"], candidate_id, job_id, old_stage, entry["body"])
+
+    def _log_stage(self, timeline_id: int, candidate_id: int, job_id: int, old: str | None, new: str) -> None:
+        if not self._row("SELECT 1 FROM ai_actions WHERE target_id = ? AND kind IN ('pipeline_add', 'stage_move')",
+                         (timeline_id,)):
+            self._log_ai("stage_move" if old else "pipeline_add", candidate_id=candidate_id, job_id=job_id,
+                         target_id=timeline_id, old={"stage": old}, new={"stage": new})
 
     def _undo_stage(self, entry: dict[str, Any], data: dict[str, Any], by: str) -> dict[str, Any]:
         """Undo an AI stage move or pipeline add (see mark_ai_stage). Call inside a transaction."""
@@ -1355,16 +1637,216 @@ class Store:
             self._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
                                (move["old"], ts, app["id"]))
             self._conn.execute(
-                "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
-                " VALUES (?, ?, 'stage', ?, ?, ?, ?)", (cid, move["job_id"], move["old"], ts, ts,
-                                                        CHANGE_SOURCES.get(by, "App")))
+                "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
+                " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)",
+                (cid, move["job_id"], move["old"], ts, ts, CHANGE_SOURCES.get(by, "App"),
+                 json.dumps({"by": by, "undo_of": entry["id"]})))
         else:
             self._conn.execute("DELETE FROM applications WHERE id = ?", (app["id"],))
         data["undone_at"] = ts
         self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
+        self._ai_undone(entry["id"], ("pipeline_add", "stage_move"))
         cand = self.get_candidate(cid)
         cand["_restored"], cand["_skipped"] = ["job stage" if move.get("old") else "job pipeline"], []
         return cand
+
+    # ---------------------------------------------------------- AI action log
+    def _log_ai(self, kind: str, *, candidate_id: int | None = None, job_id: int | None = None,
+                target_id: int | None = None, body: str | None = None, old: Any = None, new: Any = None) -> int:
+        """Record one write the AI app made, with what it replaced. Call inside a transaction."""
+        return self._conn.execute(
+            "INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, body, old_data, new_data, at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, candidate_id, job_id, target_id, body, None if old is None else json.dumps(old),
+             None if new is None else json.dumps(new), now_iso())).lastrowid
+
+    def _ai_undone(self, target_id: int, kinds: tuple[str, ...], note: str | None = None) -> None:
+        """Mark the AI action behind a timeline entry as undone (it was undone from the timeline). In a transaction."""
+        self._conn.execute(
+            f"UPDATE ai_actions SET undone_at = coalesce(undone_at, ?), undo_note = coalesce(undo_note, ?)"
+            f" WHERE target_id = ? AND kind IN ({', '.join('?' * len(kinds))})", (now_iso(), note, target_id, *kinds))
+
+    def ai_actions(self, since: str | None = None, limit: int = 300,
+                   action_id: int | None = None) -> list[dict[str, Any]]:
+        """What the AI app wrote, newest first, each with a plain `summary` and `undoable`."""
+        rows = self._rows(
+            """SELECT a.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company,
+                      j.status AS job_status, t.data AS change_data, s.text AS todo_text
+               FROM ai_actions a
+               LEFT JOIN candidates c ON c.id = a.candidate_id LEFT JOIN jobs j ON j.id = a.job_id
+               LEFT JOIN timeline t ON t.id = a.target_id AND a.kind = 'profile'
+               LEFT JOIN suggestions s ON s.id = a.target_id AND a.kind IN ('todo_added', 'todo_done')
+               WHERE a.at >= ? AND (? IS NULL OR a.id = ?) ORDER BY a.id DESC LIMIT ?""",
+            (since or "", action_id, action_id, limit))
+        for r in rows:
+            for k in ("old_data", "new_data", "change_data"):
+                try:
+                    r[k] = json.loads(r[k]) if r.get(k) else None
+                except ValueError:
+                    r[k] = None
+            r["summary"] = _ai_summary(r)
+            r["undoable"] = not r["undone_at"]
+        return rows
+
+    def ai_action(self, action_id: int) -> dict[str, Any]:
+        rows = self.ai_actions(action_id=action_id)
+        if not rows:
+            raise NotFound("That change is gone. Reload the page.")
+        return rows[0]
+
+    def ai_status_change(self, job_id: int) -> dict[str, Any] | None:
+        """The AI app's latest change to this job's status, while the job still has that status
+        and nobody else has set it since ({"status": "closed", "at": ...}), for "Closed by your AI app on Nov 5"."""
+        job = self._row("SELECT status, status_by FROM jobs WHERE id = ?", (job_id,))
+        if not job or job["status_by"] != "ai":
+            return None
+        for r in self._rows("SELECT new_data, at, undone_at FROM ai_actions WHERE job_id = ? AND kind = 'job_edit'"
+                            " ORDER BY id DESC", (job_id,)):
+            status = (json.loads(r["new_data"] or "{}") or {}).get("status")
+            if status:
+                return {"status": status, "at": r["at"]} if not r["undone_at"] and status == job["status"] else None
+        return None
+
+    def undo_ai_action(self, action_id: int, *, by: str = "app",
+                       before_delete: Callable[[], Any] | None = None) -> str:
+        """Undo one thing the AI app did and say what, as "Moved Lee Chen from Screening to Sourced in Backend".
+        Raises ValueError with the reason when it can't be undone (it was changed again since, or the
+        recruiter has worked on that person or job since), and nothing changes.
+
+        Undoing a person or job the AI added deletes it, so `before_delete` (the app's backup) runs first;
+        if it raises ValueError, nothing is deleted."""
+        a = self.ai_action(action_id)
+        if a["undone_at"]:
+            raise ValueError("That change was already undone.")
+        kind, what = a["kind"], a["summary"]
+        if kind in ("profile", "pipeline_add", "stage_move"):
+            entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
+            if entry is None:
+                raise ValueError("That entry is gone from the timeline.")
+            if (json.loads(entry["data"] or "{}") or {}).get("undone_at"):
+                with self._write():
+                    self._ai_undone(a["target_id"], (kind,))
+                raise ValueError("That change was already undone.")
+            cand = self.undo_change(a["target_id"], by=by)
+            if cand.get("_skipped"):
+                what += " (couldn't put back the " + " or the ".join(cand["_skipped"]) + ")"
+            return what
+        if kind == "candidate":
+            reason = self._candidate_touched(a["candidate_id"])
+            if reason:
+                raise ValueError(reason)
+            if before_delete:
+                before_delete()
+            self.delete_candidate(a["candidate_id"])  # its log rows go with it
+            return what
+        if kind == "job_created":
+            reason = self._job_touched(a["job_id"], a["new_data"])
+            if reason:
+                raise ValueError(reason)
+            if before_delete:
+                before_delete()
+            self.delete_job(a["job_id"])
+            return what
+        old, new = a["old_data"] or {}, a["new_data"] or {}
+        with self._write():
+            note = None
+            if kind == "job_edit":
+                note = self._undo_job_edit(a["job_id"], old, new)
+            elif kind == "stages_edit":
+                self._undo_stages_edit(a["job_id"], old, new)
+            elif kind == "todo_added":
+                s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
+                if s is None or s["done_at"]:
+                    raise ValueError("That to-do is already done.")
+                self._conn.execute("DELETE FROM suggestions WHERE id = ?", (a["target_id"],))
+            elif kind == "todo_done":
+                s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
+                if s is None or s["done_at"] != new.get("done_at"):
+                    raise ValueError("That to-do was changed again since.")
+                self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
+            else:
+                raise ValueError("That change can't be undone here.")
+            self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
+                               (now_iso(), note, action_id))
+        return what + (f" ({note})" if note else "")
+
+    def _candidate_touched(self, candidate_id: int) -> str | None:
+        """Why an AI-added person can't simply be taken out again: someone else has worked on them since."""
+        if self._row("SELECT 1 FROM applications WHERE candidate_id = ?", (candidate_id,)):
+            return "They are in a job's pipeline. Undo that first, or remove them in the app."
+        if self._row(
+                """SELECT 1 FROM timeline WHERE candidate_id = ?
+                     AND (coalesce(source, '') <> ? OR coalesce(json_extract(data, '$.updated_by'), ?) <> ?)
+                     AND json_extract(coalesce(data, '{}'), '$.undo_of') IS NULL LIMIT 1""",
+                (candidate_id, AI_SOURCE, AI_SOURCE, AI_SOURCE)):
+            return "You or an import worked on them since, so they stay."
+        if self._row("SELECT 1 FROM suggestions WHERE candidate_id = ? AND coalesce(source, '') <> ?",
+                     (candidate_id, AI_SOURCE)):
+            return "You added a to-do about them since, so they stay."
+        return None
+
+    def _job_touched(self, job_id: int, made: dict[str, Any] | None = None) -> str | None:
+        """Why an AI-created job can't simply be removed again."""
+        job = self._row("SELECT updated_at FROM jobs WHERE id = ?", (job_id,))
+        if job is None:
+            return "That job is already gone."
+        if self._row("SELECT 1 FROM applications WHERE job_id = ?", (job_id,)):
+            return "People are in its pipeline, so it stays."
+        if self._row("""SELECT 1 FROM timeline WHERE job_id = ? AND coalesce(source, '') <> ?
+                          AND json_extract(coalesce(data, '{}'), '$.undo_of') IS NULL LIMIT 1""", (job_id, AI_SOURCE)):
+            return "Activity is logged against it, so it stays."
+        if self._row("SELECT 1 FROM suggestions WHERE job_id = ? AND coalesce(source, '') <> ?", (job_id, AI_SOURCE)):
+            return "You added a to-do for it, so it stays."
+        if made and self._job_shape(job_id) != made:
+            return "It was edited since, so it stays."
+        return None
+
+    def _undo_job_edit(self, job_id: int, old: dict[str, Any], new: dict[str, Any]) -> str | None:
+        job = self._row("SELECT * FROM jobs WHERE id = ?", (job_id,)) or {}
+        fields = [k for k in new if not k.startswith("_")]
+        restore = {k: old.get(k) for k in fields if job.get(k) == new[k]}
+        if not restore:
+            raise ValueError("Those details were changed again since.")
+        skipped = [k for k in fields if k not in restore]
+        untouched = not skipped and old.get("_at") and job.get("updated_at") == new.get("_at")
+        restore["updated_at"] = old["_at"] if untouched else now_iso()
+        if "status" in restore:
+            restore["status_by"] = None
+        sets = ", ".join(f"{k} = ?" for k in restore)
+        self._conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*restore.values(), job_id))
+        return ("left " + ", ".join(k.replace("_", " ") for k in skipped) + " as you changed it") if skipped else None
+
+    def _undo_stages_edit(self, job_id: int, old: dict[str, Any], new: dict[str, Any]) -> None:
+        def shape(stages: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+            return [(s["id"], s["name"], s["outcome"]) for s in sorted(stages, key=lambda s: s["position"])]
+
+        before, after = old.get("stages") or [], new.get("stages") or []
+        if not before or shape(self.job_stages(job_id)) != shape(after):
+            raise ValueError("Its stages were changed again since.")
+        kept_ids = {s["id"] for s in before}
+        for s in after:
+            if s["id"] not in kept_ids and self._row(
+                    "SELECT 1 FROM applications WHERE job_id = ? AND lower(stage) = lower(?)", (job_id, s["name"])):
+                raise ValueError(f"Someone is in {s['name']} now, so the stages stay.")
+        now_names = {s["id"]: s["name"] for s in after}
+        for s in after:
+            if s["id"] not in kept_ids:
+                self._conn.execute("DELETE FROM job_stages WHERE id = ?", (s["id"],))
+        # Two steps, so swapped names don't collide.
+        for s in before:
+            tmp = f"~undo {s['id']}"
+            self._conn.execute("UPDATE job_stages SET name = ? WHERE id = ?", (tmp, s["id"]))
+            self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND lower(stage) = lower(?)",
+                               (tmp, job_id, now_names.get(s["id"], s["name"])))
+        for s in before:
+            tmp = f"~undo {s['id']}"
+            self._conn.execute("UPDATE job_stages SET name = ?, position = ?, outcome = ? WHERE id = ?",
+                               (s["name"], s["position"], s["outcome"], s["id"]))
+            self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND stage = ?",
+                               (s["name"], job_id, tmp))
+        job = self._row("SELECT updated_at FROM jobs WHERE id = ?", (job_id,)) or {}
+        if old.get("_at") and job.get("updated_at") == new.get("_at"):
+            self._conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (old["_at"], job_id))
 
     def delete_candidate(self, candidate_id: int) -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
@@ -1395,7 +1877,7 @@ class Store:
             for k in CANDIDATE_FIELDS:
                 kv, ov = krow.get(k), orow.get(k)
                 if k == "tags":
-                    tags = ", ".join(split_tags(split_tags(kv) + split_tags(ov))) or None
+                    tags = join_tags(split_tags(stored_tags(kv) + stored_tags(ov)))
                     if tags != kv:
                         fields[k] = tags
                 elif k == "last_contacted_at":
@@ -1525,6 +2007,9 @@ class Store:
         body = _clean(body)
         if kind == "note" and not body:
             raise ValueError("A note needs some text.")
+        if body and len(body) > NOTE_LIMIT:
+            raise ValueError(f"That {kind} is too long ({len(body):,} characters). The limit is {NOTE_LIMIT:,}, "
+                             "so nothing was saved. Shorten it or split it into a few entries.")
         self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)
@@ -1552,7 +2037,8 @@ class Store:
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._rows(
-            """SELECT t.*, j.title AS job_title FROM timeline t LEFT JOIN jobs j ON j.id = t.job_id
+            """SELECT t.*, j.title AS job_title, j.company AS job_company FROM timeline t
+               LEFT JOIN jobs j ON j.id = t.job_id
                WHERE t.candidate_id = ? ORDER BY t.at DESC, t.id DESC LIMIT ?""",
             (candidate_id, limit),
         )
@@ -1890,8 +2376,9 @@ class Store:
     # ------------------------------------------------------------------ jobs
     def add_job(self, title: str, company: str | None = None, location: str | None = None,
                 description: str | None = None, status: str = "open",
-                stages: list[str | dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
-        """extra: hiring_manager, hiring_manager_email, openings, target_date, min_active."""
+                stages: list[str | dict[str, Any]] | None = None, *, by: str = "app", **extra: Any) -> dict[str, Any]:
+        """extra: hiring_manager, hiring_manager_email, openings, target_date, min_active.
+        by="ai" logs it, so the recruiter can remove it again from Changes while nobody has used it."""
         if not _clean(title):
             raise ValueError("A job needs a title.")
         if status not in JOB_STATUSES:
@@ -1916,7 +2403,17 @@ class Store:
                 "INSERT INTO job_stages(job_id, name, position, outcome) VALUES (?, ?, ?, ?)",
                 [(job_id, n, i, o) for i, (n, o) in enumerate(plan)],
             )
+            if by == "ai":
+                self._conn.execute("UPDATE jobs SET status_by = 'ai' WHERE id = ?", (job_id,))
+                self._log_ai("job_created", job_id=job_id, new=self._job_shape(job_id))
         return self.get_job(job_id)
+
+    def _job_shape(self, job_id: int) -> dict[str, Any]:
+        """A job's details and stages, to tell later whether anyone changed it."""
+        job = self._row("SELECT * FROM jobs WHERE id = ?", (job_id,)) or {}
+        return {"job": {k: job.get(k) for k in ("title", "company", "location", "description", "status",
+                                                 *JOB_EXTRA_FIELDS)},
+                "stages": [[s["name"], s["outcome"]] for s in self.job_stages(job_id)]}
 
     def similar_open_jobs(self, title: str | None, company: str | None,
                           exclude: int | None = None) -> list[dict[str, Any]]:
@@ -1932,7 +2429,8 @@ class Store:
             raise NotFound(f"No job with id {job_id}")
         return row
 
-    def update_job(self, job_id: int, **data: Any) -> dict[str, Any]:
+    def update_job(self, job_id: int, *, by: str = "app", **data: Any) -> dict[str, Any]:
+        """Change a job's details. by="ai" logs the old values, so the change can be undone from Changes."""
         allowed = {"title", "company", "location", "description", "status", *JOB_EXTRA_FIELDS}
         unknown = set(data) - allowed
         if unknown:
@@ -1941,16 +2439,25 @@ class Store:
             data = {**data, "status": normalize_job_status(data["status"])}
         if "title" in data and not _clean(data["title"]):
             raise ValueError("A job needs a title.")
-        self.get_job(job_id)
+        job = self.get_job(job_id)
         extras = _job_extras({k: v for k, v in data.items() if k in JOB_EXTRA_FIELDS})
         if "openings" in extras and extras["openings"] is None:
             extras["openings"] = 1
         fields = {**{k: _clean(v) for k, v in data.items() if k not in JOB_EXTRA_FIELDS}, **extras}
+        if by == "ai":  # only real changes, so the log (and its undo) says what actually moved
+            fields = {k: v for k, v in fields.items() if job.get(k) != v}
         if fields:
-            fields["updated_at"] = now_iso()
-            sets = ", ".join(f"{k} = ?" for k in fields)
-            with self._lock, self._conn:
-                self._conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*fields.values(), job_id))
+            ts = now_iso()
+            if "status" in fields and fields["status"] != job["status"]:
+                fields = {**fields, "status_by": by}
+            with self._write():
+                self._conn.execute(f"UPDATE jobs SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = ?"
+                                   " WHERE id = ?", (*fields.values(), ts, job_id))
+                fields.pop("status_by", None)
+                if by == "ai":
+                    self._log_ai("job_edit", job_id=job_id, body=_job_change_body(job, fields),
+                                 old={**{k: job.get(k) for k in fields}, "_at": job["updated_at"]},
+                                 new={**fields, "_at": ts})
         return self.get_job(job_id)
 
     def delete_job(self, job_id: int) -> None:
@@ -2038,7 +2545,7 @@ class Store:
             # a new closing stage goes at the end.
             closing = [s["position"] for s in stages if s["outcome"] != "open"]
             pos = min(closing) if closing and outcome == "open" else len(stages)
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("UPDATE job_stages SET position = position + 1 WHERE job_id = ? AND position >= ?",
                                (job_id, pos))
             self._conn.execute("INSERT INTO job_stages(job_id, name, position, outcome) VALUES (?, ?, ?, ?)",
@@ -2064,13 +2571,24 @@ class Store:
                     f"Say what {new} should count as (open, hired or lost; in the app, change Counts as first), "
                     "or pick another name.")
             outcome = implied  # the last working stage can become a closing one, as its new name says
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("UPDATE job_stages SET name = ?, outcome = ? WHERE id = ?",
                                (new, outcome or stage["outcome"], stage["id"]))
             self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND lower(stage) = lower(?)",
                                (new, job_id, stage["name"]))
+            self._follow_stage_rename(job_id, stage["name"], new)
         self._touch_job(job_id)
         return self.job_stages(job_id)
+
+    def _follow_stage_rename(self, job_id: int, old: str, new: str) -> None:
+        """Timeline stage entries name the stage as it's called now, so after 'Interviewing' becomes
+        'Onsite' the timeline (and an undo of a move) says Onsite. Call inside a transaction."""
+        self._conn.execute("UPDATE timeline SET body = ? WHERE job_id = ? AND kind = 'stage' AND lower(body) = lower(?)",
+                           (new, job_id, old))
+        for key in ("old", "new"):
+            self._conn.execute(
+                f"UPDATE timeline SET data = json_set(data, '$.pipeline.{key}', ?) WHERE job_id = ? AND kind = 'stage'"
+                f" AND json_valid(data) AND lower(json_extract(data, '$.pipeline.{key}')) = lower(?)", (new, job_id, old))
 
     def reorder_stages(self, job_id: int, names: list[str]) -> list[dict[str, Any]]:
         stages = self.job_stages(job_id)
@@ -2078,7 +2596,7 @@ class Store:
         if len(set(wanted)) != len(wanted):
             raise ValueError("Each stage can only appear once.")
         rest = [s["id"] for s in stages if s["id"] not in wanted]
-        with self._lock, self._conn:
+        with self._write():
             for pos, sid in enumerate(wanted + rest):
                 self._conn.execute("UPDATE job_stages SET position = ? WHERE id = ?", (pos, sid))
         self._touch_job(job_id)
@@ -2089,9 +2607,83 @@ class Store:
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         stage = self.resolve_stage(job_id, name)
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("UPDATE job_stages SET outcome = ? WHERE id = ?", (outcome, stage["id"]))
         return self.job_stages(job_id)
+
+    def edit_job_stages(self, job_id: int, *, rename: dict[str, Any] | None = None,
+                        add: list[str | dict[str, Any]] | None = None, order: list[str] | None = None,
+                        outcomes: dict[str, str] | None = None, by: str = "app") -> dict[str, Any]:
+        """Rename, add, reorder and set what stages count as, in one go: every step lands or none does.
+
+        Stages left out of `order` keep their place, and the result's "left_out" names them; "changes"
+        says what changed in plain words. With by="ai", only a stage added in the same call may get an
+        outcome (open, hired or lost); what an existing stage counts as stays put (changing it would move
+        people in or out of the running, or count someone as hired), so the recruiter does that in the app.
+        The AI's edit is logged so it can be undone from Changes."""
+        job = self.get_job(job_id)
+        left_out: list[str] = []
+        body = ""
+        with self._write():
+            before = self.job_stages(job_id)
+            for old, new in (rename or {}).items():
+                if isinstance(new, dict):
+                    self.rename_stage(job_id, old, str(new.get("name") or ""), outcome=new.get("outcome") or None)
+                else:
+                    self.rename_stage(job_id, old, str(new or ""))
+            for item in add or []:
+                if isinstance(item, dict):
+                    self.add_stage(job_id, str(item.get("name") or ""), after=item.get("after") or None,
+                                   outcome=item.get("outcome") or None)
+                    continue
+                name, after = str(item), None
+                m = re.match(r"^(.+?)\s+after\s+(.+)$", name.strip(), flags=re.I)
+                if m:
+                    try:
+                        self.resolve_stage(job_id, m.group(2))
+                        name, after = m.group(1), m.group(2)
+                    except ValueError:
+                        pass  # "after" is part of the stage's own name
+                self.add_stage(job_id, name, after=after)
+            if order:
+                left_out = self._place_stages(job_id, list(order))
+            for name, outcome in (outcomes or {}).items():
+                self.set_stage_outcome(job_id, name, outcome)
+            stages = self.job_stages(job_id)
+            body = _stages_change_body(before, stages)
+            if by == "ai":
+                self._check_ai_outcomes(job_id, before, stages)
+                if body:
+                    self._log_ai("stages_edit", job_id=job_id, body=body,
+                                 old={"stages": before, "_at": job["updated_at"]},
+                                 new={"stages": stages, "_at": self.get_job(job_id)["updated_at"]})
+        return {"stages": stages, "left_out": left_out, "changes": body}
+
+    def _place_stages(self, job_id: int, names: list[str]) -> list[str]:
+        """Put the named stages in this order, in the places they take up now; every other stage keeps
+        its place. Returns the names of the stages left out."""
+        stages = self.job_stages(job_id)
+        wanted = [self.resolve_stage(job_id, n)["id"] for n in names]
+        if len(set(wanted)) != len(wanted):
+            raise ValueError("Each stage can only appear once.")
+        ids = [s["id"] for s in stages]
+        slots = [i for i, sid in enumerate(ids) if sid in set(wanted)]
+        for slot, sid in zip(slots, wanted):
+            ids[slot] = sid
+        with self._write():
+            for pos, sid in enumerate(ids):
+                self._conn.execute("UPDATE job_stages SET position = ? WHERE id = ?", (pos, sid))
+            self._touch_job(job_id)
+        return [s["name"] for s in stages if s["id"] not in set(wanted)]
+
+    def _check_ai_outcomes(self, job_id: int, before: list[dict[str, Any]], after: list[dict[str, Any]]) -> None:
+        """The AI may say what a stage it adds in this call counts as, but never change what an existing
+        stage counts as (open to out or hired, or back): that is the recruiter's call, in the app."""
+        prior = {s["id"]: s for s in before}
+        changed = [s for s in after if s["id"] in prior and s["outcome"] != prior[s["id"]]["outcome"]]
+        if changed:
+            raise ValueError(f"No change made. Ask the recruiter to change what {prior[changed[0]['id']]['name']} "
+                             "counts as in the app.")
 
     def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""
@@ -2102,17 +2694,19 @@ class Store:
             raise ValueError(f"{stage['name']} still has {n} candidate(s). Move them first.")
         if len(self.job_stages(job_id)) <= 1:
             raise ValueError("A job needs at least one stage.")
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("DELETE FROM job_stages WHERE id = ?", (stage["id"],))
         return self.reorder_stages(job_id, [s["name"] for s in self.job_stages(job_id)])
 
     def _touch_job(self, job_id: int) -> None:
-        with self._lock, self._conn:
+        with self._write():
             self._conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (now_iso(), job_id))
 
     # -------------------------------------------------------------- pipeline
     def add_to_pipeline(self, candidate_id: int, job_id: int, stage: str | None = None,
-                        notes: str | None = None) -> dict[str, Any]:
+                        notes: str | None = None, *, by: str | None = None) -> dict[str, Any]:
+        """Put someone in a job's pipeline (a no-op if they are in it). by="ai" marks and logs the add,
+        so the recruiter can undo it."""
         self.get_candidate(candidate_id)
         self.get_job(job_id)
         s = self.resolve_stage(job_id, stage)
@@ -2130,14 +2724,21 @@ class Store:
                     (candidate_id, job_id, s["name"], _clean(notes), ts, ts),
                 )
                 app_id = cur.lastrowid
-                self._conn.execute(
-                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at) VALUES (?, ?, 'stage', ?, ?, ?)",
-                    (candidate_id, job_id, s["name"], ts, ts),
-                )
+                source = data = None
+                if by == "ai":
+                    source = CHANGE_SOURCES["ai"]
+                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": None, "new": s["name"]}})
+                tid = self._conn.execute(
+                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
+                    " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),
+                ).lastrowid
+                if by == "ai":
+                    self._log_stage(tid, candidate_id, job_id, None, s["name"])
                 if _clean(notes):
                     self._conn.execute(
-                        "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at) VALUES (?, ?, 'note', ?, ?, ?)",
-                        (candidate_id, job_id, _clean(notes), ts, ts),
+                        "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
+                        " VALUES (?, ?, 'note', ?, ?, ?, ?)",
+                        (candidate_id, job_id, _clean(notes), ts, ts, AI_SOURCE if by == "ai" else None),
                     )
         return self.get_application(app_id)
 
@@ -2162,10 +2763,12 @@ class Store:
                     source = CHANGE_SOURCES[by]
                     data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"],
                                                               "new": s["name"]}})
-                self._conn.execute(
+                tid = self._conn.execute(
                     "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
                     " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),
-                )
+                ).lastrowid
+                if by == "ai":
+                    self._log_stage(tid, candidate_id, job_id, app["stage"], s["name"])
                 if s["name"].lower() == "contacted":
                     self._conn.execute(
                         "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
@@ -2173,8 +2776,9 @@ class Store:
             if _clean(notes):
                 self._conn.execute("UPDATE applications SET notes = ? WHERE id = ?", (_clean(notes), app["id"]))
                 self._conn.execute(
-                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at) VALUES (?, ?, 'note', ?, ?, ?)",
-                    (candidate_id, job_id, _clean(notes), ts, ts),
+                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
+                    " VALUES (?, ?, 'note', ?, ?, ?, ?)",
+                    (candidate_id, job_id, _clean(notes), ts, ts, AI_SOURCE if by == "ai" else None),
                 )
         return self.get_application(app["id"])
 
@@ -2265,6 +2869,8 @@ class Store:
                     " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (candidate_id, job_id, text, now_iso(), _clean(source), due_on, _clean(note)),
                 ).lastrowid
+                if _clean(source) == AI_SOURCE:
+                    self._log_ai("todo_added", candidate_id=candidate_id, job_id=job_id, target_id=sid)
         return self._row("SELECT * FROM suggestions WHERE id = ?", (sid,))
 
     def open_suggestions(self, job_id: int | None = None) -> list[dict[str, Any]]:
@@ -2279,12 +2885,18 @@ class Store:
                WHERE s.done_at IS NULL ORDER BY s.created_at"""
         )
 
-    def complete_suggestion(self, suggestion_id: int) -> dict[str, Any]:
-        with self._lock, self._conn:
-            cur = self._conn.execute("UPDATE suggestions SET done_at = coalesce(done_at, ?) WHERE id = ?",
-                                     (now_iso(), suggestion_id))
-        if cur.rowcount == 0:
-            raise NotFound(f"No suggestion with id {suggestion_id}")
+    def complete_suggestion(self, suggestion_id: int, *, by: str = "app") -> dict[str, Any]:
+        """Mark a to-do done (it stays in the record). by="ai" logs it, so it can be undone from Changes."""
+        with self._write():
+            row = self._row("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,))
+            if row is None:
+                raise NotFound(f"No suggestion with id {suggestion_id}")
+            if not row["done_at"]:
+                ts = now_iso()
+                self._conn.execute("UPDATE suggestions SET done_at = ? WHERE id = ?", (ts, suggestion_id))
+                if by == "ai":
+                    self._log_ai("todo_done", candidate_id=row["candidate_id"], job_id=row["job_id"],
+                                 target_id=suggestion_id, new={"done_at": ts})
         return self._row("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,))
 
     # --------------------------------------------------------------- snoozes
@@ -2351,7 +2963,7 @@ def parse_day_text(value: Any) -> str | None:
     except ValueError:
         loose = _parse_loose(re.sub(r"\s+", " ", str(v)))
         if loose is None:
-            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01 or Dec 1, 2026.") from None
+            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01, Dec 1, 2026 or Dec 1.") from None
         return loose.date().isoformat()
 
 

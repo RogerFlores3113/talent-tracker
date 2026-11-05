@@ -6,8 +6,9 @@
 <div class="sec-head">
   <div>
     <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %} {{ sample_badge(job.id in sample_ids()[1]) }}</h1>
+    {% set ai_note = ai_status_note(job.id) %}{% if ai_note %}<p class="fine ai-status"><a href="/changes?who=ai">{{ ai_note }}</a></p>{% endif %}
     <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
-    <p class="fine job-facts">{{ nums.active }} in the running · {% if nums.openings > 1 %}{{ nums.hired }} of {{ nums.openings }} {{ nums.word }}{% else %}{{ nums.hired }} {{ nums.word }}{% endif %}{% if nums.out %} · {{ nums.out }} out{% endif %}
+    <p class="fine job-facts">{{ nums.active }} in the running · {{ nums.hired }} {{ nums.word }}{% if nums.openings > 1 %}, {{ nums.openings }} openings{% endif %}{% if nums.out %} · {{ nums.out }} out{% endif %}
       {%- if job.hiring_manager %} · Hiring manager: {% if job.hiring_manager_email %}<a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager }}</a>{% else %}{{ job.hiring_manager }}{% endif %}{% elif job.hiring_manager_email %} · Hiring manager: <a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager_email }}</a>{% endif %}
       {%- if job.target_date %} · Target {{ (job.target_date ~ 'T12:00:00') | local('%b %-d, %Y') }}{% endif %}</p>
   </div>
@@ -21,11 +22,21 @@
   </div>
 </div>
 
-{% if nums.filled and job.status == 'open' %}
-<div class="flash filled" role="status">
+{% if (nums.filled and job.status == 'open') or close %}
+<div class="flash filled" role="status" id="close-out">
+  {% if nums.filled and job.status == 'open' %}
   <form method="post" action="/jobs/{{ job.id }}" class="inline"><input type="hidden" name="status" value="closed">
     <strong>This role is filled. Close it?</strong> <button class="btn small primary" type="submit">Close the job</button>
     <span class="fine">The pipeline and history are kept.</span></form>
+  {% endif %}
+  {% if close %}
+  <p>{% if close.closed %}This job is closed, but {% endif %}{{ close.count }} {{ 'person is' if close.count == 1 else 'people are' }} still in play: {{ close.names }}.</p>
+  {% set cancel_ivs = ' and cancel ' ~ close.interviews ~ ' upcoming interview' ~ ('' if close.interviews == 1 else 's') if close.interviews else '' %}
+  <form method="post" action="/jobs/{{ job.id }}/close-out" class="inline" data-confirm="Move {{ close.count }} {{ 'person' if close.count == 1 else 'people' }} to {{ close.stage }} with the reason Position filled{{ cancel_ivs }}?">
+    <button class="btn small" type="submit">Move the other {{ close.count }} to {{ close.stage }} (Position filled){{ ' and cancel their upcoming interviews' if close.interviews }}</button>
+    {% if not close.closed %}<label class="inline-label"><input type="checkbox" name="close_job" value="1" checked> Also close the job</label>{% endif %}
+    <span class="fine">{% if close.interviews %}{{ close.interviews }} upcoming interview{{ '' if close.interviews == 1 else 's' }} will be cancelled. {% endif %}Status updates say "position filled" for them, not rejected. You can undo the whole close-out from Changes.</span></form>
+  {% endif %}
 </div>
 {% endif %}
 <div class="addbar">
@@ -56,8 +67,9 @@
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>
-<details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>Status update for the hiring manager</summary>
-  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
+<details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>Status update for {{ 'the hiring manager' if inhouse() else 'the client' }}</summary>
+  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages are internal: their people aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
+  {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't presented yet.</p>{% endif %}
   <form method="post" action="/jobs/{{ job.id }}/omit" class="inline omit-stages">
     <span class="fine">Leave out:</span>
     {% set omitted = omit | map('lower') | list %}

@@ -129,7 +129,7 @@ def test_import_page_survives_a_bad_row(store):
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "linkedin_url"})
     assert r.status_code == 200 and "skipped 1 row" in r.text
-    assert "ana@x.com belongs to Ana but this row says X, so it was left alone" in r.text
+    assert "the email is Ana&#39;s, id 1, and the LinkedIn is Bob&#39;s, id 2), so it was left alone" in r.text
 
 
 def test_export_then_import_keeps_phone_and_formula_text(store, tmp_path):
@@ -192,7 +192,7 @@ def test_import_result_page_mentions_backup(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name\nZed\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name"})
-    assert "Added 1" in r.text and "backed up everything" in r.text and "before-import-" in r.text
+    assert "Added 1" in r.text and "backed up before this import" in r.text and "Undo this import" in r.text
     assert "—" not in r.text
 
 

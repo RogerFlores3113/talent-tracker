@@ -7,6 +7,7 @@
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
   "use strict";
 
@@ -72,7 +73,12 @@
     if (el.matches("select[data-stage-pick]")) {
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = form.querySelector(".reason");
-      if (o && o.dataset.out && reason) { reason.hidden = false; return; }
+      if (o && o.dataset.out && reason) {
+        // Hide the reason that only repeats the stage ("Withdrew" when moving to Withdrawn).
+        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
+        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
+        reason.hidden = false; return;
+      }
       if (reason) reason.hidden = true;
     }
     form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));

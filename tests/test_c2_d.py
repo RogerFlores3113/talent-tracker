@@ -12,7 +12,7 @@ from talent.mcp_views import view_html
 from talent.sample_data import load_sample_data, sample_ids
 from talent.store import Store
 
-from conftest import local_client
+from conftest import flash_of, local_client
 from test_mcp import call, structured, text
 
 
@@ -21,7 +21,7 @@ def _at(days=2, hours=0):
 
 
 def _msg(r, key="notice"):
-    return parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
+    return flash_of(r, key)
 
 
 def _setup(store, stages=None):
@@ -134,7 +134,7 @@ def test_one_status_update_for_the_app_and_the_ai(store):
     text_ = actions.job_status_text(store, job["id"])
     lines = text_.splitlines()
     assert lines[0] == "Backend, Acme"
-    assert "2 candidates in process, none hired yet. 1 out." in lines
+    assert "1 candidate in process, none hired yet. 1 out." in lines and "Bo Li" not in text_  # Sourced is internal
     assert "Changes since last week:" in lines
     assert "- Out: Lee Park (Rejected)" in lines and any(l.startswith("- New: ") and "Ana Ruiz in Screening" in l
                                                           for l in lines)
@@ -144,7 +144,7 @@ def test_one_status_update_for_the_app_and_the_ai(store):
 
     left = actions.job_status_text(store, job["id"], omit_stages=["sourced", "rej"])
     assert "Bo Li" not in left and "Lee Park" not in left and "Ana Ruiz" in left
-    assert "1 out." in left  # counts stay
+    assert "1 candidate in process, none hired yet." in left and "out." not in left  # counts cover who's shown
     mcp_left = call(build_server(store), "job_pipeline", job_id=job["id"], omit_stages=["Sourced", "Rejected"])
     assert mcp_left.content[0].text == left
     page = local_client(store).get(f"/jobs/{job['id']}?omit=Sourced&omit=Rejected").text
@@ -170,9 +170,9 @@ def test_status_digest_on_jobs_page_and_in_mcp(store):
     store.add_to_pipeline(ana, a["id"], "Screening")
     store.add_to_pipeline(store.add_candidate(name="Bo")["id"], r["id"], "Hired")
     digest = actions.status_digest(store)
-    assert "- Acme: 2 open jobs, 1 in process, 0 of 2 hired." in digest
-    assert "- Ramp: 1 open job, 0 in process, 1 of 2 hired." in digest
-    assert "Backend, Acme" in digest and "SRE, Ramp" in digest and "1 of 2 hired" in digest
+    assert "- Acme: 2 open jobs, 1 in process, 0 of 2 openings filled." in digest
+    assert "- Ramp: 1 open job, 0 in process, 1 of 2 openings filled." in digest
+    assert "Backend, Acme" in digest and "SRE, Ramp" in digest and "1 hired, 2 openings" in digest
     only = call(build_server(store), "status_digest", company="ramp")
     assert "SRE, Ramp" in only.content[0].text and "Backend" not in only.content[0].text
     assert structured(only)["companies"][0]["company"] == "Ramp"
@@ -193,7 +193,7 @@ def test_job_fields_header_and_filled(store):
     a, b = (store.add_candidate(name=n)["id"] for n in ("Ana", "Bo"))
     store.add_to_pipeline(a, jid, "Hired")
     page = c.get(f"/jobs/{jid}").text
-    assert "1 of 2 hired" in page and "Hiring manager:" in page and "Dana Lee" in page
+    assert "1 hired, 2 openings" in page and "Hiring manager:" in page and "Dana Lee" in page
     assert "This role is filled" not in page
     assert "Hiring manager: Dana Lee" in actions.job_status_text(store, jid)
     store.add_to_pipeline(b, jid, "Hired")
@@ -230,7 +230,7 @@ def test_thin_check_uses_job_target_and_skips_offers_and_filled(store):
     store.add_to_pipeline(store.add_candidate(name="Di")["id"], filled["id"], "Hired")
     store.add_to_pipeline(store.add_candidate(name="Ed")["id"], small["id"], "Sourced")
     thin = next(i for i in actions.action_items(store)["items"] if i["kind"] == "thin")
-    assert thin["title"] == "Staff Backend Engineer (Ramp) has 2 active candidates. Aim for at least 5."
+    assert thin["title"] == "Staff Backend Engineer (Ramp) has 2 active candidates. Aim for at least 3."
 
 
 def test_migration_v4_from_v3(tmp_path, monkeypatch):
@@ -271,11 +271,13 @@ def test_exit_names_count_as_out_and_explicit_outcomes(store):
                                   {"name": "Parked", "outcome": "out"}]))
     assert job["stage_outcomes"]["Passed"] == "lost" and job["stage_outcomes"]["Parked"] == "lost"
     jid = job["id"]
-    out = structured(call(server, "edit_job_stages", job_id=jid, outcomes={"Parked": "open"},
+    out = structured(call(server, "edit_job_stages", job_id=jid,
                           add=[{"name": "Ghosted", "outcome": "lost"}],
                           rename={"Passed": {"name": "No go", "outcome": "lost"}}))
     assert out["stage_outcomes"] == {"Sourced": "open", "Intro call": "open", "Offer": "open", "Hired": "hired",
-                                     "No go": "lost", "Parked": "open", "Ghosted": "lost"}
+                                     "No go": "lost", "Parked": "lost", "Ghosted": "lost"}
+    with pytest.raises(Exception, match="change what Parked counts as"):  # existing stages: the recruiter's call
+        call(server, "edit_job_stages", job_id=jid, outcomes={"Parked": "open"})
     with pytest.raises(Exception, match="Say what Not moving forward should count as"):
         call(server, "edit_job_stages", job_id=jid, rename={"Intro call": "Not moving forward"})
     store.rename_stage(jid, "Intro call", "Not moving forward", outcome="lost")

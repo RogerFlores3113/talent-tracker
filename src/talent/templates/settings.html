@@ -37,8 +37,25 @@
 
 <section class="panel" id="backups">
   <h2>Automatic backups</h2>
-  <p>Before every import, delete, merge or sample data removal, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>
+  <p>Before every import, delete, merge, sample data removal or restore, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>
   <pre class="code">{{ backup_folder }}</pre>
+  {% if backup_list %}
+  <p class="fine">Restoring one puts all your data back to how it was then. A fresh backup of your data as it is now is saved first, so you can switch back.</p>
+  <div class="table-wrap"><table class="dense">
+    <thead><tr><th>When</th><th>Why</th><th>People</th><th>Jobs</th><th></th></tr></thead>
+    <tbody>
+    {% for b in backup_list %}
+      <tr>
+        <td>{{ b.when | local }}</td>
+        <td>{{ b.why }}</td>
+        {% if b.ok %}<td>{{ b.people }}</td><td>{{ b.jobs }}</td>
+        <td><form method="post" action="/settings/backups/restore" data-confirm="Restore the backup from {{ b.when | local }}? Your data goes back to how it was then ({{ b.people }} {{ 'person' if b.people == 1 else 'people' }}, {{ b.jobs }} job{{ '' if b.jobs == 1 else 's' }}). Your data as it is now is backed up first."><input type="hidden" name="name" value="{{ b.name }}"><button class="btn" type="submit">Restore this backup</button></form></td>
+        {% else %}<td colspan="3" class="fine">Can't be read</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
   {% if backup_count %}
   <p class="fine">There {{ 'is' if backup_count == 1 else 'are' }} {{ backup_count }} backup{{ '' if backup_count == 1 else 's' }} now. People you deleted are still in the ones taken before the delete. Delete old backups to remove those copies too.</p>
   <form method="post" action="/settings/backups/delete" data-confirm="Delete all {{ backup_count }} automatic backup{{ '' if backup_count == 1 else 's' }}? Your current data stays. This can't be undone."><button class="btn" type="submit">Delete old backups</button></form>
@@ -46,8 +63,8 @@
 </section>
 
 <section class="panel">
-  <h2>Changes to profiles</h2>
-  <p>See every edit to a candidate's details and who made it: you, an import or your AI app. Undo any of them, or undo everything your AI app changed since a given time.</p>
+  <h2>Changes</h2>
+  <p>See every edit to a candidate's details and who made it, plus everything your AI app wrote: people, pipeline moves, jobs, stages and to-dos. Undo any of them, or undo everything your AI app did since a given time.</p>
   <p class="actions-inline"><a class="btn" href="/changes?who=ai">Review AI changes</a> <a class="btn ghost" href="/changes">All changes</a></p>
 </section>
 

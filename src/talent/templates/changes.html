@@ -2,9 +2,9 @@
 {% block title %}Changes · Talent Search{% endblock %}
 {% block body %}
 <div class="sec-head">
-  <h1>Changes to profiles</h1>
+  <h1>Changes</h1>
 </div>
-<p class="lead">Every edit to a candidate's details, newest first, with who made it. Undo puts the old values back.</p>
+<p class="lead">Every edit to a candidate's details, and everything your AI app wrote: people it added, pipeline adds and stage moves, jobs it made or edited, stage edits and to-dos. Newest first. Undo puts things back as they were. Activity it logged, like notes and interviews, stays on the timeline.</p>
 <form class="tablebar" method="get" action="/changes">
   <select name="who" aria-label="Who made the change" data-autosubmit>
     <option value="">Anyone</option>
@@ -19,10 +19,11 @@
 </form>
 
 {% if ai_pending %}
-<form method="post" action="/changes/undo-ai" class="panel" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ ai_since | local }}? Fields you edited yourself since then stay as they are.">
-  <input type="hidden" name="since" value="{{ ai_since }}">
-  <button class="btn" type="submit">Undo all AI changes since {{ ai_since | local }}</button>
-  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone.</span>
+{% set since_text = ai_since | local('%a %b %-d, %-I:%M %p %Z') %}
+<form method="post" action="/changes/undo-ai" class="panel" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ since_text }}? People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are.">
+  <input type="hidden" name="since" value="{{ ai_since_epoch }}">
+  <button class="btn" type="submit">Undo all AI changes since {{ since_text }}</button>
+  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone, newest first.</span>
 </form>
 {% endif %}
 
@@ -30,18 +31,18 @@
 <ul class="timeline changes">
   {% for r in rows %}
   <li>
-    <a href="/candidates/{{ r.candidate_id }}#timeline"><strong>{{ r.candidate_name }}</strong></a>
+    <a href="{{ r.href }}"><strong>{{ r.name }}</strong></a>
     <span class="when" title="{{ r.at | local }}">{{ r.at | local('%b %-d, %Y, %-I:%M %p') }}</span>
     <span class="muted">· {{ who_options[r.who] }}</span>
-    {% set lines = r.data | change_lines %}
-    <div>{{ 'Undo: ' if (r.body or '').startswith('Undid') }}{{ lines | join('; ') if lines else r.body }}</div>
-    {% if r.undoable %}<form method="post" action="/changes/{{ r.id }}/undo" class="inline"><button class="btn small" type="submit">Undo</button></form>
-    {% elif r.data and r.data.undone_at %}<div class="fine">Undone</div>{% endif %}
+    <div>{{ r.text }}</div>
+    {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
+    {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>{% endif %}
+    {% if r.undo_from_url and r.from_count > (1 if r.undoable else 0) %}<form method="post" action="{{ r.undo_from_url }}" class="inline" data-confirm="Undo {{ r.from_count }} change{{ '' if r.from_count == 1 else 's' }} your AI app made, from this one to the newest? People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are."><button class="btn small" type="submit">Undo this and everything after</button></form>{% endif %}
   </li>
   {% endfor %}
 </ul>
 {% if rows | length >= limit %}<p class="fine">Showing the newest {{ limit }}.</p>{% endif %}
 {% else %}
-<p class="none">{% if who or since %}No changes match.{% else %}No changes yet. When you, an import or your AI app edits someone's details, it shows up here.{% endif %}</p>
+<p class="none">{% if who or since %}No changes match.{% else %}No changes yet. When you or an import edits someone's details, or your AI app saves, moves or edits anything, it shows up here.{% endif %}</p>
 {% endif %}
 {% endblock %}

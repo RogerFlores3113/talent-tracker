@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from conftest import LOCAL_URL, local_client
+from conftest import LOCAL_URL, flash_of, local_client
 from talent import actions, cli, integrations, paths, recipes
 from talent.integrations import LaunchSpec
 from talent.typesense_index import TypesenseIndex, env_status
@@ -116,7 +116,7 @@ def test_back_never_leaves_the_app(store, ref):
     r = local_client(store).post("/actions/snooze", data={"key": "x", "days": "1"}, headers={"referer": ref},
                                  follow_redirects=False)
     loc = r.headers["location"]
-    assert r.status_code == 303 and loc.startswith("/?") and not loc.startswith("//")
+    assert r.status_code == 303 and urlsplit(loc).path == "/" and not loc.startswith("//")
 
 
 def test_back_keeps_our_own_page(store):
@@ -196,10 +196,10 @@ def test_undo_one_change_from_the_changes_page(store):
     r = c.post(f"/changes/{entry['id']}/undo", headers={"referer": LOCAL_URL + "/changes?who=ai"},
                follow_redirects=False)
     assert urlsplit(r.headers["location"]).path == "/changes"
-    assert "Undid the change to Ana" in parse_qs(urlsplit(r.headers["location"]).query)["notice"][0]
+    assert "Undid the change to Ana" in flash_of(r) and "notice" not in r.headers["location"]
     assert store.get_candidate(ana["id"])["email"] == "ana@x.com"
     again = c.post(f"/changes/{entry['id']}/undo", follow_redirects=False)
-    assert "already undone" in parse_qs(urlsplit(again.headers["location"]).query)["flash_error"][0]
+    assert "already undone" in flash_of(again, "flash_error")
 
 
 def test_undo_all_ai_changes_since(store):
@@ -212,17 +212,16 @@ def test_undo_all_ai_changes_since(store):
     c = local_client(store)
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
     r = c.post("/changes/undo-ai", data={"since": since}, follow_redirects=False)
-    notice = parse_qs(urlsplit(r.headers["location"]).query)["notice"][0]
+    notice = flash_of(r)
     assert notice.startswith("Undid 3 AI changes")
     a, b = store.get_candidate(ana["id"]), store.get_candidate(bo["id"])
     assert (a["email"], a["phone"]) == ("ana@x.com", "555 0100")
     assert b["current_title"] == "Dev" and b["location"] == "Reno"
     page = c.get("/changes?who=ai").text
     assert "Undo all AI changes since" not in page  # nothing left to undo
-    assert "no AI changes" in parse_qs(urlsplit(c.post("/changes/undo-ai", data={"since": since},
-                                                       follow_redirects=False).headers["location"]).query)["notice"][0]
+    assert "no AI changes" in flash_of(c.post("/changes/undo-ai", data={"since": since}, follow_redirects=False))
     bad = c.post("/changes/undo-ai", data={"since": "whenever"}, follow_redirects=False)
-    assert "flash_error" in bad.headers["location"]
+    assert flash_of(bad, "flash_error")
 
 
 def test_undo_all_confirms_first(store):
@@ -297,9 +296,10 @@ def test_existing_default_data_folder_is_tightened(tmp_path, monkeypatch):
     assert mode(paths.data_dir()) == 0o700
     mine = tmp_path / "mine"
     mine.mkdir()
+    (mine / "notes.txt").write_text("someone else's file")
     os.chmod(mine, 0o755)
     monkeypatch.setenv("TALENT_DATA_DIR", str(mine))
-    assert mode(paths.data_dir()) == 0o755  # a folder the user picked keeps its permissions
+    assert mode(paths.data_dir()) == 0o755  # a picked folder that holds other files keeps its permissions
 
 
 # ------------------------------------------------------------ 7. reports

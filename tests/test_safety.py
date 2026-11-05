@@ -10,7 +10,7 @@ import pytest
 from talent import importers, store as store_mod
 from talent.mcp_server import INSTRUCTIONS, build_server
 from talent.store import Store
-from conftest import local_client
+from conftest import flash_of, local_client
 
 from test_mcp import call, structured, text
 
@@ -138,7 +138,7 @@ def test_web_undo_route(store):
     assert r.status_code == 303 and r.headers["location"].startswith(f"/candidates/{c['id']}")
     assert store.get_candidate(c["id"])["location"] == "Reno"
     again = client.post(f"/candidates/{c['id']}/undo/{entry['id']}", headers=LOCAL, follow_redirects=False)
-    assert "already+undone" in again.headers["location"]
+    assert "already undone" in flash_of(again, "error")
     other = store.add_candidate(name="Other")
     assert client.post(f"/candidates/{other['id']}/undo/{entry['id']}", headers=LOCAL).status_code == 404
 
