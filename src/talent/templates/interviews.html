@@ -30,7 +30,7 @@
       {% for lp in d.loops %}
       <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
         <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}
-        {% if lp.job %}<div class="fine">{{ lp.job }}</div>{% endif %}
+        {% if lp.job %}<div class="fine">{{ lp.job }}</div>{% else %}<div class="fine">No job <a class="link small" href="/interviews/{{ lp.sessions[0].interview_id }}/job">Pick the job</a></div>{% endif %}
         {% if lp.split %}<div class="fine">Some sessions of this loop are on another day.</div>{% endif %}
         <ul class="sessions">
         {% for x in lp.sessions %}

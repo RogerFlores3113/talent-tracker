@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Submit {{ cand.name }} · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>Submit {{ cand.name }} to {{ job.company or 'the client' }}</h1>
+  <a class="btn small" href="/jobs/{{ job.id }}#pipeline">Back to {{ job.title }}</a></div>
+{% if not target %}
+<p class="flash warn" role="alert">{{ job.title }} has no stage that counts as Submitted. Add one, like Submitted to client, on <a href="/jobs/{{ job.id }}/edit">its Edit page</a>.</p>
+{% else %}
+{% if warning %}<p class="flash warn" role="alert">{{ warning }}</p>{% endif %}
+{% for e in elsewhere %}<p class="flash warn" role="status">Also in play at {{ e.client }}: {{ e.stage }} on {{ e.job }}, since {{ e.since | local('%b %-d') }}.</p>{% endfor %}
+{% if done %}
+<p class="lead">{{ cand.name }} is in {{ target.name }} since {{ since | local('%b %-d') }}. Send the write-up below from your own mail.</p>
+{% else %}
+<p class="lead">This moves {{ cand.name }} from {{ stage }} to {{ target.name }}, dated today, and keeps the write-up below for you to send from your own mail. Nothing is sent from here.</p>
+<form method="post" action="/jobs/{{ job.id }}/submit/{{ cand.id }}" class="actions"><button class="btn primary" type="submit">Move to {{ target.name }}</button></form>
+{% endif %}
+{% endif %}
+<section class="panel report" id="draft">
+  <div class="sec-head"><h2>Write-up</h2>
+    <span class="copy-status"><button type="button" class="btn small" data-copy-from="writeup-text" data-copy-note="next" data-copy-msg="Copied. Paste it into your email.">Copy</button><span class="fine" role="status"></span></span></div>
+  <p class="fine">Subject: {{ draft.subject }}</p>
+  <pre class="code wrap" id="writeup-text">{{ draft.body }}</pre>
+  <div class="actions-inline">
+  {% if draft.email %}<a class="btn small{{ ' primary' if done }}" href="{{ draft.email.href }}">Email {{ draft.email.to }}</a>{% if draft.email.long %} <span class="fine">Too long to fill in by link: copy it first, then paste it in.</span>{% endif %}
+  {% else %}<span class="fine">No email saved for this job's hiring manager or client{% if draft.client_slug %}. Add the contacts on <a href="/clients/{{ draft.client_slug }}#details">the client's page</a>{% endif %}.</span>{% endif %}
+  </div>
+  <p class="fine">Built from the profile and your newest notes on this job.{% if not draft.has_comp %} No comp found in the notes.{% endif %}{% if not draft.has_availability %} No availability found in the notes.{% endif %} Read it over before you send it.</p>
+</section>
+{% endblock %}

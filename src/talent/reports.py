@@ -74,6 +74,23 @@ COMMON_ZONES = ("America/New_York", "America/Chicago", "America/Denver", "Americ
                 "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC")
 UPDATE_DAYS = tuple(d.capitalize() for d in actions.WEEKDAYS)
 _EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+NOTE_KEY = "client_note:{}"  # per client (and hiring manager), the recruiter's "Note to the client this week"
+NOTE_LIMIT = 1500
+PEOPLE_SHOWN = 25  # per-person lines in an update, then "and 4 more"
+
+
+def normalize_day(value: str | None) -> str | None:
+    """'fri', 'Fri.', 'FRIDAY', 'thurs' -> 'Friday' or 'Thursday'. Blank -> None. Raises on anything else."""
+    v = re.sub(r"[^a-z]", "", (value or "").lower())
+    if not v:
+        return None
+    if v.endswith("s") and len(v) > 4 and v[:-1] in actions.WEEKDAYS:  # "Fridays"
+        v = v[:-1]
+    v = {"weds": "wed", "thur": "thu", "thurs": "thu"}.get(v, v)
+    found = [d for d in actions.WEEKDAYS if len(v) >= 2 and d.startswith(v)]
+    if len(found) != 1:
+        raise ValueError("Pick a day of the week for updates, like Friday or Fri.")
+    return found[0].capitalize()
 
 
 # ------------------------------------------------------------- small helpers
@@ -344,9 +361,7 @@ def save_client(store: Store, key: str, **fields: Any) -> dict[str, Any]:
             raise ValueError(f"The {k} are too long ({len(v):,} characters). The limit is {FIELD_LIMITS[k]:,}."
                              if k != "name" else f"That name is too long. The limit is {FIELD_LIMITS[k]} characters.")
         if k == "update_day" and v:
-            v = v.capitalize()
-            if v not in UPDATE_DAYS:
-                raise ValueError("Pick a day of the week for updates.")
+            v = normalize_day(v)
         if k == "time_zone":
             v = normalize_tz(v)
         clean[k] = v
@@ -360,6 +375,33 @@ def save_client(store: Store, key: str, **fields: Any) -> dict[str, Any]:
         if "time_zone" in clean:
             apply_zone(store)  # in-house on a UTC computer, the company's zone is the recruiter's
     return client(store, key)
+
+
+def create_client(store: Store, name: str, **fields: Any) -> dict[str, Any]:
+    """Save a client before its first job (an agency signs the client, then the reqs come). {"client", "created"}:
+    created is False when a job or a saved client already has that name ('Acme' and 'Acme, Inc.' are one), and
+    then nothing is changed. Raises ValueError on a blank or too long name, or a bad detail."""
+    name = re.sub(r"\s+", " ", (name or "").strip())
+    if not name or not actions.company_key(name):
+        raise ValueError("Give the client a name.")
+    if len(name) > FIELD_LIMITS["name"]:
+        raise ValueError(f"That name is too long. The limit is {FIELD_LIMITS['name']} characters.")
+    key = actions.company_key(name)
+    try:
+        return {"client": client(store, key), "created": False}
+    except NotFound:
+        pass
+    ts = now_iso()
+    with store._lock, store._conn:
+        store._conn.execute("INSERT OR IGNORE INTO clients(name, key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                            (name, key, ts, ts))
+    try:
+        c = save_client(store, key, **{k: v for k, v in fields.items() if v not in (None, "")})
+    except ValueError:
+        with store._lock, store._conn:  # a bad detail: the new client doesn't stay half made
+            store._conn.execute("DELETE FROM clients WHERE key = ? AND last_update_sent_at IS NULL", (key,))
+        raise
+    return {"client": c, "created": True}
 
 
 def find_clients(store: Store, query: str | None) -> list[str]:
@@ -415,11 +457,12 @@ def last_sent(store: Store, c: dict[str, Any]) -> str | None:
 
 
 def managers(store: Store, key: str, now: datetime | None = None) -> list[tuple[str, str]]:
-    """In-house, the hiring managers of this company's open and on-hold jobs, as (manager_key, name), with
-    ('', '') last for jobs that name none. A manager whose job closed since their last update stays until it
-    goes out, so "Hired, req closed" reaches them. Empty when no job names one, or in agency wording."""
-    if not actions.inhouse(store):
-        return []
+    """The hiring managers of this company's open and on-hold jobs, as (manager_key, name), with ('', '') last
+    for jobs that name none, so each manager's update reads only their own jobs. In-house once any job names one;
+    for a client (agency wording) once its jobs name two or more, so one email never carries another manager's
+    people. A manager whose job closed since their last update stays until it goes out, so "Hired, req closed"
+    reaches them. Empty otherwise."""
+    own = actions.inhouse(store)
     c = client(store, key)
     jobs = [j for j in c["jobs"] if j["status"] in ("open", "on_hold")]
     default = ((now or datetime.now(timezone.utc)) - timedelta(days=DEFAULT_DAYS)).replace(microsecond=0).isoformat()
@@ -431,9 +474,20 @@ def managers(store: Store, key: str, now: datetime | None = None) -> list[tuple[
     names: dict[str, str] = {}
     for j in jobs:
         names.setdefault(manager_key(j.get("hiring_manager")), (j.get("hiring_manager") or "").strip())
-    if not any(names):
+    if not any(names) or (not own and len([k for k in names if k]) < 2):
         return []
     return sorted(names.items(), key=lambda kv: (kv[0] == "", kv[0]))
+
+
+def split_note(store: Store, key: str) -> str | None:
+    """For the page: why a client's update comes as one per hiring manager, in agency wording. None otherwise."""
+    if actions.inhouse(store):
+        return None
+    named = [n for k, n in managers(store, key) if k]
+    if not named:
+        return None
+    return (f"This client's jobs name {len(named)} hiring managers ({', '.join(named)}), so there is one update for "
+            "each. Each one reads only that manager's jobs and goes only to their email.")
 
 
 def find_manager(store: Store, key: str, query: str | None) -> list[str]:
@@ -445,17 +499,52 @@ def find_manager(store: Store, key: str, query: str | None) -> list[str]:
 
 def _upcoming(store: Store, job_ids: set[int], app_pairs: set[tuple[int, int]], days: int,
               now: datetime) -> list[dict[str, Any]]:
-    """Live interviews in the next `days` for people on these jobs (or with no job, while in play on one)."""
+    """Live interviews in the next `days` for people on these jobs. One logged with no job counts only when the
+    person is in play on exactly one open job anywhere, and it's one of these: with two, nobody can tell whose
+    interview it is, so it stays out of every client's update (see loose_interviews)."""
     jobs = {j["id"]: j for j in store._rows("SELECT * FROM jobs")}
     rows = actions._live_interviews(store, store.upcoming_interviews(days=days, now=now), jobs)
-    in_play = {cid: jid for cid, jid in app_pairs}
+    loose = {r["candidate_id"] for r in rows if r.get("job_id") is None}
+    where = _open_jobs_of(store, loose)
     out = []
     for r in rows:
         if r.get("job_id") in job_ids:
             out.append(r)
-        elif r.get("job_id") is None and r["candidate_id"] in in_play:
-            out.append({**r, "job_id": in_play[r["candidate_id"]], "job_title": jobs[in_play[r["candidate_id"]]]["title"]})
+        elif r.get("job_id") is None and len(where.get(r["candidate_id"], ())) == 1:
+            jid = next(iter(where[r["candidate_id"]]))
+            if jid in job_ids and (r["candidate_id"], jid) in app_pairs:
+                out.append({**r, "job_id": jid, "job_title": jobs[jid]["title"]})
     return out
+
+
+def _open_jobs_of(store: Store, candidate_ids: set[int]) -> dict[int, set[int]]:
+    """{candidate: the open jobs they're in play on}, across every client."""
+    if not candidate_ids:
+        return {}
+    marks = ",".join("?" * len(candidate_ids))
+    out: dict[int, set[int]] = {}
+    for r in store._rows(
+            f"""SELECT a.candidate_id, a.job_id FROM applications a JOIN jobs j ON j.id = a.job_id
+                LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+                WHERE a.candidate_id IN ({marks}) AND j.status = 'open' AND coalesce(s.outcome, 'open') = 'open'""",
+            tuple(candidate_ids)):
+        out.setdefault(r["candidate_id"], set()).add(r["job_id"])
+    return out
+
+
+def loose_interviews(store: Store, job_ids: set[int], days: int = INTERVIEW_DAYS,
+                     now: datetime | None = None) -> list[dict[str, Any]]:
+    """Upcoming interviews logged with no job for people in play on these jobs that no update can carry, since
+    the person is in play on more than one open job: [{"interview_id", "candidate_id", "name", "at", "href"}].
+    The recruiter picks the job (/interviews/{id}/job) and the interview joins that client's update."""
+    now = now or datetime.now(timezone.utc)
+    jobs = {j["id"]: j for j in store._rows("SELECT * FROM jobs")}
+    rows = [r for r in actions._live_interviews(store, store.upcoming_interviews(days=days, now=now), jobs)
+            if r.get("job_id") is None]
+    where = _open_jobs_of(store, {r["candidate_id"] for r in rows})
+    return [{"interview_id": r["id"], "candidate_id": r["candidate_id"], "name": r["candidate_name"], "at": r["at"],
+             "href": f"/interviews/{r['id']}/job"}
+            for r in rows if len(where.get(r["candidate_id"], ())) > 1 and where[r["candidate_id"]] & job_ids]
 
 
 def _in_play_pairs(store: Store, job_ids: list[int]) -> set[tuple[int, int]]:
@@ -521,11 +610,30 @@ def overview(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
         c = {"id": None, "name": _spelling(jobs), "last_update_sent_at": None, "update_day": None,
              **(rows.get(key) or {}), "key": key, "slug": slug(key)}
         out.append({**c, "open_jobs": len(open_ids), "jobs": len(jobs), "in_play": len({p[0] for p in pairs}),
+                    "presented": _presented(store, open_ids),
                     # a loop of four sessions is one person interviewing, not four
                     "interviews": len({(r["candidate_id"], r.get("job_id"))
                                        for r in _upcoming(store, set(open_ids), pairs, 7, now)}),
                     "due": bool(due_parts(store, key, now, c)), "last_sent": last_sent(store, c)})
+    for key, row in rows.items():  # saved before their first job
+        if key not in {r["key"] for r in out}:
+            out.append({**row, "key": key, "slug": slug(key), "open_jobs": 0, "jobs": 0, "in_play": 0, "presented": 0,
+                        "interviews": 0, "due": False, "last_sent": last_sent(store, {**row, "key": key})})
     return sorted(out, key=lambda r: (r["open_jobs"] == 0, r["name"].lower()))
+
+
+def _presented(store: Store, job_ids: list[int]) -> int:
+    """People in play on these jobs in a stage the client sees (Submitted or later), each once: what the update's
+    "In process now" counts, against "in play" that counts Sourced and screening too."""
+    seen = set()
+    for jid in job_ids:
+        groups = stage_groups(store, jid)
+        omit = _omit(store, jid)
+        for a in store.pipeline(jid):
+            g = groups.get(a["stage"].lower()) or stage_group(a["stage"])
+            if g in IN_PLAY and _stage_key(a["stage"]) not in omit and g not in ("sourcing",):
+                seen.add(a["candidate_id"])
+    return len(seen)
 
 
 def no_company_jobs(store: Store) -> int:
@@ -834,20 +942,31 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                   for j in open_jobs if hires[j["id"]] > (j.get("openings") or 1) and j["id"] not in unset]
     words = {actions.hire_word(store, j["id"]) for j in (open_jobs or jobs)}
     # Jobs that closed in the period, with who was hired, so the update says "Hired: Aisha Bello. Req closed."
+    # A close whose hire waits for the recruiter's review waits too: no "Req closed, 0 hired" before they've checked.
+    held_on = {k[1] for k, e in held.items() if group(k[1], e["body"]) == "hired"}
     closed_jobs = [{"job_id": j["id"], "title": j["title"],
                     "hired": [m["name"] for m in moves if m["job_id"] == j["id"] and m["group"] == "hired"]}
-                   for j in jobs if j["status"] == "closed" and in_range(j.get("updated_at") or "")]
+                   for j in jobs if j["status"] == "closed" and in_range(j.get("updated_at") or "")
+                   and j["id"] not in held_on]
+    held_closed = [{"job_id": j["id"], "title": j["title"]} for j in jobs if j["status"] == "closed"
+                   and in_range(j.get("updated_at") or "") and j["id"] in held_on]
     label = None if manager is None else next((j["hiring_manager"].strip() for j in jobs
                                                if (j.get("hiring_manager") or "").strip()), "")
     hm_email = next((j["hiring_manager_email"].strip() for j in jobs if (j.get("hiring_manager_email") or "").strip()),
                     None) if manager else None
+    if manager and not own:  # a client's hiring manager: their own email, or a contact line naming them, never another's
+        hm_email = hm_email or manager_contact(c.get("contacts"), label) or ""
+    loose = loose_interviews(store, {j["id"] for j in jobs if j["status"] == "open"}, now=now)
+    labels = _job_labels(store, jobs, own)
     return {"client": {k: c.get(k) for k in ("id", "name", "key", "slug", "contacts", "time_zone", "update_day",
                                              "last_update_sent_at")},
             "inhouse": own, "manager": label, "manager_key": manager, "booked_hidden": still_hidden,
             "overfilled": overfilled, "ai_moves": ai_moves, "held": held_moves, "closed_out": list(closed_out.values()),
             "openings_unset": [{"job_id": j["id"], "title": j["title"]} for j in open_jobs if j["id"] in unset],
-            "results": results, "labels": _job_labels(store, jobs, own),
-            "closed_jobs": closed_jobs,
+            "results": results, "labels": labels,
+            "closed_jobs": closed_jobs, "held_closed": held_closed, "loose_interviews": loose,
+            "people_lines": person_lines(people, upcoming, labels, c.get("time_zone"), own),
+            "client_note": client_note(store, c["key"], manager),
             "hired": sum(hires.values()), "hire_word": "placed" if words == {"placed"} else "hired",
             "since": start, "until": end, "range_from": why, "now": now.isoformat(),
             "jobs": [{"id": j["id"], "title": j["title"], "status": j["status"], "location": j.get("location"),
@@ -857,9 +976,82 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
             "imported_moves": imported, "median_days": medians, "upcoming": upcoming, "people": people,
             "openings": openings, "filled": filled,
             # with no contact email saved yet, a client update goes to a job's hiring manager email
-            "email": hm_email or _contact_email(c.get("contacts")) or (None if manager is not None else next(
+            "email": None if hm_email == "" else hm_email or _contact_email(c.get("contacts")) or (
+                None if manager is not None else next(
                 (j["hiring_manager_email"].strip() for j in jobs if (j.get("hiring_manager_email") or "").strip()),
                 None))}
+
+
+def manager_contact(contacts: str | None, name: str | None) -> str | None:
+    """The email on a client contact line that names this hiring manager ('Dana Reyes <dana@hfl.com>'), or None."""
+    words = [w for w in re.split(r"\W+", (name or "").lower()) if len(w) > 1]
+    if not words:
+        return None
+    for line in (contacts or "").splitlines():
+        low = line.lower()
+        m = _EMAIL.search(line)
+        if m and all(re.search(rf"\b{re.escape(w)}\b", low.replace(m.group(0).lower(), " ")) for w in words):
+            return m.group(0)
+    return None
+
+
+def _note_key(key: str, manager: str | None) -> str:
+    return NOTE_KEY.format(f"{key}|{manager or ''}" if manager is not None else key)
+
+
+def client_note(store: Store, key: str, manager: str | None = None) -> str:
+    """The recruiter's note to the client for the next update (it goes at the top of the text), or ''."""
+    raw = _get_json(store, _note_key(key, manager))
+    return str(raw.get("text") or "") if isinstance(raw, dict) else ""
+
+
+def save_client_note(store: Store, key: str, text: str | None, manager: str | None = None) -> str:
+    """Save (or with blank text, clear) the note that opens the next update. Marking it as sent clears it."""
+    text = re.sub(r"[ \t]+\n", "\n", (text or "").strip())
+    if len(text) > NOTE_LIMIT:
+        raise ValueError(f"That note is too long ({len(text):,} characters). The limit is {NOTE_LIMIT:,}.")
+    ensure_client(store, key)
+    if text:
+        _put_json(store, _note_key(key, manager), {"text": text, "at": now_iso()})
+    else:
+        with store._lock, store._conn:
+            store._conn.execute("DELETE FROM settings WHERE key = ?", (_note_key(key, manager),))
+    return text
+
+
+def _clear_notes(store: Store, key: str, manager: str | None) -> None:
+    """After Mark as sent: the notes that went out with it. Marking the whole client clears every manager's too."""
+    with store._lock, store._conn:
+        if manager is None:
+            store._conn.execute("DELETE FROM settings WHERE key = ? OR key LIKE ?",
+                                (_note_key(key, None), NOTE_KEY.format(key + "|") + "%"))
+        else:
+            store._conn.execute("DELETE FROM settings WHERE key = ?", (_note_key(key, manager),))
+
+
+def person_lines(people: list[dict[str, Any]], upcoming: list[dict[str, Any]], labels: dict[str, str],
+                 tz: str | None, own: bool) -> list[str]:
+    """One line per person in play, furthest along first: 'Lena Hoffmann (Staff Engineer at Fetch) for Robotics
+    Lead: Submitted to client Nov 5, awaiting your feedback'. A booked interview is named on the line."""
+    nxt: dict[tuple[int, str], str] = {}
+    for u in upcoming:
+        nxt.setdefault((u["candidate_id"], u["job"]), in_zone(u["at"], tz, "%a %b %-d"))
+    order = {g: i for i, g in enumerate(IN_PLAY)}
+    rows = sorted((p for p in people if p["group"] in IN_PLAY),
+                  key=lambda p: (-order[p["group"]], p["name"].lower(), p["job"].lower()))
+    out = []
+    for p in rows:
+        role = " at ".join(x for x in (p.get("title"), p.get("company")) if x) if p.get("title") else ""
+        who = p["name"] + (f" ({role})" if role else "")
+        when = "" if p.get("imported") else " " + in_zone(p["since"], tz, "%b %-d")
+        bits = [f"{p['stage']}{when}" if when.strip() else p["stage"]]
+        iv = nxt.get((p["candidate_id"], p["job"]))
+        if iv:
+            bits.append(f"interview {iv}")
+        elif p["group"] == "submitted" and not own:
+            bits.append("awaiting your feedback")
+        out.append(f"\u2022 {who} for {p['job']}: {', '.join(bits)}")
+    return out
 
 
 def _openings_unset(store: Store, job_ids: list[int]) -> set[int]:
@@ -975,6 +1167,14 @@ def recruiter_notes(rep: dict[str, Any]) -> list[str]:
     for o in rep.get("overfilled") or []:
         notes.append(f"{o['title']} has {o['hired']} {rep.get('hire_word', 'hired')} for "
                      f"{_plural(o['openings'], 'opening')} (over by {o['over']}). Check those hires before you send this")
+    for j in rep.get("held_closed") or []:
+        notes.append(f"{j['title']} is closed, but the hire it waits on isn't reviewed yet, so the update still "
+                     "lists it as open until you review that hire")
+    loose = rep.get("loose_interviews") or []
+    if loose:
+        notes.append("Left out, since no job is set and they're in play on more than one: " + ", ".join(
+            f"{x['name']}'s interview {in_zone(x['at'], rep['client'].get('time_zone'), '%a %b %-d')}" for x in loose[:5])
+            + (f" and {len(loose) - 5} more" if len(loose) > 5 else "") + ". Pick the job on Interviews to add it")
     if rep.get("openings_unset"):
         notes.append("Openings not set yet for " + ", ".join(j["title"] for j in rep["openings_unset"])
                      + ", so the update gives the hires without \"of N openings filled\". Set them on the job's page")
@@ -1009,6 +1209,8 @@ def report_text(rep: dict[str, Any], trim: int = 0) -> str:
     labels = rep.get("labels") or (INHOUSE_LABELS if own else GROUP_LABELS)
     shown_moves = (MOVES_SHOWN, MOVES_SHOWN, 10, 5)[min(trim, 3)]
     lines = [title(rep)]
+    if rep.get("client_note"):
+        lines += ["", rep["client_note"], ""]
     if rep["range_from"] == "last_update":
         lines.append("Changes since the last update.")
     for cj in rep.get("closed_jobs") or []:  # the news a closing manager most needs: who was hired, and it's done
@@ -1016,15 +1218,24 @@ def report_text(rep: dict[str, Any], trim: int = 0) -> str:
         lines.append(f"{who}{'Req' if own else 'Job'} closed: {cj['title']}.")
     live = [j for j in rep["jobs"] if j["status"] == "open"]
     held = [j for j in rep["jobs"] if j["status"] == "on_hold"]
+    waiting = [j["title"] for j in rep.get("held_closed") or []]  # closed, but its hire waits for review
     if live:
-        lines.append(f"{_plural(len(live), 'open job')}: " + ", ".join(j["title"] for j in live)
+        lines.append(f"{_plural(len(live) + len(waiting), 'open job')}: " + ", ".join([j["title"] for j in live] + waiting)
                      + f". {seats_text(rep)}.")
+    elif waiting:
+        lines.append(f"{_plural(len(waiting), 'open job')}: {', '.join(waiting)}.")
     else:
         lines.append("No open jobs right now.")
     if held:
         lines.append("On hold: " + ", ".join(j["title"] for j in held) + ".")
     lines += ["", f"In process now: {rep['in_play']}"]
     lines += [f"- {labels[g]}: {rep['stand'][g]}" for g in IN_PLAY if rep["stand"][g]]
+    who = rep.get("people_lines") or []
+    if who:
+        cap = (PEOPLE_SHOWN, PEOPLE_SHOWN, 10, 5)[min(trim, 3)]
+        lines += ["", "Where each person stands:", *who[:cap]]
+        if len(who) > cap:
+            lines.append(f"\u2022 and {len(who) - cap} more")
     p = rep["period"]
     lines += ["", "This period:"]
     moved = ("interview", "offer", "hired", "out") if own else ("submitted", "interview", "offer", "hired", "out")
@@ -1166,6 +1377,9 @@ def mark_sent(store: Store, key: str, since: str | None = None, until: str | Non
     key = actions.company_key(key)
     if manager is not None and manager not in {k for k, _ in managers(store, key, now)}:
         raise ValueError("That hiring manager has no update here. Reload the page.")
+    again = None if since or until else repeat_of(store, key, manager, now)
+    if again:  # marked a moment ago with nothing new since (a retry, a double click): the same send
+        return again
     watermark = store._row("SELECT coalesce(max(id), 0) AS n FROM timeline")["n"]
     reps = reports_for(store, key, since, until, now) if manager is None else [
         report(store, key, since, until, now, manager=manager)]
@@ -1190,8 +1404,52 @@ def mark_sent(store: Store, key: str, since: str | None = None, until: str | Non
         store._conn.execute(put, (SENT_KEY.format(c["key"]), json.dumps(state)))
         store._conn.execute(put, (UPDATE_KEY.format(uid), json.dumps(
             {"manager": manager, "state": raw["value"] if raw else None, "last": c.get("last_update_sent_at")})))
+    _clear_notes(store, c["key"], manager)  # the note to the client went out with it
     return {"id": uid, "sent_at": ts, "since": rep["since"], "body": text, "manager": rep.get("manager"),
-            "client": c["name"], "key": c["key"], "slug": c["slug"], "ai_moves": [m for r in reps for m in r["ai_moves"]]}
+            "client": c["name"], "key": c["key"], "slug": c["slug"], "ai_moves": [m for r in reps for m in r["ai_moves"]],
+            "already": False}
+
+
+REPEAT_HOURS = 12  # a second Mark as sent this soon, with nothing new, is the same send
+
+
+def last_update_for(store: Store, key: str, manager: str | None) -> dict[str, Any] | None:
+    """The newest copy marked as sent for this client's update (or this one hiring manager's)."""
+    for u in updates(store, key, 200):
+        snap = _get_json(store, UPDATE_KEY.format(u["id"]))
+        if (snap.get("manager") if isinstance(snap, dict) else None) == manager:
+            return u
+    return None
+
+
+def repeat_of(store: Store, key: str, manager: str | None, now: datetime) -> dict[str, Any] | None:
+    """When this update was marked as sent in the last REPEAT_HOURS and nothing on its jobs changed since (no
+    move, interview, note or job edit, no new note to the client): that send, as mark_sent returns it, with
+    already=True. Else None."""
+    try:
+        c = client(store, key)
+    except NotFound:
+        return None
+    mark = sent_mark(store, c["key"], manager, c)
+    at = to_dt(mark.get("at"))
+    if not at or mark.get("id") is None or now - at > timedelta(hours=REPEAT_HOURS) or client_note(store, c["key"], manager):
+        return None
+    jobs = c["jobs"] if manager is None else [j for j in c["jobs"] if manager_key(j.get("hiring_manager")) == manager]
+    ids = [j["id"] for j in jobs]
+    if any((j.get("updated_at") or "") > mark["at"] for j in jobs):
+        return None
+    if ids and store._row(f"SELECT 1 AS x FROM timeline WHERE id > ? AND job_id IN ({','.join('?' * len(ids))}) LIMIT 1",
+                          (mark["id"], *ids)):
+        return None
+    last = last_update_for(store, c["key"], manager)
+    if not last or last["sent_at"] != mark["at"]:
+        return None
+    who = None
+    if manager:
+        who = next(((j.get("hiring_manager") or "").strip() for j in jobs if (j.get("hiring_manager") or "").strip()), None)
+    return {"id": last["id"], "sent_at": last["sent_at"], "since": last["since"], "body": last["body"],
+            "manager": "" if manager == "" else who, "client": c["name"], "key": c["key"], "slug": c["slug"],
+            "ai_moves": [], "already": True}
 
 
 def last_sent_to(store: Store, key: str, query: str | None) -> dict[str, Any] | None:
@@ -1361,9 +1619,25 @@ def ai_save_client(store: Store, key: str, **fields: Any) -> dict[str, Any]:
     return {"client": after, "changed": changed, "action_id": action_id}
 
 
+def ai_create_client(store: Store, name: str) -> dict[str, Any]:
+    """create_client for the AI app: the name only (details go through ai_save_client), logged on Changes so the
+    recruiter can undo it while no job names the client. {"client", "created", "action_id"}."""
+    got = create_client(store, name)
+    got["action_id"] = None
+    if got["created"]:
+        c = got["client"]
+        with store._write():
+            got["action_id"] = store._log_ai("client_create", target_id=c["id"], body=c["name"],
+                                             new={"_client": c["name"], "_key": c["key"]})
+    return got
+
+
 def ai_mark_sent(store: Store, key: str, manager: str | None = None, since: str | None = None) -> dict[str, Any]:
     """mark_sent for the AI app, logged on Changes so the recruiter can take it back."""
     out = mark_sent(store, key, since, None, manager=manager)
+    if out.get("already"):  # nothing new since the last Mark as sent: nothing to log or undo
+        out["action_id"] = None
+        return out
     with store._write():
         out["action_id"] = store._log_ai("client_sent", target_id=out["id"], body=out["manager"],
                                          new={"_client": out["client"], "_key": out["key"], "manager": out["manager"],
@@ -1377,6 +1651,12 @@ def ai_client_blocker(store: Store, a: dict[str, Any]) -> str | None:
     row = store._row("SELECT * FROM clients WHERE key = ?", (new.get("_key") or "",))
     if row is None:
         return "that client is gone"
+    if a["kind"] == "client_create":
+        if _all_jobs(store).get(row["key"]):
+            return "a job names that client now"
+        if updates(store, row["key"], 1):
+            return "an update to them was marked as sent since"
+        return None
     if a["kind"] == "client_sent":
         latest = updates(store, row["key"], 1)
         if not latest or latest[0]["id"] != a["target_id"]:
@@ -1395,6 +1675,14 @@ def ai_client_undo(store: Store, a: dict[str, Any], by: str = "app") -> str:
     if a["kind"] == "client_sent":
         undo_sent(store, new["_key"], a["target_id"], note=None)  # marks this action undone too
         return a["summary"]
+    if a["kind"] == "client_create":  # a client the AI app saved, with no job and no update yet: it goes
+        with store._write():
+            store._conn.execute("DELETE FROM clients WHERE key = ?", (new["_key"],))
+            store._conn.execute("DELETE FROM settings WHERE key IN (?, ?) OR key LIKE ? OR key LIKE ?",
+                                (NOTE_KEY.format(new["_key"]), SENT_KEY.format(new["_key"]),
+                                 NOTE_KEY.format(new["_key"] + "|") + "%", "client_chased:" + new["_key"] + "|%"))
+            store._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), a["id"]))
+        return a["summary"]
     old = {k: v for k, v in (a.get("old_data") or {}).items() if k in CLIENT_AI_FIELDS}
     with store._write():
         if old:
@@ -1411,9 +1699,12 @@ def submittals(store: Store, key: str, limit: int = 200) -> list[dict[str, Any]]
     ids = [j["id"] for j in c["jobs"]]
     titles = {j["id"]: j["title"] for j in c["jobs"]}
     out = [{"at": e["at"], "candidate_id": e["candidate_id"], "name": e["candidate_name"], "job_id": e["job_id"],
-            "job": titles[e["job_id"]], "stage": e["body"], "imported": e["imported"]}
+            "job": titles[e["job_id"]], "stage": e["body"], "imported": e["imported"],
+            # an import with no date for it carries the import day, not the day they were submitted
+            "undated": _data(e.get("data")).get("imported") is True}
            for es in _history(store, ids).values() for e in es if is_submittal(e["body"])]
-    return sorted(out, key=lambda s: s["at"], reverse=True)[:limit]
+    out.sort(key=lambda s: s["at"], reverse=True)
+    return sorted(out, key=lambda s: s["undated"])[:limit]  # dated ones first, newest first; date unknown last
 
 
 def submittal_note(store: Store, candidate_id: int, job_id: int, now: datetime | None = None) -> dict[str, Any] | None:
