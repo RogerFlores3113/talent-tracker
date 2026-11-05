@@ -82,6 +82,11 @@
           <a class="btn small" href="{{ i.href }}">Set openings</a>
           {% elif i.kind == 'stuck' and i.count %}
           <a class="btn small" href="{{ i.href }}">See the job</a>
+          {% elif i.kind == 'ai_change' and i.confirm_id %}
+          <form method="post" action="/changes/ai/{{ i.confirm_id }}/confirm"><button class="btn small" type="submit">Yes</button></form>
+          <form method="post" action="/changes/ai/{{ i.confirm_id }}/undo"><button class="btn small" type="submit">Undo</button></form>
+          {% elif i.kind == 'ai_change' and i.button %}
+          <a class="btn small" href="{{ i.href }}">{{ i.button }}</a>
           {% elif i.kind == 'interview_out' %}
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="cancel"><button class="btn small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview{{ 's' if i.interview_ids | length > 1 }}</button></form>
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="keep"><button class="link small" type="submit" title="Stop asking. It shows on Today as a normal interview.">Keep it</button></form>

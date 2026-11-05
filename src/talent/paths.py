@@ -178,6 +178,13 @@ def use_launch_code(code: str) -> bool:
     return fresh
 
 
+def health_proof(key: str, nonce: str) -> str:
+    """What /api/health answers for a nonce: an HMAC of it under this install's key. Only the real app (or
+    another process that can read app.key) can make it, so a second launch never hands a launch code to an
+    impostor listening on the port."""
+    return hmac.new(key.encode(), b"talent-health:" + nonce.encode(), "sha256").hexdigest()
+
+
 def launch_url(port: int | None = None) -> str:
     """Opens the app window and unlocks it. Never log or store this address."""
     base = f"http://127.0.0.1:{port}" if port else app_url("").rstrip("/")

@@ -43,7 +43,7 @@
 
 <section class="panel" id="backups">
   <h2>Automatic backups</h2>
-  <p>Before every import, delete, merge, sample data removal or restore, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>
+  <p>Before every import, delete, merge, undo of all AI changes, sample data removal or restore, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>
   <pre class="code">{{ backup_folder }}</pre>
   {% if backup_list %}
   <p class="fine">Restoring one puts all your data back to how it was then. A fresh backup of your data as it is now is saved first, so you can switch back.</p>
@@ -66,6 +66,16 @@
   <p class="fine">There {{ 'is' if backup_count == 1 else 'are' }} {{ backup_count }} backup{{ '' if backup_count == 1 else 's' }} now. People you deleted are still in the ones taken before the delete. Delete old backups to remove those copies too.</p>
   <form method="post" action="/settings/backups/delete" data-confirm="Delete all {{ backup_count }} automatic backup{{ '' if backup_count == 1 else 's' }}? Your current data stays. This can't be undone."><button class="btn" type="submit">Delete old backups</button></form>
   {% else %}<p class="fine">No backups yet.</p>{% endif %}
+</section>
+
+<section class="panel" id="cautious">
+  <h2>Cautious mode</h2>
+  <p>When it's on, your AI app's changes to saved details, moves into Hired or out, job changes and closes, and the notes it logs wait on <a href="/review">Review</a> until you keep or pass them. Filling empty fields and adding new people still apply straight away. Each AI session can be kept or passed in one go.</p>
+  <form method="post" action="/settings/cautious" class="stack">
+    <label class="check"><input type="checkbox" name="ai_cautious" value="1" {{ 'checked' if s.ai_cautious == '1' }}>
+      <span><strong>Cautious mode</strong> <span class="fine">Off by default.</span></span></label>
+    <div><button class="btn" type="submit">Save</button> <a class="btn ghost" href="/review">Review AI changes</a></div>
+  </form>
 </section>
 
 <section class="panel">

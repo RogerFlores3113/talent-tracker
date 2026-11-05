@@ -82,7 +82,7 @@ def test_v9_fills_keys_for_older_rows_and_a_new_rule_works_them_out_again(tmp_pa
     s.close()
     monkeypatch.setattr(store_mod, "_MIGRATIONS", all_steps)
     s = Store(path)
-    assert s.schema_version == len(all_steps) == 9
+    assert s.schema_version == len(all_steps) >= 9  # later cycles add steps after v9
     assert s._row("SELECT linkedin_key FROM candidates WHERE id = 1")["linkedin_key"] == "https://linkedin.com/in/wei-zhang"
     assert s.find_duplicate(linkedin_url="linkedin.com/in/wei-zhang")["id"] == 1
     # A row written by another tool has no key: it is still found, and the next open fills it.
