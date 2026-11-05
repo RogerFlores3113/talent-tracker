@@ -42,13 +42,15 @@ def private_dir(path: Path, tighten: bool = True) -> Path:
 
 
 # What the app itself keeps in its data folder.
-OUR_FILES = ("talent.db", "backups", "imports", "app.key", "app.port", "app.log", "launch.code", ".DS_Store")
+OUR_FILES = ("talent.db", "backups", "imports", "app.key", "app.port", "app.log", "launch.code", ".DS_Store",
+             "talent.db-wal", "talent.db-shm", "talent.db-journal")
 
 
 def _only_ours(path: Path) -> bool:
-    """True when the folder holds nothing but the app's own files (or nothing at all)."""
+    """True when the folder holds nothing but the app's own files (or nothing at all). Exact names, so a file
+    like "backups-old" or "app.keyx" is someone else's."""
     try:
-        return all(entry.name.startswith(OUR_FILES) for entry in path.iterdir())
+        return all(entry.name in OUR_FILES for entry in path.iterdir())
     except OSError:
         return False
 
@@ -178,12 +180,19 @@ def use_launch_code(code: str) -> bool:
     return fresh
 
 
+def subkey(key: str, purpose: str) -> bytes:
+    """A key for one purpose ("flash", "health", "cards"), derived from this install's key, so a value made for
+    one purpose (an answer from /api/health, say) is no use for another."""
+    return hmac.new(key.encode(), f"talent-search:{purpose}".encode(), "sha256").digest()
+
+
 def health_proof(key: str, nonce: str, port: int) -> str:
     """What /api/health answers for a nonce: an HMAC of it and the port the request came in on, under this
     install's key. Only the real app (or another process that can read app.key) can make it, so a second
     launch never hands a launch code to an impostor listening on the port. The port is in it so a program
     that passes the nonce on to the real app on another port gets a proof for that port, not its own."""
-    return hmac.new(key.encode(), f"talent-health:{int(port)}:".encode() + nonce.encode(), "sha256").hexdigest()
+    return hmac.new(subkey(key, "health"), f"talent-health:{int(port)}:".encode() + nonce.encode(),
+                    "sha256").hexdigest()
 
 
 def launch_url(port: int | None = None) -> str:

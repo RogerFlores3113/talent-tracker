@@ -210,6 +210,7 @@ def test_outreach_and_interviews_nudge_the_stage_and_the_pipeline_shows_booked(s
     job = store.add_job("Staff ML Engineer", company="Northwind")
     joao = store.add_candidate(name="Joao Silva")
     store.add_to_pipeline(joao["id"], job["id"])
+    store._conn.execute("INSERT INTO settings(key, value) VALUES ('outreach_moves', '0')")  # c6: else it moves them
     server = build_server(store)
     res = call(server, "log_activity", candidate_id=joao["id"], kind="message", summary="InMail", job_id=job["id"])
     assert res.structuredContent["suggested_step"] == {"tool": "move_stage", "candidate_id": joao["id"],

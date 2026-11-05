@@ -24,20 +24,38 @@
       <div class="fine"><strong>{{ p.stage }}</strong>{% if p.days_in_process is not none %} · {{ p.days_in_process }} day{{ '' if p.days_in_process == 1 else 's' }} in process{% endif %}</div>
       {% if p.source %}<div class="fine">Found via {{ p.source }}{% if p.referrer %} (referred by {{ p.referrer }}){% endif %}</div>{% endif %}
       {% if p.still_to_come %}<div class="fine"><strong>{{ p.name }} has {{ p.still_to_come }} interview{{ '' if p.still_to_come == 1 else 's' }} still to come</strong></div>{% endif %}
+      {% if p.tally %}<div class="fine tally">Verdicts: <strong>{{ p.tally }}</strong></div>{% endif %}
+      {% if p.open_sessions %}<div class="fine"><span class="badge overdue">Needs outcome</span> {{ p.open_sessions }} session{{ '' if p.open_sessions == 1 else 's' }} with no outcome yet</div>{% endif %}
+      {% if p.owed %}<div class="fine">Feedback owed by {{ p.owed | join(', ') }}</div>{% endif %}
       {% if not p.interviews %}<p class="fine">No interviews logged for this job.</p>{% endif %}
       {% for i in p.interviews %}
       <div class="iv" id="iv-{{ i.interview_id }}">
         <div><strong>{{ i.name }}</strong>{% if i.interviewer %} <span class="fine">with {{ i.interviewer }}</span>{% endif %}</div>
-        <div class="fine">{{ i.at | local(IV_TIME) }} · <span class="badge">{{ i.outcome }}</span></div>
+        <div class="fine">{{ i.at | local(IV_TIME) }} · <span class="badge{{ ' overdue' if i.needs_outcome }}">{{ i.outcome }}</span></div>
+        {% if i.verdicts | length > 1 or (i.verdicts and i.verdicts | selectattr('label') | list) %}
+        <div class="fine">{% for v in i.verdicts %}{{ v.name or 'Unnamed' }}: {{ v.label or 'not recorded' }}{{ ' · ' if not loop.last }}{% endfor %}</div>
+        {% endif %}
+        {% if i.owed %}<div class="fine">Owed: {{ i.owed | join(', ') }}</div>{% endif %}
         {% if i.note %}<blockquote>{{ i.note }}</blockquote>{% endif %}
         {% for f in i.feedback %}<blockquote><span class="fine">{{ f.by or 'Interviewer' }}{% if f.source == 'AI app' %} (via your AI app){% endif %}:</span> {{ f.text }}</blockquote>{% endfor %}
         {% if not i.upcoming %}
+        {% set back_to = '/jobs/' ~ job.id ~ '/decide' ~ ('?ids=' ~ ids if ids else '') %}
+        <form method="post" action="/candidates/{{ p.candidate_id }}/interviews/{{ i.interview_id }}/verdict" class="inline-verdict">
+          <input type="hidden" name="next" value="{{ back_to }}">
+          {% if i.names | length > 1 %}<select name="interviewer" aria-label="Whose verdict">{% for n in i.names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}</select>
+          {% elif i.names %}<input type="hidden" name="interviewer" value="{{ i.names[0] }}">
+          {% else %}<input type="text" name="interviewer" maxlength="200" placeholder="Who (optional)" aria-label="Interviewer">{% endif %}
+          <select name="verdict" aria-label="Verdict">{% for value, word in verdict_choices %}<option value="{{ value }}">{{ word }}</option>{% endfor %}</select>
+          <button class="btn small" type="submit">{{ 'Change verdict' if i.status != 'scheduled' else 'Record verdict' }}</button>
+        </form>
         <details>
           <summary class="link small">Add feedback</summary>
           <form method="post" action="/candidates/{{ p.candidate_id }}/interviews/{{ i.interview_id }}/feedback" class="stack">
-            <input type="hidden" name="next" value="/jobs/{{ job.id }}/decide{% if ids %}?ids={{ ids }}{% endif %}">
-            <input type="text" name="interviewer" maxlength="200" placeholder="Who said it" value="{{ i.interviewer or '' }}" aria-label="Interviewer">
+            <input type="hidden" name="next" value="{{ back_to }}">
+            <input type="text" name="interviewer" maxlength="200" placeholder="Who said it" value="{{ i.names[0] if i.names | length == 1 else '' }}" aria-label="Interviewer"{% if i.names | length > 1 %} list="who-{{ i.interview_id }}"{% endif %}>
+            {% if i.names | length > 1 %}<datalist id="who-{{ i.interview_id }}">{% for n in i.names %}<option value="{{ n }}">{% endfor %}</datalist>{% endif %}
             <textarea name="text" rows="3" maxlength="4000" required placeholder="What they thought, in their words" aria-label="Feedback"></textarea>
+            <label>Their verdict (optional) <select name="verdict"><option value="">Not given</option>{% for value, word in verdict_choices %}<option value="{{ value }}">{{ word }}</option>{% endfor %}</select></label>
             <button class="btn small" type="submit">Save feedback</button>
           </form>
         </details>
@@ -45,6 +63,7 @@
       </div>
       {% endfor %}
       {% for t in p.todos %}<div class="fine">To-do: {{ t.text }}</div>{% endfor %}
+      {% with on = offers_of(p.candidate_id).get(job.id), offer_href = '/jobs/' ~ job.id ~ '/offers/' ~ p.candidate_id %}{% include "_offer_note.html" %}{% endwith %}
     </article>
   {% endfor %}
   </div>
@@ -63,11 +82,14 @@
   <form method="post" action="/jobs/{{ job.id }}/decide" class="stack" data-decide="{{ out_stage }}">
     <fieldset>
       <legend>Who gets the offer? They move to {{ offer_stage }}.</legend>
-      {% for p in people %}<label class="inline-label"><input type="radio" name="offer" value="{{ p.candidate_id }}" data-name="{{ p.name }}" required> {{ p.name }}</label>{% endfor %}
+      {% for p in people %}<label class="inline-label"><input type="radio" name="offer" value="{{ p.candidate_id }}" data-name="{{ p.name }}"{% if p.open_sessions %} data-open="{{ p.open_sessions }}"{% endif %} required> {{ p.name }}</label>{% endfor %}
+      <label class="inline-label"><input type="radio" name="offer" value="none" data-name="nobody yet" required> No offer yet, another round</label>
     </fieldset>
+    {% set open_people = people | selectattr('open_sessions') | list %}
+    {% if open_people %}<p class="fine warn" id="open-sessions"><strong>Still open:</strong> {% for p in open_people %}{{ p.name }} has {{ p.open_sessions }} session{{ '' if p.open_sessions == 1 else 's' }} with no outcome{{ '; ' if not loop.last else '.' }}{% endfor %} You can still record the decision.</p>{% endif %}
     <fieldset>
       <legend>Pass on. Tick each person to pass on; they move to {{ out_stage }}.</legend>
-      {% for p in people %}<label class="inline-label"><input type="checkbox" name="pass" value="{{ p.candidate_id }}" data-name="{{ p.name }}"{% if p.still_to_come %} data-ahead="{{ p.still_to_come }}"{% endif %}> {{ p.name }}{% if p.still_to_come %} <span class="fine">({{ p.still_to_come }} interview{{ '' if p.still_to_come == 1 else 's' }} still to come)</span>{% endif %}</label>{% endfor %}
+      {% for p in people %}<label class="inline-label"><input type="checkbox" name="pass" value="{{ p.candidate_id }}" data-name="{{ p.name }}"{% if p.still_to_come %} data-ahead="{{ p.still_to_come }}"{% endif %}{% if p.open_sessions %} data-open="{{ p.open_sessions }}"{% endif %}> {{ p.name }}{% if p.still_to_come %} <span class="fine">({{ p.still_to_come }} interview{{ '' if p.still_to_come == 1 else 's' }} still to come)</span>{% endif %}</label>{% endfor %}
       <p class="fine">Nobody is ticked to start. Anyone you don't tick stays where they are. The person who gets the offer is never passed on, even if ticked here.</p>
     </fieldset>
     <label>Reason for passing <select name="reason">{% for label, _ in move_reasons() %}<option value="{{ label }}"{% if label == pass_label %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>

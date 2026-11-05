@@ -23,18 +23,19 @@
 
 <section class="panel">
   {% if not w.total %}<p class="none">Nothing booked this week. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
-  <div class="week">
+  <div class="week days-{{ w.days | length }}">
   {% for d in w.days %}
     <div class="day">
       <h3>{{ d.label }}</h3>
       {% for lp in d.loops %}
       <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
         <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}
-        {% if lp.job %}<div class="fine">{{ lp.job }}</div>{% endif %}
+        {% if lp.job %}<div class="fine">{{ lp.job }}</div>{% else %}<div class="fine">No job <a class="link small" href="/interviews/{{ lp.sessions[0].interview_id }}/job">Pick the job</a></div>{% endif %}
         {% if lp.split %}<div class="fine">Some sessions of this loop are on another day.</div>{% endif %}
         <ul class="sessions">
         {% for x in lp.sessions %}
-          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% endif %}
+          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% elif x.needs_outcome %} <span class="badge overdue">Needs outcome</span>{% endif %}
+            {% if x.owed %}<span class="fine">Owed: {{ x.owed | join(', ') }}</span>{% endif %}
             <a class="link small" href="{{ x.href }}">Change</a></li>
         {% endfor %}
         </ul>
@@ -44,6 +45,13 @@
   {% endfor %}
   </div>
 </section>
+
+{% if w.owed %}
+<section class="panel" id="owed">
+  <h2>Still open</h2>
+  <ul>{% for o in w.owed %}<li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a>, {{ o.session }} ({{ o.at | local('%a %b %-d') }}): {% if o.outcome %}needs an outcome{% endif %}{% if o.outcome and o.feedback %}; {% endif %}{% if o.feedback %}feedback owed by {{ o.feedback | join(', ') }}{% endif %}</li>{% endfor %}</ul>
+</section>
+{% endif %}
 
 {% if w.load %}
 <section class="panel">

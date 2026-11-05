@@ -1,6 +1,6 @@
 // Talent Search app window. All page scripts live here so the Content-Security-Policy
 // can forbid inline scripts. Pages opt in with data- attributes:
-//   data-confirm="question"   on a form: ask before submitting
+//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form)
 //   data-autosubmit           on a select: submit its form when it changes
 //   data-recipe="run|copy"    on a button with data-prompt (and optional data-fill)
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
@@ -11,7 +11,9 @@
 //                             (a submit button's own data-busy wins when that button sent it)
 //   data-decide="Out stage"   on the Decide form: before sending, confirm naming who gets the offer and who is
 //                             passed on (radio offer and ticked pass boxes, each with data-name; data-ahead counts
-//                             their interviews still to come, which get cancelled)
+//                             their interviews still to come, which get cancelled; data-open their sessions
+//                             with no outcome yet, named as still open)
+//   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -69,6 +71,16 @@
     if (e.target.closest && e.target.closest("button[data-print]")) window.print();
   });
 
+  // The time zone banner: suggest the zone this browser is in, so saving it is one click.
+  function prefillZones() {
+    let zone = "";
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
+    if (!zone) return;
+    document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
+  else prefillZones();
+
   // The Decide form: say exactly who gets the offer and who is passed on before anything moves.
   function decideQuestion(form) {
     const offer = form.querySelector("input[name=offer]:checked");
@@ -83,13 +95,27 @@
         q += "\n  " + b.dataset.name + (n ? " (cancels " + n + " interview" + (n === 1 ? "" : "s") + " still to come)" : "");
       });
     }
+    const open = [offer, ...passed].filter(b => b && b.dataset.open);
+    if (open.length) {
+      q += "\n\nStill open:";
+      open.forEach(b => {
+        const n = parseInt(b.dataset.open, 10);
+        q += "\n  " + b.dataset.name + " has " + n + " session" + (n === 1 ? "" : "s") + " with no outcome";
+      });
+    }
     return q + "\n\nYou can undo it all under Changes.";
+  }
+
+  // A confirm can name the stage picked in the form's stage menu: "{stage}" reads as the chosen stage.
+  function confirmText(form) {
+    const pick = form.querySelector("select[name=stage]");
+    return form.dataset.confirm.split("{stage}").join(pick && pick.value ? pick.value : "the first stage");
   }
 
   document.addEventListener("submit", e => {
     const form = e.target;
     if (form.dataset && form.dataset.decide !== undefined && !window.confirm(decideQuestion(form))) { e.preventDefault(); return; }
-    if (form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) { e.preventDefault(); return; }
+    if (form.dataset && form.dataset.confirm && !window.confirm(confirmText(form))) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.busy) {
       // A big import takes a while: say so, and don't let a second click send it again.
       if (form.dataset.sent) { e.preventDefault(); return; }

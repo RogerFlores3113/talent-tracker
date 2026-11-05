@@ -116,7 +116,7 @@ def _pipelines(store: Store, candidate_id: int) -> list[dict[str, Any]]:
 def checks(store: Store, p: dict[str, Any]) -> dict[str, Any]:
     """What the recruiter should know before keeping someone: the saved person with this profile link
     (with their jobs), people saved under the same name, and other jobs where they were passed on."""
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {} if p.get("linkedin_url") else {"no_link": True}
     saved = store.find_duplicate(linkedin_url=p["linkedin_url"]) if p.get("linkedin_url") else None
     if saved:
         out["saved"] = {**_brief(saved), "pipelines": _pipelines(store, saved["id"]),
@@ -143,7 +143,10 @@ def same_name(store: Store, p: dict[str, Any]) -> list[dict[str, Any]]:
 
 def check_lines(c: dict[str, Any]) -> list[str]:
     """The checks as short plain lines, for the AI's reply and the Shortlist page."""
-    lines = []
+    lines = [f"Passed on for {x['job']}" + (f": {x['reason']}" if x.get("reason") else "")
+             for x in c.get("passed_elsewhere") or []]
+    if c.get("no_link"):
+        lines.append("No LinkedIn link, so it can't be checked against people already saved")
     if c.get("saved"):
         s = c["saved"]
         jobs = "; ".join(f"{p['job']}: {p['stage']}" for p in s["pipelines"])
@@ -155,8 +158,6 @@ def check_lines(c: dict[str, Any]) -> list[str]:
                      + (f", {m['current_title']}" if m.get("current_title") else "")
                      + (f" at {m['current_company']}" if m.get("current_company") else "")
                      + (f". In {jobs}" if jobs else ""))
-    for x in c.get("passed_elsewhere") or []:
-        lines.append(f"Passed on for {x['job']}" + (f": {x['reason']}" if x.get("reason") else ""))
     return lines
 
 
@@ -285,13 +286,37 @@ def _last_timeline_id(store: Store) -> int:
     return store._row("SELECT coalesce(max(id), 0) AS n FROM timeline")["n"]
 
 
+def keep_stage(store: Store, job_id: int, stage: str | None) -> str | None:
+    """The stage a Keep adds people to: None (the job's first stage) or one still in play, by name."""
+    if not (stage or "").strip():
+        return None
+    s = store.resolve_stage(job_id, stage)
+    if s["outcome"] != "open":
+        raise ValueError(f"Keep adds people to a stage still in play, not {s['name']}.")
+    return s["name"]
+
+
+def keep_stages(store: Store, job_id: int) -> list[str]:
+    """Where a Keep can land: the job's first stage, and its Contacted stage for people already messaged."""
+    from .outreach import contact_stage  # here: outreach imports actions, as this module does
+
+    stages = store.job_stages(job_id)
+    out = [stages[0]["name"]] if stages and stages[0]["outcome"] == "open" else []
+    c = contact_stage(store, job_id)
+    if c and c["name"] not in out:
+        out.append(c["name"])
+    return out
+
+
 def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = None,
-         as_new: bool = False, log: bool = True, via: str | None = None) -> dict[str, Any]:
+         as_new: bool = False, log: bool = True, via: str | None = None, stage: str | None = None) -> dict[str, Any]:
     """The recruiter keeps someone: link the person already saved with this profile link (or the one they
     picked), or save them, then add them to the job's first stage. Returns {"candidate", "created", "stage",
     "already", "record"}. Raises NeedsChoice when someone with the same name is saved and the recruiter hasn't
     chosen. With log, the keep is listed on Changes with its own Undo (keep_all logs its keeps as one).
-    Linking someone saved fills their blank fields from the Shortlist row. via="claude": pressed in Claude's view."""
+    Linking someone saved fills their blank fields from the Shortlist row. via="claude": pressed in Claude's view.
+    stage: a stage still in play to add them to (Contacted, when the recruiter already messaged them)."""
+    stage_name = keep_stage(store, job_id, stage)
     mark = _last_timeline_id(store)
     p = get(store, job_id, prospect_id)
     if p["status"] != "proposed":
@@ -332,7 +357,7 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
     stage = already
     if not already:
         note = f"Kept from the Shortlist. Why they fit: {p['fit']}" if p.get("fit") else "Kept from the Shortlist."
-        stage = store.add_to_pipeline(target["id"], job_id, None, note)["stage"]
+        stage = store.add_to_pipeline(target["id"], job_id, stage_name, note)["stage"]
     with store._write():
         ts = now_iso()
         store._conn.execute("UPDATE prospects SET status = 'kept', candidate_id = ?, decided_at = ?, updated_at = ?"
@@ -347,26 +372,34 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
               "own": own, **({"via": via} if via else {})}
     if log:
         _log_keeps(store, job_id, [record])
-    return {"candidate": target, "created": created, "stage": stage, "already": bool(already), "record": record}
+    from .outreach import other_clients_text  # here: outreach imports actions, as this module does
+
+    return {"candidate": target, "created": created, "stage": stage, "already": bool(already), "record": record,
+            "elsewhere": other_clients_text(store, target["id"], job_id)}
 
 
-def keep_all(store: Store, job_id: int) -> dict[str, Any]:
-    """Keep everyone waiting, except people whose same-name match needs the recruiter's choice and names that
-    read like a sentence (keep those one at a time, if they really are someone). Logged as one change."""
+def keep_all(store: Store, job_id: int, ids: list[int] | None = None, *, stage: str | None = None,
+             via: str | None = None) -> dict[str, Any]:
+    """Keep everyone waiting (or the waiting ones among ids), except people whose same-name match needs the
+    recruiter's choice and names that read like a sentence (keep those one at a time, if they really are
+    someone). Logged as one change."""
+    keep_stage(store, job_id, stage)  # a stage out of play is refused before anyone is kept
     kept, left, held = [], [], []
-    for p in listed(store, job_id, "proposed", with_checks=False):
+    rows = listed(store, job_id, "proposed", with_checks=False)
+    if ids is not None:
+        rows = [p for p in rows if p["id"] in set(ids)]
+    for p in rows:
         if _sentence_like(p["name"]):
             held.append(p["name"])
             continue
         try:
-            kept.append(keep(store, job_id, p["id"], log=False))
+            kept.append(keep(store, job_id, p["id"], log=False, stage=stage, via=via))
         except NeedsChoice:
             left.append(p["name"])
         except (ValueError, NotFound):
             left.append(p["name"])
-    if kept:
-        _log_keeps(store, job_id, [k["record"] for k in kept])
-    return {"kept": kept, "left": left, "held": held}
+    batch = _log_keeps(store, job_id, [k["record"] for k in kept]) if kept else None
+    return {"kept": kept, "left": left, "held": held, "batch": batch}
 
 
 def _log_keeps(store: Store, job_id: int, records: list[dict[str, Any]]) -> int:
@@ -400,7 +433,7 @@ def keep_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]
         stages = sorted({k["stage"] for k in kept if k.get("stage")})
         text = (f"Kept {who} from the Shortlist for {job_label(job['title'], job.get('company'))}"
                 + (f", in {' and '.join(stages)}" if stages else "")
-                + (", in Claude" if kept and all(k.get("via") == "claude" for k in kept) else ""))
+                + (", in your AI app" if kept and all(k.get("via") == "claude" for k in kept) else ""))
         out.append({**b, "id": int(bid), "job_title": job["title"], "text": text, "undoable": not b.get("undone_at"),
                     "note": b.get("undo_note")})
     return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)
@@ -491,9 +524,17 @@ def pass_on(store: Store, job_id: int, prospect_id: int, reason: str | None = No
     return _pass(store, [p["id"]], reason)[0] | {"name": p["name"]}
 
 
-def pass_all(store: Store, job_id: int, reason: str | None = None) -> int:
-    ids = [p["id"] for p in listed(store, job_id, "proposed", with_checks=False)]
-    return len(_pass(store, ids, reason)) if ids else 0
+def pass_all(store: Store, job_id: int, reason: str | None = None, ids: list[int] | None = None) -> int:
+    """Pass on everyone waiting (or the waiting ones among ids), with one reason."""
+    return len(pass_waiting(store, job_id, reason, ids))
+
+
+def pass_waiting(store: Store, job_id: int, reason: str | None = None,
+                 ids: list[int] | None = None) -> list[dict[str, Any]]:
+    """pass_all, returning the people passed on: [{"id", "name", "reason"}]."""
+    rows = [p for p in listed(store, job_id, "proposed", with_checks=False) if ids is None or p["id"] in set(ids)]
+    names = {p["id"]: p["name"] for p in rows}
+    return [{**r, "name": names[r["id"]]} for r in _pass(store, list(names), reason)] if rows else []
 
 
 def _pass(store: Store, ids: list[int], reason: str | None) -> list[dict[str, Any]]:
@@ -546,7 +587,7 @@ def row_view(p: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["MAX_BATCH", "NeedsChoice", "propose", "listed", "keep", "keep_all", "keep_batches", "undo_keep",
+__all__ = ["MAX_BATCH", "NeedsChoice", "propose", "listed", "keep", "keep_all", "keep_stage", "keep_stages", "keep_batches", "undo_keep",
            "pass_on", "pass_all", "put_back",
            "counts", "waiting", "today_items", "checks", "check_lines", "row_view", "profile_url",
            "same_name"]

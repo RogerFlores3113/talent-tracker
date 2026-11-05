@@ -11,6 +11,7 @@
     <p class="fine job-facts">{{ nums.active }} in the running · {{ nums.hired }} {{ nums.word }}{% if nums.openings > 1 %}, {{ nums.openings }} openings{% endif %}{% if nums.out %} · {{ nums.out }} out{% endif %}
       {%- if job.hiring_manager %} · Hiring manager: {% if job.hiring_manager_email %}<a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager }}</a>{% else %}{{ job.hiring_manager }}{% endif %}{% elif job.hiring_manager_email %} · Hiring manager: <a href="mailto:{{ job.hiring_manager_email }}">{{ job.hiring_manager_email }}</a>{% endif %}
       {%- if job.target_date %} · Target {{ (job.target_date ~ 'T12:00:00') | local('%b %-d, %Y') }}{% endif %}</p>
+    {% set jx_ids = [job.id] %}{% include "_ai_job_email.html" %}
   </div>
   <div class="actions-inline">
     {% include "_job_tabs.html" %}
@@ -68,6 +69,7 @@
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>
+{% include "_sequence.html" %}
 <details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>{{ 'Status update' if inhouse() else 'Status update for the client' }}</summary>
   <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages are internal: their people aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
   {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't {{ 'put forward' if inhouse() else 'presented' }} yet.</p>{% endif %}

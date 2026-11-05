@@ -2,24 +2,35 @@
 {% set word = 'Reports' if inhouse() else 'Clients' %}
 {% block title %}{{ word }} · Talent Search{% endblock %}
 {% block body %}
-<div class="sec-head"><h1>{{ word }}</h1>{% if rows %}<a class="btn small{{ ' primary' if rows | selectattr('due') | list }}" href="/clients/due">Updates due this week</a>{% endif %}</div>
+<div class="sec-head"><h1>{{ word }}</h1><span class="actions-inline">{% if rows %}<a class="btn small" href="/clients/chase">Waiting on feedback</a> <a class="btn small{{ ' primary' if rows | selectattr('due') | list }}" href="/clients/due">Updates due this week</a>{% endif %}</span></div>
 <p class="lead">{% if inhouse() %}One row per company your jobs name. Open one for a hiring update to share: where people stand, who moved, how long each stage takes and the interviews coming up.{% else %}One row per client, from the company on each job. Open one for its update: where people stand, who moved since your last update, how long each stage takes and the interviews coming up.{% endif %}</p>
 {% if rows %}
 <div class="table-wrap"><table class="dense clients-table">
-  <thead><tr><th>{{ 'Company' if inhouse() else 'Client' }}</th><th>Open jobs</th><th>People in play</th><th>Interviews this week</th><th>Last update sent</th></tr></thead>
+  <thead><tr><th>{{ 'Company' if inhouse() else 'Client' }}</th><th>Open jobs</th><th>In play (incl. sourced)</th><th>Interviews this week</th><th>Last update sent</th></tr></thead>
   <tbody>{% for r in rows %}
   <tr>
     <td><a href="/clients/{{ r.slug }}">{{ r.name }}</a>{% if r.due %} <span class="badge overdue">Update due</span>{% endif %}</td>
     <td>{{ r.open_jobs }}{% if r.jobs > r.open_jobs %} <span class="muted">of {{ r.jobs }}</span>{% endif %}</td>
-    <td>{{ r.in_play }}</td>
+    <td>{{ r.in_play }}{% if r.in_play %} <span class="muted">{{ r.presented }} in the update</span>{% endif %}</td>
     <td>{{ r.interviews }}</td>
     <td class="nowrap">{{ r.last_sent | ago if r.last_sent else 'never' }}{% if r.update_day %} <span class="muted">· {{ r.update_day }}s</span>{% endif %}</td>
   </tr>{% endfor %}</tbody>
 </table></div>
-<p class="fine">"Acme" and "Acme, Inc." count as one. Interviews this week are the next 7 days. People in play are on open jobs and not yet hired or out.</p>
+<p class="fine">"Acme" and "Acme, Inc." count as one. Interviews this week are the next 7 days. In play counts everyone on open jobs not yet hired or out, Sourced included; the update counts only the stages it shows.</p>
 {% else %}
-<div class="empty"><h2>No {{ 'companies' if inhouse() else 'clients' }} yet</h2><p>Give a job a company and it shows up here.</p>
-<p class="actions"><a class="btn primary" href="/jobs">Go to jobs</a></p></div>
+<div class="empty"><h2>No {{ 'companies' if inhouse() else 'clients' }} yet</h2><p>Add one below, or give a job a company and it shows up here.</p>
+<p class="actions"><a class="btn" href="/jobs">Go to jobs</a></p></div>
 {% endif %}
+<section class="panel no-print" id="new-client">
+  <h2>New {{ 'company' if inhouse() else 'client' }}</h2>
+  <p class="fine">Signed a client before the first req? Save them here, then add jobs from their page.</p>
+  <form class="form" method="post" action="/clients/new">
+    <label>Name<input type="text" name="name" maxlength="200" required></label>
+    <label>Update day<select name="update_day"><option value="">No set day</option>{% for d in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'] %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select></label>
+    <label>Time zone<input type="text" name="time_zone" placeholder="America/New_York, or ET, CT, MT, PT"></label>
+    <label class="wide">Contacts (one per line, like Dana Reyes &lt;dana@example.com&gt;)<textarea name="contacts" rows="2" maxlength="3000"></textarea></label>
+    <div class="actions"><button class="btn primary" type="submit">Add {{ 'company' if inhouse() else 'client' }}</button></div>
+  </form>
+</section>
 {% if no_company %}<p class="fine">{{ no_company }} job{{ '' if no_company == 1 else 's' }} with no company {{ "isn't" if no_company == 1 else "aren't" }} listed. Add a company on the job to report on it here.</p>{% endif %}
 {% endblock %}

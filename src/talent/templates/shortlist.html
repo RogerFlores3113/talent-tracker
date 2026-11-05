@@ -15,8 +15,9 @@
     <h2>{{ counts.proposed }} waiting for you{% if counts.kept or counts.passed %} <span class="fine">· {{ counts.kept }} kept · {{ counts.passed }} passed on</span>{% endif %}</h2>
     {% if rows %}
     <div class="actions-inline">
-      <form method="post" action="/jobs/{{ job.id }}/shortlist/keep-all" class="inline" data-confirm="Keep all {{ rows | length }} and add them to {{ first_stage }}? People who share a name with someone saved wait for your choice.">
-        <button class="btn small primary" type="submit">Keep all</button></form>
+      <form method="post" action="/jobs/{{ job.id }}/shortlist/keep-all" class="inline" data-confirm="Keep all {{ rows | length }} and add them to {{ '{stage}' if keep_stages | length > 1 else first_stage }}? People who share a name with someone saved wait for your choice.">
+        {% if keep_stages | length > 1 %}<select name="stage" aria-label="Keep into">{% for s in keep_stages %}<option value="{{ s }}">Into {{ s }}</option>{% endfor %}</select>{% endif %}
+        <button class="btn small primary" type="submit">Keep all ({{ rows | length }})</button></form>
       <form method="post" action="/jobs/{{ job.id }}/shortlist/pass-all" class="inline" data-confirm="Pass on all {{ rows | length }}? They won't be proposed for this job again.">
         <input type="text" name="reason" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for passing on everyone">
         <button class="btn small" type="submit">Pass all</button></form>
@@ -36,7 +37,11 @@
         {% if p.linkedin_url %}<a href="{{ p.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ p.linkedin_url | profile_label }}</a>{% endif %}
         {% if p.fit %}<div class="fit">{{ p.fit }}</div>{% endif %}
         {% if p.tags %}<div class="fine">Skills: {{ p.tags | join(', ') }}</div>{% endif %}
-        {% for line in p.check_lines %}<div class="fine check">{{ line }}</div>{% endfor %}
+        {% for line in p.check_lines %}<div class="fine check">{% if line.startswith('Passed on for ') %}<strong>{{ line }}</strong>{% else %}{{ line }}{% endif %}</div>{% endfor %}
+        {% if p.about or p.work_history %}<details class="fine prospect-more"><summary>About and work history</summary>
+          {% if p.about %}<p>{{ p.about }}</p>{% endif %}
+          {% if p.work_history %}<ul>{% for w in p.work_history %}<li>{{ w.title or '' }}{% if w.company %} at {{ w.company }}{% endif %}{% if w.start or w.end %} ({{ w.start or '' }} to {{ w.end or 'now' }}){% endif %}</li>{% endfor %}</ul>{% endif %}
+        </details>{% endif %}
         <div class="fine">Proposed {{ p.created_at | ago }}{% if p.proposed_by == 'ai' %} by your AI app{% endif %}</div>
       </div>
       <div class="item-acts">
@@ -44,13 +49,15 @@
         {% if same and not (p.checks or {}).get('saved') %}
           {% for m in same %}
           <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline"><input type="hidden" name="link_id" value="{{ m.id }}">
-            <button class="btn small{{ ' primary' if choose == p.id }}" type="submit">Keep as {{ m.name }} (#{{ m.id }})</button></form>
+            <button class="btn small{{ ' primary' if choose == p.id }}" type="submit">Same as {{ m.name }}{% if m.current_company %}, {{ m.current_company }}{% elif m.current_title %}, {{ m.current_title }}{% endif %}</button></form>
           {% endfor %}
           <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline"><input type="hidden" name="as_new" value="1">
-            <button class="btn small" type="submit">Keep as someone new</button></form>
+            <button class="btn small" type="submit">Someone new</button></form>
         {% else %}
           <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline">
             <button class="btn small primary" type="submit">Keep</button></form>
+          {% if keep_stages | length > 1 %}<form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/keep" class="inline"><input type="hidden" name="stage" value="{{ keep_stages[1] }}">
+            <button class="link small" type="submit" title="You already messaged them">Keep in {{ keep_stages[1] }}</button></form>{% endif %}
         {% endif %}
         <form method="post" action="/jobs/{{ job.id }}/shortlist/{{ p.id }}/pass" class="inline pass-form">
           <input type="text" name="reason" maxlength="300" placeholder="Reason (optional)" aria-label="Reason for passing on {{ p.name }}">

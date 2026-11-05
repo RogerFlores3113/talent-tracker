@@ -18,20 +18,46 @@
   {% if who or since %}<a href="/changes" class="small">Clear</a>{% endif %}
 </form>
 
-{% if ai_pending %}
+{% if ai_pending or ai_waiting %}
 {% set since_text = ai_since | local('%a %b %-d, %-I:%M %p %Z') %}
 <div class="panel">
-<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ since_text }}? A backup is saved first. People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are.">
+<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo {{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} your AI app made since {{ since_text }}{% if ai_waiting %}, and pass the {{ ai_waiting }} still waiting on Review{% endif %}? A backup is saved first. People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself, or kept on Review, stay as they are.">
   <input type="hidden" name="since" value="{{ ai_since_epoch }}">
   <button class="btn" type="submit">Undo all AI changes since {{ since_text }}</button>
-  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone, newest first. A backup is saved first.</span>
+  <span class="fine">{{ ai_pending }} change{{ '' if ai_pending == 1 else 's' }} can be undone, newest first{% if ai_waiting %}, and {{ ai_waiting }} waiting on Review {{ 'is' if ai_waiting == 1 else 'are' }} passed{% endif %}. A backup is saved first.</span>
 </form>
-<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo every change your AI app made in the time you picked? A backup is saved first. Things you edited yourself since then stay as they are.">
+<form method="post" action="/changes/undo-ai" class="inline" data-confirm="Undo every change your AI app made in the time you picked, and pass what it left waiting on Review? A backup is saved first. Things you edited yourself since then stay as they are.">
   <label class="inline-label fine">Or undo all from the last
     <select name="window" aria-label="How far back to undo">{% for k, label in undo_windows.items() %}<option value="{{ k }}" {{ 'selected' if k == undo_window }}>{{ label }}</option>{% endfor %}</select></label>
+  <label class="inline-label fine"><input type="checkbox" name="include_kept" value="1"> Also undo changes I kept on Review or Today</label>
   <button class="btn small" type="submit">Undo</button>
 </form>
 </div>
+{% endif %}
+
+{% if ai_sessions %}
+<section class="panel" id="sessions">
+  <h2>AI sessions</h2>
+  <p class="fine">Each time your AI app connects is one session. A backup is saved before its first change. Roll back undoes only that session's changes, newest first, and passes what it left waiting on Review. Changes you kept stay.</p>
+  <ul class="timeline changes">
+  {% for g in ai_sessions %}
+    <li>
+      <strong>{{ g.label }}</strong>
+      <span class="when">{{ (g.first_write or g.started) | local('%b %-d, %Y, %-I:%M %p') }}</span>
+      <span class="muted">· {{ g['items'] | length }} change{{ '' if g['items'] | length == 1 else 's' }}{% if g.waiting %}, {{ g.waiting }} waiting on <a href="/review">Review</a>{% endif %}{% if g.kept %}, {{ g.kept }} you kept{% endif %}</span>
+      {% if g['items'] %}<details class="import-people"><summary>What it changed</summary>
+        <ul class="timeline changes">{% for a in g['items'][:50] %}<li>{{ a.summary }}{% if a.undone_at %} <span class="fine">Undone</span>{% elif a.confirmed_at %} <span class="fine">You kept it</span>{% elif a.blocked %} <span class="fine">Can't undo: {{ a.blocked }}</span>{% endif %}</li>{% endfor %}</ul>
+        {% if g['items'] | length > 50 %}<p class="fine">And {{ g['items'] | length - 50 }} more.</p>{% endif %}
+      </details>{% endif %}
+      {% if g.can_roll_back and g.later %}<div class="fine">{{ g.later | join('; ') }}. Roll back leaves {{ 'that move' if g.later | length == 1 else 'those moves' }} as {{ 'it is' if g.later | length == 1 else 'they are' }}.</div>{% endif %}
+      {% if g.can_roll_back %}<form method="post" action="/changes/session/roll-back" class="inline" data-confirm="{{ g.confirm }}">
+        <input type="hidden" name="session" value="{{ g.id }}"><button class="btn small" type="submit">Roll back this session</button></form>
+      {% elif g.rolled_back %}<div class="fine">Rolled back {{ g.rolled_back.at | local('%b %-d, %-I:%M %p') }}.{% if g.rolled_back.left %} Couldn't undo {{ g.rolled_back.left | length }}: {{ g.rolled_back.left | join('; ') }}.{% endif %}</div>{% endif %}
+      {% if g.backup %}<div class="fine">Its backup from before its first change is under <a href="/settings#backups">Automatic backups</a>.</div>{% elif g.backup_error %}<div class="fine">No backup was saved before its first change.</div>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
 {% endif %}
 {% if undo_last and not (request.state.flash or {}).get('notice') %}<p class="fine" role="status">Last Undo all AI, {{ undo_last.at | local('%a %b %-d, %-I:%M %p') }}: {{ undo_last.notice }}</p>{% endif %}
 

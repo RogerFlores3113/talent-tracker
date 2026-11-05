@@ -17,17 +17,27 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import actions, reports
-from .store import (AI_SOURCE, FIELD_LABELS, INTERVIEW_OUTCOME_LABELS, INTERVIEW_OUTCOMES, INTERVIEW_VERDICTS,
+from . import sessions as ledger
+from .store import (AI_KEPT, AI_SOURCE, FIELD_LABELS, INTERVIEW_OUTCOME_LABELS, INTERVIEW_OUTCOMES, INTERVIEW_VERDICTS,
                     JOB_FIELD_LABELS, JOB_STATUS_LABELS, NotFound, Store, _labels, now_iso, parse_when, quoted)
 
 SETTING = "ai_cautious"
+# Cautious options (settings rows, "1" for on). Only read while Cautious mode is on.
+HOLD_CONTACTS = "ai_hold_contacts"  # a new email or phone on a saved person waits too, not only a replaced one
+HOLD_MOVES = "ai_hold_moves"  # every stage move waits, not only moves into a hired or out stage
+OPTIONS = (HOLD_CONTACTS, HOLD_MOVES)
+# Job fields that say where client updates get emailed: in Cautious mode the AI app's change to one always waits,
+# even when it fills an empty one.
+JOB_CONTACT_FIELDS = ("hiring_manager_email",)
+CANDIDATE_CONTACT_FIELDS = ("email", "phone")
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
-         "feedback": "Interview feedback", "job_stages": "Stage change"}
+         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
@@ -41,6 +51,41 @@ def set_cautious(store: Store, on: bool) -> None:
     with store._write():  # its own settings row (not one of the Today settings set_settings checks)
         store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
                             " SET value = excluded.value", (SETTING, "1" if on else "0"))
+
+
+def set_options(store: Store, **on: bool) -> None:
+    with store._write():
+        store._conn.executemany("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
+                                " SET value = excluded.value", [(k, "1" if v else "0") for k, v in on.items()
+                                                                if k in OPTIONS])
+
+
+def hold_contacts(store: Store) -> bool:
+    return cautious(store) and store.setting(HOLD_CONTACTS) == "1"
+
+
+def hold_moves(store: Store) -> bool:
+    return cautious(store) and store.setting(HOLD_MOVES) == "1"
+
+
+def extra_holds_text(store: Store) -> str:
+    """The extra holds that are on, named in the notice after saving Cautious mode ("" when none is)."""
+    bits = [x for on, x in ((hold_contacts(store), "new emails and phones on saved people"),
+                            (hold_moves(store), "every stage move, a submit to a client included")) if on]
+    return f" So do {' and '.join(bits)}." if bits else ""
+
+
+def held_contacts(store: Store, saved: dict[str, Any], data: dict[str, Any]) -> list[str]:
+    """The email and phone the AI app would fill in on a saved person, when Settings holds new ones too."""
+    if not hold_contacts(store):
+        return []
+    return [k for k in CANDIDATE_CONTACT_FIELDS
+            if str(data.get(k) or "").strip() and not str(saved.get(k) or "").strip()]
+
+
+def todos_this_hour(store: Store) -> int:
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    return store._row("SELECT count(*) AS n FROM ai_actions WHERE kind = 'todo_added' AND at >= ?", (since,))["n"]
 
 
 def new_session() -> str:
@@ -173,6 +218,67 @@ def queue_move(store: Store, candidate_id: int, job_id: int, stage: str, before:
                   session=session)
 
 
+def queue_submit(store: Store, candidate_id: int, job_id: int, session: str | None) -> dict[str, Any] | None:
+    """Hold submit_to_client's move into the job's Submitted stage (Cautious mode with Hold every stage move).
+    Checked the way chase.submit checks first, so a submit that can't be made is refused now. None when they are
+    already in that stage, so there is nothing to move."""
+    from .chase import submit_stage  # here: chase imports reports, which this module imports
+    job, c = store.get_job(job_id), store.get_candidate(candidate_id)
+    app = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    if app is None:
+        raise ValueError(f"{c['name']} isn't on {job['title']} yet. Add them to the job first.")
+    target = submit_stage(store, job_id)
+    if target is None:
+        raise ValueError(f"{job['title']} has no stage that counts as Submitted. Add one (like Submitted to client), "
+                         "or set a stage's Counts as to Submitted on the job's Edit stages page.")
+    here = next((x for x in store.job_stages(job_id) if x["name"].lower() == app["stage"].lower()), None)
+    if here is not None and here["outcome"] != "open":
+        raise ValueError(f"{c['name']} is in {app['stage']} on {job['title']}, which counts as "
+                         f"{'hired' if here['outcome'] == 'hired' else 'out'}. Move them back first if they're in play.")
+    if app["stage"].lower() == target["name"].lower():
+        return None
+    if here is not None and here["position"] > target["position"]:
+        raise ValueError(f"{c['name']} is already past Submitted on {job['title']} ({app['stage']}).")
+    where = job["title"] + (f" ({job['company']})" if job.get("company") else "")
+    return _queue(store, "stage_move", f"Submit {quoted(c['name'])}: move from {app['stage']} to {target['name']} "
+                  f"on {where}", {"stage": target["name"], "before": app["stage"], "notes": None, "submit": True},
+                  candidate_id=candidate_id, job_id=job_id, session=session)
+
+
+def mark_submit(store: Store, candidate_id: int, job_id: int) -> None:
+    """Mark the AI app's newest move of this person on this job as a submit to the client, so it counts toward
+    the hourly cap on what the AI app changes."""
+    with store._write():
+        a = store._row("SELECT id, new_data FROM ai_actions WHERE kind = 'stage_move' AND candidate_id = ? AND job_id = ?"
+                       " ORDER BY id DESC LIMIT 1", (candidate_id, job_id))
+        if a is None:
+            return
+        try:
+            new = json.loads(a["new_data"] or "{}") or {}
+        except ValueError:
+            new = {}
+        store._conn.execute("UPDATE ai_actions SET new_data = ? WHERE id = ?",
+                            (json.dumps({**new, "submit": True}), a["id"]))
+
+
+def stale_move(store: Store, r: dict[str, Any]) -> str | None:
+    """Why a waiting stage move is out of date: a newer move of the same person on the same job waits too, or they
+    were moved since. None while it still fits."""
+    cid, jid = r.get("candidate_id"), r.get("job_id")
+    if r["kind"] != "stage_move" or cid is None or jid is None:
+        return None
+    app = next((a for a in store.candidate_pipelines(cid) if a["job_id"] == jid), None)
+    before = (r["payload"].get("before") or "")
+    if app is None:
+        return "They are no longer on this job."
+    if app["stage"].lower() != before.lower():
+        return f"They were moved to {app['stage']} since, so Keep won't make this move."
+    if store._row("SELECT 1 FROM ai_review WHERE status = 'pending' AND kind = 'stage_move' AND candidate_id = ?"
+                  " AND job_id = ? AND id > ?", (cid, jid, r["id"])):
+        return "A newer move for them on this job waits here too. Keep the one you want."
+    return None
+
+
 def queue_job(store: Store, job_id: int, fields: dict[str, Any], old: dict[str, Any],
               session: str | None) -> dict[str, Any]:
     j = store.get_job(job_id)
@@ -290,11 +396,13 @@ def queue_interview(store: Store, interview_id: int, args: dict[str, Any], sessi
 
 
 def queue_feedback(store: Store, interview_id: int, feedback: str, interviewer: str | None,
-                   session: str | None) -> dict[str, Any]:
+                   session: str | None, verdict: str | None = None) -> dict[str, Any]:
     iv = store.get_interview(interview_id)
     who = f" from {quoted(interviewer.strip())}" if interviewer and interviewer.strip() else ""
-    return _queue(store, "feedback", f"Save feedback{who} on {_interview_whose(iv)}",
-                  {"interview_id": interview_id, "feedback": feedback, "interviewer": interviewer},
+    said = f" (verdict: {verdict})" if verdict else ""
+    return _queue(store, "feedback", f"Save feedback{who}{said} on {_interview_whose(iv)}",
+                  {"interview_id": interview_id, "feedback": feedback, "interviewer": interviewer,
+                   **({"verdict": verdict} if verdict else {})},
                   candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), session=session)
 
 
@@ -324,6 +432,60 @@ def queue_stages(store: Store, job_id: int, args: dict[str, Any], session: str |
         raise ValueError("No change to the stages of " + job + ".")
     return _queue(store, "job_stages", f"Change the stages of {job}: {res['changes']}",
                   {"args": args, "before": _stage_shape(store, job_id)}, job_id=job_id, session=session)
+
+
+def queue_todo(store: Store, row: dict[str, Any], session: str | None) -> dict[str, Any]:
+    """Hold the AI app's Mark done of one of the recruiter's own to-dos."""
+    return _queue(store, "todo", f"Mark the to-do {quoted(row.get('text'))} done",
+                  {"suggestion_id": row["id"], "text": row.get("text")}, candidate_id=row.get("candidate_id"),
+                  job_id=row.get("job_id"), session=session)
+
+
+def email_changes(store: Store, job_ids: list[int] | None = None) -> list[dict[str, Any]]:
+    """Hiring manager emails the AI app set (a new one or a replaced one) that the recruiter hasn't kept or undone,
+    while the job still has that email: {"id", "job_id", "title", "email", "old", "at"}, newest first. Client
+    updates can go to these addresses, so the client page and Today point them out."""
+    where, params = "", []
+    if job_ids is not None:
+        if not job_ids:
+            return []
+        where = f" AND a.job_id IN ({', '.join('?' * len(job_ids))})"
+        params = list(job_ids)
+    out, seen = [], set()
+    for a in store._rows(
+            f"""SELECT a.id, a.kind, a.job_id, a.old_data, a.new_data, a.at, a.undone_at, a.confirmed_at,
+                       j.title, j.company, j.hiring_manager_email AS now
+                FROM ai_actions a JOIN jobs j ON j.id = a.job_id
+                WHERE a.kind IN ('job_edit', 'job_created'){where} ORDER BY a.id DESC""", params):
+        if a["job_id"] in seen:
+            continue
+        try:
+            new, old = json.loads(a["new_data"] or "{}") or {}, json.loads(a["old_data"] or "{}") or {}
+        except ValueError:
+            continue
+        if a["kind"] == "job_created":
+            new, old = (new.get("job") or {}), {}
+        if not new.get("hiring_manager_email"):
+            continue
+        seen.add(a["job_id"])
+        if a["undone_at"] or a["confirmed_at"] or a["now"] != new["hiring_manager_email"]:
+            continue
+        out.append({"id": a["id"], "job_id": a["job_id"], "title": a["title"], "company": a["company"],
+                    "email": new["hiring_manager_email"], "old": old.get("hiring_manager_email"), "at": a["at"],
+                    "confirmable": a["kind"] == "job_edit"})
+    return out
+
+
+def keep_email(store: Store, action_id: int) -> None:
+    """The recruiter checked an email the AI app set on a job (even one it set when it made the job)."""
+    a = store._row("SELECT kind, undone_at FROM ai_actions WHERE id = ?", (action_id,))
+    if a is None or a["kind"] not in ("job_edit", "job_created"):
+        raise NotFound("That change is gone. Reload the page.")
+    if a["undone_at"]:
+        raise ValueError("That change was undone.")
+    with store._write():
+        store._conn.execute("UPDATE ai_actions SET confirmed_at = coalesce(confirmed_at, ?) WHERE id = ?",
+                            (now_iso(), action_id))
 
 
 def contacts_change(store: Store, key: str | None) -> dict[str, Any] | None:
@@ -411,6 +573,8 @@ def _apply(store: Store, r: dict[str, Any]) -> str:
             raise ValueError(f"They were moved to {app['stage']} since, so the move wasn't made.")
         store.move_stage(cid, jid, p["stage"], p.get("notes"), by="ai")
         store.mark_ai_stage(cid, jid, p["before"])
+        if p.get("submit"):
+            mark_submit(store, cid, jid)
         _confirm_newest(store, "stage_move", cid, jid)
         return r["summary"]
     if kind == "job_edit":
@@ -434,7 +598,9 @@ def _apply(store: Store, r: dict[str, Any]) -> str:
         entry = store.log(cid, p["kind"], p.get("body"), at=p.get("at"), job_id=p.get("job_id"), source=AI_SOURCE,
                           interviewer=p.get("interviewer"))
         store.mark_ai_note(entry)
-        return r["summary"]
+        from .chase import attach_interview_job  # the same interview kept again with its job: give it the job
+        fixed = attach_interview_job(store, entry, p.get("job_id"))
+        return r["summary"] + (f" ({fixed['skipped']})" if fixed["skipped"] else "")
     return _apply_more(store, r)
 
 
@@ -495,7 +661,11 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
         return r["summary"]
     if kind == "feedback":
         try:
-            store.add_interview_feedback(p["interview_id"], p["feedback"], p.get("interviewer"), by="ai")
+            if p.get("verdict"):  # one interviewer's own verdict, with their words (interviews.give_verdict)
+                from .interviews import give_verdict
+                give_verdict(store, p["interview_id"], p["verdict"], p.get("interviewer"), p["feedback"], by="ai")
+            else:
+                store.add_interview_feedback(p["interview_id"], p["feedback"], p.get("interviewer"), by="ai")
         except NotFound:
             raise ValueError("That interview is gone.") from None
         return r["summary"]
@@ -507,18 +677,32 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("The job's stages were changed since, so nothing was changed.")
         store.edit_job_stages(jid, by="ai", **(p.get("args") or {}))
         return r["summary"]
+    if kind == "offer":
+        from .offers import apply_review  # here: offers imports this module
+        return apply_review(store, r)
+    if kind == "todo":
+        s = store._row("SELECT done_at FROM suggestions WHERE id = ?", (p.get("suggestion_id"),))
+        if s is None:
+            raise ValueError("That to-do is gone.")
+        if s["done_at"]:
+            raise ValueError("That to-do is already done.")
+        store.complete_suggestion(p["suggestion_id"], by="ai")
+        return r["summary"]
     raise ValueError("That change can't be made here.")
 
 
 def keep(store: Store, review_id: int) -> str:
     """Apply one waiting change, exactly once (a second Keep, or a Keep after Pass, is refused)."""
     r = _claim(store, review_id, "kept")
+    token = AI_KEPT.set(True)  # what it writes is the recruiter's choice: Undo all AI leaves it unless asked
     try:
         what = _apply(store, r)
     except (ValueError, NotFound) as exc:
         reason = str(exc).rstrip(".")
         _result(store, review_id, f"Couldn't keep it: {reason}", "passed")  # decided: it won't wait again
         raise ValueError(f"Couldn't keep it: {reason}.") from None
+    finally:
+        AI_KEPT.reset(token)
     _result(store, review_id, what)
     return what
 
@@ -549,13 +733,22 @@ def sessions(store: Store) -> list[dict[str, Any]]:
         g = groups.setdefault(key, {"session": key, "started": r["created_at"], "items": []})
         r["lines"] = field_lines(r) if r["kind"] in ("profile", "job_edit") else _more_lines(r)
         r["detail"] = _detail(r)
+        r["stale"] = stale_move(store, r)
         g["items"].append(r)
+    for g in groups.values():
+        rec = ledger.get(store, g["session"]) if g["session"] else None
+        g["label"] = ledger.label(rec) if rec else "Your AI app"
+        g["started"] = (rec or {}).get("started") or g["started"]
+        g["ledger"] = rec is not None  # it has a ledger, so Roll back this session can run
     return sorted(groups.values(), key=lambda g: g["started"], reverse=True)
 
 
 def _more_lines(r: dict[str, Any]) -> list[dict[str, str]]:
     """What a client or interview change would do, one line per field: {"label", "old", "new"}."""
     p = r["payload"]
+    if r["kind"] == "offer":
+        from .offers import review_lines  # here: offers imports this module
+        return review_lines(r)
     if r["kind"] == "client_edit":
         return [{"label": CLIENT_LABELS.get(k, k), "old": _short((p.get("old") or {}).get(k)) or "(empty)",
                  "new": _short(v) or "(cleared)"} for k, v in (p.get("fields") or {}).items()]
@@ -595,18 +788,36 @@ def decided(store: Store, since: str | None = None, limit: int = 300) -> list[di
         (since or "", limit))]
 
 
+def pass_since(store: Store, since: str) -> int:
+    """Pass every change that waits on Review and was sent at or after this time (Undo all AI does this)."""
+    ids = [r["id"] for r in store._rows("SELECT id FROM ai_review WHERE status = 'pending' AND created_at >= ?",
+                                        (since,))]
+    return len(decide_many(store, ids, False)["done"])
+
+
 def today_items(store: Store) -> list[dict[str, Any]]:
-    """One Today item while AI changes wait for review."""
+    """One Today item while AI changes wait for review, and one for each job email the AI app set unchecked."""
+    out = []
+    for e in email_changes(store)[:5]:
+        job = e["title"] + (f" ({e['company']})" if e.get("company") else "")
+        out.append({"key": f"aiemail:{e['id']}", "kind": "ai_change", "rank": 0, "when": e["at"],
+                    "title": f"Your AI app set where updates for {job} go: {e['email']}.",
+                    "detail": ("Hiring manager updates" if actions.inhouse(store) else "Client updates")
+                              + " can be emailed there. Check it on the job.",
+                    "href": f"/jobs/{e['job_id']}", "button": "Check"})
     row = store._row("SELECT count(*) AS n, max(id) AS last, max(created_at) AS at FROM ai_review WHERE status = 'pending'")
     if not row or not row["n"]:
-        return []
+        return out
     n = row["n"]
-    return [{"key": f"aireview:{row['last']}", "kind": "ai_change", "rank": 0, "when": row["at"],
-             "title": f"{n} change{'' if n == 1 else 's'} from your AI app wait{'s' if n == 1 else ''} for your review.",
-             "detail": "Keep or pass each one. Nothing changed until you do.", "href": "/review", "button": "Review"}]
+    return out + [{"key": f"aireview:{row['last']}", "kind": "ai_change", "rank": 0, "when": row["at"],
+                   "title": f"{n} change{'' if n == 1 else 's'} from your AI app wait{'s' if n == 1 else ''} for your review.",
+                   "detail": "Keep or pass each one. Nothing changed until you do.", "href": "/review",
+                   "button": "Review"}]
 
 
-__all__ = ["KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
+__all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOLD_CONTACTS", "HOLD_MOVES", "JOB_CONTACT_FIELDS", "email_changes", "hold_contacts", "hold_moves",
+           "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
+           "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
            "queue_interview", "queue_job", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_stages",
            "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]

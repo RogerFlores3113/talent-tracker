@@ -64,7 +64,9 @@
     {% for p in panels %}{{ panel_list(p, 'preview') }}{% endfor %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}
-  {% if not preview and has_name %}<label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
+  {% if not preview and has_name %}<label class="check"><input type="checkbox" name="add_stages" value="1" {{ 'checked' if add_stages }}>
+    <span>Keep the file's own stages: a stage a job doesn't have yet is added to it. Left unticked, those people go in the closest stage by name.</span></label>
+  <label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
     <span>Move people whose stage in the file is different, dated from its stage date column, or today.</span></label>{% endif %}
   {% if big %}<p class="fine">This is a big file: importing {{ total }} rows takes about a minute. Keep this page open until the result shows.</p>{% endif %}
   <div><button class="btn primary" type="submit">{{ button_label or ('Import ' ~ total ~ ' row' ~ ('' if total == 1 else 's')) }}</button>

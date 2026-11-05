@@ -1,21 +1,29 @@
-"""The Interviews week: every session booked Monday to Friday across all jobs, grouped into loops, with each
-interviewer's load and the clashes worth fixing (an interviewer double-booked, a candidate in two sessions at once).
-Read-only, computed from timeline interview rows."""
+"""The Interviews week: every session booked that week across all jobs (Saturday and Sunday show when something is
+booked), grouped into loops, with each interviewer's load and the clashes worth fixing (an interviewer double-booked,
+a candidate in two sessions at once), and who still owes an outcome or feedback.
+
+Also each interviewer's own verdict on a joint or panel session (kept in the interview's data as `verdicts`, the
+session's outcome rolled up from them), and the feedback chase: who still owes feedback a day after a session, with
+a request they can paste or send from their own mail. The app sends nothing."""
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+from urllib.parse import quote
+
 from . import actions
-from .store import Store, to_dt
+from .store import (CHANGE_SOURCES, INTERVIEW_VERDICTS, VERDICT_LABELS, Store, _legacy_verdict, as_local,
+                    interview_note, now_iso, shown_zone, to_dt)
 
 SESSION_MINUTES = 45  # interviews have no length saved; two starting closer than this overlap
 
 
 def week_start(day: date | None = None) -> date:
     """The Monday of the week holding `day` (today by default); on a weekend, the coming Monday."""
-    day = day or datetime.now(timezone.utc).astimezone().date()
+    day = day or as_local(datetime.now(timezone.utc)).date()
     if day.weekday() >= 5:
         day += timedelta(days=7 - day.weekday())
     return day - timedelta(days=day.weekday())
@@ -27,13 +35,35 @@ def interviewers(text: str | None) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _midnight(day: date) -> str:
+    """The start of `day` on the recruiter's clock (Settings > Your time zone, else this computer's), in UTC."""
+    zone = shown_zone()
+    at = datetime.combine(day, time.min, zone) if zone is not None else datetime.combine(day, time.min).astimezone()
+    return at.astimezone(timezone.utc).isoformat()
+
+
+def week_day(value: str | None, today: date | None = None) -> date | None:
+    """A day in the week to show: '2026-11-09', a time, or 'this' / 'next' / 'last' (week). None means this week."""
+    v = re.sub(r"\s+", " ", (value or "").strip().lower())
+    if not v:
+        return None
+    today = today or as_local(datetime.now(timezone.utc)).date()
+    words = {"this": 0, "this week": 0, "current": 0, "now": 0, "next": 7, "next week": 7, "last": -7,
+             "last week": -7, "previous": -7, "previous week": -7}
+    if v in words:
+        return week_start(today) + timedelta(days=words[v]) if words[v] else None
+    try:
+        return as_local(to_dt(v)).date() if "t" in v else date.fromisoformat(v)
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("week is a day like 2026-11-09, or this or next.") from None
+
+
 def week(store: Store, start: date | None = None) -> dict[str, Any]:
     """{start, end, prev, next, days: [{day, label, loops: [...]}], load: [{name, count}], clashes: [...],
-    total, loops}. Each loop is one person's sessions for one job that day, in time order."""
+    total, loops, owed}. Each loop is one person's sessions for one job that day, in time order. Monday to
+    Friday always show; Saturday and Sunday only when something is booked then."""
     monday = week_start(start)
-    tz = datetime.now(timezone.utc).astimezone().tzinfo
-    lo = datetime.combine(monday, time.min, tz).astimezone(timezone.utc).isoformat()
-    hi = datetime.combine(monday + timedelta(days=5), time.min, tz).astimezone(timezone.utc).isoformat()
+    lo, hi = _midnight(monday), _midnight(monday + timedelta(days=7))
     rows = store._rows(
         """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
            JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
@@ -41,8 +71,9 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
              AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled' ORDER BY t.at, t.id""", (lo, hi))
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
-             "loops": []} for i in range(5)]
+             "loops": []} for i in range(7)]
     loops = []
+    chase = _chase_pairs(store, {(t["candidate_id"], t.get("job_id")) for t in rows})
     for g in actions.group_loops(rows):
         by_day: dict[date, list[dict[str, Any]]] = {}
         for t in g:  # a session moved to another day shows on that day, still marked as part of its loop
@@ -50,12 +81,12 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
         first = g[0]
         loop = {"candidate_id": first["candidate_id"], "name": first["candidate_name"], "job_id": first.get("job_id"),
                 "job": actions.job_label(first.get("job_title"), first.get("job_company")) if first.get("job_title")
-                else None, "size": len(g), "sessions": [actions._session(t, now) for t in g]}
+                else None, "size": len(g), "sessions": [_owing(t, now, chase) for t in g]}
         loops.append(loop)
         for d, ts in by_day.items():
             col = next((c for c in days if c["day"] == d), None)
             if col is not None:
-                col["loops"].append({**loop, "sessions": [actions._session(t, now) for t in ts],
+                col["loops"].append({**loop, "sessions": [_owing(t, now, chase) for t in ts],
                                      "split": len(ts) < len(g)})
     load: dict[str, dict[str, Any]] = {}
     for t in rows:
@@ -69,9 +100,39 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
         for lp in col["loops"]:
             for x in lp["sessions"]:
                 x["clash"] = x["interview_id"] in flagged
-    return {"start": monday, "end": monday + timedelta(days=4), "prev": monday - timedelta(days=7),
+    days = [d for d in days if d["day"].weekday() < 5 or d["loops"]]
+    owed = [{"name": lp["name"], "candidate_id": lp["candidate_id"], "interview_id": x["interview_id"],
+             "session": x["name"], "at": x["at"], "outcome": x["needs_outcome"], "feedback": x["owed"]}
+            for lp in loops for x in lp["sessions"] if x["needs_outcome"] or x["owed"]]
+    return {"start": monday, "end": days[-1]["day"], "prev": monday - timedelta(days=7),
             "next": monday + timedelta(days=7), "days": days, "loops": loops, "total": len(rows), "clashes": clashes,
-            "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold()))}
+            "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold())), "owed": owed}
+
+
+def _chase_pairs(store: Store, pairs: set[tuple[int, Any]]) -> set[tuple[int, Any]]:
+    """Of these (candidate, job) pairs, the ones whose feedback is still worth asking for: the person is in play
+    on an open job, or the session names no job. A closed req or someone hired or out owes nobody feedback."""
+    out = {p for p in pairs if p[1] is None}
+    jobs = {p[1] for p in pairs if p[1] is not None}
+    if not jobs:
+        return out
+    marks = ", ".join("?" * len(jobs))
+    live = {(r["candidate_id"], r["job_id"]) for r in store._rows(
+        f"""SELECT a.candidate_id, a.job_id FROM applications a JOIN jobs j ON j.id = a.job_id
+            JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+            WHERE a.job_id IN ({marks}) AND j.status = 'open' AND s.outcome = 'open'""", tuple(jobs))}
+    return out | (pairs & live)
+
+
+def _owing(t: dict[str, Any], now_iso: str, chase: set[tuple[int, Any]] | None = None) -> dict[str, Any]:
+    """A session as the week lists it, with needs_outcome (it has taken place and nobody said how it went) and
+    owed (the named interviewers who have given no feedback or verdict on it yet, while it's still worth asking:
+    see _chase_pairs)."""
+    x = actions._session(t, now_iso)
+    past = x["started"] and x["status"] == "scheduled"
+    asks = chase is None or (t["candidate_id"], t.get("job_id")) in chase
+    return {**x, "needs_outcome": past,
+            "owed": owed_by(t) if asks and x["started"] and x["status"] != "cancelled" else []}
 
 
 def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -110,7 +171,287 @@ def week_text(w: dict[str, Any]) -> str:
     if w["load"]:
         lines.append("Interviewer load: " + ", ".join(f"{e['name']} {e['count']}" for e in w["load"]) + ".")
     lines += [f"Clash: {c['text']}." for c in w["clashes"]]
+    for o in w.get("owed") or []:
+        bits = (["needs an outcome"] if o["outcome"] else []) + (
+            [f"feedback owed by {', '.join(o['feedback'])}"] if o["feedback"] else [])
+        lines.append(f"Still open: {o['name']}, {o['session']} ({actions.local_time(o['at'], '%a %b %-d')}): "
+                     + "; ".join(bits) + ".")
     return "\n".join(lines)
 
 
-__all__ = ["interviewers", "week", "week_start", "week_text"]
+# ------------------------------------------------------------ verdicts per interviewer
+VERDICT_SCORE = {"strong_yes": 3, "yes": 2, "lean_yes": 1, "mixed": 0, "lean_no": -1, "no": -2, "strong_no": -3}
+VERDICT_CHOICES = (("strong yes", "Strong yes"), ("yes", "Yes"), ("mixed", "Mixed"), ("no", "No"),
+                   ("strong no", "Strong no"))
+
+
+def _data(t: dict[str, Any]) -> dict[str, Any]:
+    return actions._iv_data(t)
+
+
+def display_name(who: str) -> str:
+    """'Alex Ruiz <alex@lumen.com>' -> 'Alex Ruiz'."""
+    return re.sub(r"\s*<[^>]*>\s*", " ", who).strip() or who.strip()
+
+
+def email_of(who: str) -> str | None:
+    m = re.search(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", who or "")
+    return m.group(0) if m else None
+
+
+def named(t: dict[str, Any]) -> list[str]:
+    """The interviewers named on a session, each once, as written."""
+    seen: dict[str, str] = {}
+    for w in interviewers(actions.interviewer_of(t)):
+        seen.setdefault(display_name(w).casefold(), w)
+    return list(seen.values())
+
+
+def verdicts(t: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """{folded name: {by, verdict, at, source}}: each interviewer's latest verdict on this session ('' when
+    nobody was named)."""
+    out: dict[str, dict[str, Any]] = {}
+    for v in _data(t).get("verdicts") or []:
+        if isinstance(v, dict) and v.get("verdict") in VERDICT_SCORE:
+            out[display_name(v.get("by") or "").casefold()] = v
+    return out
+
+
+def rollup(words: list[str]) -> str | None:
+    """The session's verdict from each interviewer's: all on one side gives the least sure of them (Strong yes and
+    Yes is Yes), a split or any Mixed gives Mixed."""
+    scores = [VERDICT_SCORE[w] for w in words if w in VERDICT_SCORE]
+    if not scores:
+        return None
+    if all(x > 0 for x in scores):
+        best = min(scores)
+    elif all(x < 0 for x in scores):
+        best = max(scores)
+    else:
+        return "mixed"
+    return next(w for w, x in VERDICT_SCORE.items() if x == best)
+
+
+def owed_by(t: dict[str, Any]) -> list[str]:
+    """Named interviewers on this session with no feedback and no verdict of their own yet."""
+    d = _data(t)
+    if d.get("status") == "cancelled":
+        return []
+    gave = {display_name(f.get("by") or "").casefold() for f in d.get("feedback") or [] if isinstance(f, dict)}
+    gave |= set(verdicts(t))
+    return [display_name(w) for w in named(t) if display_name(w).casefold() not in gave]
+
+
+def _verdict_key(value: str) -> str:
+    key = re.sub(r"[\s_-]+", " ", (value or "").strip().lower()).strip(" .!")
+    if key not in INTERVIEW_VERDICTS:
+        raise ValueError("A verdict is one of: strong yes, yes, mixed, no, strong no.")
+    return key
+
+
+def give_verdict(store: Store, interview_id: int, verdict: str, interviewer: str | None = None,
+                 note: str | None = None, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+    """One interviewer's own verdict on a session (and their notes, saved as their feedback). The session's outcome
+    becomes the roll-up of everyone's latest verdict, so a later change of mind updates it. Nothing is removed:
+    an earlier verdict stays in the list. An AI app's verdict is on Changes, where Undo puts the session back."""
+    key = _verdict_key(verdict)
+    iv = store.get_interview(interview_id, candidate_id)
+    if iv["status"] == "cancelled":
+        raise ValueError("That interview was cancelled, so it has no verdict. Put it back first if it happened.")
+    ts = now_iso()
+    if iv["at"] > ts:
+        raise ValueError("That interview hasn't happened yet, so it can't have a verdict. Record it after it takes "
+                         "place, or change its time first.")
+    names = named(iv)
+    who = " ".join((interviewer or "").split()) or None
+    if who and len(who) > 200:
+        raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
+    if not who and len(names) == 1:
+        who = names[0]
+    if not who and len(names) > 1:
+        raise ValueError("Say whose verdict this is: " + ", ".join(display_name(n) for n in names) + ".")
+    if who:
+        who = next((display_name(n) for n in names if display_name(n).casefold() == display_name(who).casefold()),
+                   display_name(who))
+    data = dict(iv["data"])
+    word = key.replace(" ", "_")
+    body = (note or "").strip() or None
+    current = verdicts(iv).get((who or "").casefold())
+    if current and current["verdict"] == word and not body:
+        return iv
+    source = CHANGE_SOURCES.get(by, by)
+    data["verdicts"] = [*(v for v in data.get("verdicts") or [] if isinstance(v, dict)),
+                        {"by": who, "verdict": word, "at": ts, "source": source}]
+    if body:
+        if len(body) > 4000:
+            raise ValueError(f"That feedback is too long ({len(body):,} characters). The limit is 4,000, so nothing "
+                             "was saved.")
+        notes = [f for f in data.get("feedback") or [] if isinstance(f, dict)]
+        if not any((f.get("by") or "").casefold() == (who or "").casefold() and f.get("text") == body for f in notes):
+            data["feedback"] = [*notes, {"by": who, "text": body, "at": ts, "source": source}]
+    if data.get("verdict") is None and _legacy_verdict(data):
+        data["outcome_note"] = interview_note(data)
+    combined = rollup([v["verdict"] for v in verdicts({**iv, "data": data}).values()]) or word
+    data["verdict"], data["outcome"], data["outcome_at"] = combined, \
+        INTERVIEW_VERDICTS[combined.replace("_", " ")], ts
+    data["updated_by"] = source
+    with store._write():
+        store._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), interview_id))
+        if by == "ai":
+            store._log_ai("interview_outcome", candidate_id=iv["candidate_id"], job_id=iv.get("job_id"),
+                          target_id=interview_id, old={"at": iv["at"], "data": iv["data"]},
+                          new={"at": iv["at"], "data": data, "summary": iv.get("body")})
+        store._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
+                            " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
+                            (iv["at"], iv["candidate_id"], iv["at"]))
+    return store.get_interview(interview_id)
+
+
+def verdict_rows(t: dict[str, Any]) -> list[dict[str, Any]]:
+    """Each named interviewer (and anyone else who gave a verdict) with their latest verdict label, or None."""
+    vs = verdicts(t)
+    rows = [{"name": display_name(n), "verdict": (vs.get(display_name(n).casefold()) or {}).get("verdict")}
+            for n in named(t)]
+    have = {r["name"].casefold() for r in rows}
+    rows += [{"name": v.get("by") or "", "verdict": v["verdict"]} for k, v in vs.items() if k not in have]
+    return [{**r, "label": VERDICT_LABELS.get(r["verdict"] or "")} for r in rows]
+
+
+def tally(sessions: list[dict[str, Any]]) -> dict[str, Any]:
+    """A finalist's roll-up across sessions that have taken place: {counts: [(label, n)], missing: n, text}.
+    Per interviewer where they gave their own verdict, else the session's outcome; 'Strong yes 1, Mixed 1,
+    1 not recorded'. sessions are Decide's interviews (with data)."""
+    counts: dict[str, int] = {}
+    missing = 0
+    for s in sessions:
+        if s.get("upcoming"):
+            continue
+        t = {"data": s.get("data") or {}}
+        vs = verdicts(t)
+        if vs:
+            for v in vs.values():
+                lab = VERDICT_LABELS[v["verdict"]]
+                counts[lab] = counts.get(lab, 0) + 1
+            missing += sum(1 for n in named(t) if display_name(n).casefold() not in vs)
+        elif s.get("status") != "scheduled":
+            counts[s["outcome"]] = counts.get(s["outcome"], 0) + 1
+        else:
+            missing += max(1, len(named(t)))
+    order = {VERDICT_LABELS[w]: -x for w, x in VERDICT_SCORE.items()}
+    pairs = sorted(counts.items(), key=lambda p: order.get(p[0], 10))
+    text = ", ".join([f"{lab} {n}" for lab, n in pairs] + ([f"{missing} not recorded"] if missing else []))
+    return {"counts": pairs, "missing": missing, "text": text}
+
+
+# ------------------------------------------------------------ the feedback chase
+CHASE_HOURS = 24  # a day after a session, Today asks for the feedback still owed
+CHASE_DAYS = 14  # and stops asking two weeks after it
+
+
+def request_text(who: str, candidate: str, session: str, day: str) -> tuple[str, str]:
+    """(subject, body) of a short feedback request to one interviewer, in the recruiter's voice."""
+    first = display_name(who).split(" ")[0] or "there"
+    what = session if session and session != "Interview" else "interview"
+    subject = f"Feedback on {candidate} ({what}, {day})"
+    body = (f"Hi {first},\n\nCould you send me your feedback on {candidate} from the {what} on {day}? A few lines "
+            "on how it went and your verdict (strong yes, yes, mixed, no or strong no) is plenty.\n\nThanks!")
+    return subject, body
+
+
+def mailto(who: str, subject: str, body: str) -> str:
+    """A mailto link that opens the recruiter's own mail app with the request filled in. Nothing is sent here."""
+    return f"mailto:{quote(email_of(who) or '', safe='@')}?subject={quote(subject)}&body={quote(body)}"
+
+
+def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None = None,
+                  hours: int = CHASE_HOURS, days: int = CHASE_DAYS, recent: bool = False) -> list[dict[str, Any]]:
+    """Loops with feedback still owed: sessions at least `hours` ago and at most `days` ago, for people still in
+    play on an open job, where a named interviewer has given no feedback or verdict. One row per loop:
+    {key, candidate_id, name, job_id, job, day, at, owed: [{name, email, session, interview_id, subject, body,
+    mailto, chased}]}, oldest first. recent=True also lists sessions that took place under `hours` ago, as Decide
+    does, each owed entry with chased False (Today doesn't ask for those yet)."""
+    now = now or datetime.now(timezone.utc)
+    due = (now - timedelta(hours=hours)).replace(microsecond=0).isoformat()
+    hi = now.replace(microsecond=0).isoformat() if recent else due
+    lo = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
+    where = "AND t.job_id = ?" if job_id is not None else "AND t.job_id IS NOT NULL"
+    rows = store._rows(
+        f"""SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
+            JOIN candidates c ON c.id = t.candidate_id JOIN jobs j ON j.id = t.job_id
+            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = t.job_id
+            JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+            WHERE t.kind = 'interview' AND t.at >= ? AND t.at <= ? AND j.status = 'open' AND s.outcome = 'open'
+              AND json_extract(t.data, '$.interviewer') IS NOT NULL {where}
+              AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled' ORDER BY t.at, t.id""",
+        (lo, hi, *([job_id] if job_id is not None else [])))
+    out = []
+    for g in actions.group_loops(rows):
+        first = g[0]
+        day = actions.local_time(first["at"], "%a %b %-d")
+        owed = []
+        for t in g:
+            session = actions.interview_name(t) or "Interview"
+            for who in named(t):
+                if display_name(who) not in owed_by(t):
+                    continue
+                subject, body = request_text(who, first["candidate_name"], session, day)
+                owed.append({"name": display_name(who), "email": email_of(who), "session": session,
+                             "interview_id": t["id"], "subject": subject, "body": body,
+                             "mailto": mailto(who, subject, body), "chased": t["at"] <= due})
+        if owed:
+            out.append({"key": f"feedback_owed:{first['candidate_id']}:{first['job_id']}:"
+                               f"{actions.loop_day(first).isoformat()}",
+                        "candidate_id": first["candidate_id"], "name": first["candidate_name"],
+                        "job_id": first["job_id"], "job": actions.job_label(first["job_title"], first.get("job_company")),
+                        "day": day, "at": first["at"], "owed": owed})
+    return out
+
+
+def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Today: 'Feedback owed on Tomas Okafor (Tue Nov 3)', one per loop, a request per interviewer inside."""
+    out = []
+    for r in feedback_owed(store, now):
+        people = list(dict.fromkeys(o["name"] for o in r["owed"]))
+        several = len({o["interview_id"] for o in r["owed"]}) > 1
+        out.append({"key": r["key"], "kind": "feedback_owed", "rank": 1, "when": r["at"],
+                    "title": f"Feedback owed on {r['name']}'s interview{'s' if several else ''} ({r['day']})",
+                    "detail": " · ".join(x for x in (r["job"], "Owed by " + ", ".join(people)) if x),
+                    "owed": r["owed"], "candidate_id": r["candidate_id"], "job_id": r["job_id"],
+                    "href": f"/jobs/{r['job_id']}/decide#c{r['candidate_id']}"})
+    return out
+
+
+def feedback_owed_text(rows: list[dict[str, Any]]) -> str:
+    """list_feedback_owed's text: each loop and who still owes feedback, with the request to send."""
+    rule = (f"This covers sessions from the last {CHASE_DAYS} days on open jobs. Today asks for feedback "
+            f"{CHASE_HOURS} hours after a session; one newer than that is listed as not chased yet.")
+    if not rows:
+        return "Nobody owes interview feedback right now. " + rule
+    n = sum(len(r["owed"]) for r in rows)
+    fresh = sum(1 for r in rows for o in r["owed"] if not o.get("chased", True))
+    lines = [f"{n} feedback request{'' if n == 1 else 's'} owed across {len(rows)} loop{'' if len(rows) == 1 else 's'}"
+             + (f" ({fresh} not chased yet)" if fresh else "") + ". Draft the nudges for the recruiter to send from "
+             "their own mail. Nothing is sent by Talent Search. " + rule]
+    for r in rows:
+        lines.append(f"## {r['name']} (candidate id {r['candidate_id']}), {r['job']}, {r['day']}")
+        lines += [f"- {o['name']}" + (f" <{o['email']}>" if o["email"] else "") + f" owes feedback on {o['session']} "
+                  f"(interview id {o['interview_id']})"
+                  + ("" if o.get("chased", True) else f", not chased yet (under {CHASE_HOURS} hours ago)")
+                  for o in r["owed"]]
+    return "\n".join(lines)
+
+
+def future_note(at: str | None, kind: str, now: datetime | None = None) -> str | None:
+    """A warning for a call, email or note dated later than now (an interview may be booked ahead): it moves
+    'last contacted' into the future."""
+    dt = to_dt(at) if at else None
+    now = now or datetime.now(timezone.utc)
+    if not dt or kind == "interview" or dt <= now + timedelta(minutes=5):
+        return None
+    return (f"That {kind} is dated {actions.local_time(at, actions.IV_TIME)}, which is later than now. If it hasn't "
+            "happened yet, log it after it does, or log it as an interview to book it.")
+
+
+__all__ = ["CHASE_DAYS", "CHASE_HOURS", "VERDICT_CHOICES", "feedback_owed", "feedback_owed_text", "future_note",
+           "give_verdict", "interviewers", "named", "owed_by", "rollup", "tally", "today_items", "verdict_rows",
+           "verdicts", "week", "week_day", "week_start", "week_text"]

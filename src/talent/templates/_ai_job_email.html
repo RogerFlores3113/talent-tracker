@@ -1,0 +1,9 @@
+{# A job's hiring manager email that the AI app set and the recruiter hasn't kept or undone yet. Needs jx_ids (job ids,
+   or none for every job). For the recruiter only: never part of the update text. #}
+{% for e in ai_email_changes(jx_ids) %}<div class="flash warn no-print recruiter-only" role="alert">
+  <p><strong>Changed by your AI app</strong> {{ e.at | ago }}: the hiring manager email on <a href="/jobs/{{ e.job_id }}">{{ e.title }}</a> is now {{ e.email }}{% if e.old %} (was {{ e.old }}){% endif %}. {{ 'Hiring manager updates' if inhouse() else 'Client updates' }} can be emailed there. Check it first.</p>
+  <div class="actions-inline">
+    <form method="post" action="/jobs/{{ e.job_id }}/ai-email/{{ e.id }}/keep" class="inline"><button class="btn small primary" type="submit">Keep</button></form>
+    {% if e.confirmable %}<form method="post" action="/changes/ai/{{ e.id }}/undo" class="inline" data-confirm="Put the hiring manager email back to how it was?"><button class="btn small" type="submit">Undo</button></form>{% else %}<a class="btn small" href="/jobs/{{ e.job_id }}/edit">Edit the job</a>{% endif %}
+  </div>
+</div>{% endfor %}

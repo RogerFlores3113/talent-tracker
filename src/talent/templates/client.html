@@ -19,17 +19,25 @@
 {% for o in rep.overfilled %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.hired }} {{ rep.hire_word }} for {{ o.openings }} opening{{ 's' if o.openings != 1 }} (over by {{ o.over }}). Check those hires, or raise the job's openings, before you send this update.</p>{% endfor %}
 <section class="panel report" id="report">
   <div class="sec-head"><h2>{{ 'Updates to share' if sections | length > 1 else 'Update to share' }}</h2></div>
-  {% if sections[0].rep.manager is not none %}<p class="fine no-print">One update per hiring manager, so each one reads only their own jobs.</p>{% endif %}
+  {% if split_note %}<p class="flash warn no-print" role="note">{{ split_note }}</p>
+  {% elif sections[0].rep.manager is not none %}<p class="fine no-print">One update per hiring manager, so each one reads only their own jobs.</p>{% endif %}
   {% for s in sections %}{% set tid = 'report-text' if loop.first else 'report-text-' ~ loop.index %}
   <div class="report-part">
     <div class="sec-head">{% if s.rep.manager is not none %}<h3>{{ s.rep.manager or 'Jobs with no hiring manager' }}</h3>{% endif %}
       <span class="copy-status no-print">{% if s.rep.held %}<span class="badge overdue" title="Your AI app's moves into {{ 'hired' if inhouse() else 'placed' }} or out stay out of the text until you review them">({{ s.rep.held | length }} held back, review first)</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
     <pre class="code wrap" id="{{ tid }}">{{ s.text }}</pre>
     {% if s.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ s.notes | join('; ') }}.</p>{% endif %}
+    {% if s.rep.loose_interviews %}<p class="fine no-print recruiter-only">Pick the job: {% for x in s.rep.loose_interviews %}<a href="{{ x.href }}">{{ x.name }}</a>{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+    <details class="no-print"><summary class="fine">{% set reader = 'the hiring manager' if inhouse() else 'the client' %}{{ ('Edit the note to ' ~ reader) if s.rep.client_note else ('Add a note to ' ~ reader ~ ' this week') }}</summary>
+      <form method="post" action="/clients/{{ c.slug }}/note" class="form">{% if s.rep.manager_key is not none %}<input type="hidden" name="manager" value="{{ s.rep.manager_key }}">{% endif %}
+        <label class="wide">Opens the update, before the numbers. Mark as sent clears it.<textarea name="note" rows="3" maxlength="1500">{{ s.rep.client_note or '' }}</textarea></label>
+        <div class="actions"><button class="btn small" type="submit">Save note</button></div></form></details>
     {% if s.rep.manager is none and s.email %}{% set ck = c.key %}{% include "_ai_contacts.html" %}{% endif %}
+    {% if s.email %}{% set jx_ids = s.rep.jobs | map(attribute='id') | list %}{% include "_ai_job_email.html" %}{% endif %}
     <div class="actions-inline no-print">
     {% if s.email %}{% set e = s.email %}<a class="btn small" href="{{ e.href }}">Email this update to {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">It's too long to fill in by link, so the email opens empty: copy the update first, then paste it in.</span>{% elif e.trimmed %} <span class="fine">The email gets a shorter version to fit the link; Copy gives the full one.</span>{% endif %}{% endif %}
-    {% if s.rep.manager_key is not none %}<form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {% if s.rep.manager %}{{ s.rep.manager }}'s update{% else %}the update for jobs with no hiring manager{% endif %} as sent? A copy is kept, and their next update covers what happens from now.{% if s.rep.ai_moves %} {{ s.rep.ai_moves | length }} AI move{{ 's' if s.rep.ai_moves | length != 1 }} in it {{ 'are' if s.rep.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">
+    {% if s.cc_email %}<a class="btn small" href="{{ s.cc_email.href }}">Or with {{ s.cc_email.cc | join(', ') }} on Cc</a>{% if s.cc_email.long and not s.email.long %} <span class="fine">That one opens empty: copy the update first.</span>{% endif %}{% endif %}
+    {% if s.rep.manager_key is not none %}<form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="{% if early %}Not due until {{ early }}. {% endif %}Mark {% if s.rep.manager %}{{ s.rep.manager }}'s update{% else %}the update for jobs with no hiring manager{% endif %} as sent{{ ' anyway' if early }}? A copy is kept, and their next update covers what happens from now.{% if s.rep.ai_moves %} {{ s.rep.ai_moves | length }} AI move{{ 's' if s.rep.ai_moves | length != 1 }} in it {{ 'are' if s.rep.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">
       <input type="hidden" name="manager" value="{{ s.rep.manager_key }}"><input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}"><input type="hidden" name="ai_seen" value="{{ s.rep.ai_moves | map(attribute='action_id') | join(',') }}">
       <button class="btn small" type="submit">Mark this one as sent</button></form>{% endif %}
     </div>
@@ -39,7 +47,7 @@
     <button type="button" class="btn small" data-print>Print or save as PDF</button>
     <a class="btn small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as CSV</a>
     <a class="small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until, 'out': '1'} | urlencode }}" title="The CSV leaves out people who are out, like Not a Fit or Withdrew">CSV with people who are out</a>
-    <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {{ 'all these updates' if sections | length > 1 else 'this update' }} as sent? A copy is kept, and the next update covers what happens from now.{% if ai_moves %} {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} your AI app made {{ 'are' if ai_moves | length != 1 else 'is' }} in it and not reviewed yet: {% for m in ai_moves[:3] %}{{ m.name }} to {{ m.stage }}{{ ', ' if not loop.last }}{% endfor %}{% if ai_moves | length > 3 %} and {{ ai_moves | length - 3 }} more{% endif %}.{% endif %}">
+    <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="{% if early %}Not due until {{ early }}. {% endif %}Mark {{ 'all these updates' if sections | length > 1 else 'this update' }} as sent{{ ' anyway' if early }}? A copy is kept, and the next update covers what happens from now.{% if ai_moves %} {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} your AI app made {{ 'are' if ai_moves | length != 1 else 'is' }} in it and not reviewed yet: {% for m in ai_moves[:3] %}{{ m.name }} to {{ m.stage }}{{ ', ' if not loop.last }}{% endfor %}{% if ai_moves | length > 3 %} and {{ ai_moves | length - 3 }} more{% endif %}.{% endif %}">
       <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}"><input type="hidden" name="ai_seen" value="{{ ai_moves | map(attribute='action_id') | join(',') }}">
       <button class="btn small primary" type="submit">{{ 'Mark all as sent' if sections | length > 1 else 'Mark as sent' }}</button></form>
     <a class="small" href="/clients/due">Every update due this week</a>
@@ -69,6 +77,8 @@
 <section class="panel no-print">
   <h2>Jobs</h2>
   <ul class="plain">{% for j in c.jobs %}<li><a href="/jobs/{{ j.id }}">{{ j.title }}</a>{% if j.location %} <span class="muted">{{ j.location }}</span>{% endif %}{% if j.status != 'open' %} <span class="badge">{{ j.status | replace('_', ' ') }}</span>{% endif %}</li>{% endfor %}</ul>
+  {% if not c.jobs %}<p class="fine">No jobs yet.</p>{% endif %}
+  <p class="actions-inline"><a class="btn small" href="/jobs/new?{{ {'company': c.name} | urlencode }}">New job for {{ c.name }}</a>{% if not inhouse() %} <a class="small" href="/clients/chase">Waiting on feedback</a>{% endif %}</p>
   <p class="fine">Each job's own status update is on its page, and the Jobs page copies one for every open job.</p>
 </section>
 
@@ -79,7 +89,7 @@
   <table class="dense">
     <thead><tr><th>Date</th><th>Person</th><th>Job</th><th>Stage</th></tr></thead>
     <tbody>{% for s in submittals %}
-    <tr><td class="nowrap">{{ in_zone(s.at, None, '%b %-d, %Y') }}{% if s.imported %} <span class="muted">imported</span>{% endif %}</td><td><a href="/candidates/{{ s.candidate_id }}">{{ s.name }}</a></td><td>{{ s.job }}</td><td>{{ s.stage }}</td></tr>
+    <tr><td class="nowrap">{% if s.undated %}<span class="muted">Date unknown (imported)</span>{% else %}{{ in_zone(s.at, None, '%b %-d, %Y') }}{% if s.imported %} <span class="muted">imported</span>{% endif %}{% endif %}</td><td><a href="/candidates/{{ s.candidate_id }}">{{ s.name }}</a></td><td>{{ s.job }}</td><td>{{ s.stage }}</td></tr>
     {% endfor %}</tbody>
   </table>
   {% else %}<p class="fine">Nobody yet. Moving someone into a stage named like Submitted or Presented lists them here with the date.</p>{% endif %}

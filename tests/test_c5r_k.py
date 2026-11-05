@@ -3,6 +3,7 @@ title, Keep in Claude on Changes, tag case, and plain tool text."""
 import json
 
 import anyio
+import pytest
 from mcp.types import ClientCapabilities, Implementation, InitializeRequestParams
 
 from talent import mcp_server, paths, shortlist
@@ -22,8 +23,18 @@ def text(res):
     return "\n".join(c.text for c in res.content)
 
 
-def key_of(res):
-    return res.meta[VIEW_KEY]["key"]
+def key_of(server, res):
+    """The key the Shortlist card asks for with its app-only tool (cycle 6 A: never in a result the model sees)."""
+    d = res.structuredContent or {}
+    ids = [p["id"] for p in d.get("added") or d.get("prospects") or [] if p.get("status", "proposed") == "proposed"]
+    out = call(server, "shortlist_card_key", job_id=res.meta[VIEW_KEY]["job_id"], prospect_ids=ids)
+    return out.structuredContent["key"]
+
+
+@pytest.fixture(autouse=True)
+def _apps_host(monkeypatch):
+    """These tests play a host that says it shows MCP Apps views (cycle 6 A: only those get the card tools)."""
+    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: True)
 
 
 def propose(server, job_id, *people):
@@ -31,12 +42,17 @@ def propose(server, job_id, *people):
 
 
 # ------------------------------------------------------- 1. keys survive a restart
-def test_a_card_key_still_works_after_a_restart_and_comes_from_the_data_folder(store):
+def test_a_card_still_works_after_a_restart_with_a_key_from_the_new_session(store):
+    # Cycle 6 F: keys are one-time and belong to the session that gave them out. The card asks for one before
+    # each press, so after a restart it simply gets one from the new session; an old session's key is refused.
     job = store.add_job("Backend", company="Ledgerly")
-    res = propose(build_server(store), job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
-    assert (paths.data_dir() / "app.key").exists()
+    server = build_server(store)
+    res = propose(server, job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
     pid = res.structuredContent["added"][0]["id"]
-    out = call(build_server(store), "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    later = build_server(store)
+    old = call(later, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
+    assert old.isError and text(old) == mcp_server.CARD_OTHER_SESSION
+    out = call(later, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(later, res))
     assert not out.isError and text(out).startswith('Passed on "Ana Ruiz".')
 
 
@@ -46,11 +62,11 @@ def test_a_key_covers_only_the_batches_its_card_shows(store):
     first = propose(server, job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
     later = propose(server, job["id"], {"name": "Bo Li", "linkedin_url": "https://linkedin.com/in/bo"})
     bo = later.structuredContent["added"][0]["id"]
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=bo, view_key=key_of(first))
+    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=bo, view_key=key_of(server, first))
     assert out.isError and text(out) == CARD_STALE and store.count_candidates() == 0
     # The full Shortlist card covers everyone waiting on it.
     listing = call(server, "list_prospects", job_id=job["id"])
-    assert not call(server, "keep_prospect", job_id=job["id"], prospect_id=bo, view_key=key_of(listing)).isError
+    assert not call(server, "keep_prospect", job_id=job["id"], prospect_id=bo, view_key=key_of(server, listing)).isError
 
 
 def test_a_wrong_key_reads_as_an_old_card_and_no_key_as_the_model(store):
@@ -58,8 +74,8 @@ def test_a_wrong_key_reads_as_an_old_card_and_no_key_as_the_model(store):
     server = build_server(store)
     res = propose(server, job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
     pid = res.structuredContent["added"][0]["id"]
-    scope = key_of(res).rpartition(":")[0]
-    for bad in ("old-session-key", f"{scope}:{'0' * 32}", key_of(res)[:-1]):
+    scope = key_of(server, res).rpartition(":")[0]
+    for bad in ("old-session-key", f"{scope}:{'0' * 32}", key_of(server, res)[:-1]):
         out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=bad)
         assert out.isError and text(out) == CARD_STALE
     assert text(call(server, "pass_prospect", job_id=job["id"], prospect_id=pid)) == NOT_FROM_VIEW
@@ -72,8 +88,8 @@ def test_a_refused_press_is_plain_text_on_the_card(store):
     server = build_server(store)
     res = propose(server, job["id"], {"name": "Tom Becker", "linkedin_url": "https://linkedin.com/in/tom"})
     pid = res.structuredContent["added"][0]["id"]
-    call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
-    again = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
+    again = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
     assert again.isError and text(again) == "Tom Becker was already passed."
     assert 'replace(/^Error executing tool [\\w-]+: /,"")' in view_html("shortlist")
 
@@ -94,12 +110,17 @@ def test_card_tools_are_hidden_from_hosts_that_say_they_show_no_views(store, mon
     res = propose(server, job["id"], {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana"})
     pid = res.structuredContent["added"][0]["id"]
     names = {t.name for t in anyio.run(server.list_tools)}
-    assert {"keep_prospect", "pass_prospect"} <= names
-    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: False)
-    names = {t.name for t in anyio.run(server.list_tools)}
-    assert "keep_prospect" not in names and "propose_candidates" in names
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
-    assert out.isError and text(out) == NOT_FROM_VIEW
+    assert {"keep_prospect", "pass_prospect", "shortlist_card_key"} <= names
+    key = key_of(server, res)
+    # Cycle 6 A: a host that says nothing (None) is treated like one that shows no views.
+    for says in (False, None):
+        monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp, says=says: says)
+        names = {t.name for t in anyio.run(server.list_tools)}
+        assert not names & {"keep_prospect", "pass_prospect", "shortlist_card_key"} and "propose_candidates" in names
+        out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key)
+        assert out.isError and text(out) == NOT_FROM_VIEW
+        asked = call(server, "shortlist_card_key", job_id=job["id"], prospect_ids=[pid])
+        assert asked.isError and "key" not in (asked.structuredContent or {})
 
 
 # ------------------------------------------------------- 3. work history
@@ -127,13 +148,13 @@ def test_a_keep_in_claude_that_fills_a_saved_person_shows_in_claude_on_changes(s
     server = build_server(store)
     res = propose(server, job["id"], {"name": "Emily Stone", "linkedin_url": "https://linkedin.com/in/emily-s"})
     pid = res.structuredContent["added"][0]["id"]
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res),
+    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res),
                candidate_id=emily["id"])
     assert not out.isError and store.get_candidate(emily["id"])["linkedin_url"]
     change = store._row("SELECT data FROM timeline WHERE candidate_id = ? AND kind = 'change'", (emily["id"],))
     assert json.loads(change["data"])["via"] == "claude"
     page = local_client(store).get("/changes").text
-    assert "You, in Claude" in page
+    assert "You, on the Shortlist card in your AI app" in page  # cycle 6 F wording
 
 
 def test_skills_keep_the_case_given(store):
@@ -143,7 +164,7 @@ def test_skills_keep_the_case_given(store):
     res = propose(server, job["id"], {"name": "Rafael Gomez", "linkedin_url": "https://linkedin.com/in/rafael",
                                       "tags": ["Go", "Kafka", "PostgreSQL"]})
     pid = res.structuredContent["added"][0]["id"]
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
     assert store.get_candidate(out.structuredContent["candidate_id"])["tags"] == ["Go", "Kafka", "PostgreSQL"]
     assert store.search_candidates(tag="KAFKA").total == 2
 

@@ -57,7 +57,8 @@ def ai_session(store):
     call(server, "update_job", job_id=jid, openings=2, location="Remote")
     call(server, "edit_job_stages", job_id=jid, rename={"Offer": "Offer out"}, add=["Take-home"])
     sid = structured(call(server, "add_suggestion", text="Ping Lee", candidate_id=cid))["id"]
-    old_todo = store.add_suggestion("Call the HM")  # the recruiter's own to-do, done by the AI
+    # Cycle 6 A: the AI app may mark done only a to-do it wrote, so it adds this one first.
+    old_todo = structured(call(server, "add_suggestion", text="Call the HM"))
     call(server, "complete_suggestion", suggestion_id=old_todo["id"])
     call(server, "update_job", job_id=jid, status="closed")
     return server, cid, jid, sid, old_todo["id"]
@@ -79,7 +80,7 @@ def test_every_ai_write_is_listed_on_changes(store):
     # Cycle 4 P: the add, the job and the person each wait for the newer AI change, so they show the reason
     # instead of an Undo that would fail (Undo all still puts them back).
     assert "Undo all AI changes since" in page and page.count(">Undo</button>") >= 6
-    assert page.count("Can't undo: your AI app changed it again later. Undo that first.") == 3
+    assert page.count("Can't undo: your AI app changed it again later. Undo that first.") == 4  # c6 A: and its to-do
     since = re.search(r'name="since" value="(\d+)"', page).group(1)  # epoch, so a hand-built post can't fail
     assert int(since) > 1_000_000_000
     zone = datetime.now().astimezone().tzname()
@@ -92,11 +93,11 @@ def test_undo_all_reverts_every_kind_in_reverse_order(store):
     c = local_client(store)
     r = c.post("/changes/undo-ai", data={"since": hour_ago()}, follow_redirects=False)
     msg = flash(r)
-    assert msg.startswith("Undid 9 AI changes: Changed Senior Backend Engineer (Acme): status Open to Closed;"), msg
+    assert msg.startswith("Undid 10 AI changes: Changed Senior Backend Engineer (Acme): status Open to Closed;"), msg
     assert "Left" not in msg, msg
-    assert "; and 3 more." in msg  # more than 6, so the rest are counted (c5 A: then the backup note)
+    assert "; and 4 more." in msg  # more than 6, so the rest are counted (c5 A: then the backup note)
     assert store.count_candidates() == 0 and store.list_jobs(None) == []
-    assert store._row("SELECT done_at FROM suggestions WHERE id = ?", (todo,))["done_at"] is None
+    assert store._row("SELECT 1 FROM suggestions WHERE id = ?", (todo,)) is None  # done put back, then its add
     assert store._row("SELECT 1 FROM suggestions WHERE id = ?", (sid,)) is None
     assert "no AI changes" in flash(c.post("/changes/undo-ai", data={"since": hour_ago()}, follow_redirects=False))
 

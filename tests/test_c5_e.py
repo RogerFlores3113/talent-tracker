@@ -6,7 +6,7 @@ import anyio
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from talent import importers, shortlist
+from talent import importers, mcp_server, shortlist
 from talent.mcp_server import APP_ONLY, NOT_FROM_VIEW, VIEW_KEY, build_server
 from talent.mcp_views import view_html
 from talent.store import looks_like_name
@@ -28,8 +28,18 @@ def iso(dt):
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def key_of(res):
-    return res.meta[VIEW_KEY]["key"]
+def key_of(server, res):
+    """The key the Shortlist card asks for with its app-only tool (cycle 6 A: never in a result the model sees)."""
+    d = res.structuredContent or {}
+    ids = [p["id"] for p in d.get("added") or d.get("prospects") or [] if p.get("status", "proposed") == "proposed"]
+    out = call(server, "shortlist_card_key", job_id=res.meta[VIEW_KEY]["job_id"], prospect_ids=ids)
+    return out.structuredContent["key"]
+
+
+@pytest.fixture(autouse=True)
+def _apps_host(monkeypatch):
+    """These tests play a host that says it shows MCP Apps views (cycle 6 A: only those get the card tools)."""
+    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: True)
 
 
 # ------------------------------------------------------------ 1. last contacted
@@ -198,22 +208,24 @@ def test_keep_and_pass_tools_are_app_only_and_refuse_the_model(store):
     res = call(server, "propose_candidates", job_id=job["id"], people=[
         {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana-ruiz"}])
     pid = res.structuredContent["added"][0]["id"]
-    assert res.meta[VIEW_KEY]["job_id"] == job["id"] and key_of(res) not in text(res)
-    assert key_of(res) not in str(res.structuredContent)
+    assert res.meta[VIEW_KEY] == {"job_id": job["id"]}  # cycle 6 A: no key in what the model may see
+    assert key_of(server, res) not in text(res) and key_of(server, res) not in str(res.structuredContent)
     # Refusals come back as plain error results (cycle 5 re-review: no "Error executing tool" prefix on the card).
-    for args, says in (({}, "Only the recruiter keeps or passes"), ({"view_key": "guess"}, "earlier Claude session"),
-                       ({"view_key": key_of(res) + "x"}, "earlier Claude session")):
+    # Cycle 6 F: keys are one-time and per session, and the refusal says so truly (no "earlier Claude session").
+    for args, says in (({}, "Only the recruiter keeps or passes"), ({"view_key": "guess"}, "key didn't fit"),
+                       ({"view_key": key_of(server, res) + "x"}, "key didn't fit")):
         for tool in ("keep_prospect", "pass_prospect"):
             out = call(server, tool, job_id=job["id"], prospect_id=pid, **args)
             assert out.isError and says in text(out) and not text(out).startswith("Error")
     assert shortlist.counts(store, job["id"])["proposed"] == 1 and store.count_candidates() == 0
     assert "Nothing changed" in NOT_FROM_VIEW
-    # A key is per job. Since the cycle 5 re-review it survives a restart (a new server takes it).
+    # A key is per job. Cycle 6 F: after a restart the card asks the new session for a key (an old one is refused).
     other = store.add_job("Platform")
-    other_key = key_of(call(server, "list_prospects", job_id=other["id"]))
+    other_key = key_of(server, call(server, "list_prospects", job_id=other["id"]))
     assert call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=other_key).isError
-    assert not call(build_server(store), "keep_prospect", job_id=job["id"], prospect_id=pid,
-                    view_key=key_of(res)).isError
+    fresh = build_server(store)
+    assert call(fresh, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res)).isError
+    assert not call(fresh, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(fresh, res)).isError
 
 
 def test_a_keep_from_the_card_is_logged_in_claude_and_undoable(store):
@@ -222,19 +234,19 @@ def test_a_keep_from_the_card_is_logged_in_claude_and_undoable(store):
     res = call(server, "propose_candidates", job_id=job["id"], people=[
         {"name": "Ana Ruiz", "linkedin_url": "https://linkedin.com/in/ana-ruiz", "skills": ["Go"]}])
     pid = res.structuredContent["added"][0]["id"]
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
     d = out.structuredContent
     assert d["prospect"]["status"] == "kept" and d["counts"]["kept"] == 1
     assert d["message"].startswith('Saved "Ana Ruiz" and added them to Sourced on Backend (Ledgerly).')
     batch = shortlist.keep_batches(store)[0]
-    assert batch["text"].endswith(", in Claude") and batch["kept"][0]["via"] == "claude"
+    assert batch["text"].endswith(", in your AI app") and batch["kept"][0]["via"] == "claude"
     c = local_client(store)
-    assert "in Claude" in c.get("/changes").text
+    assert "on the Shortlist card in your AI app" in c.get("/changes").text  # cycle 6 F wording
     r = c.post(f"/changes/shortlist-keep/{batch['id']}/undo", follow_redirects=False)
     assert r.status_code == 303 and "Undid the keep" in flash_of(r)
     assert shortlist.counts(store, job["id"])["proposed"] == 1
-    call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
-    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
+    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res))
     assert again.isError and "already kept" in text(again)
 
 
@@ -245,24 +257,24 @@ def test_card_keep_asks_for_a_choice_then_keeps_as_the_chosen_person_or_passes(s
     res = call(server, "propose_candidates", job_id=job["id"], people=[
         {"name": "Lee Chen", "linkedin_url": "https://linkedin.com/in/lee-c", "location": "Austin"},
         {"name": "Bo Li", "linkedin_url": "https://linkedin.com/in/bo-li"}])
-    key = key_of(res)
+    key = lambda: key_of(server, res)  # noqa: E731  cycle 6 F: one key per press
     lee_pid, bo_pid = (a["id"] for a in res.structuredContent["added"])
-    ask = call(server, "keep_prospect", job_id=job["id"], prospect_id=lee_pid, view_key=key).structuredContent
+    ask = call(server, "keep_prospect", job_id=job["id"], prospect_id=lee_pid, view_key=key()).structuredContent
     assert ask["needs_choice"] and ask["matches"][0]["id"] == lee["id"] and ask["prospect"]["status"] == "proposed"
-    done = call(server, "keep_prospect", job_id=job["id"], prospect_id=lee_pid, view_key=key,
+    done = call(server, "keep_prospect", job_id=job["id"], prospect_id=lee_pid, view_key=key(),
                 candidate_id=lee["id"]).structuredContent
     assert done["candidate_id"] == lee["id"] and store.count_candidates() == 1
     assert store.get_candidate(lee["id"])["location"] == "Austin"
-    passed = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key, reason="Too junior")
+    passed = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key(), reason="Too junior")
     assert passed.structuredContent["prospect"]["pass_reason"] == "Too junior"
     assert text(passed).startswith('Passed on "Bo Li".')
-    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key)
+    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key())
     assert again.isError and text(again) == "Bo Li was already passed."
 
 
 def test_the_shortlist_card_has_buttons_only_when_the_host_can_call_tools():
     html = view_html("shortlist")
-    for bit in ("keep_prospect", "pass_prospect", "Keep as someone new", "Keep as #", "Reason (optional)",
+    for bit in ("keep_prospect", "pass_prospect", "Someone new", "Same as ", "Reason (optional)",  # c6 labels
                 "serverTools", "talent-search/shortlist", "Review in Talent Search"):
         assert bit in html, bit
     assert "innerHTML" not in html and "—" not in html and "–" not in html

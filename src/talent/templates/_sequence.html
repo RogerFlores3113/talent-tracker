@@ -1,0 +1,44 @@
+{% set fu = followups(job.id) %}
+<section class="panel sequence" id="followups">
+  <h2>Follow-ups</h2>
+  {% if fu.steps %}
+  <p class="fine">After the first message, follow-ups come due on Today with the text ready to paste. Nothing is sent for you. A reply, or a move past {{ fu.contact or 'Contacted' }}, ends someone's follow-ups. People first contacted since {{ fu.since | date }} follow it.</p>
+  {% if fu.people %}
+  <ul class="todo-list">{% for p in fu.people %}
+    <li><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a>
+      {% if p.status in ('due', 'waiting') %}<span class="muted">· {{ p.label }}, step {{ p.step }} of {{ p.steps }}</span>
+        {% if p.overdue %}<span class="badge overdue">Overdue</span>{% endif %} <span class="fine">{{ p.due_text }}</span>
+        {% if p.status == 'due' %}
+        <details class="fine"><summary>Text to paste</summary><p class="about">{{ p.draft }}</p>
+          <button class="btn small" type="button" data-copy-text="{{ p.draft }}">Copy</button></details>
+        {% endif %}
+        <form method="post" action="/jobs/{{ job.id }}/followups/{{ p.candidate_id }}/sent" class="inline"><input type="hidden" name="next" value="/jobs/{{ job.id }}#followups"><button class="btn small" type="submit">I sent it</button></form>
+        <form method="post" action="/jobs/{{ job.id }}/followups/{{ p.candidate_id }}/replied" class="inline"><input type="hidden" name="next" value="/jobs/{{ job.id }}#followups"><button class="link small" type="submit">They replied</button></form>
+      {% elif p.status == 'replied' %}<span class="muted">· replied</span>
+        {% if p.next_stage %}<form method="post" action="/actions/advance" class="inline"><input type="hidden" name="candidate_id" value="{{ p.candidate_id }}"><input type="hidden" name="job_id" value="{{ job.id }}"><input type="hidden" name="stage" value="{{ p.next_stage }}"><button class="btn small" type="submit">Move to {{ p.next_stage }}</button></form>{% endif %}
+      {% elif p.status == 'moved_on' %}<span class="muted">· moved on to {{ p.stage }}</span>
+      {% else %}<span class="muted">· no reply after all {{ p.steps }} steps</span>{% endif %}
+    </li>
+  {% endfor %}</ul>
+  {% else %}<p class="none">Nobody has started yet. Log the first message to someone on this job and their follow-ups start.</p>{% endif %}
+  {% else %}
+  <p class="fine">Set a short sequence, like a first message, a follow-up after 4 days and a last one after 7. Logging the first message starts it for that person, and each follow-up shows on Today with text ready to paste. Nothing is sent for you.</p>
+  {% endif %}
+  <details {{ 'open' if not fu.steps and request.query_params.get('sequence') }}><summary>{{ 'Change the steps' if fu.steps else 'Set up follow-ups' }}</summary>
+    <form method="post" action="/jobs/{{ job.id }}/sequence" class="sequence-form">
+      <p class="fine">Day is days after the first message. You can use {first_name}, {job} and {company} in the text.</p>
+      {% for i in range(5) %}{% set s = (fu.steps or fu.defaults)[i] if i < (fu.steps or fu.defaults) | length else {} %}
+      <div class="seq-step">
+        <input type="text" name="label_{{ i }}" value="{{ s.label or '' }}" maxlength="60" placeholder="{{ 'First message' if i == 0 else 'Follow-up' }}" aria-label="Step {{ i + 1 }} name">
+        <label class="inline-label">Day <input type="number" name="day_{{ i }}" value="{{ s.day if s.day is not none else '' }}" min="0" max="90" aria-label="Step {{ i + 1 }} day"></label>
+        <textarea name="text_{{ i }}" rows="2" maxlength="2000" aria-label="Step {{ i + 1 }} text">{{ s.text or '' }}</textarea>
+      </div>
+      {% endfor %}
+      <button class="btn small primary" type="submit">Save follow-ups</button>
+    </form>
+    {% if fu.copy_from %}<form method="post" action="/jobs/{{ job.id }}/sequence/copy" class="inline copy-steps"{% if fu.steps %} data-confirm="Replace this job's steps with the ones you pick? Nothing logged changes."{% endif %}>
+      <select name="from_job_id" aria-label="Job to copy the steps from">{% for j in fu.copy_from %}<option value="{{ j.id }}">{{ j.name }} ({{ j.steps }} steps)</option>{% endfor %}</select>
+      <button class="btn small" type="submit">Copy steps from another job</button></form>{% endif %}
+    {% if fu.steps %}<form method="post" action="/jobs/{{ job.id }}/sequence" class="inline" data-confirm="Stop follow-ups for this job? Nothing logged is removed."><input type="hidden" name="remove" value="1"><button class="link small danger" type="submit">Stop follow-ups for this job</button></form>{% endif %}
+  </details>
+</section>

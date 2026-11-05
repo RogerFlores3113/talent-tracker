@@ -19,6 +19,7 @@ import sqlite3
 import threading
 import unicodedata
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -579,6 +580,31 @@ _MIGRATIONS: tuple[Any, ...] = (
     CREATE INDEX ai_review_candidate_idx ON ai_review(candidate_id, status);
     ALTER TABLE ai_actions ADD COLUMN confirmed_at TEXT;
     """,
+    # v11: one offer per person and job (offers.py): its terms, the answer-by and start dates, notes from the offer
+    # call, where it stands and whether its status (never its numbers) may go in client updates.
+    """
+    CREATE TABLE offers (
+        id           INTEGER PRIMARY KEY,
+        candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+        job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        status       TEXT NOT NULL DEFAULT 'drafted'
+                     CHECK (status IN ('drafted', 'out', 'accepted', 'declined', 'withdrawn')),
+        salary       TEXT,
+        equity       TEXT,
+        bonus        TEXT,
+        start_date   TEXT,
+        answer_by    TEXT,
+        notes        TEXT,
+        reason       TEXT,
+        share_status INTEGER NOT NULL DEFAULT 0,
+        out_at       TEXT,
+        answered_at  TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE (candidate_id, job_id)
+    );
+    CREATE INDEX offers_job_idx ON offers(job_id, status);
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -589,9 +615,17 @@ AI_ACTION_KINDS = {
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
     "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
+    "client_create": "Added a client",
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
+    "offer_terms": "Recorded an offer", "offer_answer": "Recorded an answer to an offer",
+    "card_keep": "Kept someone from a Shortlist card", "card_pass": "Passed on someone on a Shortlist card",
+    "outreach_batch": "Logged outreach in one batch",
+    "interview_job": "Said which job an interview is for",
 }
+# AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
+# log_activity call for several people.
+BATCH_KINDS = frozenset({"save_batch", "outreach_batch"})
 # AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
 # outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
 INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback", "interview_outcome")
@@ -621,6 +655,9 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
     new time or outcome."""
     if kind in ("job_edit", "client_edit"):
         return sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+    if kind.startswith("offer_"):
+        from .offers import overwrite_count  # here: offers imports this module
+        return overwrite_count(kind, old, new)
     if kind == "stages_edit":
         was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
         now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
@@ -630,6 +667,12 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
         return renamed + int(moved)
     return 1
 AI_SOURCE = "AI app"
+# The AI session (one `talent mcp` run) a tool call runs in, set around each call, so every AI action it logs
+# lands in that session's ledger (see sessions.py).
+AI_SESSION: ContextVar[str | None] = ContextVar("talent_ai_session", default=None)
+# True while a change the recruiter kept on Review is being made: its AI actions are marked confirmed, so
+# Undo all AI leaves them alone unless asked.
+AI_KEPT: ContextVar[bool] = ContextVar("talent_ai_kept", default=False)
 
 
 def now_iso() -> str:
@@ -1530,29 +1573,59 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
     if kind == "save_batch":
         return _batch_summary(new, job if r.get("job_title") else None)
+    if kind == "outreach_batch":
+        return r.get("body") or AI_ACTION_KINDS[kind]
     if kind == "client_sent":
         return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
             f" ({new['manager']})" if new.get("manager") else "")
     if kind == "client_edit":
         return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
+    if kind == "client_create":
+        return f"Added the client {quoted(new.get('_client'))}"
     what = f": {new['summary']}" if new.get("summary") else ""
     if kind == "interview_cancel":
         return f"Cancelled an interview with {name}{what}"
     if kind == "interview_move":
         return f"Moved an interview with {name} to a new time{what}"
     if kind == "interview_outcome":
+        verdict = _added_verdict(old.get("data"), new.get("data"))
+        if verdict:  # one interviewer's own verdict: say whose, so it doesn't read as the session's outcome
+            return f"{verdict[0]}'s verdict on {name}: {verdict[1]}"
         label = interview_label(new.get("data")) or ""
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
+    if kind == "interview_job":
+        return f"Set the job of an interview with {name} to {job}{what}"
     if kind == "interview_feedback":
         who = r.get("body") or ""
         return f"Added interview feedback on {name}" + (f" from {who}" if who else "") + what
+    if kind.startswith("offer_"):
+        from .offers import ai_summary  # here: offers imports this module
+        return ai_summary(r)
     if kind == "note_logged":
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
         body = body[:80] + ("..." if len(body) > 80 else "")
         return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
                 + (f": {body}" if body else ""))
+    if kind == "card_keep":
+        if (new.get("count") or 1) > 1:
+            return f"Kept {new['count']} people on the Shortlist card in your AI app, for {job}"
+        return f"Kept {quoted(new.get('name'))} on the Shortlist card in your AI app, for {job}"
+    if kind == "card_pass":
+        return f"Passed on {quoted(new.get('name'))} on the Shortlist card in your AI app, for {job}"
     return AI_ACTION_KINDS.get(kind, "A change")
+
+
+def _added_verdict(old: Any, new: Any) -> tuple[str, str] | None:
+    """(who, "Yes") for the interviewer verdict an AI action added to a session, or None when it added none."""
+    was = [v for v in ((old or {}).get("verdicts") or []) if isinstance(v, dict)] if isinstance(old, dict) else []
+    now = [v for v in ((new or {}).get("verdicts") or []) if isinstance(v, dict)] if isinstance(new, dict) else []
+    if len(now) <= len(was):
+        return None
+    last = now[-1]
+    who = re.sub(r"\s*<[^>]*>\s*", " ", " ".join(str(last.get("by") or "").split())).strip()
+    label = VERDICT_LABELS.get(str(last.get("verdict") or ""))
+    return (who, label) if who and label else None
 
 
 def quoted(name: Any) -> str:
@@ -1585,7 +1658,7 @@ def _batch_summary(new: dict[str, Any], job: str | None) -> str:
 def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """What an AI action changed, so a newer action on the same thing can be found (see Store.ai_actions)."""
     kind, cid, jid = r["kind"], r.get("candidate_id"), r.get("job_id")
-    if kind == "save_batch":
+    if kind in BATCH_KINDS:
         return (("batch", r["id"]),)
     if kind == "candidate":
         return (("person", cid),)
@@ -1601,9 +1674,13 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("interview", r.get("target_id")))
     if kind.startswith("client_"):
         return (("client", (r.get("new_data") or {}).get("_key")),)
+    if kind.startswith("offer_"):
+        return (("person", cid), ("offer", r.get("target_id")))
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
+    if kind in ("card_keep", "card_pass"):
+        return ((kind, r.get("target_id")),)
     return (("todo", r.get("target_id")),)
 
 
@@ -2227,11 +2304,16 @@ class Store:
     def _log_ai(self, kind: str, *, candidate_id: int | None = None, job_id: int | None = None,
                 target_id: int | None = None, body: str | None = None, old: Any = None, new: Any = None) -> int:
         """Record one write the AI app made, with what it replaced. Call inside a transaction."""
-        return self._conn.execute(
-            "INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, body, old_data, new_data, at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ts = now_iso()
+        aid = self._conn.execute(
+            "INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, body, old_data, new_data, at, confirmed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (kind, candidate_id, job_id, target_id, body, None if old is None else json.dumps(old),
-             None if new is None else json.dumps(new), now_iso())).lastrowid
+             None if new is None else json.dumps(new), ts, ts if AI_KEPT.get() else None)).lastrowid
+        if AI_SESSION.get():
+            from .sessions import note_action  # here: sessions imports this module
+            note_action(self, AI_SESSION.get(), aid)
+        return aid
 
     def _ai_undone(self, target_id: int, kinds: tuple[str, ...], note: str | None = None) -> None:
         """Mark the AI action behind a timeline entry as undone (it was undone from the timeline). In a transaction."""
@@ -2283,7 +2365,7 @@ class Store:
         (undone once they all are, undoable while any is). Each of those carries `batch_id`. The batch row
         never counts as pending itself, so Undo all doesn't count its changes twice."""
         by_id = {r["id"]: r for r in rows}
-        for b in (r for r in rows if r["kind"] == "save_batch"):
+        for b in (r for r in rows if r["kind"] in BATCH_KINDS):
             ids = [i for i in ((b.get("new_data") or {}).get("action_ids") or []) if isinstance(i, int)]
             kids = []
             for i in ids:
@@ -2344,9 +2426,15 @@ class Store:
             if kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
+            if kind == "interview_job":
+                from .chase import ai_job_blocker  # here: chase imports this module
+                return ai_job_blocker(self, a)
             if kind.startswith("client_"):
                 from .reports import ai_client_blocker  # here: reports imports this module
                 return ai_client_blocker(self, a)
+            if kind.startswith("offer_"):
+                from .offers import ai_blocker  # here: offers imports this module
+                return ai_blocker(self, a)
             if kind == "note_logged":
                 t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
                 if t is None:
@@ -2357,6 +2445,16 @@ class Store:
                 if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
                     return "that interview was changed again since"
                 return None
+            if kind == "card_keep":
+                raw = self._row("SELECT value FROM settings WHERE key = ?", (f"shortlist_keep:{a['target_id']}",))
+                if raw is None:
+                    return "it is gone"
+                return "that keep was undone already" if (json.loads(raw["value"]) or {}).get("undone_at") else None
+            if kind == "card_pass":
+                p = self._row("SELECT status FROM prospects WHERE id = ?", (a["target_id"],))
+                if p is None:
+                    return "it is gone"
+                return None if p["status"] == "passed" else "they were put back or kept since"
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2429,8 +2527,13 @@ class Store:
                 n, last = n + hit, max(last or "", r["created_at"])
                 people.add(r["candidate_id"])
         for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
-                            " AND kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
-                            " 'interview_move', 'interview_outcome')", (since,)):
+                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer', 'card_keep')"
+                            " OR (kind = 'stage_move' AND json_valid(new_data)"
+                            " AND json_extract(new_data, '$.submit') = 1))"  # a submit to a client, and card presses
+                            " UNION ALL SELECT 'stage_move', candidate_id, job_id, NULL, NULL, created_at FROM ai_review"
+                            " WHERE created_at >= ? AND kind = 'stage_move' AND status = 'pending' AND json_valid(payload)"
+                            " AND json_extract(payload, '$.submit') = 1", (since, since)):  # a held submit too
             try:
                 old = json.loads(r["old_data"] or "{}") or {}
                 new = json.loads(r["new_data"] or "{}") or {}
@@ -2616,11 +2719,17 @@ class Store:
         if a["undone_at"]:
             raise ValueError("That change was already undone.")
         kind, what = a["kind"], a["summary"]
-        if kind == "save_batch":
+        if kind in BATCH_KINDS:
             return self._undo_save_batch(a, by, before_delete)
         if kind.startswith("client_"):
             from .reports import ai_client_undo  # here: reports imports this module
             return ai_client_undo(self, a, by)
+        if kind.startswith("offer_"):
+            from .offers import ai_undo  # here: offers imports this module
+            return ai_undo(self, a)
+        if kind == "interview_job":
+            from .chase import ai_job_undo  # here: chase imports this module
+            return ai_job_undo(self, a)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
@@ -2655,6 +2764,18 @@ class Store:
                 raise ValueError(reason[:1].upper() + reason[1:] + ".")
             self.strike_entry(a["target_id"], by=by)
             return what + " (struck out, kept on the timeline)"
+        if kind in ("card_keep", "card_pass"):
+            from . import shortlist  # here: shortlist imports this module
+            reason = self._ai_blocker(a)
+            if reason:
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
+            if kind == "card_keep":
+                shortlist.undo_keep(self, a["target_id"], before_delete=before_delete)
+            else:
+                shortlist.put_back(self, a["job_id"], a["target_id"])
+            with self._write():
+                self._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), action_id))
+            return what
         old, new = a["old_data"] or {}, a["new_data"] or {}
         with self._write():
             note = None
@@ -2869,6 +2990,9 @@ class Store:
                     self._conn.execute(
                         "UPDATE applications SET stage = ?, stage_changed_at = ?, notes = coalesce(notes, ?)"
                         " WHERE id = ?", (app["stage"], app["stage_changed_at"], app["notes"], ours["id"]))
+            # Offers come along, unless the kept profile has its own on that job (offers.py, v11).
+            self._conn.execute("UPDATE offers SET candidate_id = ? WHERE candidate_id = ? AND job_id NOT IN"
+                               " (SELECT job_id FROM offers WHERE candidate_id = ?)", (keep_id, other_id, keep_id))
             # other's email and LinkedIn URL are unique, so other goes before keep takes them.
             self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
             created = min(krow["created_at"], orow["created_at"])
@@ -3318,7 +3442,9 @@ class Store:
             # Fewer than 3 people have every word: add the people who have the most of them.
             exact_ids = [r["id"] for r in self._rows(f"SELECT c.id {base}", (and_match, *params))]
             exact_ids += extra
-            segments.append(ranked(" OR ".join(t.fts() for t in terms), exact_ids, True))
+            # Whole words only: a stemmed prefix ("ros"* is "ro"*) finds unrelated words like "Rockies".
+            loose = [_Term(t.form, False, t.expansions, t.names) for t in terms]
+            segments.append(ranked(" OR ".join(t.fts() for t in loose), exact_ids, True))
         total = sum(n for n, _ in segments)
         hits: list[SearchHit] = []
         skip = max(0, offset)
@@ -4110,8 +4236,8 @@ VERDICT_LABELS = {"strong_yes": "Strong yes", "yes": "Yes", "lean_yes": "Lean ye
 INTERVIEW_OUTCOME_CHOICES = ("passed", "not passed", "no show", "strong yes", "yes", "mixed", "no", "strong no")
 # What the app offers when recording how an interview went (Today's buttons, the profile's menu): value, label.
 INTERVIEW_RESULT_CHOICES = (("strong yes", "Strong yes"), ("yes", "Yes"), ("mixed", "Mixed"), ("no", "No"),
-                            ("no show", "No show"))
-INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:4], ("strong no", "Strong no"), ("passed", "Passed"),
+                            ("strong no", "Strong no"), ("no show", "No show"))
+INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:5], ("passed", "Passed"),
                           ("not passed", "Not passed"), ("no show", "No show"))
 FEEDBACK_LIMIT = 4000  # one interviewer's feedback on one interview
 LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"

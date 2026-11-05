@@ -228,6 +228,14 @@ def _sync(args: argparse.Namespace) -> None:
         print(f"{len(asks)} new job(s) made. Set their openings in the app, under Import, or on Today.")
 
 
+def _import_stage_opts(args: argparse.Namespace, prof: dict | None) -> dict[str, bool]:
+    """import-csv keeps the file's own stages the way sync does: a Status the job has no stage for becomes its
+    own stage, unless --fold-stages says to fold it into the closest one."""
+    prof = prof or {}
+    return {"add_stages": not args.fold_stages,
+            "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="talent", description="Talent Search")
     sub = parser.add_subparsers(dest="cmd")
@@ -248,6 +256,10 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("--source", default=None, help='where these people came from (default "CSV import")')
     imp.add_argument("--map", default="", metavar="SPEC",
                      help='match columns by hand, like "Stage Entered=stage_changed_at, Recruiter=tag_column, Owner=skip"')
+    imp.add_argument("--fold-stages", action="store_true",
+                     help="put a Status the job has no stage for in the closest stage, instead of adding it")
+    imp.add_argument("--keep-default-stages", action="store_true",
+                     help="keep the empty default stages on new jobs that bring their own stages")
     syn = sub.add_parser("sync", help="re-import this week's ATS export: shows what will change, then applies it")
     syn.add_argument("file")
     syn.add_argument("--yes", action="store_true", help="apply without asking")
@@ -312,7 +324,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
         else:
             header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
-            mapping, _ = importers.mapping_for(store, header, rows)
+            mapping, prof = importers.mapping_for(store, header, rows)
             try:
                 mapping = importers.apply_map(header, mapping, args.map)
             except ValueError as exc:
@@ -320,11 +332,14 @@ def main(argv: list[str] | None = None) -> None:
             if not any(m in ("name", "first_name", "last_name") for m in mapping):
                 sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
             source = args.source or importers.default_source(header)
+            stages = _import_stage_opts(args, prof)
             print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping)
                                           if m))
             if args.dry_run:
-                r = importers.preview_import(store, header, rows, mapping, source=source)
+                r = importers.preview_import(store, header, rows, mapping, source=source, **stages)
                 for line in importers.preview_lines(r):
+                    print(line)
+                for line in importers.stage_fold_lines(r):
                     print(line)
                 details = r["changes"] + r["skipped"] + r["possible_duplicates"] + r["warnings"]
                 for line in details[:20]:
@@ -333,8 +348,10 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 from . import backups
 
-                r = importers.import_rows(store, header, rows, mapping, source=source, file_name=Path(args.file).name)
-                importers.save_sync_profile(store, header, mapping, r, file_name=Path(args.file).name, source=source)
+                r = importers.import_rows(store, header, rows, mapping, source=source, file_name=Path(args.file).name,
+                                          **stages)
+                importers.save_sync_profile(store, header, mapping, r, file_name=Path(args.file).name, source=source,
+                                            **stages)
                 backups.record_import(store, r, Path(args.file).name, len(rows))
                 print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
                       f"skipped {r['skipped_rows']}, {r['notes']} note{'' if r['notes'] == 1 else 's'} added.")
@@ -342,8 +359,10 @@ def main(argv: list[str] | None = None) -> None:
                     print(f"Put {r['pipelines_added']} in job pipelines"
                           + (f", made {len(r['jobs_created'])} new job(s): " + ", ".join(r["jobs_created"])
                              if r["jobs_created"] else "") + ".")
+                for line in importers.stage_fold_lines(r):
+                    print(line)
                 for p in importers.result_panels(r):
-                    if p["key"] == "changes":
+                    if p["key"] in ("changes", "stage_fallbacks"):  # the folds were just printed, with counts
                         continue
                     print(f"{p['title']} ({p['count']}):")
                     for line in (p["groups"] or p["lines"])[:importers.PANEL_LINES]:

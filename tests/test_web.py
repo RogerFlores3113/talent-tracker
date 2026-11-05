@@ -11,7 +11,7 @@ def test_empty_state_then_sample_data(store):
     r = c.post("/sample-data", follow_redirects=False)
     assert r.status_code == 303
     page = c.get("/?q=rust").text
-    assert "Maya Okafor" in page and "Daniel Reyes" not in page
+    assert "Maya Example" in page and "Daniel Example" not in page
 
 
 def test_htmx_returns_fragment_only(store):
@@ -93,7 +93,7 @@ def test_every_page_renders_with_sample_data(store):
         assert r.status_code == 200, path
         assert "—" not in r.text, f"em-dash on {path}"
     home = c.get("/").text
-    assert "Interview with Maya Okafor" in home and "Stuck" in home and "uses none of your data" in home
+    assert "Interview with Maya Example" in home and "Stuck" in home and "uses none of your data" in home
     assert c.get("/nope").status_code == 404 and c.get("/candidates/9999").status_code == 404
 
 
@@ -136,7 +136,8 @@ def test_settings_toggle_today_items(store):
     from talent.sample_data import load_sample_data
     load_sample_data(store)
     c = client(store)
-    c.post("/settings", data={"flag_interviews": "1", "stuck_days": "3", "pipeline_view": "board"})
+    c.post("/settings", data={"flags_shown": "1", "flag_interviews": "1", "stuck_days": "3",
+                              "pipeline_view": "board"})  # the page sends flags_shown with its boxes (c6r H)
     s = store.settings()
     assert s["flag_stale"] == "0" and s["flag_interviews"] == "1" and s["stuck_days"] == "3"
     assert "Stale profile" not in c.get("/").text

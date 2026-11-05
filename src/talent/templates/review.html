@@ -5,7 +5,7 @@
   <h1>Review AI changes</h1>
   <a class="small" href="/changes?who=ai">All AI changes</a>
 </div>
-<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes apply straight away. These were sent while it was on.{% endif %} Your AI app's overwrites, moves into Hired or out, job and stage changes, notes, interview changes and feedback, client contacts and Mark as sent wait here until you keep or pass them. Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
+<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes apply straight away. These were sent while it was on.{% endif %} Your AI app's overwrites, moves into Hired or out, job and stage changes, notes, interview changes and feedback, client contacts, job hiring manager emails, to-dos it marks done and Mark as sent wait here until you keep or pass them. Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling other empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
 
 {% if not groups %}
 <p class="none">Nothing waits for your review.</p>
@@ -14,9 +14,11 @@
 {% for g in groups %}
 <section class="panel review-session">
   <div class="sec-head">
-    <h2>AI session from {{ g.started | local('%a %b %-d, %-I:%M %p') }} <span class="fine">· {{ g['items'] | length }} waiting</span></h2>
+    <h2>{{ g.label }}, session from {{ g.started | local('%a %b %-d, %-I:%M %p') }} <span class="fine">· {{ g['items'] | length }} waiting</span></h2>
     <div class="actions-inline">
-      <form method="post" action="/review/keep-session" class="inline" data-confirm="Keep all {{ g['items'] | length }} changes from this AI session? Each is made once, and you can still undo it on Changes.">
+      {% if g.ledger %}<form method="post" action="/changes/session/roll-back" class="inline" data-confirm="Roll back this AI session? Everything it changed is undone, newest first, and what it left waiting here is passed. Changes you kept stay. A backup is saved first.">
+        <input type="hidden" name="session" value="{{ g.session }}"><button class="btn small" type="submit">Roll back this session</button></form>{% endif %}
+      <form method="post" action="/review/keep-session" class="inline" data-confirm="Keep all {{ g['items'] | length }} changes from this AI session? Each is made once, and you can still undo it on Changes. A backup is saved first.">
         <input type="hidden" name="session" value="{{ g.session }}"><button class="btn small primary" type="submit">Keep all</button></form>
       <form method="post" action="/review/pass-session" class="inline" data-confirm="Pass on all {{ g['items'] | length }} changes from this AI session? Nothing is changed.">
         <input type="hidden" name="session" value="{{ g.session }}"><button class="btn small" type="submit">Pass all</button></form>
@@ -33,6 +35,8 @@
         {% if r.kind == 'note' %}<div class="fit">{{ r.payload.body or '(no text)' }}</div><div class="fine">{{ r.payload.kind | capitalize }}, {{ r.payload.at | local('%b %-d, %Y, %-I:%M %p') }}. Text from your AI app, not checked.</div>{% endif %}
         {% if r.detail %}<div class="fit">{{ r.detail }}</div><div class="fine">Text from your AI app, not checked.</div>{% endif %}
         {% if r.kind == 'client_edit' and 'contacts' in r.payload.fields %}<div class="fine">Client updates would go to these contacts.</div>{% endif %}
+        {% if r.kind == 'job_edit' and 'hiring_manager_email' in r.payload.fields %}<div class="fine">Client updates for this job can be emailed to this address.</div>{% endif %}
+        {% if r.stale %}<div class="fine"><span class="badge warn">Out of date</span> {{ r.stale }}</div>{% endif %}
         {% if r.kind == 'stage_move' and r.payload.notes %}<div class="fine">With the note: {{ r.payload.notes }}</div>{% endif %}
         <div class="fine">Sent {{ r.created_at | ago }}</div>
       </div>
