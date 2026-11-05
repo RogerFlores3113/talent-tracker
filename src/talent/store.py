@@ -554,6 +554,28 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _fill_linkedin_keys,
     ),
+    # v10: the AI review queue. In Cautious mode (settings ai_cautious) the AI app's overwrites, moves into a
+    # hired or out stage, job closes and notes wait here until the recruiter keeps (applies, once) or passes
+    # (drops) them. session is the MCP server process that sent it. ai_actions.confirmed_at: the recruiter
+    # said Yes to an AI hire or job close on Today.
+    """
+    CREATE TABLE ai_review (
+        id           INTEGER PRIMARY KEY,
+        kind         TEXT NOT NULL,
+        candidate_id INTEGER REFERENCES candidates(id) ON DELETE CASCADE,
+        job_id       INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+        session      TEXT,
+        summary      TEXT NOT NULL,
+        payload      TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'kept', 'passed')),
+        created_at   TEXT NOT NULL,
+        decided_at   TEXT,
+        result       TEXT
+    );
+    CREATE INDEX ai_review_status_idx ON ai_review(status, id);
+    CREATE INDEX ai_review_candidate_idx ON ai_review(candidate_id, status);
+    ALTER TABLE ai_actions ADD COLUMN confirmed_at TEXT;
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -563,6 +585,7 @@ AI_ACTION_KINDS = {
     "prospects_proposed": "Proposed people for a Shortlist",
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
+    "note_logged": "Logged activity",
 }
 # AI actions listed on Changes as a record only: there is nothing to put back.
 AI_RECORD_KINDS = frozenset({"interview_outcome"})
@@ -571,6 +594,16 @@ AI_EDIT_BUDGET = 3
 AI_EDIT_WINDOW_MINUTES = 60
 # How many saved values the AI app may clear (empty), across everyone, in an hour.
 AI_CLEAR_CAP = 10
+# How many saved values the AI app may replace or clear in an hour, across everyone (job closes and job edits
+# that replace a value count too), and from how many a Today alert says so.
+AI_OVERWRITE_CAP = 30
+AI_OVERWRITE_ALERT = 15
+# How many entries (notes, calls, emails...) the AI app may log on one person in an hour.
+AI_NOTE_CAP = 10
+# Timeline kinds the recruiter can strike when the AI app logged them (interviews are cancelled instead).
+STRIKE_KINDS = ("note", "call", "email", "message", "meeting")
+# SQL: a timeline row (alias t) that nobody struck out.
+NOT_STRUCK = "NOT (json_valid(t.data) AND json_extract(t.data, '$.struck_at') IS NOT NULL)"
 AI_SOURCE = "AI app"
 
 
@@ -1453,6 +1486,11 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_outcome":
         label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
+    if kind == "note_logged":
+        what = new.get("kind") or "note"
+        body = " ".join(str(new.get("body") or "").split())
+        body = body[:80] + ("..." if len(body) > 80 else "")
+        return f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} on {name}" + (f": {body}" if body else "")
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -1500,6 +1538,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("job", jid), (kind, jid))
     if kind.startswith("interview_"):
         return (("person", cid), ("interview", r.get("target_id")))
+    if kind == "note_logged":
+        return (("person", cid), ("entry", r.get("target_id")))
     return (("todo", r.get("target_id")),)
 
 
@@ -2104,6 +2144,11 @@ class Store:
         data["undone_at"] = ts
         self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
         self._ai_undone(entry["id"], ("pipeline_add", "stage_move"))
+        if entry.get("source") == AI_SOURCE:  # the note the AI app sent with the move goes too (kept, struck out)
+            for note in self._rows("SELECT * FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'note'"
+                                   " AND source = ? AND at = ?", (cid, move["job_id"], AI_SOURCE, entry["at"])):
+                if not (json.loads(note["data"]) if note.get("data") else {}).get("struck_at"):
+                    self._strike(note, by)
         cand = self.get_candidate(cid)
         cand["_restored"], cand["_skipped"] = ["job stage" if move.get("old") else "job pipeline"], []
         return cand
@@ -2229,6 +2274,11 @@ class Store:
             if kind in ("interview_cancel", "interview_move"):
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
+            if kind == "note_logged":
+                t = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
+                if t is None:
+                    return "it is gone from the timeline"
+                return "it was struck out already" if (json.loads(t["data"] or "{}") or {}).get("struck_at") else None
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2282,6 +2332,137 @@ class Store:
         """Whether the AI app may clear n more saved values now (at most AI_CLEAR_CAP an hour, across everyone)."""
         return n <= 0 or self.ai_clears_this_hour()["count"] + n <= AI_CLEAR_CAP
 
+    def ai_overwrites_this_hour(self, minutes: int = AI_EDIT_WINDOW_MINUTES) -> dict[str, Any]:
+        """Saved values the AI app replaced or cleared in the last hour, across everyone, job edits and closes
+        included: {"count", "people", "jobs", "last"}. Undone ones still count, like clears."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n, people, jobs, last = 0, set(), set(), None
+        for r in self._rows("SELECT candidate_id, data, created_at FROM timeline WHERE kind = ? AND source = ?"
+                            " AND created_at >= ?", (CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived = set(data.get("derived") or ())
+            hit = sum(1 for k, v in (data.get("old") or {}).items() if k not in derived and v not in (None, "", []))
+            if hit:
+                n, last = n + hit, max(last or "", r["created_at"])
+                people.add(r["candidate_id"])
+        for r in self._rows("SELECT job_id, old_data, at FROM ai_actions WHERE kind = 'job_edit' AND at >= ?", (since,)):
+            try:
+                old = json.loads(r["old_data"] or "{}") or {}
+            except ValueError:
+                continue
+            hit = sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+            if hit:
+                n, last = n + hit, max(last or "", r["at"])
+                jobs.add(r["job_id"])
+        return {"count": n, "people": len(people), "jobs": len(jobs), "last": last}
+
+    def ai_overwrites_left(self, n: int) -> bool:
+        """Whether the AI app may replace or clear n more saved values now (AI_OVERWRITE_CAP an hour, everyone)."""
+        return n <= 0 or self.ai_overwrites_this_hour()["count"] + n <= AI_OVERWRITE_CAP
+
+    def ai_notes_this_hour(self, candidate_id: int, minutes: int = AI_EDIT_WINDOW_MINUTES) -> int:
+        """Entries (notes, calls, emails, interviews...) the AI app logged on this person in the last hour."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        return self._row("SELECT count(*) AS n FROM timeline WHERE candidate_id = ? AND source = ? AND created_at >= ?"
+                         " AND kind NOT IN ('stage', ?)", (candidate_id, AI_SOURCE, since, CHANGE_KIND))["n"]
+
+    def mark_ai_note(self, entry: dict[str, Any]) -> int | None:
+        """Log a note, call, email, message or meeting the AI app just added, so Changes lists it and the
+        recruiter (or Undo all AI) can strike it out. Re-logging the same entry adds nothing."""
+        if entry.get("source") != AI_SOURCE or entry.get("kind") not in STRIKE_KINDS:
+            return None
+        with self._write():
+            if self._row("SELECT 1 FROM ai_actions WHERE kind = 'note_logged' AND target_id = ?", (entry["id"],)):
+                return None
+            return self._log_ai("note_logged", candidate_id=entry["candidate_id"], job_id=entry.get("job_id"),
+                                target_id=entry["id"], new={"kind": entry["kind"], "body": (entry.get("body") or "")[:300],
+                                                            "at": entry["at"]})
+
+    def _last_contact(self, candidate_id: int) -> str | None:
+        """When this person was last contacted, worked out from what is on the timeline and not struck out."""
+        marks = ", ".join("?" * len(CONTACT_KINDS))
+        r = self._row(f"""SELECT max(t.at) AS at FROM timeline t WHERE t.candidate_id = ? AND {NOT_STRUCK}
+                            AND ((t.kind IN ({marks}) AND t.at <= ?) OR (t.kind = 'stage' AND lower(t.body) = 'contacted'))""",
+                      (candidate_id, *sorted(CONTACT_KINDS), now_iso()))
+        return r["at"] if r else None
+
+    def _strike(self, entry: dict[str, Any], by: str) -> dict[str, Any]:
+        """Strike out one timeline entry (see strike_entry). Call inside a transaction."""
+        data = json.loads(entry["data"]) if entry.get("data") else {}
+        data.update(struck_at=now_iso(), struck_by=by if by in CHANGE_SOURCES else "app")
+        self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
+        cid = entry["candidate_id"]
+        if entry["kind"] in CONTACT_KINDS:
+            row = self._row("SELECT last_contacted_at FROM candidates WHERE id = ?", (cid,)) or {}
+            if row.get("last_contacted_at") == entry["at"]:  # it set "last contacted": work it out without it
+                self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?",
+                                   (self._last_contact(cid), cid))
+        if entry["kind"] == "note" and entry.get("job_id") and entry.get("body"):  # a move note is the job's note too
+            self._conn.execute("UPDATE applications SET notes = NULL WHERE candidate_id = ? AND job_id = ? AND notes = ?",
+                               (cid, entry["job_id"], entry["body"]))
+        self._ai_undone(entry["id"], ("note_logged",), "struck out")
+        return {**entry, "data": data}
+
+    def strike_entry(self, timeline_id: int, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Strike out a note, call, email, message or meeting the AI app logged. It stays on the timeline,
+        marked struck, but leaves reports, the AI app's reads, search and "last contacted"."""
+        with self._write():
+            entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
+            if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
+                raise NotFound(f"No timeline entry with id {timeline_id}")
+            if entry["kind"] not in STRIKE_KINDS or entry.get("source") != AI_SOURCE:
+                raise ValueError("Only notes, calls, emails, messages and meetings your AI app logged can be struck out.")
+            if (json.loads(entry["data"]) if entry.get("data") else {}).get("struck_at"):
+                raise ValueError("That entry is already struck out.")
+            return self._strike(entry, by)
+
+    def unstrike_entry(self, timeline_id: int, *, candidate_id: int | None = None) -> dict[str, Any]:
+        """Put a struck-out entry back as it was."""
+        with self._write():
+            entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
+            if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
+                raise NotFound(f"No timeline entry with id {timeline_id}")
+            data = json.loads(entry["data"]) if entry.get("data") else {}
+            if not data.get("struck_at"):
+                raise ValueError("That entry isn't struck out.")
+            data.pop("struck_at", None)
+            data.pop("struck_by", None)
+            self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data) if data else None, timeline_id))
+            if entry["kind"] in CONTACT_KINDS and entry["at"] <= now_iso():
+                self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
+                                   " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
+                                   (entry["at"], entry["candidate_id"], entry["at"]))
+            self._conn.execute("UPDATE ai_actions SET undone_at = NULL, undo_note = NULL WHERE kind = 'note_logged'"
+                               " AND target_id = ?", (timeline_id,))
+        return {**entry, "data": data}
+
+    def confirm_ai_action(self, action_id: int) -> dict[str, Any]:
+        """The recruiter said Yes to an AI hire move or job close on Today: it stays, and Today stops asking."""
+        a = self.ai_action(action_id)
+        if a["kind"] not in ("stage_move", "pipeline_add", "job_edit"):
+            raise ValueError("Only an AI move or job change can be confirmed.")
+        if a["undone_at"]:
+            raise ValueError("That change was undone.")
+        with self._write():
+            self._conn.execute("UPDATE ai_actions SET confirmed_at = coalesce(confirmed_at, ?) WHERE id = ?",
+                               (now_iso(), action_id))
+        return self.ai_action(action_id)
+
+    def job_diff(self, job_id: int, **data: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(old, new) of the job fields update_job would really change, normalized the same way."""
+        job = self.get_job(job_id)
+        if "status" in data:
+            data = {**data, "status": normalize_job_status(data["status"])}
+        extras = _job_extras({k: v for k, v in data.items() if k in JOB_EXTRA_FIELDS})
+        if "openings" in extras and extras["openings"] is None:
+            extras["openings"] = 1
+        fields = {**{k: _clean(v) for k, v in data.items() if k not in JOB_EXTRA_FIELDS}, **extras}
+        new = {k: v for k, v in fields.items() if job.get(k) != v}
+        return {k: job.get(k) for k in new}, new
+
     def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
                       work_history: list[dict[str, Any]] | None = None) -> list[str]:
         """The saved (non-empty) fields this update would clear or replace."""
@@ -2310,11 +2491,12 @@ class Store:
         job = self._row("SELECT status, status_by FROM jobs WHERE id = ?", (job_id,))
         if not job or job["status_by"] != "ai":
             return None
-        for r in self._rows("SELECT new_data, at, undone_at FROM ai_actions WHERE job_id = ? AND kind = 'job_edit'"
-                            " ORDER BY id DESC", (job_id,)):
+        for r in self._rows("SELECT id, new_data, at, undone_at, confirmed_at FROM ai_actions WHERE job_id = ?"
+                            " AND kind = 'job_edit' ORDER BY id DESC", (job_id,)):
             status = (json.loads(r["new_data"] or "{}") or {}).get("status")
             if status:
-                return {"status": status, "at": r["at"]} if not r["undone_at"] and status == job["status"] else None
+                return ({"status": status, "at": r["at"], "id": r["id"], "confirmed_at": r["confirmed_at"]}
+                        if not r["undone_at"] and status == job["status"] else None)
         return None
 
     def undo_ai_action(self, action_id: int, *, by: str = "app",
@@ -2359,6 +2541,9 @@ class Store:
                 before_delete()
             self.delete_job(a["job_id"])
             return what
+        if kind == "note_logged":
+            self.strike_entry(a["target_id"], by=by)
+            return what + " (struck out, kept on the timeline)"
         old, new = a["old_data"] or {}, a["new_data"] or {}
         with self._write():
             note = None
@@ -2724,6 +2909,8 @@ class Store:
                                  and not r["data"].get("undone_at") and not r["data"].get("merged"))
             if r["kind"] == "interview":
                 r["status"] = interview_status(r["data"])
+            r["struck"] = bool(r["data"] and r["data"].get("struck_at"))
+            r["strikable"] = r["kind"] in STRIKE_KINDS and r.get("source") == AI_SOURCE and not r["struck"]
         return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -3010,6 +3197,7 @@ class Store:
         who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
         for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
                 f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
+                "NOT (json_valid(data) AND json_extract(data, '$.struck_at') IS NOT NULL) AND "  # struck out: not found
                 f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
                 " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
             if r["candidate_id"] not in found:

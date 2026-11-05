@@ -115,7 +115,7 @@ def test_today_flags_ai_moves_to_offer_and_hired(store):
     call(server, "move_stage", candidate_id=cy, job_id=job["id"], stage="Screening")  # not worth a line
     titles = _ai_titles(store)
     assert "Your AI app moved Ana Diaz to Offer on Staff Backend Engineer (Acme Fintech). Review or undo." in titles
-    assert "Your AI app moved Bo Li to Hired on Staff Backend Engineer (Acme Fintech). Review or undo." in titles
+    assert "Your AI app marked Bo Li hired on Staff Backend Engineer (Acme Fintech). Right?" in titles  # c5 A
     assert not any("Cy Park" in t for t in titles)
 
     # Undone: the line goes. Moved by the recruiter since: it goes too.

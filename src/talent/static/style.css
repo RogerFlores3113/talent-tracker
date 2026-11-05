@@ -198,6 +198,7 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 .badge.overdue { background: #fde2e1; color: #9b1c1c; text-transform: none; }
 .badge.iv-cancelled { text-decoration: line-through; }
 .t-interview.cancelled .when { text-decoration: line-through; color: var(--muted); }
+.timeline li.struck > div:not(.fine) { text-decoration: line-through; color: var(--muted); }
 .iv-edit { margin-top: 4px; } .iv-edit form { margin: 4px 8px 4px 0; }
 .today .later { margin-top: 16px; } .add-todo input[type=text] { min-width: 16em; }
 .job-facts { margin: 2px 0 0; } .omit-stages { flex-wrap: wrap; gap: 4px 10px; margin-bottom: 8px; }

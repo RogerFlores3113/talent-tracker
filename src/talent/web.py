@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist, reports
+from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -58,6 +58,8 @@ REDIRECTS = {301, 302, 303, 307, 308}
 log = logging.getLogger(__name__)
 CHANGE_WHO = {"ai": "Your AI app", "import": "CSV import", "app": "You, in the app"}
 CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
+# "Undo all AI changes from the last ...": hours back.
+UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"}
 CHANGES_SHOWN = 300
 TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
@@ -666,6 +668,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if cand["_skipped"]:
             notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/timeline/{timeline_id}/strike")
+    def strike_entry(candidate_id: int, timeline_id: int):
+        """Strike out a note, call, email, message or meeting the AI app logged. It stays, marked struck."""
+        cand_or_404(candidate_id)
+        try:
+            store.strike_entry(timeline_id, candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That entry isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        notice = "Struck it out. It stays on the timeline, but reports, search and your AI app leave it out."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
+
+    @app.post("/candidates/{candidate_id}/timeline/{timeline_id}/unstrike")
+    def unstrike_entry(candidate_id: int, timeline_id: int):
+        cand_or_404(candidate_id)
+        try:
+            store.unstrike_entry(timeline_id, candidate_id=candidate_id)
+        except NotFound:
+            raise HTTPException(404, "That entry isn't on this profile.")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': 'Put it back.'})}#timeline",
                                 status_code=303)
 
     @app.post("/candidates/{candidate_id}/contacted")
@@ -1465,6 +1495,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     first = min(a["children"])
                     rows[-1].update(undo_label="Undo this batch", undo_from_url=f"/changes/ai/{first}/undo-from",
                                     from_count=sum(1 for b in ai if b["id"] >= first and b["undo_pending"]))
+        if who in ("", "app"):  # a Keep or Pass on Review (a kept change is also an AI row, with its Undo)
+            for r in review.decided(store, since, limit):
+                name, href = (r["candidate_name"], f"/candidates/{r['candidate_id']}#timeline") if r["candidate_id"] \
+                    else (r["job_title"] or "AI change", f"/jobs/{r['job_id']}" if r["job_id"] else "/review")
+                result = r.get("result") or ""
+                verb = "Passed" if r["status"] == "passed" and not result.startswith("Couldn't") else "Kept"
+                text = f"{verb} on Review: {r['summary']}" + (f". {result}" if result.startswith("Couldn't") else "")
+                rows.append({"at": r["decided_at"], "who": "app", "name": name, "href": href, "text": text,
+                             "undoable": False, "undone": False,
+                             "hint": "Its change is listed as your AI app's, with Undo." if verb == "Kept" and
+                             not result.startswith("Couldn't") else None})
         if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
             rows.extend(import_change_rows(since)[:limit])
         if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
@@ -1534,7 +1575,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
-                    ai_since_epoch=int(to_dt(ai_since).timestamp()))
+                    ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
+                    undo_window={"1": "24", "7": "168", "30": "720"}.get(since, "24"))
 
     @app.post("/changes/{timeline_id}/undo")
     def undo_from_changes(request: Request, timeline_id: int):
@@ -1562,6 +1604,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """Undo these AI changes, newest first, skipping ones already undone, and say what happened."""
         undone, skipped = [], []
         backup = ai_backup()
+        saved = None
+        if any(a["undo_pending"] for a in todo):  # several changes at once: keep a copy from just before
+            try:
+                saved = importers.backup_before_import(store, reason="undo-ai")
+            except ValueError as exc:
+                return back(request, "/changes", error=str(exc))
+            backup = lambda: None  # noqa: E731 (that copy also covers people and jobs it takes out)
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
             if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
                 continue
@@ -1577,6 +1626,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             ": " + _listed(undone) if undone else "") + "."
         if skipped:
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
+        if saved is not None and undone:
+            notice += " A backup from just before is under Automatic backups in Settings."
         return back(request, "/changes", notice=notice)
 
     @app.post("/changes/stage-outcome/{change_id}/undo")
@@ -1632,11 +1683,83 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.post("/changes/undo-ai")
     async def undo_ai_since(request: Request):
         form = await request.form()
-        start = since_iso(str(form.get("since") or ""))
+        window = str(form.get("window") or "")
+        if window in UNDO_WINDOWS:  # the window picked next to the button
+            start = (datetime.now(timezone.utc) - timedelta(hours=int(window))).replace(microsecond=0).isoformat()
+        else:
+            start = since_iso(str(form.get("since") or ""))
         if not start:
             return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
         return undo_ai_batch(request, store.ai_actions(start, limit=1_000_000),
                              "There were no AI changes to undo in that time.")
+
+    @app.post("/changes/ai/{action_id}/confirm")
+    def confirm_ai_action(request: Request, action_id: int):
+        """Yes on Today's "Your AI app marked X hired. Right?" (or a job it closed): it stays, and Today stops asking."""
+        try:
+            a = store.confirm_ai_action(action_id)
+        except NotFound:
+            return back(request, "/", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/", error=str(exc))
+        return back(request, "/", notice=f"Kept: {a['summary']}.")
+
+    # ---------------------------------------------------------- AI review queue
+    @app.get("/review", response_class=HTMLResponse)
+    def review_page(request: Request):
+        return page(request, "review.html", groups=review.sessions(store), cautious=review.cautious(store),
+                    kinds=review.KINDS)
+
+    def _review_done(request: Request, res: dict[str, list[str]], kept: bool, none: str):
+        done, left = res["done"], res["left"]
+        if not done and not left:
+            return back(request, "/review", notice=none)
+        verb = "Kept" if kept else "Passed"
+        notice = f"{verb} {len(done)} change{'' if len(done) == 1 else 's'}" + (": " + _listed(done) if done else "") + "."
+        if left:
+            notice += f" Left {len(left)}: {_listed(left)}."
+        return back(request, "/review", notice=notice)
+
+    @app.post("/review/{review_id}/keep")
+    def review_keep(request: Request, review_id: int):
+        try:
+            what = review.keep(store, review_id)
+        except NotFound as exc:
+            return back(request, "/review", error=str(exc))
+        except ValueError as exc:
+            return back(request, "/review", error=str(exc))
+        return back(request, "/review", notice=f"Kept: {what}. You can still undo it on Changes.")
+
+    @app.post("/review/{review_id}/pass")
+    def review_pass(request: Request, review_id: int):
+        try:
+            what = review.pass_(store, review_id)
+        except NotFound as exc:
+            return back(request, "/review", error=str(exc))
+        except ValueError as exc:
+            return back(request, "/review", error=str(exc))
+        return back(request, "/review", notice=f"Passed: {what}. Nothing was changed.")
+
+    @app.post("/review/{op}-session")
+    async def review_session(request: Request, op: str):
+        """Keep all or Pass all of one AI session's waiting changes."""
+        if op not in ("keep", "pass"):
+            raise HTTPException(404)
+        form = await request.form()
+        session = str(form.get("session") or "")
+        ids = [r["id"] for r in review.pending(store, session=session)] if session else \
+            [r["id"] for r in review.pending(store) if not r.get("session")]
+        return _review_done(request, review.decide_many(store, ids, op == "keep"), op == "keep",
+                            "Nothing from that session waits for review.")
+
+    @app.post("/settings/cautious")
+    async def set_cautious(request: Request):
+        form = await request.form()
+        on = form.get("ai_cautious") == "1"
+        review.set_cautious(store, on)
+        msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job changes and notes now wait "
+               "on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
 
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)
@@ -1777,11 +1900,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")
-    def health(request: Request):
-        """Open without the key so a second launch can find the running app. Says nothing about the data."""
-        if not request.state.unlocked:
-            return {"ok": True, "version": __version__}
-        return {"ok": True, "version": __version__, "search": search.engine, "candidates": store.count_candidates()}
+    def health(request: Request, nonce: str = ""):
+        """Open without the key so a second launch can find the running app. Says nothing about the data.
+        With a nonce it also answers `proof` (paths.health_proof), so the launcher can tell this app from
+        another program on the port before it sends a launch code."""
+        out: dict[str, Any] = {"ok": True, "version": __version__}
+        if nonce and len(nonce) <= 128:
+            out["proof"] = paths.health_proof(key, nonce)
+        if request.state.unlocked:
+            out.update(search=search.engine, candidates=store.count_candidates())
+        return out
 
     @app.get("/api/candidates")
     def api_search(q: str = "", location: str | None = None, title: str | None = None, tag: str | None = None,

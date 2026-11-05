@@ -6,8 +6,10 @@ the browser. AI apps launch it with `mcp` to talk over stdio.
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -16,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, launch_url, port_file
+from .paths import DEFAULT_PORT, app_key, data_dir, db_path, health_proof, is_frozen, launch_url, port_file
 
 
 def _private(path: Path) -> Path:
@@ -45,12 +47,24 @@ def _setup_logging(to_stderr: bool) -> None:
                         handlers=handlers)
 
 
-def _already_running(port: int) -> bool:
+def _probe(port: int) -> str:
+    """Who answers on this port: "ours" (this install's app, proven with an HMAC of a fresh nonce under the
+    app key), "other" (something else is listening there) or "free"."""
+    nonce = secrets.token_urlsafe(24)
     try:
-        r = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=0.5)
-        return r.status_code == 200 and "version" in r.json()
+        r = httpx.get(f"http://127.0.0.1:{port}/api/health", params={"nonce": nonce}, timeout=0.5)
+        body = r.json()
     except (httpx.HTTPError, ValueError):
-        return False
+        return "free" if _port_free(port) else "other"
+    proof = body.get("proof") if isinstance(body, dict) else None
+    if r.status_code == 200 and isinstance(proof, str) and hmac.compare_digest(proof, health_proof(app_key(), nonce)):
+        return "ours"
+    return "other"
+
+
+def _already_running(port: int) -> bool:
+    """This install's app answers on the port. Only then does a launcher send it a launch code."""
+    return _probe(port) == "ours"
 
 
 def _port_free(port: int) -> bool:
@@ -88,12 +102,19 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     from .store import Store
     from .web import create_app
 
+    say = logging.getLogger(__name__)
     if _already_running(port):
         # Second double-click: just bring the window back.
         if open_browser:
             webbrowser.open(launch_url(port))
+        say.info("Talent Search is already running at http://127.0.0.1:%s/, so this copy didn't start another. %s",
+                 port, "Opened its window." if open_browser else "Run talent open to open its window.")
         return
+    wanted = port
     port = _pick_port(port)
+    if port != wanted:
+        say.warning("Port %s is in use by another program that isn't this Talent Search, so no launch code was sent "
+                    "to it. Starting on port %s instead.", wanted, port)
     app = create_app(Store(db_path()))
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"

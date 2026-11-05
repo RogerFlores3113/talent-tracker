@@ -418,6 +418,26 @@ def ai_clear_cap(store: Store) -> list[dict[str, Any]]:
              "detail": "It can't clear more until the hour has passed.", "href": "/changes?who=ai&since=1"}]
 
 
+def ai_overwrite_alert(store: Store) -> list[dict[str, Any]]:
+    """A Today item once the AI app has replaced or cleared many saved values in the last hour, across everyone
+    (AI_OVERWRITE_ALERT), so a run of injected edits doesn't sit unseen on Changes."""
+    from .store import AI_OVERWRITE_ALERT, AI_OVERWRITE_CAP
+
+    got = store.ai_overwrites_this_hour()
+    if got["count"] < AI_OVERWRITE_ALERT:
+        return []
+    where = ([f"{got['people']} {'person' if got['people'] == 1 else 'people'}"] if got["people"] else []) + (
+        [f"{got['jobs']} job{'' if got['jobs'] == 1 else 's'}"] if got["jobs"] else [])
+    people = " and ".join(where) or "your records"
+    left = AI_OVERWRITE_CAP - got["count"]
+    return [{"key": f"aioverwrites:{got['last']}", "kind": "ai_change", "rank": 0, "when": got["last"],
+             "title": f"Your AI app changed {got['count']} saved values on {people} in the last hour. "
+                      "Review or undo all.",
+             "detail": (f"It can change {left} more this hour." if left > 0
+                        else "It can't change more until the hour has passed."),
+             "href": "/changes?who=ai&since=1"}]
+
+
 def _offer_name(name: str | None) -> bool:
     return "offer" in _stage_key(name).split()
 
@@ -431,7 +451,8 @@ def ai_pipeline_changes(store: Store, now: datetime | None = None, days: int = 7
     out_by_job: dict[int, dict[str, Any]] = {}
     items: list[dict[str, Any]] = []
     for r in store._rows(
-            """SELECT a.id, a.job_id, a.at, j.title, j.company, s.name AS stage, s.outcome, c.name AS candidate_name
+            """SELECT a.id, a.job_id, a.at, a.confirmed_at, j.title, j.company, s.name AS stage, s.outcome,
+                      c.name AS candidate_name
                FROM ai_actions a JOIN jobs j ON j.id = a.job_id
                JOIN timeline t ON t.id = a.target_id
                JOIN candidates c ON c.id = t.candidate_id
@@ -445,7 +466,17 @@ def ai_pipeline_changes(store: Store, now: datetime | None = None, days: int = 7
         if r["outcome"] == "lost":
             item = out_by_job.setdefault(r["job_id"], {"id": r["id"], "at": r["at"], "title": r["title"], "n": 0})
             item["n"] += 1
-        elif r["outcome"] == "hired" or (r["outcome"] == "open" and _offer_name(r["stage"])):
+        elif r["outcome"] == "hired":  # a hire feeds reports: the recruiter says Yes or Undo
+            if r["confirmed_at"]:
+                continue
+            word = "placed" if _stage_key(r["stage"]) == "placed" else "hired"
+            items.append({"key": f"aihire:{r['id']}", "kind": "ai_change", "rank": 1, "when": r["at"],
+                          "job_id": r["job_id"], "confirm_id": r["id"],
+                          "title": f"Your AI app marked {r['candidate_name']} {word} on "
+                                   f"{r['title']}{' (' + r['company'] + ')' if r['company'] else ''}. Right?",
+                          "detail": f"They are in {r['stage']} now. Say Yes to keep it, or Undo.",
+                          "href": "/changes?who=ai&since=7"})
+        elif r["outcome"] == "open" and _offer_name(r["stage"]):
             items.append({"key": f"aihire:{r['id']}", "kind": "ai_change", "rank": 1, "when": r["at"],
                           "job_id": r["job_id"],
                           "title": f"Your AI app moved {r['candidate_name']} to {r['stage']} on "
@@ -459,11 +490,12 @@ def ai_pipeline_changes(store: Store, now: datetime | None = None, days: int = 7
     for job in store._rows("SELECT id, title FROM jobs WHERE status IN ('closed', 'on_hold') AND updated_at >= ?",
                            (since,)):
         change = store.ai_status_change(job["id"])
-        if change and change["at"] >= since:
+        if change and change["at"] >= since and not change.get("confirmed_at"):
             verb = words[change["status"]]
             what = verb.format(job["title"]) if "{}" in verb else f"{verb} {job['title']}"
             items.append({"key": f"aistatus:{job['id']}:{change['at']}", "kind": "ai_change", "rank": 1,
-                          "when": change["at"], "job_id": job["id"], "title": f"Your AI app {what}.", "detail": "",
+                          "when": change["at"], "job_id": job["id"], "title": f"Your AI app {what}.",
+                          "detail": "Right? Say Yes to keep it, or Undo.", "confirm_id": change.get("id"),
                           "href": "/changes?who=ai&since=7"})
     return items
 
@@ -642,6 +674,9 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
             })
 
     items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now) + ai_clear_cap(store)
+    items += ai_overwrite_alert(store)
+    from .review import today_items as review_items
+    items += review_items(store)
     from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
     items += shortlist_items(store)
     if on("flag_stuck"):

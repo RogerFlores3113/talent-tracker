@@ -181,6 +181,9 @@ def environment_line() -> str:
 
 _PRIVATE = (
     (re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+"), "[email removed]"),
+    # Spelled-out emails: "ana at acme dot com", "ana [at] acme [dot] com", "ana(at)acme.com".
+    (re.compile(r"[\w.+'-]+\s*[\[({]\s*at\s*[\])}]\s*[\w-]+(?:(?:\s*[\[({]\s*dot\s*[\])}]\s*|\.|\s+dot\s+)[\w-]+)+"
+                r"|\b[\w.+'-]+\s+at\s+[\w-]+(?:\s+dot\s+[\w-]+)+\b", re.I), "[email removed]"),
     (re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|dev|co|ai|app|me|in)(?:/\S*)?\b",
                 re.I), "[link removed]"),
     # Phone-like digit runs, but not dates such as 2026-11-05.
@@ -209,7 +212,7 @@ def _scrub_names(text: str, names: Iterable[str]) -> str:
         if name.casefold() in folded:
             full.add(name)
         parts = [p.strip(".,") for p in name.split(" ")]
-        words = [(parts[0], 3), (parts[-1], 4)] if len(parts) > 1 else [(parts[0], 3)]
+        words = [(parts[0], 3), (parts[-1], 2)] if len(parts) > 1 else [(parts[0], 3)]  # surnames like Li or Ng
         parts_found.update(w for w, least in words if len(w) >= least and w in text)
     for name in sorted(full, key=len, reverse=True):
         text = re.sub(r"(?<!\w)" + r"\s+".join(map(re.escape, name.split(" "))) + r"(?!\w)", "[name removed]", text,
