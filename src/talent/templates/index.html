@@ -2,6 +2,13 @@
 {% block body %}
 {% set qp = request.query_params %}
 {% if qp.get('deleted') %}<p class="flash">Candidate deleted.</p>{% endif %}
+{% if not user_zone() and not searching %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone">
+  <input type="hidden" name="next" value="/">
+  <span>Times show in {{ shown_zone_name() or local_zone() or "this computer's time zone" }}. Set your time zone:</span>
+  <input type="text" name="time_zone" value="" list="banner-zones" data-tz-prefill placeholder="America/Chicago, or ET, CT, MT, PT" aria-label="Time zone">
+  <datalist id="banner-zones">{% for z in common_zones %}<option value="{{ z }}">{% endfor %}</datalist>
+  <button class="btn small primary" type="submit">Save</button>
+</form>{% endif %}
 {% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab. You can remove it any time.</p>{% endif %}
 {% if total_all or jobs or searching %}
 <form class="searchbar" action="/" method="get" role="search"

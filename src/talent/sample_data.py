@@ -1,4 +1,5 @@
-"""Made-up candidates so a new user can try search before adding real people."""
+"""Made-up candidates so a new user can try search before adding real people. Every one is called
+"<first name> Example", so a sample person is never mistaken for, or matched to, someone a real import brings."""
 from __future__ import annotations
 
 import json
@@ -11,56 +12,56 @@ from .store import NotFound, Store
 SAMPLE_SOURCE = "Sample data"  # the source on sample people, notes and to-dos
 
 SAMPLES = [
-    ("Maya Okafor", "Senior Backend Engineer", "Ledgerline", "Austin, TX",
+    ("Maya Example", "Senior Backend Engineer", "Ledgerline", "Austin, TX",
      "Eight years building payment systems in Go and Rust. Led the migration of a card-processing service to event sourcing; mentors two junior engineers.", "go, rust, payments"),
-    ("Daniel Reyes", "Staff Frontend Engineer", "Brightpath", "San Francisco, CA",
+    ("Daniel Example", "Staff Frontend Engineer", "Brightpath", "San Francisco, CA",
      "React and TypeScript specialist who built a design system used by 40 product teams. Strong on accessibility and performance budgets.", "react, typescript, design systems"),
-    ("Priya Natarajan", "Data Science Lead", "Harvest Analytics", "New York, NY",
+    ("Priya Example", "Data Science Lead", "Harvest Analytics", "New York, NY",
      "Runs a team of six doing forecasting and causal inference in Python. Previously an economist; publishes on experiment design.", "python, causal inference, leadership"),
-    ("Tomás Lindqvist", "Machine Learning Engineer", "Northwind AI", "Seattle, WA",
+    ("Tomás Example", "Machine Learning Engineer", "Northwind AI", "Seattle, WA",
      "Trains and serves ranking models with PyTorch on Kubernetes. Cut inference cost 40% with distillation and batching.", "pytorch, mlops, kubernetes"),
-    ("Aisha Bello", "Product Manager", "Cartwheel", "Chicago, IL",
+    ("Aisha Example", "Product Manager", "Cartwheel", "Chicago, IL",
      "B2B SaaS PM focused on onboarding and activation. Shipped a self-serve trial that doubled conversion; former support lead.", "saas, growth, onboarding"),
-    ("Kenji Watanabe", "Site Reliability Engineer", "Cloudmere", "Remote (Portland, OR)",
+    ("Kenji Example", "Site Reliability Engineer", "Cloudmere", "Remote (Portland, OR)",
      "On-call lead for a 99.99% uptime API platform. Terraform, Prometheus and incident command; writes great postmortems.", "sre, terraform, observability"),
-    ("Sofia Marchetti", "Engineering Manager", "Ledgerline", "Austin, TX",
+    ("Sofia Example", "Engineering Manager", "Ledgerline", "Austin, TX",
      "Manages two backend teams (14 engineers). Grew the org from 5 and introduced a career ladder. Hands-on background in Java.", "management, java, hiring"),
-    ("Liam O'Connor", "iOS Engineer", "Fitloop", "Boston, MA",
+    ("Liam Example", "iOS Engineer", "Fitloop", "Boston, MA",
      "Swift and SwiftUI developer on a top-50 fitness app. Owns HealthKit integrations and offline sync.", "swift, ios, mobile"),
-    ("Grace Kim", "Security Engineer", "Vaultline", "Washington, DC",
+    ("Grace Example", "Security Engineer", "Vaultline", "Washington, DC",
      "Application security for fintech: threat modeling, secure code review and SOC 2 programs. Former penetration tester.", "appsec, soc2, fintech"),
-    ("Arjun Mehta", "Full Stack Engineer", "Shoplane", "San Jose, CA",
+    ("Arjun Example", "Full Stack Engineer", "Shoplane", "San Jose, CA",
      "Next.js, Node and Postgres generalist at an e-commerce startup. Built the checkout flow and an internal admin panel.", "nextjs, node, postgres"),
-    ("Hannah Schultz", "Technical Recruiter", "Talentforge", "Denver, CO",
+    ("Hannah Example", "Technical Recruiter", "Talentforge", "Denver, CO",
      "Agency recruiter placing infrastructure and data engineers. Strong network in the Rockies startup scene.", "recruiting, infrastructure"),
-    ("Omar Haddad", "Data Engineer", "Streamwise", "New York, NY",
+    ("Omar Example", "Data Engineer", "Streamwise", "New York, NY",
      "Builds batch and streaming pipelines with Spark, Kafka and dbt. Owns the company's data warehouse on Snowflake.", "spark, kafka, dbt, snowflake"),
-    ("Chloe Dubois", "Product Designer", "Brightpath", "Los Angeles, CA",
+    ("Chloe Example", "Product Designer", "Brightpath", "Los Angeles, CA",
      "Systems-minded designer working across web and mobile. Ran the research program behind a full navigation redesign.", "figma, research, design systems"),
-    ("Rafael Costa", "Solutions Engineer", "Northwind AI", "Miami, FL",
+    ("Rafael Example", "Solutions Engineer", "Northwind AI", "Miami, FL",
      "Pre-sales engineer for an AI platform. Runs technical demos and pilots with enterprise customers; Python and SQL.", "pre-sales, python, enterprise"),
-    ("Emily Zhang", "Senior Software Engineer", "Medisight", "Boston, MA",
+    ("Emily Example", "Senior Software Engineer", "Medisight", "Boston, MA",
      "Healthcare software in Python and Django; HL7/FHIR integrations with hospital systems. Cares about data privacy.", "python, django, healthcare"),
-    ("Noah Williams", "DevOps Engineer", "Shoplane", "Remote (Atlanta, GA)",
+    ("Noah Example", "DevOps Engineer", "Shoplane", "Remote (Atlanta, GA)",
      "CI/CD and AWS cost work. Moved builds from Jenkins to GitHub Actions and halved deploy times.", "aws, ci/cd, github actions"),
 ]
 
 
 HISTORY = {
-    "Maya Okafor": [("Senior Backend Engineer", "Ledgerline", "2021", ""), ("Backend Engineer", "Stripe", "2017", "2021")],
-    "Priya Natarajan": [("Data Science Lead", "Harvest Analytics", "2020", ""), ("Economist", "Federal Reserve Bank of NY", "2015", "2020")],
-    "Kenji Watanabe": [("Site Reliability Engineer", "Cloudmere", "2019", ""), ("Systems Engineer", "Rackspace", "2014", "2019")],
-    "Omar Haddad": [("Data Engineer", "Streamwise", "2022", ""), ("Analytics Engineer", "Squarespace", "2019", "2022")],
+    "Maya Example": [("Senior Backend Engineer", "Ledgerline", "2021", ""), ("Backend Engineer", "Stripe", "2017", "2021")],
+    "Priya Example": [("Data Science Lead", "Harvest Analytics", "2020", ""), ("Economist", "Federal Reserve Bank of NY", "2015", "2020")],
+    "Kenji Example": [("Site Reliability Engineer", "Cloudmere", "2019", ""), ("Systems Engineer", "Rackspace", "2014", "2019")],
+    "Omar Example": [("Data Engineer", "Streamwise", "2022", ""), ("Analytics Engineer", "Squarespace", "2019", "2022")],
 }
 
 JOBS = [
     ("Senior Backend Engineer", "Acme Payments", "Austin, TX or remote",
      "Go or Rust, payments or ledger experience, 6+ years. Owns the settlement service.",
-     [("Maya Okafor", "Interviewing", 3), ("Kenji Watanabe", "Screening", 12), ("Noah Williams", "Contacted", 4),
-      ("Arjun Mehta", "Sourced", 20), ("Sofia Marchetti", "Rejected", 9)]),
+     [("Maya Example", "Interviewing", 3), ("Kenji Example", "Screening", 12), ("Noah Example", "Contacted", 4),
+      ("Arjun Example", "Sourced", 20), ("Sofia Example", "Rejected", 9)]),
     ("Data Lead", "Acme Payments", "New York, NY",
      "Leads a small data science team. Forecasting, experiments, Python and SQL.",
-     [("Priya Natarajan", "Offer", 2), ("Omar Haddad", "Sourced", 1)]),
+     [("Priya Example", "Offer", 2), ("Omar Example", "Sourced", 1)]),
 ]
 
 
@@ -93,7 +94,7 @@ def load_sample_data(store: Store) -> int:
 
     db = store._conn
     # A couple of profiles that haven't been touched in a long time, so "stale profile" has something to show.
-    for name, days in (("Liam O'Connor", 400), ("Chloe Dubois", 250)):
+    for name, days in (("Liam Example", 400), ("Chloe Example", 250)):
         db.execute("UPDATE candidates SET updated_at = ?, created_at = ? WHERE id = ?", (_ago(days), _ago(days), ids[name]))
 
     existing = {j["title"] for j in store.list_jobs()}
@@ -113,11 +114,11 @@ def load_sample_data(store: Store) -> int:
                        (_ago(days), ids[name], job["id"]))
         if title == "Senior Backend Engineer":
             when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=17, minute=0, second=0, microsecond=0)
-            store.log(ids["Maya Okafor"], "interview", "Systems design round with the payments team",
+            store.log(ids["Maya Example"], "interview", "Systems design round with the payments team",
                       at=when, job_id=job["id"], source=SAMPLE_SOURCE)
-            store.log(ids["Kenji Watanabe"], "call", "Intro call. Open to Austin, wants to stay hands-on.",
+            store.log(ids["Kenji Example"], "call", "Intro call. Open to Austin, wants to stay hands-on.",
                       at=_ago(12), job_id=job["id"], source=SAMPLE_SOURCE)
-            store.add_suggestion("Follow up with Noah Williams about the backend role", candidate_id=ids["Noah Williams"],
+            store.add_suggestion("Follow up with Noah Example about the backend role", candidate_id=ids["Noah Example"],
                                  job_id=job["id"], source=SAMPLE_SOURCE)
     db.commit()
     people, jobs = sample_ids(store)

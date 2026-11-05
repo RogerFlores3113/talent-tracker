@@ -65,13 +65,13 @@ def test_search_ranks_name_and_title_above_about(store):
 
 def test_search_prefix_aliases_filters_and_snippet(store):
     load_sample_data(store)
-    assert {h.candidate["name"] for h in store.search_candidates("pyth").hits} >= {"Priya Natarajan", "Emily Zhang"}
+    assert {h.candidate["name"] for h in store.search_candidates("pyth").hits} >= {"Priya Example", "Emily Example"}
     sf = store.search_candidates("react sf")
-    assert [h.candidate["name"] for h in sf.hits] == ["Daniel Reyes"]
+    assert [h.candidate["name"] for h in sf.hits] == ["Daniel Example"]
     assert "<mark>React</mark>" in snippet_html(sf.hits[0].snippet)
     ny = store.search_candidates("", location="new york")
     assert ny.total == 2 and all("New York" in h.candidate["location"] for h in ny.hits)
-    assert store.search_candidates("python", title="lead").hits[0].candidate["name"] == "Priya Natarajan"
+    assert store.search_candidates("python", title="lead").hits[0].candidate["name"] == "Priya Example"
 
 
 def test_search_is_safe_against_fts_syntax(store):

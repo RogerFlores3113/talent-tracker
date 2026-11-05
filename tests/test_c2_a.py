@@ -135,15 +135,15 @@ def test_remove_sample_data_keeps_what_the_recruiter_touched(store):
     people, jobs = sample_ids(store)
     by_name = {store.get_candidate(i)["name"]: i for i in people}
     by_title = {store.get_job(j)["title"]: j for j in jobs}
-    store.log(by_name["Maya Okafor"], "call", "Real call about the Austin role", source="App")
-    store.move_stage(by_name["Kenji Watanabe"], by_title["Senior Backend Engineer"], "Offer")
+    store.log(by_name["Maya Example"], "call", "Real call about the Austin role", source="App")
+    store.move_stage(by_name["Kenji Example"], by_title["Senior Backend Engineer"], "Offer")
     store.add_to_pipeline(real["id"], by_title["Data Lead"])
     r = remove_sample_data(store)
-    assert r["kept_people"] == ["Kenji Watanabe", "Maya Okafor"] and r["people"] == 14
+    assert r["kept_people"] == ["Kenji Example", "Maya Example"] and r["people"] == 14
     assert sorted(r["kept_jobs"]) == ["Data Lead (Acme Payments)", "Senior Backend Engineer (Acme Payments)"]
     assert r["backup"] and "before-sample-removal-" in r["backup"]
     assert sample_ids(store) == (set(), set())  # kept ones are real now
-    assert {store.get_candidate(i)["name"] for i in (by_name["Maya Okafor"], real["id"])}
+    assert {store.get_candidate(i)["name"] for i in (by_name["Maya Example"], real["id"])}
     assert [p["candidate_name"] for p in store.pipeline(by_title["Data Lead"])] == ["Jordan Pierce"]
 
 

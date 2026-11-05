@@ -191,7 +191,7 @@ def test_export_notes_carry_every_kind_and_round_trip(store, tmp_path):
 def test_kept_sample_people_lose_the_sample_entries(store):
     load_sample_data(store)
     people, _ = sample_ids(store)
-    maya = next(i for i in people if store.get_candidate(i)["name"] == "Maya Okafor")
+    maya = next(i for i in people if store.get_candidate(i)["name"] == "Maya Example")
     store.log(maya, "call", "Real call about Austin", source="App")
     remove_sample_data(store)
     tl = store.timeline(maya)
