@@ -13,6 +13,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -57,7 +58,9 @@ def _probe(port: int) -> str:
     except (httpx.HTTPError, ValueError):
         return "free" if _port_free(port) else "other"
     proof = body.get("proof") if isinstance(body, dict) else None
-    if r.status_code == 200 and isinstance(proof, str) and hmac.compare_digest(proof, health_proof(app_key(), nonce)):
+    # Bound to the port dialed here: a program on this port that passes the nonce on to the real app
+    # elsewhere gets back a proof for the real app's port, which doesn't match.
+    if r.status_code == 200 and isinstance(proof, str) and hmac.compare_digest(proof, health_proof(app_key(), nonce, port)):
         return "ours"
     return "other"
 
@@ -87,13 +90,42 @@ def _recorded_port() -> int | None:
         return None
 
 
+PORT_GRACE = 30  # seconds a just-written port file is trusted while its app is still starting
+
+
+def _forget_port(port: int) -> None:
+    """The recorded port didn't answer as this app (a killed run, or another program there now): drop it, so
+    the AI app's links stop pointing at it. A file written in the last few seconds stays (that app may still
+    be starting)."""
+    path = port_file()
+    try:
+        if _recorded_port() == port and time.time() - path.stat().st_mtime > PORT_GRACE:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _find_running(*ports: int) -> int | None:
+    """The port this install's app answers on: the recorded one first, then these. A recorded port that
+    doesn't answer as ours isn't trusted: it's rewritten when the app is found elsewhere, else dropped."""
+    recorded = _recorded_port()
+    for port in dict.fromkeys(p for p in (recorded, *ports) if p):
+        if _already_running(port):
+            if port != recorded:
+                _write_port_file(port)
+            return port
+    if recorded:
+        _forget_port(recorded)
+    return None
+
+
 def open_window() -> bool:
     """Open (and unlock) the app window of the running app. False when it isn't running."""
-    for port in dict.fromkeys(p for p in (_recorded_port(), DEFAULT_PORT) if p):
-        if _already_running(port):
-            webbrowser.open(launch_url(port))  # a one-time code, never the key itself
-            return True
-    return False
+    port = _find_running(DEFAULT_PORT)
+    if port is None:
+        return False
+    webbrowser.open(launch_url(port))  # a one-time code, never the key itself
+    return True
 
 
 def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
@@ -103,7 +135,9 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     from .web import create_app
 
     say = logging.getLogger(__name__)
-    if _already_running(port):
+    running = _find_running(port, DEFAULT_PORT)  # the recorded port first: the app may be on another one
+    if running is not None:
+        port = running
         # Second double-click: just bring the window back.
         if open_browser:
             webbrowser.open(launch_url(port))
@@ -124,7 +158,14 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     logging.getLogger(__name__).info("If the window says it's locked, open Talent Search from its app icon "
                                      "or run: talent open")
     # log_config=None: the frozen windowed build has no console for uvicorn's default handlers.
-    uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
+    finally:  # stopped: the port file no longer says where the app is (a killed run is caught on the next start)
+        if _recorded_port() == port:
+            try:
+                port_file().unlink()
+            except OSError:
+                pass
 
 
 def _sync(args: argparse.Namespace) -> None:

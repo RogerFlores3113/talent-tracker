@@ -51,8 +51,8 @@ def test_health_answers_a_proof_only_this_install_can_make(store):
     c = local_client(store, unlocked=False)
     assert c.get("/api/health").json() == {"ok": True, "version": c.get("/api/health").json()["version"]}
     body = c.get("/api/health", params={"nonce": "abc123"}).json()
-    assert body["proof"] == paths.health_proof(paths.app_key(), "abc123")
-    assert body["proof"] != paths.health_proof("another install's key" * 2, "abc123")
+    assert body["proof"] == paths.health_proof(paths.app_key(), "abc123", 8765)  # c5 G: bound to the port too
+    assert body["proof"] != paths.health_proof("another install's key" * 2, "abc123", 8765)
     assert "candidates" not in body  # still says nothing about the data while locked
 
 
@@ -65,11 +65,11 @@ def test_launcher_sends_no_code_to_an_impostor(monkeypatch):
     assert cli.open_window() is False and opened == []
     # A copied proof for some other nonce doesn't work either.
     monkeypatch.setattr(cli.httpx, "get", lambda url, params=None, timeout=None: _Resp(
-        {"ok": True, "version": "9", "proof": paths.health_proof(paths.app_key(), "old-nonce")}))
+        {"ok": True, "version": "9", "proof": paths.health_proof(paths.app_key(), "old-nonce", 8765)}))
     assert cli._probe(8765) == "other"
     # The real app answers the HMAC of the nonce it was sent.
     monkeypatch.setattr(cli.httpx, "get", lambda url, params=None, timeout=None: _Resp(
-        {"ok": True, "version": "9", "proof": paths.health_proof(paths.app_key(), params["nonce"])}))
+        {"ok": True, "version": "9", "proof": paths.health_proof(paths.app_key(), params["nonce"], 8765)}))
     assert cli._probe(8765) == "ours"
     assert cli.open_window() is True and len(opened) == 1 and "/launch?code=" in opened[0]
 

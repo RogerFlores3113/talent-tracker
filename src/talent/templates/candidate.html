@@ -93,7 +93,7 @@
       {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% if ivd.outcome_note %}<div class="fine">How it went: {{ ivd.outcome_note }}</div>{% endif %}
       {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}: {{ f.text }}</div>{% endfor %}
-      <details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
+      {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">
           <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
@@ -124,7 +124,7 @@
           <button class="btn small" type="submit" title="Builds an onsite loop: same day and job">Add another session that day</button>
         </form>
         {% endif %}
-      </details>
+      </details>{% endif %}
       {% endif %}
       {% if t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}
       {% if t.strikable %}<form method="post" action="/candidates/{{ c.id }}/timeline/{{ t.id }}/strike" class="inline" data-confirm="Strike this out? It stays on the timeline, marked struck, but reports, search and your AI app leave it out."><button class="link small" type="submit">Strike out</button></form>

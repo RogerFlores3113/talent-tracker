@@ -592,10 +592,11 @@ AI_ACTION_KINDS = {
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
 }
-# AI interview changes that Undo puts back by restoring the interview's time and data as they were.
-INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback")
-# AI actions listed on Changes as a record only: there is nothing to put back.
-AI_RECORD_KINDS = frozenset({"interview_outcome"})
+# AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
+# outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
+INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback", "interview_outcome")
+# AI actions listed on Changes as a record only: there is nothing to put back. (None any more.)
+AI_RECORD_KINDS: frozenset[str] = frozenset()
 # How many saved values (cleared or replaced) the AI app may change on one person in an hour.
 AI_EDIT_BUDGET = 3
 AI_EDIT_WINDOW_MINUTES = 60
@@ -607,8 +608,9 @@ AI_OVERWRITE_CAP = 30
 AI_OVERWRITE_ALERT = 15
 # How many entries (notes, calls, emails...) the AI app may log on one person in an hour.
 AI_NOTE_CAP = 10
-# Timeline kinds the recruiter can strike when the AI app logged them (interviews are cancelled instead).
-STRIKE_KINDS = ("note", "call", "email", "message", "meeting")
+# Timeline kinds the recruiter can strike when the AI app logged them. A struck interview is also marked
+# cancelled, so it leaves Today, Interviews, Decide and reports (Put back undoes both).
+STRIKE_KINDS = ("note", "call", "email", "message", "meeting", "interview")
 # SQL: a timeline row (alias t) that nobody struck out.
 NOT_STRUCK = "NOT (json_valid(t.data) AND json_extract(t.data, '$.struck_at') IS NOT NULL)"
 AI_SOURCE = "AI app"
@@ -1512,7 +1514,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
         body = body[:80] + ("..." if len(body) > 80 else "")
-        return f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} on {name}" + (f": {body}" if body else "")
+        return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
+                + (f": {body}" if body else ""))
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -1562,8 +1565,9 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("interview", r.get("target_id")))
     if kind.startswith("client_"):
         return (("client", (r.get("new_data") or {}).get("_key")),)
-    if kind == "note_logged":
-        return (("person", cid), ("entry", r.get("target_id")))
+    if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
+        thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
+        return (("person", cid), (thing, r.get("target_id")))
     return (("todo", r.get("target_id")),)
 
 
@@ -2302,10 +2306,15 @@ class Store:
                 from .reports import ai_client_blocker  # here: reports imports this module
                 return ai_client_blocker(self, a)
             if kind == "note_logged":
-                t = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
+                t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
                 if t is None:
                     return "it is gone from the timeline"
-                return "it was struck out already" if (json.loads(t["data"] or "{}") or {}).get("struck_at") else None
+                data = json.loads(t["data"] or "{}") or {}
+                if data.get("struck_at"):
+                    return "it was struck out already"
+                if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
+                    return "that interview was changed again since"
+                return None
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2317,6 +2326,8 @@ class Store:
         if t is None:
             return "That interview is gone from the timeline."
         data = json.loads(t["data"]) if t.get("data") else {}
+        if data.get("struck_at"):
+            return "That interview was struck out."
         if t["at"] != new.get("at") or data != (new.get("data") or {}):
             return "That interview was changed again since."
         return None
@@ -2404,9 +2415,12 @@ class Store:
         with self._write():
             if self._row("SELECT 1 FROM ai_actions WHERE kind = 'note_logged' AND target_id = ?", (entry["id"],)):
                 return None
+            new = {"kind": entry["kind"], "body": (entry.get("body") or "")[:300], "at": entry["at"]}
+            if entry["kind"] == "interview":  # as logged, so Undo can tell when it was changed since
+                raw = entry.get("data")
+                new["data"] = (json.loads(raw) if isinstance(raw, str) else raw) or {}
             return self._log_ai("note_logged", candidate_id=entry["candidate_id"], job_id=entry.get("job_id"),
-                                target_id=entry["id"], new={"kind": entry["kind"], "body": (entry.get("body") or "")[:300],
-                                                            "at": entry["at"]})
+                                target_id=entry["id"], new=new)
 
     def _last_contact(self, candidate_id: int) -> str | None:
         """When this person was last contacted, worked out from what is on the timeline and not struck out."""
@@ -2420,6 +2434,8 @@ class Store:
         """Strike out one timeline entry (see strike_entry). Call inside a transaction."""
         data = json.loads(entry["data"]) if entry.get("data") else {}
         data.update(struck_at=now_iso(), struck_by=by if by in CHANGE_SOURCES else "app")
+        if entry["kind"] == "interview" and data.get("status") != "cancelled":  # off every schedule; Put back restores
+            data.update(status="cancelled", cancelled_at=data["struck_at"], struck_cancelled=True)
         self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
         cid = entry["candidate_id"]
         if entry["kind"] in CONTACT_KINDS:
@@ -2441,7 +2457,8 @@ class Store:
             if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
                 raise NotFound(f"No timeline entry with id {timeline_id}")
             if entry["kind"] not in STRIKE_KINDS or entry.get("source") != AI_SOURCE:
-                raise ValueError("Only notes, calls, emails, messages and meetings your AI app logged can be struck out.")
+                raise ValueError("Only notes, calls, emails, messages, meetings and interviews your AI app logged can be "
+                             "struck out.")
             if (json.loads(entry["data"]) if entry.get("data") else {}).get("struck_at"):
                 raise ValueError("That entry is already struck out.")
             return self._strike(entry, by)
@@ -2457,6 +2474,9 @@ class Store:
                 raise ValueError("That entry isn't struck out.")
             data.pop("struck_at", None)
             data.pop("struck_by", None)
+            if data.pop("struck_cancelled", None):  # an interview: back on the schedule as it was
+                data.pop("cancelled_at", None)
+                data["status"] = "scheduled"
             self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data) if data else None, timeline_id))
             if entry["kind"] in CONTACT_KINDS and entry["at"] <= now_iso():
                 self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
@@ -2572,6 +2592,9 @@ class Store:
             self.delete_job(a["job_id"])
             return what
         if kind == "note_logged":
+            reason = self._ai_blocker(a)
+            if reason and reason != "it was struck out already":
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
             self.strike_entry(a["target_id"], by=by)
             return what + " (struck out, kept on the timeline)"
         old, new = a["old_data"] or {}, a["new_data"] or {}
@@ -2599,8 +2622,6 @@ class Store:
                     raise ValueError(reason)
                 self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                    (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
-            elif kind in AI_RECORD_KINDS:
-                raise ValueError("How an interview went stays on the timeline as a record.")
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -3039,7 +3060,7 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
-            if by == "ai":  # on Changes: a cancel or a new time can be undone, an outcome is listed as a record
+            if by == "ai":  # on Changes: a cancel, a new time or an outcome can be undone (put back as it was)
                 kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
                         else "interview_outcome" if outcome is not None or note is not None else None)
                 if kind:

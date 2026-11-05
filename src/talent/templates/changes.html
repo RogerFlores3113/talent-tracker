@@ -4,7 +4,7 @@
 <div class="sec-head">
   <h1>Changes</h1>
 </div>
-<p class="lead">Every edit to a candidate's details, each CSV import, each Keep from a Shortlist or Review, and everything your AI app wrote: people it added (a batch it saved is one row), pipeline adds and stage moves, jobs it made or edited, stage edits, to-dos and the notes, calls and emails it logged. Newest first. Undo puts things back as they were, including interviews it cancelled or moved. A note it logged is struck out instead: it stays on the timeline, marked struck, and leaves reports, search and your AI app's reads. Interviews and how an interview went stay on the timeline.</p>
+<p class="lead">Every edit to a candidate's details, each CSV import, each Keep from a Shortlist or Review, and everything your AI app wrote: people it added (a batch it saved is one row), pipeline adds and stage moves, jobs it made or edited, stage edits, to-dos, the notes, calls, emails and interviews it logged, and how it said an interview went. Newest first. Undo puts things back as they were, including interviews it cancelled or moved and outcomes it recorded. A note or interview it logged is struck out instead: it stays on the timeline, marked struck, and leaves reports, search, the schedule and your AI app's reads.</p>
 <form class="tablebar" method="get" action="/changes">
   <select name="who" aria-label="Who made the change" data-autosubmit>
     <option value="">Anyone</option>
@@ -33,6 +33,7 @@
 </form>
 </div>
 {% endif %}
+{% if undo_last and not (request.state.flash or {}).get('notice') %}<p class="fine" role="status">Last Undo all AI, {{ undo_last.at | local('%a %b %-d, %-I:%M %p') }}: {{ undo_last.notice }}</p>{% endif %}
 
 {% if rows %}
 <ul class="timeline changes">
