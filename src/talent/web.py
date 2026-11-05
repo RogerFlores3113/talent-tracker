@@ -178,6 +178,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["profile_label"] = profile_label
     env.globals["version"] = __version__
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
@@ -891,31 +892,57 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ---------------------------------------------------------- AI changes
     def change_rows(who: str = "", since: str | None = None, limit: int = CHANGES_SHOWN) -> list[dict[str, Any]]:
-        """Change entries across every candidate, newest first."""
-        where, params = ["t.kind = ?"], [CHANGE_KIND]
-        if who in CHANGE_SOURCES:
-            where.append("t.source = ?")
-            params.append(CHANGE_SOURCES[who])
-        if since:
-            where.append("t.at >= ?")
-            params.append(since)
-        rows = store._rows(
-            f"""SELECT t.id, t.candidate_id, t.body, t.at, t.source, t.data, c.name AS candidate_name
-                FROM timeline t JOIN candidates c ON c.id = t.candidate_id WHERE {' AND '.join(where)}
-                ORDER BY t.at DESC, t.id DESC LIMIT ?""", (*params, limit))
-        for r in rows:
-            r["data"] = _json_or_none(r["data"])
-            d = r["data"] or {}
-            r["undoable"] = bool(d.get("old")) and not d.get("undone_at")
-            r["who"] = d.get("by") if d.get("by") in CHANGE_WHO else "app"
-        return rows
+        """Everything on Changes, newest first: profile edits by you or an import (kept on the timeline),
+        and every write your AI app made (kept in its own log, with what each replaced)."""
+        rows: list[dict[str, Any]] = []
+        if who != "ai":
+            where, params = ["t.kind = ?", "coalesce(t.source, '') <> ?"], [CHANGE_KIND, CHANGE_SOURCES["ai"]]
+            if who in CHANGE_SOURCES:
+                where.append("t.source = ?")
+                params.append(CHANGE_SOURCES[who])
+            if since:
+                where.append("t.at >= ?")
+                params.append(since)
+            for r in store._rows(
+                    f"""SELECT t.id, t.candidate_id, t.body, t.at, t.data, c.name AS candidate_name
+                        FROM timeline t JOIN candidates c ON c.id = t.candidate_id WHERE {' AND '.join(where)}
+                        ORDER BY t.at DESC, t.id DESC LIMIT ?""", (*params, limit)):
+                d = _json_or_none(r["data"]) or {}
+                lines = change_lines(d)
+                rows.append({"at": r["at"], "who": d.get("by") if d.get("by") in CHANGE_WHO else "app",
+                             "name": r["candidate_name"], "href": f"/candidates/{r['candidate_id']}#timeline",
+                             "text": ("Undo: " if (r["body"] or "").startswith("Undid") else "")
+                             + ("; ".join(lines) if lines else r["body"] or ""),
+                             "undoable": bool(d.get("old")) and not d.get("undone_at") and not d.get("merged"),
+                             "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo"})
+        if who in ("", "ai"):
+            for a in store.ai_actions(since, limit):
+                if a["candidate_id"]:
+                    name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
+                elif a["job_id"]:
+                    name, href = a["job_title"], f"/jobs/{a['job_id']}"
+                else:
+                    name, href = "To-do", "/"
+                lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
+                rows.append({"at": a["at"], "who": "ai", "name": name, "href": href,
+                             "text": "; ".join(lines) if lines else a["summary"], "undoable": a["undoable"],
+                             "undone": bool(a["undone_at"]), "note": a.get("undo_note"),
+                             "undo_url": f"/changes/ai/{a['id']}/undo"})
+        rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
+        return rows[:limit]
 
     def since_iso(since: str) -> str | None:
+        """A start time from the Changes form: 1, 7 or 30 (days back), epoch seconds, or ISO with a zone
+        (a '+' that a hand-built form turned into a space still works)."""
+        since = (since or "").strip()
         if since in CHANGE_SINCE:
             return (datetime.now(timezone.utc) - timedelta(days=int(since))).replace(microsecond=0).isoformat()
         try:
-            dt = to_dt(since) if since else None
-        except ValueError:
+            if since.isdigit():
+                dt = datetime.fromtimestamp(int(since), timezone.utc)
+            else:
+                dt = to_dt(re.sub(r" (\d{2}:?\d{2})$", r"+\1", since)) if since else None
+        except (ValueError, OverflowError, OSError):
             return None
         return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat() if dt else None
 
@@ -926,9 +953,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         start = since_iso(since)
         rows = change_rows(who, start)
         ai_since = start or since_iso("1")
-        ai_pending = sum(1 for r in change_rows("ai", ai_since) if r["undoable"])
+        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undoable"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
-                    since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN)
+                    since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
+                    ai_since_epoch=int(to_dt(ai_since).timestamp()))
 
     @app.post("/changes/{timeline_id}/undo")
     def undo_from_changes(request: Request, timeline_id: int):
@@ -943,27 +971,38 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
         return back(request, "/changes", notice=notice)
 
+    @app.post("/changes/ai/{action_id}/undo")
+    def undo_ai_action(request: Request, action_id: int):
+        try:
+            what = store.undo_ai_action(action_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=f"Couldn't undo that. {exc}")
+        return back(request, "/changes", notice=f"Undid: {what}.")
+
     @app.post("/changes/undo-ai")
     async def undo_ai_since(request: Request):
         form = await request.form()
         start = since_iso(str(form.get("since") or ""))
         if not start:
             return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
-        undone, kept = 0, []
-        for r in change_rows("ai", start, limit=100000):  # newest first, so older values come back last
-            if not r["undoable"]:
+        undone, skipped = [], []
+        for a in store.ai_actions(start, limit=1_000_000):  # newest first, so older values come back last
+            if a["undone_at"]:
                 continue
             try:
-                store.undo_change(r["id"], by="app")
-                undone += 1
-            except (ValueError, NotFound):
-                kept.append(r["candidate_name"])
-        if not undone and not kept:
+                undone.append(store.undo_ai_action(a["id"], by="app"))
+            except NotFound:
+                continue  # went with a person or job taken out just before
+            except ValueError as exc:
+                skipped.append(f"{a['summary']} ({str(exc).rstrip('.')})")
+        if not undone and not skipped:
             return back(request, "/changes", notice="There were no AI changes to undo in that time.")
-        notice = f"Undid {undone} AI change{'' if undone == 1 else 's'}."
-        if kept:
-            names = ", ".join(dict.fromkeys(kept))
-            notice += f" Left {len(kept)} alone because the fields were edited again since ({names})."
+        notice = f"Undid {len(undone)} AI change{'' if len(undone) == 1 else 's'}" + (
+            ": " + _listed(undone) if undone else "") + "."
+        if skipped:
+            notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
         return back(request, "/changes", notice=notice)
 
     # ---------------------------------------------------------- settings etc
@@ -1140,6 +1179,21 @@ def _hostname(host_header: str) -> str:
     if host_header.startswith("["):
         return host_header.split("]", 1)[0] + "]"
     return host_header.rsplit(":", 1)[0] if host_header.count(":") == 1 else host_header
+
+
+def ai_status_note(store: Store, job_id: int) -> str:
+    """'Closed by your AI app on Nov 5' while the job still has the status the AI app gave it, else ''."""
+    change = store.ai_status_change(job_id)
+    if not change:
+        return ""
+    verb = {"closed": "Closed", "on_hold": "Put on hold", "open": "Reopened"}.get(change["status"], "Changed")
+    return f"{verb} by your AI app on {_local(change['at'], '%b %-d')}"
+
+
+def _listed(items: list[str], shown: int = 6) -> str:
+    """'A; B; C and 4 more' for a notice that must stay one readable line."""
+    head = "; ".join(items[:shown])
+    return head + (f"; and {len(items) - shown} more" if len(items) > shown else "")
 
 
 def _json_or_none(text: str | None) -> Any:
