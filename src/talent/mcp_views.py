@@ -33,7 +33,8 @@ mark{background:var(--mark);color:inherit;border-radius:2px}a,button.link{color:
 .board{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}.col{min-width:150px;flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px}
 .col h3{font-size:12px;margin:0 0 6px;display:flex;justify-content:space-between}.pc{border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin-bottom:6px;font-size:13px}
 ul{margin:4px 0;padding-left:18px}.kind{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-.empty{color:var(--muted);padding:12px}
+.empty{color:var(--muted);padding:12px}.click{cursor:pointer}.click:hover{border-color:var(--accent)}
+.contact{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:13px}
 """
 
 _JS = r"""
@@ -46,11 +47,16 @@ function el(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v
  for(const k of kids.flat()){if(k==null||k===false)continue;e.append(k instanceof Node?k:document.createTextNode(String(k)))}return e}
 function marked(s){const out=[];String(s||"").split("**").forEach((p,i)=>out.push(i%2?el("mark",{},p):p));return out}
 function openApp(url){if(!url)return;req("ui/open-link",{url}).catch(()=>{})}
+function safeUrl(u){try{const x=new URL(String(u||""));return /^https?:$/.test(x.protocol)?x:null}catch(e){return null}}
+function profileLink(u,fallback){const x=safeUrl(u);if(!x)return null;const li=/(^|\.)linkedin\.com$/i.test(x.hostname);
+ return el("button",{class:"link",onclick:()=>openApp(x.href)},li?"LinkedIn":(fallback||"Profile"))}
+function openCard(cls,url,...kids){const e=el("div",{class:cls+(url?" click":""),title:url?"Open in Talent Search":null},...kids);
+ if(url)e.addEventListener("click",ev=>{if(!(ev.target instanceof HTMLButtonElement))openApp(url)});return e}
 function appLink(url,label){return url?el("button",{class:"link small",onclick:()=>openApp(url)},label||"Open in Talent Search"):null}
 function day(iso){if(!iso)return"";const d=new Date(iso);return isNaN(d)?iso:d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})}
 function when(iso){if(!iso)return"";const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString(undefined,{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}
 const root=()=>document.getElementById("root");
-window.addEventListener("message",ev=>{const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
  if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.result||{});delete pend[m.id];return}
  if(m.method==="ui/notifications/tool-result"){const d=(m.params&&m.params.structuredContent)||null;root().replaceChildren(d?render(d):el("p",{class:"empty"},"Nothing to show."))}
  else if(m.method==="ui/notifications/host-context-changed")theme(m.params);
@@ -67,6 +73,8 @@ function render(c){
  const card=el("div",{class:"card"},
   el("div",{class:"row"},el("h1",{},c.name),appLink(c.app_url)),
   sub?el("div",{class:"muted"},sub):null,
+  el("div",{class:"contact"},c.email?el("span",{},c.email):null,c.phone?el("span",{},c.phone):null,
+   profileLink(c.linkedin_url),profileLink(c.website,"Website"),c.source?el("span",{class:"muted"},"Source: "+c.source):null),
   (c.tags&&c.tags.length)?el("div",{class:"chips"},c.tags.map(t=>el("span",{class:"chip"},t))):null,
   c.about?el("p",{},c.about):null,
   el("div",{class:"small muted"},"Last contacted: "+(c.last_contacted_at?day(c.last_contacted_at):"never")+" · Updated "+day(c.updated_at)),
@@ -78,10 +86,11 @@ function render(c){
     "results": r"""
 function render(d){
  const wrap=el("div",{});
- wrap.append(el("div",{class:"row small muted"},el("span",{},d.total+(d.total===1?" match":" matches")),appLink(d.app_url,"Open search in Talent Search")));
- if(!d.results.length)wrap.append(el("p",{class:"empty"},"No one matches that yet."));
+ const head=d.closest?"No exact matches. Closest matches:":d.exact?"Exact match":d.total+(d.total===1?" match":" matches");
+ wrap.append(el("div",{class:"row small muted"},el("span",{},head),appLink(d.app_url,"Open search in Talent Search")));
+ if(!d.results.length)wrap.append(el("p",{class:"empty"},"No saved candidates match. Try fewer or different words."));
  for(const c of d.results){const sub=[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")+(c.location?" · "+c.location:"");
-  wrap.append(el("div",{class:"card"},el("div",{class:"row"},el("b",{},c.name),el("span",{class:"small muted"},"#"+c.id)),sub?el("div",{class:"muted small"},sub):null,
+  wrap.append(openCard("card",c.app_url,el("div",{class:"row"},el("b",{},c.name),profileLink(c.linkedin_url)),sub?el("div",{class:"muted small"},sub):null,
    c.match?el("div",{class:"small"},marked(c.match)):null,(c.tags&&c.tags.length)?el("div",{class:"chips"},c.tags.slice(0,6).map(t=>el("span",{class:"chip"},t))):null))}
  return wrap}""",
     "pipeline": r"""
@@ -90,7 +99,9 @@ function render(d){
  wrap.append(el("div",{class:"row"},el("h1",{},d.job.title+(d.job.company?" · "+d.job.company:"")),appLink(d.app_url)));
  const board=el("div",{class:"board"});
  for(const s of d.stages){board.append(el("div",{class:"col"},el("h3",{},el("span",{},s.name),el("span",{class:"muted"},s.candidates.length)),
-  s.candidates.length?s.candidates.map(c=>el("div",{class:"pc"},el("b",{},c.name),c.current_title?el("div",{class:"muted small"},c.current_title):null,el("div",{class:"muted small"},"since "+day(c.since)))):el("div",{class:"muted small"},"Empty")))}
+  s.candidates.length?s.candidates.map(c=>openCard("pc",c.app_url,el("b",{},c.name),c.current_title?el("div",{class:"muted small"},c.current_title):null,
+   el("div",{class:"muted small"},(c.days_in_stage!=null?c.days_in_stage+(c.days_in_stage===1?" day":" days")+" in stage":"since "+day(c.since))),
+   c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
 const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"Thin pipeline",stale:"Stale profile"};

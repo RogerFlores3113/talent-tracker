@@ -36,6 +36,29 @@ DEFAULT_STAGES: tuple[tuple[str, str], ...] = (
 STAGES: tuple[str, ...] = tuple(n for n, _ in DEFAULT_STAGES)
 STAGE_OUTCOMES = ("open", "hired", "lost")
 JOB_STATUSES = ("open", "on_hold", "closed")
+_STATUS_ALIASES = {"on hold": "on_hold", "hold": "on_hold", "paused": "on_hold", "pause": "on_hold"}
+
+# Stage names that close an application, so custom pipelines count them right.
+WON_STAGE_NAMES = frozenset({"hired", "placed", "started", "offer accepted", "accepted", "joined"})
+LOST_STAGE_NAMES = frozenset({
+    "rejected", "not a fit", "declined", "withdrew", "withdrawn", "lost", "closed", "offer declined",
+    "not interested", "no hire", "dropped out", "turned down", "archived",
+})
+
+
+def normalize_job_status(value: str | None) -> str:
+    """'On hold', 'on-hold', 'paused' -> 'on_hold'. Raises on anything that isn't a job status."""
+    v = re.sub(r"[\s_-]+", " ", (value or "").strip().lower())
+    v = _STATUS_ALIASES.get(v, v.replace(" ", "_"))
+    if v not in JOB_STATUSES:
+        raise ValueError("status must be open, on hold or closed")
+    return v
+
+
+def stage_outcome(name: str) -> str:
+    """Guess a stage's outcome from its name: 'hired' for wins, 'lost' for exits, else 'open'."""
+    key = re.sub(r"[\W_]+", " ", name or "").strip().lower()
+    return "hired" if key in WON_STAGE_NAMES else "lost" if key in LOST_STAGE_NAMES else "open"
 
 # Things that can go on a candidate's timeline. Contact kinds also move
 # "last contacted" when they happened in the past.
@@ -333,6 +356,8 @@ class SearchResult:
     engine: str = "fts5"
     query: str = ""
     filters: dict[str, str] = field(default_factory=dict)
+    closest: bool = False  # no hit had every word, so these match some of them
+    exact: bool = False  # the query was an email or LinkedIn URL that matched one person
 
 
 def _clean(value: Any) -> Any:
@@ -371,9 +396,7 @@ def normalize_linkedin(url: str | None) -> str | None:
 
 # Shorthand recruiters type for places and titles. Each expands to an OR group.
 ALIASES: dict[str, tuple[str, ...]] = {
-    "sf": ("san francisco",),
     "sfo": ("san francisco",),
-    "nyc": ("new york",),
     "ny": ("new york",),
     "la": ("los angeles",),
     "dc": ("washington",),
@@ -381,31 +404,71 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "swe": ("software engineer",),
     "sde": ("software engineer",),
     "pm": ("product manager",),
-    "ml": ("machine learning",),
     "ai": ("artificial intelligence",),
     "fe": ("frontend", "front end"),
     "be": ("backend", "back end"),
 }
+# Spellings that mean the same thing, matched in both directions.
+ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("frontend", "front end"),
+    ("backend", "back end"),
+    ("fullstack", "full stack"),
+    ("ml", "machine learning"),
+    ("js", "javascript"),
+    ("ts", "typescript"),
+    ("k8s", "kubernetes"),
+    ("sf", "san francisco"),
+    ("nyc", "new york"),
+)
+for _group in ALIAS_GROUPS:
+    for _form in _group:
+        ALIASES[_form] = tuple(dict.fromkeys((*ALIASES.get(_form, ()), *(f for f in _group if f != _form))))
+
+# Filler words people type in a natural-language search ("people who know react in sf").
+STOPWORDS = frozenset(
+    "the and a an of in at with for who people someone or to is are on from that has have any "
+    "find me show candidates candidate person knows know".split()
+)
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_LINKEDIN_RE = re.compile(r"^(https?://)?([a-z]{2,3}\.)?linkedin\.com/", re.I)
 
 
-def fts_query(text: str) -> str | None:
+def _query_groups(text: str) -> list[str]:
+    """Free text -> one FTS5 group per meaningful word (or alias phrase), all syntax quoted."""
+    words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
+    kept = [w for w in words if w not in STOPWORDS] or words
+    groups: list[str] = []
+    i = 0
+    while i < len(kept):
+        pair = " ".join(kept[i:i + 2]) if i + 1 < len(kept) else ""
+        if pair in ALIASES:  # a two-word phrase like "front end" or "san francisco"
+            form, step = pair, 2
+        else:
+            form, step = kept[i], 1
+        last = i + step >= len(kept)
+        term = f'"{form}"*' if last and step == 1 else f'"{form}"'
+        expansions = ALIASES.get(form)
+        if expansions:
+            term = "(" + " OR ".join([term, *(f'"{e}"' for e in expansions)]) + ")"
+        groups.append(term)
+        i += step
+    return groups
+
+
+def fts_query(text: str, *, any_word: bool = False) -> str | None:
     """Turn free text into a safe FTS5 query: every word must match, last word as prefix.
 
     Users type things like `senior react sf` or `o'brien`; we never pass raw
-    syntax through, so stray quotes or operators can't raise errors. Known
-    shorthand (sf, nyc, swe...) also matches its long form.
+    syntax through, so stray quotes or operators can't raise errors. Filler
+    words (the, who, people...) are dropped, and known shorthand (sf, nyc,
+    frontend / front end...) also matches its other forms. any_word=True
+    joins the words with OR instead, for a "closest matches" fallback.
     """
-    words = re.findall(r"\w+", text.lower(), flags=re.UNICODE)
-    if not words:
+    groups = _query_groups(text)
+    if not groups:
         return None
-    parts = []
-    for i, w in enumerate(words):
-        term = f'"{w}"*' if i == len(words) - 1 else f'"{w}"'
-        expansions = ALIASES.get(w)
-        if expansions:
-            term = "(" + " OR ".join([term, *(f'"{e}"' for e in expansions)]) + ")"
-        parts.append(term)
-    return " AND ".join(parts)
+    return (" OR " if any_word else " AND ").join(groups)
 
 
 def _history_text(entries: list[dict[str, Any]]) -> str | None:
@@ -530,11 +593,24 @@ class Store:
             out["last_contacted_at"] = parse_when(out["last_contacted_at"])
         return out
 
+    def _canonical_tag(self, tag: str, candidate_id: int) -> str:
+        """The spelling other candidates already use for this tag ("React" beats a new "react")."""
+        row = self._conn.execute(
+            "SELECT tag FROM candidate_tags WHERE tag = ? AND candidate_id <> ?"
+            " GROUP BY tag COLLATE BINARY ORDER BY count(*) DESC, min(rowid) LIMIT 1",
+            (tag, candidate_id),
+        ).fetchone()
+        return row[0] if row else tag
+
     def _sync_tags(self, candidate_id: int, tags_text: str | None) -> None:
+        tags = [self._canonical_tag(t, candidate_id) for t in split_tags(tags_text)]
+        text = ", ".join(tags) or None
+        if text != tags_text:  # keep the search copy in the same spelling
+            self._conn.execute("UPDATE candidates SET tags = ? WHERE id = ?", (text, candidate_id))
         self._conn.execute("DELETE FROM candidate_tags WHERE candidate_id = ?", (candidate_id,))
         self._conn.executemany(
             "INSERT OR IGNORE INTO candidate_tags(candidate_id, tag) VALUES (?, ?)",
-            [(candidate_id, t) for t in split_tags(tags_text)],
+            [(candidate_id, t) for t in tags],
         )
 
     def add_candidate(self, work_history: list[dict[str, Any]] | None = None, **data: Any) -> dict[str, Any]:
@@ -734,6 +810,15 @@ class Store:
         )
 
     # ---------------------------------------------------------------- search
+    def lookup_exact(self, query: str | None) -> tuple[bool, dict[str, Any] | None]:
+        """(looks_like_id, candidate) for a query that is an email address or a LinkedIn URL."""
+        q = (query or "").strip()
+        if _EMAIL_RE.match(q):
+            return True, self.find_duplicate(email=q)
+        if _LINKEDIN_RE.match(q):
+            return True, self.find_duplicate(linkedin_url=q)
+        return False, None
+
     def search_candidates(
         self,
         query: str = "",
@@ -761,6 +846,11 @@ class Store:
             params.append(tag.strip())
             filters["tag"] = tag
 
+        is_id, person = self.lookup_exact(query)
+        if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
+            hits = [SearchHit(candidate=person)] if person else []
+            return SearchResult(hits=hits, total=len(hits), query=query, filters=filters, exact=bool(person))
+
         match = fts_query(query or "")
         if match is None:
             clause = ("WHERE " + " AND ".join(where)) if where else ""
@@ -775,6 +865,11 @@ class Store:
         clause = " AND ".join(["candidates_fts MATCH ?", *where])
         base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {clause}"
         total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        closest = False
+        if total == 0 and len(_query_groups(query)) > 1:
+            # Nobody has every word: show the people who have the most of them.
+            match, closest = fts_query(query, any_word=True), True
+            total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
         rows = self._rows(
             # column weights: name, title, company, location, about, tags, past roles
             f"""SELECT c.*,
@@ -793,7 +888,7 @@ class Store:
             score = r.pop("_score")
             hits.append(SearchHit(candidate=self._hydrate(r), snippet=snippet if HL_START in (snippet or "") else None,
                                   score=score))
-        return SearchResult(hits=hits, total=total, query=query, filters=filters)
+        return SearchResult(hits=hits, total=total, query=query, filters=filters, closest=closest and total > 0)
 
     # ------------------------------------------------------------------ jobs
     def add_job(self, title: str, company: str | None = None, location: str | None = None,
@@ -828,8 +923,8 @@ class Store:
         unknown = set(data) - allowed
         if unknown:
             raise ValueError(f"Unknown job field(s): {', '.join(sorted(unknown))}")
-        if "status" in data and data["status"] not in JOB_STATUSES:
-            raise ValueError(f"status must be one of {', '.join(JOB_STATUSES)}")
+        if "status" in data:
+            data = {**data, "status": normalize_job_status(data["status"])}
         if "title" in data and not _clean(data["title"]):
             raise ValueError("A job needs a title.")
         self.get_job(job_id)
@@ -880,15 +975,27 @@ class Store:
             raise ValueError("This job has no stages.")
         if not _clean(name):
             return stages[0]
+        key = _stage_key(name)
         for s in stages:
-            if s["name"].lower() == name.strip().lower():
+            if _stage_key(s["name"]) == key:
                 return s
-        raise ValueError(f"No stage called {name!r} on this job. Its stages are: {', '.join(s['name'] for s in stages)}.")
+        # An unambiguous start of a name is enough: "tech" finds "Technical interview".
+        starts = [s for s in stages if key and _stage_key(s["name"]).startswith(key)]
+        if len(starts) == 1:
+            return starts[0]
+        listed = ", ".join(s["name"] for s in stages)
+        if starts:
+            raise ValueError(f"{name!r} could mean {' or '.join(s['name'] for s in starts)}. "
+                             f"Use the full name. This job's stages are: {listed}.")
+        raise ValueError(f"No stage called {name!r} on this job. Its stages are: {listed}.")
 
-    def add_stage(self, job_id: int, name: str, *, after: str | None = None, outcome: str = "open") -> list[dict[str, Any]]:
+    def add_stage(self, job_id: int, name: str, *, after: str | None = None,
+                  outcome: str | None = None) -> list[dict[str, Any]]:
+        """Add a stage after the named one, or before the closing stages. Outcome defaults from the name."""
         name = _clean(name)
         if not name:
             raise ValueError("A stage needs a name.")
+        outcome = outcome or stage_outcome(name)
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         self.get_job(job_id)
@@ -898,9 +1005,10 @@ class Store:
         if after:
             pos = self.resolve_stage(job_id, after)["position"] + 1
         else:
-            # Before the first closing stage, so new working stages land in the flow.
+            # Before the first closing stage, so new working stages land in the flow;
+            # a new closing stage goes at the end.
             closing = [s["position"] for s in stages if s["outcome"] != "open"]
-            pos = min(closing) if closing else len(stages)
+            pos = min(closing) if closing and outcome == "open" else len(stages)
         with self._lock, self._conn:
             self._conn.execute("UPDATE job_stages SET position = position + 1 WHERE job_id = ? AND position >= ?",
                                (job_id, pos))
@@ -1150,16 +1258,20 @@ class Store:
             self._conn.execute("DELETE FROM search_outbox")
 
 
+def _stage_key(name: str | None) -> str:
+    """'Phone-screen ' and 'phone screen' compare equal."""
+    return re.sub(r"[\W_]+", " ", name or "").strip().lower()
+
+
 def _stage_plan(names: list[str]) -> list[tuple[str, str]]:
-    """Custom stage list for a new job. Known closing names keep their outcome."""
-    known = {n.lower(): o for n, o in DEFAULT_STAGES}
+    """Custom stage list for a new job. Closing names (Hired, Placed, Not a fit, Withdrew...) close the application."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for n in names:
         n = _clean(n)
         if n and n.lower() not in seen:
             seen.add(n.lower())
-            out.append((n, known.get(n.lower(), "hired" if n.lower() in {"placed", "hired"} else "open")))
+            out.append((n, stage_outcome(n)))
     if not out:
         raise ValueError("Give at least one stage name.")
     return out
