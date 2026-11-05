@@ -239,7 +239,7 @@ def test_a_keep_from_the_card_is_logged_in_claude_and_undoable(store):
     assert d["prospect"]["status"] == "kept" and d["counts"]["kept"] == 1
     assert d["message"].startswith('Saved "Ana Ruiz" and added them to Sourced on Backend (Ledgerly).')
     batch = shortlist.keep_batches(store)[0]
-    assert batch["text"].endswith(", in Claude") and batch["kept"][0]["via"] == "claude"
+    assert batch["text"].endswith(", in your AI app") and batch["kept"][0]["via"] == "claude"
     c = local_client(store)
     assert "on the Shortlist card in your AI app" in c.get("/changes").text  # cycle 6 F wording
     r = c.post(f"/changes/shortlist-keep/{batch['id']}/undo", follow_redirects=False)

@@ -433,7 +433,7 @@ def keep_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]
         stages = sorted({k["stage"] for k in kept if k.get("stage")})
         text = (f"Kept {who} from the Shortlist for {job_label(job['title'], job.get('company'))}"
                 + (f", in {' and '.join(stages)}" if stages else "")
-                + (", in Claude" if kept and all(k.get("via") == "claude" for k in kept) else ""))
+                + (", in your AI app" if kept and all(k.get("via") == "claude" for k in kept) else ""))
         out.append({**b, "id": int(bid), "job_title": job["title"], "text": text, "undoable": not b.get("undone_at"),
                     "note": b.get("undo_note")})
     return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)
