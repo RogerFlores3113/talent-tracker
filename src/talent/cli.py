@@ -106,6 +106,62 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
 
 
+def _sync(args: argparse.Namespace) -> None:
+    """talent sync FILE: read the export the way it was read last time, show what will change, then apply it
+    as one import (one row on Changes, undoable while nothing else changes)."""
+    from . import backups, importers
+    from .store import Store
+
+    path = Path(args.file)
+    try:
+        header, rows = importers.read_csv(importers.decode(path.read_bytes()))
+    except (OSError, ValueError) as exc:
+        sys.exit(f"Couldn't read {path.name}: {exc}")
+    store = Store(db_path())
+    mapping, prof = importers.mapping_for(store, header, rows)
+    prof = prof or {}
+    try:
+        mapping = importers.apply_map(header, mapping, args.map)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    if not any(m in ("name", "first_name", "last_name") for m in mapping):
+        sys.exit("Couldn't find a name column. Use --map, or the app's Import page to match columns by hand.")
+    source = args.source or prof.get("source") or importers.default_source(header)
+    client = args.client if args.client is not None else prof.get("client") or ""
+    opts = {"source": source, "add_stages": bool(prof.get("add_stages", True)), "move_stages": not args.no_move,
+            "profile": {**prof, "client": client}}
+    print(("Using the saved matches for this export" + (f" ({prof['file']})" if prof.get("file") else "") + ".")
+          if prof else "No saved profile for these columns yet, so the columns were guessed.")
+    print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping) if m))
+    preview = importers.preview_import(store, header, rows, mapping, **opts)
+    for line in importers.diff_lines(preview):
+        print(line)
+    if args.dry_run:
+        print("Nothing was changed (dry run).")
+        return
+    if not args.yes:
+        try:
+            answer = input("Apply these changes? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Nothing was changed.")
+            return
+    r = importers.import_rows(store, header, rows, mapping, file_name=path.name, **opts)
+    importers.save_sync_profile(store, header, mapping, r, file_name=path.name, source=source,
+                                add_stages=opts["add_stages"], move_stages=opts["move_stages"], client=client)
+    backups.record_import(store, r, path.name, len(rows))
+    print(f"Added {r['added']}, updated {r['updated']}, moved {len(r['moved'])}, unchanged {r['unchanged']}, "
+          f"skipped {r['skipped_rows']}.")
+    if r["backup"]:
+        print("Saved as one row on Changes. Undo it there while nothing else has changed.")
+    else:
+        print("Nothing changed, so no backup was needed.")
+    asks = [i for i in r.get("new_job_ids") or [] if i in importers.openings_to_ask(store)]
+    if asks:
+        print(f"{len(asks)} new job(s) made. Set their openings in the app, under Import, or on Today.")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="talent", description="Talent Search")
     sub = parser.add_subparsers(dest="cmd")
@@ -124,6 +180,16 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("file")
     imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
     imp.add_argument("--source", default=None, help='where these people came from (default "CSV import")')
+    imp.add_argument("--map", default="", metavar="SPEC",
+                     help='match columns by hand, like "Stage Entered=stage_changed_at, Recruiter=tag_column, Owner=skip"')
+    syn = sub.add_parser("sync", help="re-import this week's ATS export: shows what will change, then applies it")
+    syn.add_argument("file")
+    syn.add_argument("--yes", action="store_true", help="apply without asking")
+    syn.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
+    syn.add_argument("--map", default="", metavar="SPEC", help="match columns by hand (see import-csv --map)")
+    syn.add_argument("--client", default=None, help="the client for jobs in a file with no client column")
+    syn.add_argument("--source", default=None, help="where these people came from")
+    syn.add_argument("--no-move", action="store_true", help="don't move people already in a job")
     exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
     exp.add_argument("file")
     args = parser.parse_args(argv)
@@ -162,6 +228,8 @@ def main(argv: list[str] | None = None) -> None:
         if index is None:
             sys.exit("Set TYPESENSE_URL and TYPESENSE_API_KEY first. Built-in search needs no index.")
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
+    elif cmd == "sync":
+        _sync(args)
     elif cmd in ("import-csv", "export-csv"):
         from pathlib import Path
 
@@ -174,7 +242,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
         else:
             header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
-            mapping = importers.guess_mapping(header, rows)
+            mapping, _ = importers.mapping_for(store, header, rows)
+            try:
+                mapping = importers.apply_map(header, mapping, args.map)
+            except ValueError as exc:
+                sys.exit(str(exc))
             if not any(m in ("name", "first_name", "last_name") for m in mapping):
                 sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
             source = args.source or importers.default_source(header)
@@ -192,6 +264,7 @@ def main(argv: list[str] | None = None) -> None:
                 from . import backups
 
                 r = importers.import_rows(store, header, rows, mapping, source=source, file_name=Path(args.file).name)
+                importers.save_sync_profile(store, header, mapping, r, file_name=Path(args.file).name, source=source)
                 backups.record_import(store, r, Path(args.file).name, len(rows))
                 print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
                       f"skipped {r['skipped_rows']}, {r['notes']} note{'' if r['notes'] == 1 else 's'} added.")

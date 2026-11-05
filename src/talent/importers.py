@@ -14,8 +14,8 @@ from typing import Any, Iterable
 
 from .paths import backups_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
-                    IdentityConflict, Store, normalize_linkedin, parse_when, same_person_name, split_tags,
-                    stage_outcome)
+                    IdentityConflict, Store, normalize_linkedin, now_iso, parse_when, same_person_name,
+                    split_tags, stage_outcome)
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
@@ -58,11 +58,15 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Dates: when the person was first added, and when they reached their stage. Exact headers only, so a
     # "Created by" or "Added by" column is never read as a date.
     ("created_at", ("date added", "added", "added on", "created", "created at", "created on", "date created",
-                    "date entered")),
+                    "date entered", "created date", "creation date")),
     ("stage_changed_at", ("stage date", "date moved", "last stage change", "stage changed", "stage changed at",
-                          "status date", "status changed", "date of last stage change", "moved on")),
+                          "status date", "status changed", "date of last stage change", "moved on",
+                          "stage entered", "date stage entered", "stage entered date", "stage entered on",
+                          "entered stage", "date entered stage", "status entered", "status entered date")),
+    # Who owns the person in the ATS: kept as a tag ("Recruiter: Marcus"), so it can be searched.
+    ("tag_column", ("recruiter", "recruiter name", "assigned recruiter")),
 )
-_EXACT_ONLY = {"created_at", "stage_changed_at"}
+_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
 _PIPELINE_ONLY_HINTS = {"role", "job"}
 _MULTI_TARGETS = {"location", "note", "tag_column"}  # several columns may feed these
@@ -562,11 +566,21 @@ class _People:
         entries[:] = [e for e in entries if e["id"] != c["id"]] + [entry]
 
     def match(self, data: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        """(the one person this row is, or None; everyone else with the same name)."""
+        """(the one person this row is, or None; everyone else with the same name).
+
+        A row with no email or LinkedIn is never saved into someone by their name alone. The same phone
+        number is them; a different phone number is someone else. With no phone to go by, the same company
+        is them only when the saved person has no email or LinkedIn either (likely an earlier import of
+        this same row), so a namesake with their own email is never overwritten."""
         same = self.by_name.get(_fold(data.get("name")), [])
         company, phone = _fold(data.get("current_company")), _digits(data.get("phone"))
         for e in reversed(same):
-            if (company and _fold(e["current_company"]) == company) or (phone and _digits(e["phone"]) == phone):
+            theirs = _digits(e["phone"])
+            if phone and theirs:
+                if phone == theirs:
+                    return e, []
+                continue  # a different phone: a different person
+            if company and _fold(e["current_company"]) == company and not (e["email"] or e["linkedin_url"]):
                 return e, []
         return None, list(same)
 
@@ -593,21 +607,34 @@ def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict
 class _Jobs:
     """Find a job by title and company (ignoring case), or make it. One lookup per import."""
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, aliases: dict[str, int] | None = None) -> None:
         self.store = store
         self.jobs = store.list_jobs()
         self.created: list[str] = []
+        self.made: list[dict[str, Any]] = []
+        self.aliases = dict(aliases or {})  # a sync profile's "title|company" -> job id, kept if the job is renamed
+        self.keys: dict[str, int] = {}  # what this file matched, for the profile
 
     def get(self, title: str, company: str, any_status: bool) -> dict[str, Any]:
         key = (_fold(title), _fold(company))
+        name = "|".join(key)
+        known = self.aliases.get(name)
+        if known is not None:
+            hit = next((j for j in self.jobs if j["id"] == known and (any_status or j["status"] == "open")), None)
+            if hit:
+                self.keys[name] = hit["id"]
+                return hit
         rank = {"open": 0, "on_hold": 1, "closed": 2}
         found = sorted((j for j in self.jobs if (_fold(j["title"]), _fold(j.get("company"))) == key
                         and (any_status or j["status"] == "open")), key=lambda j: rank.get(j["status"], 3))
         if found:
+            self.keys[name] = found[0]["id"]
             return found[0]
         job = self.store.add_job(title, company or None)
         self.jobs.append(job)
         self.created.append(job_label(job))
+        self.made.append(job)
+        self.keys[name] = job["id"]
         return job
 
 
@@ -633,7 +660,8 @@ def _labels(fields: Iterable[str]) -> str:
 
 def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
                 source: str = "CSV import", backup: bool = True, add_stages: bool = False,
-                file_name: str | None = None) -> dict[str, Any]:
+                file_name: str | None = None, move_stages: bool = False,
+                profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Add or update one candidate per row. A bad row is skipped and listed, never fatal.
 
     Backs up the database first (see backup_before_import). Rows with the same email or LinkedIn
@@ -646,7 +674,7 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
     each updated row changed. Job, client and stage columns put people in pipelines.
 
     A Status the job has a stage for (ignoring case) goes there. With add_stages=True any other Status is
-    added to that job as its own stage, in pipeline order (see _gap_after); a "Placed" on a job whose win is
+    added to that job as its own stage, in pipeline order (see _meaning_place); a "Placed" on a job whose win is
     "Hired" still goes to Hired. Without it, a Status goes to the closest stage by name ("Phone screen" to
     Screening), else the job's first stage. `missing_stages` lists the stages ticking add_stages would add,
     `stage_fallbacks` says who went where, and `stage_moves` counts them ("Phone Screen to Screening on
@@ -657,10 +685,16 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
     Date added and stage date columns date the person and their stage. Pipeline entries with no stage date
     are marked as imported, so status updates don't call them new this week. The backup is labelled with
     `file_name` and the row count, and dropped again when the import changes nothing.
+
+    move_stages=True is a sync: someone already in a job whose stage in the file differs is moved there, dated
+    from the stage date column (else now), as real stage history by "sync" (`moved` lists them). A move made
+    in the app since the last import is kept: the file has to be newer to win. `missing_from_file` lists people
+    in the file's jobs who aren't in it, left as they are. `profile` is a saved sync profile (see
+    sync_profile): its stage order, client and job matches.
     """
     backup_file = backup_before_import(store, prune=False) if backup else None
     try:
-        result = _import(store, header, rows, mapping, source, add_stages)
+        result = _import(store, header, rows, mapping, source, add_stages, move_stages, profile or {})
     except BaseException:
         if backup_file:
             prune_backups()
@@ -676,57 +710,108 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
     return result
 
 
-def _order_hints(records: list[dict[str, Any]]) -> dict[tuple[str, str], list[str]]:
-    """For each job in the file, its Status values in pipeline order as far as the file can tell: by the
-    middle stage date when every Status has one, else in the order the file first shows them."""
-    seen: dict[tuple[str, str], dict[str, list[Any]]] = {}
+def _file_order(records: list[dict[str, Any]], saved: list[str] | None = None) -> list[str]:
+    """Every Status in the file, in one pipeline order for all its jobs: by the middle stage date when every
+    Status has one, else in the order the file first shows them. A sync profile's saved order comes first,
+    so the same export keeps the same order week after week."""
+    by: dict[str, list[Any]] = {}
     for rec in records:
-        for title, company, stage, _, row in rec["jobs"]:
+        for _, _, stage, _, row in rec["jobs"]:
             if not stage.strip():
                 continue
-            by = seen.setdefault((_fold(title), _fold(company)), {})
             entry = by.setdefault(stage.strip().casefold(), [len(by), stage.strip(), []])
             if rec["stage_at"].get(row):
                 entry[2].append(rec["stage_at"][row])
-    out: dict[tuple[str, str], list[str]] = {}
-    for key, by in seen.items():
-        entries = list(by.values())
-        if all(e[2] for e in entries):
-            entries.sort(key=lambda e: (sorted(e[2])[len(e[2]) // 2], e[0]))
-        else:
-            entries.sort(key=lambda e: e[0])
-        out[key] = [e[1] for e in entries]
+    entries = list(by.values())
+    if entries and all(e[2] for e in entries):
+        entries.sort(key=lambda e: (sorted(e[2])[len(e[2]) // 2], e[0]))
+    out = list(saved or [])
+    have = {n.casefold() for n in out}
+    out += [e[1] for e in entries if e[1].casefold() not in have]
     return out
 
 
-def _gap_after(stages: list[dict[str, Any]], order: list[str] | None, new: str) -> str | None:
-    """The stage a new in-play stage should go right after, so the job's stages agree with the order the
-    file gives (`order`) as closely as they can: "Submitted" seen between Screened and Client interview goes
-    between them. None when the file gives no hint (the stage then goes before the closing stages)."""
+# What a stage means, as a place in the funnel: the first word list a stage's name has a word of, from the
+# far end, wins ("HM Screen" is an interview, "Phone Screen" a screen). Hired is 8 and out stages 9.
+_STAGE_RANKS: tuple[tuple[int, frozenset[str]], ...] = (
+    (7, frozenset({"offer", "offered", "offers", "negotiation", "negotiating"})),
+    (6, frozenset({"reference", "references", "background", "check", "checks", "verification"})),
+    (5, frozenset({"onsite", "site", "final", "finals", "panel", "loop", "second", "2nd", "third", "3rd"})),
+    (4, frozenset({"interview", "interviews", "interviewing", "interviewed", "hm", "manager", "technical", "tech",
+                   "assessment", "test", "case", "challenge"})),
+    (3, frozenset({"submitted", "submittal", "submission", "presented", "shortlisted", "sent", "client"})),
+    (2, frozenset({"screen", "screens", "screening", "screened", "phone", "qualified", "qualifying", "vetted",
+                   "vetting", "recruiter", "review", "reviewed"})),
+    (1, frozenset({"contacted", "reached", "outreach", "engaged", "messaged", "responded", "replied",
+                   "interested", "contact"})),
+    (0, frozenset({"sourced", "new", "lead", "leads", "applied", "application", "applicant", "prospect",
+                   "inbound", "added", "pool", "pipeline"})),
+)
+
+
+def stage_rank(name: str | None, outcome: str | None = None) -> int | None:
+    """Where a stage sits in the funnel by what its name means: 0 sourced, 1 contacted, 2 screen, 3 submitted
+    or client review, 4 interview, 5 onsite or final, 6 references, 7 offer, 8 hired, 9 out. None when the
+    name says nothing we know ("Stage 3")."""
+    outcome = outcome or stage_outcome(name or "")
+    if outcome == "hired":
+        return 8
+    if outcome == "lost":
+        return 9
+    words = set(re.split(r"[^a-z0-9]+", _fold(name)))
+    for rank, known in _STAGE_RANKS:
+        if words & known:
+            return rank
+    return None
+
+
+def _rank_in(name: str, order: list[str] | None) -> float | None:
+    """A stage's rank, or for a name we don't know, the rank of the stage the file shows just before it."""
+    r = stage_rank(name)
+    if r is not None:
+        return float(r)
     keys = [k.casefold() for k in order or []]
-    if new.casefold() not in keys or stage_outcome(new) != "open":
+    if name.casefold() not in keys:
         return None
-    pos = {s["name"].casefold(): i for i, s in enumerate(stages)}
-    known = [pos[k] for k in keys if k in pos]
-    if known != sorted(known):
-        return None  # the file lists the job's own stages out of order (sorted by name, say): no hint
-    me = keys.index(new.casefold())
-    before = [pos[k] for k in keys[:me] if k in pos]
-    after = [pos[k] for k in keys[me + 1:] if k in pos]
-    if not before and not after:
-        return None
-    best: tuple[int, int] | None = None
-    for gap, s in enumerate(stages):  # gap = right after stage number `gap`
+    i = keys.index(name.casefold())
+    before = [x for x in (stage_rank(n) for n in (order or [])[:i]) if x is not None]
+    if before:
+        return before[-1] + 0.5
+    after = [x for x in (stage_rank(n) for n in (order or [])[i + 1:]) if x is not None]
+    return after[0] - 0.5 if after else None
+
+
+def _meaning_place(stages: list[dict[str, Any]], order: list[str] | None, new: str) -> tuple[str | None, bool]:
+    """(the stage a new in-play stage goes right after, whether it goes first instead). Stages go in by what
+    they mean, so every job in a file gets the same order: a screen before a submittal, an offer last before
+    the hire. Two stages that mean the same go in the file's order. (None, False) leaves it to add_stage:
+    before the closing stages, or at the end for a closing one."""
+    if stage_outcome(new) != "open":
+        return None, False
+    me = _rank_in(new, order)
+    if me is None:
+        return None, False
+    idx = {k.casefold(): i for i, k in enumerate(order or [])}
+    mine = (me, idx.get(new.casefold(), 10 ** 6))
+    after, ranked = None, False
+    for s in stages:
         if s["outcome"] != "open":
             break  # an in-play stage never goes after a closing one
-        cost = sum(1 for p in before if p > gap) + sum(1 for p in after if p <= gap)
-        if best is None or cost < best[0] or (cost == best[0] and not before):
-            best = (cost, gap)  # with only later stages to go by, sit right before them
-    return stages[best[1]]["name"] if best else None
+        r = _rank_in(s["name"], order)
+        if r is None:
+            continue
+        ranked = True
+        if (r, idx.get(s["name"].casefold(), -1)) <= mine:
+            after = s["name"]
+    return after, after is None and ranked
 
 
 def _import(store: Store, header: list[str], rows: list[list[str]], mapping: list[str], source: str,
-            add_stages: bool) -> dict[str, Any]:
+            add_stages: bool, move_stages: bool = False, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    profile = profile or {}
+    run = now_iso()  # marks this import's stage entries, so Today can snooze "all from this import"
+    moved: list[str] = []
+    seen: set[tuple[int, int]] = set()
     added = updated = unchanged = skipped_rows = notes = conflicts = pipelines = dated = 0
     skipped: list[str] = []
     warned: list[str] = []
@@ -740,7 +825,11 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
     stages_made: list[str] = []
     field_counts: Counter[str] = Counter()
     records = _collapse(list(_records(header, rows, mapping)))
-    hints = _order_hints(records) if add_stages else {}
+    client = str(profile.get("client") or "").strip()
+    if client:  # the profile's client, for an export with no client column
+        for rec in records:
+            rec["jobs"] = [(t, c or client, st, ours, row) for t, c, st, ours, row in rec["jobs"]]
+    order = _file_order(records, profile.get("stage_order"))
     people: _People | None = None
     jobs: _Jobs | None = None
     tag_case = {t["tag"].casefold(): t["tag"] for t in store.list_tags(100000)}
@@ -824,17 +913,20 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             except Exception as exc:
                 warned.append(f"{label}: note not saved ({exc})")
         for title, company, stage, any_status, row in rec["jobs"]:
-            jobs = jobs or _Jobs(store)
+            jobs = jobs or _Jobs(store, profile.get("jobs"))
             try:
                 pipelines += _place(store, jobs, cand, title, company, stage, any_status, f"Row {row}", warned,
                                     fallbacks=fallbacks, missing=missing, add_stages=add_stages, already=already,
-                                    moves=moves, order=hints.get((_fold(title), _fold(company))),
-                                    stage_at=rec["stage_at"].get(row), made=stages_made)
+                                    moves=moves, order=order, stage_at=rec["stage_at"].get(row),
+                                    made=stages_made, move=move_stages, moved=moved, run=run, seen=seen)
             except Exception as exc:
                 warned.append(f"Row {row}: not added to {title} ({exc})")
     mapped_cols = {i for i, m in enumerate(mapping) if m}
     not_imported = [h for i, h in enumerate(header) if i not in mapped_cols and h.strip()]
     jobs_created = jobs.created if jobs else []
+    gone = _missing_from_file(store, seen) if move_stages else []
+    if jobs and jobs.made:
+        _guess_openings(store, jobs.made)
     return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
             "skipped_rows": skipped_rows, "conflicts": conflicts, "warnings": warned, "notes": notes,
             "changes": changes, "changed_fields": dict(field_counts.most_common()),
@@ -842,7 +934,10 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             "stage_moves": dict(moves.most_common()), "already_in": already,
             "merged_rows": merged_rows, "missing_stages": list(missing.values()), "stages_added": add_stages,
             "jobs_created": jobs_created, "not_imported": not_imported, "dates_set": dated,
-            "_changed": bool(added or updated or notes or pipelines or dated or jobs_created or stages_made),
+            "moved": moved, "missing_from_file": gone, "move_stages": move_stages, "stage_order": order,
+            "job_keys": jobs.keys if jobs else {}, "new_job_ids": [j["id"] for j in jobs.made] if jobs else [],
+            "_changed": bool(added or updated or notes or pipelines or dated or jobs_created or stages_made
+                             or moved),
             "dry_run": False}
 
 
@@ -868,8 +963,10 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
            any_status: bool, label: str, warned: list[str], *, fallbacks: list[str] | None = None,
            missing: dict[tuple[int, str], dict[str, str]] | None = None, add_stages: bool = False,
            already: list[str] | None = None, moves: Counter[str] | None = None, order: list[str] | None = None,
-           stage_at: str | None = None, made: list[str] | None = None) -> int:
-    """Put the person in that job's pipeline at that stage. 1 if they were added, 0 if already there."""
+           stage_at: str | None = None, made: list[str] | None = None, move: bool = False,
+           moved: list[str] | None = None, run: str | None = None, seen: set[tuple[int, int]] | None = None) -> int:
+    """Put the person in that job's pipeline at that stage. 1 if they were added, 0 if already there.
+    With move=True someone already there at another stage is moved, when the file may (see _file_wins)."""
     fallbacks = warned if fallbacks is None else fallbacks
     already = warned if already is None else already
     job = jobs.get(title, company, any_status)
@@ -888,7 +985,10 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
         elif add_stages:  # its own stage, never merged into a near one ("HM Screen" is not Screening)
             if missing is not None:
                 missing.setdefault((job["id"], key), {"job": job_label(job), "stage": stage.strip()})
-            store.add_stage(job["id"], stage.strip(), after=_gap_after(stages, order, stage.strip()))
+            after, first = _meaning_place(stages, order, stage.strip())
+            store.add_stage(job["id"], stage.strip(), after=after)
+            if first:
+                store.reorder_stages(job["id"], [stage.strip()])
             want = store.resolve_stage(job["id"], stage.strip())
             if made is not None:
                 made.append(want["name"])
@@ -908,28 +1008,174 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
                                  f"{stage!r}")
             if moves is not None and not (len(starts) == 1 or by_outcome):
                 moves[f"{stage.strip()} to {want['name']} on {job_label(job)}"] += 1
+    if seen is not None:
+        seen.add((cand["id"], job["id"]))
     current = next((p for p in store.candidate_pipelines(cand["id"]) if p["job_id"] == job["id"]), None)
     if current:
         if current["stage"].casefold() != want["name"].casefold():
-            already.append(f"{label}: already in {job_label(job)} at {current['stage']}, so they were left there")
+            why = _file_wins(store, current, stage_at) if move else "not moved"
+            if why is None:
+                _sync_move(store, current, want["name"], stage_at, run)
+                if moved is not None:
+                    moved.append(f"{label} ({cand['name']}): {current['stage']} to {want['name']} on {job_label(job)}")
+                return 0
+            note = " and moved in the app since," if why == "moved here" else ","
+            already.append(f"{label}: already in {job_label(job)} at {current['stage']} (the file says "
+                           f"{want['name']}){note} so they were left there")
         return 0
     store.add_to_pipeline(cand["id"], job["id"], stage=want["name"])
-    _date_placement(store, cand["id"], job["id"], stage_at)
+    _date_placement(store, cand["id"], job["id"], stage_at, run)
     return 1
 
 
-def _date_placement(store: Store, candidate_id: int, job_id: int, stage_at: str | None) -> None:
+SYNC_SOURCE = "ATS sync"  # the timeline source of a stage move a sync made
+
+
+def _entry_data(raw: Any) -> dict[str, Any]:
+    import json
+
+    try:
+        out = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def from_a_file(entry: dict[str, Any] | None) -> bool:
+    """A stage entry an import or a sync wrote (rather than a move made in the app or by the AI)."""
+    if not entry:
+        return False
+    d = _entry_data(entry.get("data"))
+    return (entry.get("source") in (CHANGE_SOURCES["import"], SYNC_SOURCE) or d.get("by") in ("import", "sync")
+            or d.get("imported") is True or "import_run" in d)
+
+
+def _file_wins(store: Store, app: dict[str, Any], stage_at: str | None) -> str | None:
+    """None when a sync may move this person to the file's stage: their stage came from a file, or the file's
+    stage date is newer than the app's. Else why not ("moved here": someone moved them in the app since)."""
+    last = store._row("SELECT * FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'"
+                      " ORDER BY id DESC LIMIT 1", (app["candidate_id"], app["job_id"]))
+    if last is None or from_a_file(last):
+        return None
+    if stage_at and stage_at > (app.get("stage_changed_at") or ""):
+        return None
+    return "moved here"
+
+
+def _sync_move(store: Store, app: dict[str, Any], stage: str, at: str | None, run: str | None) -> None:
+    """Move someone to the file's stage as real stage history: dated from the file, marked by "sync", with the
+    old stage kept so the move can be undone from their timeline."""
+    import json
+
+    ts = now_iso()
+    when = at or ts
+    data = json.dumps({"by": "sync", "pipeline": {"job_id": app["job_id"], "old": app["stage"], "new": stage},
+                       "old_since": app["stage_changed_at"], "import_run": run})
+    with store._lock, store._conn:
+        store._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
+                            (stage, when, app["id"]))
+        store._conn.execute(
+            "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
+            " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (app["candidate_id"], app["job_id"], stage, when, ts,
+                                                        SYNC_SOURCE, data))
+
+
+def file_entries(store: Store) -> dict[tuple[int, int], dict[str, Any]]:
+    """For each (candidate, job) whose newest stage entry an import or a sync wrote: when the app got it
+    (created_at, not the file's date) and which import it was (run)."""
+    out: dict[tuple[int, int], dict[str, Any]] = {}
+    for t in store._rows(
+            """SELECT t.candidate_id, t.job_id, t.created_at, t.source, t.data FROM timeline t
+               JOIN (SELECT max(id) AS id FROM timeline WHERE kind = 'stage' AND job_id IS NOT NULL
+                     GROUP BY candidate_id, job_id) m ON m.id = t.id"""):
+        if from_a_file(t):
+            out[(t["candidate_id"], t["job_id"])] = {"created_at": t["created_at"],
+                                                     "run": _entry_data(t["data"]).get("import_run")}
+    return out
+
+
+def _missing_from_file(store: Store, seen: set[tuple[int, int]]) -> list[str]:
+    """People still in play on the file's jobs who aren't in the file. Listed only, never moved or removed."""
+    out: list[str] = []
+    for job_id in sorted({j for _, j in seen}):
+        job = store.get_job(job_id)
+        closed = {s["name"].casefold() for s in store.job_stages(job_id) if s["outcome"] != "open"}
+        for a in store.pipeline(job_id):
+            if (a["candidate_id"], job_id) not in seen and a["stage"].casefold() not in closed:
+                out.append(f"{a['candidate_name']} is at {a['stage']} on {job_label(job)} here, but isn't in the "
+                           "file, so they were left as they are")
+    return out
+
+
+def _guess_openings(store: Store, made: list[dict[str, Any]]) -> None:
+    """A job an import made gets as many openings as the file has hires on it (at least 1), so a client update
+    doesn't say "over by 7". Its openings are asked once, on the import page or Today (see openings_to_ask)."""
+    import json
+
+    for job in made:
+        hired = store._row("SELECT count(*) AS n FROM applications a JOIN job_stages s ON s.job_id = a.job_id"
+                           " AND lower(s.name) = lower(a.stage) WHERE a.job_id = ? AND s.outcome = 'hired'",
+                           (job["id"],))["n"]
+        if hired > 1:
+            store.update_job(job["id"], openings=hired)
+    ask = sorted(set(openings_to_ask(store)) | {j["id"] for j in made})
+    with store._lock, store._conn:
+        store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                            "value = excluded.value", (OPENINGS_KEY, json.dumps(ask)))
+
+
+OPENINGS_KEY = "import_openings_ask"  # settings row: ids of jobs an import made, whose openings we still ask
+
+
+def openings_to_ask(store: Store) -> list[int]:
+    """Jobs an import made whose number of openings nobody has answered yet."""
+    import json
+
+    row = store._row("SELECT value FROM settings WHERE key = ?", (OPENINGS_KEY,))
+    try:
+        ids = json.loads(row["value"]) if row else []
+    except ValueError:
+        return []
+    return [int(i) for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
+
+
+def answer_openings(store: Store, answers: dict[int, int | None]) -> int:
+    """Save the openings asked for (None leaves a job as it is) and stop asking about those jobs."""
+    import json
+
+    n = 0
+    for job_id, openings in answers.items():
+        if openings:
+            try:
+                store.update_job(job_id, openings=openings)
+            except (KeyError, ValueError, LookupError):
+                continue  # the job is gone, or the number isn't one
+            n += 1
+    left = [i for i in openings_to_ask(store) if i not in answers]
+    with store._lock, store._conn:
+        store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                            "value = excluded.value", (OPENINGS_KEY, json.dumps(left)))
+    return n
+
+
+def _date_placement(store: Store, candidate_id: int, job_id: int, stage_at: str | None,
+                    run: str | None = None) -> None:
     """Date a new pipeline entry from the sheet's stage date. With no date, mark its stage entry as imported,
-    so a status update says "(imported)" and doesn't count it as this week's news."""
+    so a status update says "(imported)" and doesn't count it as this week's news. Either way the entry
+    names the import it came from (import_run)."""
+    import json
+
     with store._lock, store._conn:
         entry = ("(SELECT max(id) FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage')")
         if stage_at:
             store._conn.execute("UPDATE applications SET stage_changed_at = ?, created_at = min(created_at, ?)"
                                 " WHERE candidate_id = ? AND job_id = ?", (stage_at, stage_at, candidate_id, job_id))
-            store._conn.execute(f"UPDATE timeline SET at = ? WHERE id = {entry}", (stage_at, candidate_id, job_id))
+            store._conn.execute(f"UPDATE timeline SET at = ?, data = ? WHERE id = {entry}",
+                                (stage_at, json.dumps({"import_run": run}) if run else None, candidate_id, job_id))
         else:
+            data = {"imported": True, **({"import_run": run} if run else {})}
             store._conn.execute(f"UPDATE timeline SET data = ? WHERE id = {entry}",
-                                ('{"imported": true}', candidate_id, job_id))
+                                (json.dumps(data), candidate_id, job_id))
 
 
 def imported_placements(store: Store, job_id: int) -> set[int]:
@@ -943,8 +1189,9 @@ def imported_placements(store: Store, job_id: int) -> set[int]:
 
 
 def preview_import(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
-                   source: str = "CSV import", add_stages: bool = False) -> dict[str, Any]:
-    """What import_rows would do, worked out on a private copy of the database. Nothing here changes."""
+                   source: str = "CSV import", add_stages: bool = False, **opts: Any) -> dict[str, Any]:
+    """What import_rows would do, worked out on a private copy of the database. Nothing here changes.
+    opts: import_rows' move_stages and profile."""
     scratch = Store(":memory:")
     try:
         try:
@@ -952,8 +1199,9 @@ def preview_import(store: Store, header: list[str], rows: list[list[str]], mappi
                 store._conn.backup(scratch._conn)
         except sqlite3.Error:  # page sizes differ: fall back to a copy on disk
             scratch.close()
-            return _preview_on_disk(store, header, rows, mapping, source, add_stages)
-        result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages)
+            return _preview_on_disk(store, header, rows, mapping, source, add_stages, **opts)
+        result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages,
+                             **opts)
     finally:
         try:
             scratch.close()
@@ -963,7 +1211,7 @@ def preview_import(store: Store, header: list[str], rows: list[list[str]], mappi
 
 
 def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
-                     source: str, add_stages: bool = False) -> dict[str, Any]:
+                     source: str, add_stages: bool = False, **opts: Any) -> dict[str, Any]:
     import tempfile
 
     folder = Path(tempfile.mkdtemp(prefix="preview-", dir=backups_dir()))
@@ -972,7 +1220,8 @@ def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], map
         store.backup_to(copy)
         scratch = Store(copy)
         try:
-            result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages)
+            result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages,
+                                 **opts)
         finally:
             scratch.close()
     finally:
@@ -984,15 +1233,134 @@ def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], map
 
 def _will(result: dict[str, Any]) -> dict[str, Any]:
     """A dry run speaks about what will happen: "so it will be left alone"."""
-    for key in ("skipped", "warnings", "stage_fallbacks", "merged_rows", "already_in"):
+    for key in ("skipped", "warnings", "stage_fallbacks", "merged_rows", "already_in", "missing_from_file"):
         if result.get(key):
             result[key] = [x.replace("so it was left alone", "so it will be left alone")
                            .replace("so they were left there", "so they will be left there")
                            .replace("so they were saved as one", "so they will be saved as one")
                            .replace(": put in ", ": will be put in ", 1)
+                           .replace("so they were left as they are", "so they will be left as they are")
                            for x in result[key]]
     result["dry_run"] = True
     return result
+
+
+# ------------------------------------------------------------- sync profiles
+PROFILE_PREFIX = "sync_profile:"  # settings rows, one per export (keyed by its set of column headers)
+PROFILES_KEPT = 20
+
+
+def header_key(header: list[str]) -> str:
+    """The same export (the same columns, in any case or spacing) gives the same key."""
+    import hashlib
+
+    return hashlib.sha1("|".join(_norm_header(h) for h in header).encode("utf-8")).hexdigest()[:16]
+
+
+def sync_profile(store: Store, header: list[str]) -> dict[str, Any] | None:
+    """The saved profile for this export's columns: its column matches, stage order, client and job matches."""
+    import json
+
+    row = store._row("SELECT value FROM settings WHERE key = ?", (PROFILE_PREFIX + header_key(header),))
+    try:
+        prof = json.loads(row["value"]) if row else None
+    except ValueError:
+        return None
+    if not isinstance(prof, dict) or len(prof.get("mapping") or []) != len(header):
+        return None
+    prof["mapping"] = [m if m in IMPORT_TARGETS else "" for m in prof["mapping"]]
+    return prof
+
+
+def sync_profiles(store: Store) -> list[dict[str, Any]]:
+    """Every saved profile, newest first."""
+    import json
+
+    out = []
+    for r in store._rows("SELECT value FROM settings WHERE key LIKE ?", (PROFILE_PREFIX + "%",)):
+        try:
+            prof = json.loads(r["value"])
+        except ValueError:
+            continue
+        if isinstance(prof, dict):
+            out.append(prof)
+    return sorted(out, key=lambda p: str(p.get("saved_at") or ""), reverse=True)
+
+
+def mapping_for(store: Store, header: list[str], rows: list[list[str]]) -> tuple[list[str], dict[str, Any] | None]:
+    """(the column matches to start from, the profile they came from). A file whose columns were imported before
+    gets the matches used then; any other file gets our guess."""
+    prof = sync_profile(store, header)
+    return (list(prof["mapping"]), prof) if prof else (guess_mapping(header, rows), None)
+
+
+def save_sync_profile(store: Store, header: list[str], mapping: list[str], result: dict[str, Any], *,
+                      file_name: str | None = None, source: str | None = None, add_stages: bool = False,
+                      move_stages: bool = False, client: str | None = None) -> dict[str, Any]:
+    """After an import: remember how this export was read, for next week's file. Keeps PROFILES_KEPT."""
+    import json
+
+    old = sync_profile(store, header) or {}
+    jobs = {**(old.get("jobs") or {}), **(result.get("job_keys") or {})}
+    prof = {"key": header_key(header), "file": (file_name or old.get("file") or "").strip()[:120],
+            "header": header, "mapping": mapping, "source": source or old.get("source") or "CSV import",
+            "add_stages": bool(add_stages), "move_stages": bool(move_stages),
+            "stage_order": (result.get("stage_order") or old.get("stage_order") or [])[:200],
+            "client": (client if client is not None else old.get("client") or "").strip()[:120],
+            "jobs": dict(list(jobs.items())[-500:]), "saved_at": now_iso(), "runs": int(old.get("runs") or 0) + 1}
+    with store._lock, store._conn:
+        store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                            "value = excluded.value", (PROFILE_PREFIX + prof["key"], json.dumps(prof)))
+    for extra in sync_profiles(store)[PROFILES_KEPT:]:
+        with store._lock, store._conn:
+            store._conn.execute("DELETE FROM settings WHERE key = ?", (PROFILE_PREFIX + str(extra.get("key")),))
+    return prof
+
+
+def forget_sync_profile(store: Store, key: str) -> None:
+    with store._lock, store._conn:
+        store._conn.execute("DELETE FROM settings WHERE key = ?", (PROFILE_PREFIX + key,))
+
+
+def apply_map(header: list[str], mapping: list[str], spec: str) -> list[str]:
+    """The command line's --map: "Stage Entered=stage_changed_at, Recruiter=tag_column, Owner=skip". A column is
+    named by its header (any case); a field by its name, its label, or skip."""
+    out = list(mapping)
+    lows = [_norm_header(h) for h in header]
+    by_label = {_norm_header(v): k for k, v in TARGET_LABELS.items()}
+    for part in (p.strip() for p in re.split(r"[,;]", spec or "")):
+        if not part:
+            continue
+        col, sep, field = part.partition("=")
+        if not sep:
+            raise ValueError(f"Use Column=field in --map, like \"Stage Entered=stage_changed_at\" (got {part!r}).")
+        key = _norm_header(col)
+        if key not in lows:
+            raise ValueError(f"No column called {col.strip()!r} in this file. Its columns are: {', '.join(header)}.")
+        f = field.strip()
+        f = "" if f.lower() in ("skip", "none", "") else f if f in IMPORT_TARGETS else by_label.get(_norm_header(f), f)
+        if f not in IMPORT_TARGETS:
+            raise ValueError(f"{field.strip()!r} isn't a field. Use one of: skip, "
+                             + ", ".join(t for t in IMPORT_TARGETS if t) + ".")
+        out[lows.index(key)] = f
+    return out
+
+
+def diff_lines(result: dict[str, Any], limit: int = 10) -> list[str]:
+    """A sync's what-will-change, section by section, for the command line."""
+    out = preview_lines(result)
+    for key, title in (("moved", "Stage moves"), ("changes", "Changed fields"), ("possible_duplicates",
+                       "Name-only matches, added as new people"), ("missing_from_file", "Here but not in the file"),
+                       ("already_in", "Left where they are")):
+        lines = result.get(key) or []
+        if not lines:
+            continue
+        out.append(f"{title} ({len(lines)}):")
+        groups = group_lines(lines) if len(lines) > limit else []
+        out += ["  " + x for x in (groups or lines)[:limit]]
+        if not groups and len(lines) > limit:
+            out.append(f"  and {len(lines) - limit} more")
+    return out
 
 
 def button_label(result: dict[str, Any] | None, total: int) -> str:
@@ -1017,6 +1385,8 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
     fields = _labels(result.get("changed_fields") or {})
     parts = [f"add {result['added']}",
              f"update {result['updated']}" + (f" ({fields})" if fields and result["updated"] else "")]
+    if result.get("moved"):
+        parts.append(f"move {_plural(len(result['moved']), 'person', 'people')} to the stage the file shows")
     if result.get("conflicts"):
         parts.append(f"leave {result['conflicts']} alone because of conflicts")
     other_skips = result["skipped_rows"] - result.get("conflicts", 0)
@@ -1039,6 +1409,9 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
     if result.get("missing_stages") and result.get("stages_added"):
         extra.append(f"{_plural(len(result['missing_stages']), 'new stage')}: " + ", ".join(
             f"{m['stage']} on {m['job']}" for m in result["missing_stages"][:5]))
+    if result.get("missing_from_file"):
+        extra.append(f"{_plural(len(result['missing_from_file']), 'person', 'people')} on these jobs here but not "
+                     "in the file, left as they are")
     if extra:
         lines.append("Also: " + "; ".join(extra) + ".")
     return lines
@@ -1046,10 +1419,11 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
 
 PANEL_LINES = 20  # lines a result panel shows before "and N more"
 # Result panels: (key in the result, heading). Possible duplicates start open.
-PANELS = (("skipped", "Skipped rows"), ("already_in", "Already in that job"),
+PANELS = (("skipped", "Skipped rows"), ("moved", "Stage moves from the file"), ("already_in", "Already in that job"),
           ("warnings", "Imported, with a cell left blank"), ("stage_fallbacks", "Put in a different stage"),
           ("merged_rows", "Rows saved as one person"), ("changes", "What changed on updated people"),
-          ("possible_duplicates", "Possible duplicates to check"))
+          ("possible_duplicates", "Possible duplicates to check"),
+          ("missing_from_file", "Here but not in the file"))
 _ROW_LEAD = re.compile(r"^Rows? [\d, and]+(?: \([^)]*\))?: ")
 
 

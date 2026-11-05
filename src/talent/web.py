@@ -724,9 +724,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         fd = os.open(imports_dir() / f"{token}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        mapping = importers.guess_mapping(header, rows)
-        return map_step(request, token, header, rows, mapping, importers.default_source(header),
-                        _file_name(upload.filename))
+        mapping, prof = importers.mapping_for(store, header, rows)
+        return map_step(request, token, header, rows, mapping,
+                        (prof or {}).get("source") or importers.default_source(header), _file_name(upload.filename),
+                        add_stages=bool((prof or {}).get("add_stages", True)),
+                        move_stages=True, client=(prof or {}).get("client"))
 
     def _file_name(name: Any) -> str:
         """The uploaded file's own name, without any folder, for Changes and the backup list."""
@@ -745,12 +747,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
-                 add_stages: bool = True) -> HTMLResponse:
+                 add_stages: bool = True, move_stages: bool = True, client: str | None = None) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
+        prof = importers.sync_profile(store, header)
+        client = (client or "").strip()[:120]
         preview = None
         if has_name and len(rows) <= PREVIEW_MAX_ROWS:
             try:
-                preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages)
+                preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
+                                                   move_stages=move_stages, profile={**(prof or {}), "client": client})
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -760,7 +765,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
-                    button_label=importers.button_label(preview, len(rows)), add_stages=add_stages)
+                    button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
+                    move_stages=move_stages, profile=prof, client=client,
+                    no_client="job_title" in mapping and "job_company" not in mapping)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -782,7 +789,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
                         str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
-                        add_stages=form.get("add_stages") == "1")
+                        add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
+                        client=str(form.get("client") or ""))
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -795,23 +803,59 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
+        move_stages = form.get("move_stages") == "1"
+        client = str(form.get("client") or "").strip()[:120]
         filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
             return map_step(request, token, header, rows, mapping, source, filename,
-                            error="Pick which column holds the name.", add_stages=add_stages)
+                            error="Pick which column holds the name.", add_stages=add_stages,
+                            move_stages=move_stages, client=client)
+        prof = importers.sync_profile(store, header) or {}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
-                                           file_name=filename or None)
+                                           file_name=filename or None, move_stages=move_stages,
+                                           profile={**prof, "client": client})
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
+        importers.save_sync_profile(store, header, mapping, result, file_name=filename, source=source,
+                                    add_stages=add_stages, move_stages=move_stages, client=client)
         backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
             result["backup_name"] = Path(result["backup"]).name
         _save_lists(token, "result", result)
+        ask = set(importers.openings_to_ask(store))
+        new_jobs = [store.get_job(i) for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
-                    panels=importers.result_panels(result))
+                    panels=importers.result_panels(result), new_jobs=new_jobs[:30])
+
+    @app.get("/import/openings", response_class=HTMLResponse)
+    def import_openings_page(request: Request):
+        """Jobs an import made, asked once how many openings each has."""
+        jobs = []
+        for i in importers.openings_to_ask(store):
+            try:
+                jobs.append(store.get_job(i))
+            except LookupError:
+                continue
+        return page(request, "import.html", step="openings", new_jobs=jobs[:50])
+
+    @app.post("/import/openings")
+    async def import_openings(request: Request):
+        form = await request.form()
+        answers: dict[int, int | None] = {}
+        for key, value in form.items():
+            if key.startswith("openings_") and key[9:].isdigit():
+                v = str(value or "").strip()
+                answers[int(key[9:])] = int(v) if v.isdigit() and 0 < int(v) < 1000 else None
+        name = str(form.get("backup") or "")
+        keep_undo = bool(name) and backups.import_undo_state(store, name) == "ok"
+        n = importers.answer_openings(store, answers)
+        if keep_undo:  # answering the import's own question doesn't take its Undo away
+            backups.remember_import(store, name)
+        what = f"Saved openings for {n} job{'' if n == 1 else 's'}." if n else "Okay, we won't ask about those again."
+        return RedirectResponse("/jobs?" + urlencode({"notice": what}), status_code=303)
 
     @app.get("/import/{token}/{which}.csv")
     def import_list_csv(token: str, which: str, panel: str = ""):
@@ -1374,6 +1418,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="Couldn't snooze that. Reload the page and try again.")
         store.snooze(key, int(days))
         return back(request, notice=f"Snoozed for {days} day{'' if days == '1' else 's'}.")
+
+    @app.post("/actions/snooze-import")
+    async def snooze_import(request: Request):
+        """Snooze every stuck reminder about people one import or sync brought in."""
+        form = await request.form()
+        run = str(form.get("run") or "")[:40]
+        n = actions.snooze_import(store, run) if run else 0
+        if not n:
+            return back(request, error="Nothing to snooze. Those reminders may be gone already.")
+        return back(request, notice=f"Snoozed {n} stuck reminder{'' if n == 1 else 's'} from that import for "
+                                    f"{actions.STUCK_SNOOZE_DAYS} days.")
 
     @app.post("/actions/todo")
     async def add_todo(request: Request):

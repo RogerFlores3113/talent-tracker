@@ -162,7 +162,8 @@ def record_import(store: Store, result: dict[str, Any], file_name: str | None, t
     entry = {"at": now_iso(), "file": (file_name or "").strip()[:120], "rows": total, "added": result.get("added", 0),
              "updated": result.get("updated", 0), "unchanged": result.get("unchanged", 0),
              "skipped": result.get("skipped_rows", 0), "pipelines": result.get("pipelines_added", 0),
-             "notes": result.get("notes", 0), "changed": bool(backup), "backup": backup}
+             "notes": result.get("notes", 0), "moved": len(result.get("moved") or []), "changed": bool(backup),
+             "backup": backup}
     log = [entry] + import_log(store)
     value = json.dumps(log[:IMPORT_LOG_KEPT])
     with store._lock, store._conn:
@@ -190,6 +191,8 @@ def import_text(entry: dict[str, Any]) -> str:
             parts.append(f"{int(entry[key]):,} {word}")
     if entry.get("pipelines"):
         parts.append(f"{int(entry['pipelines']):,} put in job pipelines")
+    if entry.get("moved"):
+        parts.append(f"{int(entry['moved']):,} stage move{'' if entry['moved'] == 1 else 's'}")
     if entry.get("notes"):
         parts.append(f"{int(entry['notes']):,} note{'' if entry['notes'] == 1 else 's'} added")
     if not entry.get("changed"):

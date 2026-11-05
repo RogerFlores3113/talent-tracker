@@ -644,19 +644,14 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now) + ai_clear_cap(store)
     from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
     items += shortlist_items(store)
+    stuck_more = 0
     if on("flag_stuck"):
-        limit = _int(cfg, "stuck_days", 7)
-        for a in store.open_applications():
-            days = _days_ago(a["stage_changed_at"], now)
-            if days >= limit:
-                nxt = store.next_stage(a["job_id"], a["stage"])
-                items.append({
-                    "key": f"stuck:{a['id']}", "kind": "stuck", "rank": 2, "when": a["stage_changed_at"],
-                    "title": f"{a['candidate_name']} has been in {a['stage']} for {days} days",
-                    "detail": label(a["job_id"], a["job_title"]), "candidate_id": a["candidate_id"],
-                    "job_id": a["job_id"], "stage": a["stage"], "next_stage": nxt, "days": days,
-                    "href": f"/candidates/{a['candidate_id']}",
-                })
+        rows, n_hidden, stuck_more = _stuck_items(store, now, _int(cfg, "stuck_days", 7), snoozed, label)
+        items += rows
+        hidden += n_hidden
+    openings = _openings_item(store)
+    if openings:
+        items.append(openings)
 
     if on("flag_thin"):
         default_min = _int(cfg, "thin_min", 5)
@@ -732,7 +727,112 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     shown_stale = stale_total if any(i["kind"] == "stale" for i in visible) else 0
     next_week.sort(key=lambda i: i["when"] or "")
     return {"items": visible, "counts": counts, "hidden": hidden, "scheduled": scheduled,
-            "scheduled_later": scheduled_later, "stale_total": shown_stale, "stale_more": 0, "next_week": next_week}
+            "scheduled_later": scheduled_later, "stale_total": shown_stale, "stale_more": 0, "next_week": next_week,
+            "stuck_more": stuck_more}
+
+
+STUCK_GROUP = 3  # a job with more people stuck than this shows them as one row
+STUCK_CAP = 50  # stuck rows on Today, then "and N more"
+STUCK_SNOOZE_DAYS = 30  # "Snooze all from this import"
+
+
+def _stuck_items(store: Store, now: datetime, limit: int, snoozed: set[str],
+                 label: Callable[..., str]) -> tuple[list[dict[str, Any]], int, int]:
+    """(Today's stuck rows, how many are snoozed, how many more than STUCK_CAP). A stuck clock never starts
+    from a date an import or a sync brought in: it starts when the app got that stage, so a fresh export
+    doesn't fill Today. A job with many stuck people is one row. "Move to" never points back up the funnel."""
+    from .importers import file_entries, stage_rank
+
+    clocks = file_entries(store)
+    stuck: list[dict[str, Any]] = []
+    hidden = 0
+    for a in store.open_applications():
+        clock = clocks.get((a["candidate_id"], a["job_id"]))
+        since = max(a["stage_changed_at"] or "", clock["created_at"] or "") if clock else a["stage_changed_at"]
+        days = _days_ago(since, now)
+        if days < limit:
+            continue
+        if f"stuck:{a['id']}" in snoozed:
+            hidden += 1
+            continue
+        stuck.append({"app": a, "since": since, "days": days, "run": clock.get("run") if clock else None})
+    by_job: dict[int, list[dict[str, Any]]] = {}
+    for x in stuck:
+        by_job.setdefault(x["app"]["job_id"], []).append(x)
+    rows: list[dict[str, Any]] = []
+    for job_id, xs in by_job.items():
+        xs.sort(key=lambda x: (-x["days"], x["app"]["candidate_name"]))
+        name = label(job_id, xs[0]["app"]["job_title"])
+        if len(xs) > STUCK_GROUP:
+            key = f"stuck_job:{job_id}"
+            if key in snoozed:
+                hidden += 1
+                continue
+            runs = sorted({x["run"] for x in xs if x["run"]})
+            rows.append({
+                "key": key, "kind": "stuck", "rank": 2, "when": min(x["since"] for x in xs),
+                "title": f"{len(xs)} people on {name} haven't moved in {limit} days or more",
+                "detail": "Longest: " + ", ".join(f"{x['app']['candidate_name']} ({x['app']['stage']}, "
+                                                  f"{x['days']} days)" for x in xs[:3]),
+                "job_id": job_id, "count": len(xs), "import_run": runs[-1] if runs else None,
+                "href": f"/jobs/{job_id}"})
+            continue
+        stages = store.job_stages(job_id)
+        for x in xs:
+            a = x["app"]
+            nxt = store.next_stage(job_id, a["stage"])
+            here = next((s for s in stages if s["name"].lower() == a["stage"].lower()), None)
+            there = next((s for s in stages if s["name"] == nxt), None)
+            r1 = stage_rank(a["stage"], here and here["outcome"])
+            r2 = stage_rank(nxt, there and there["outcome"]) if nxt else None
+            if r1 is not None and r2 is not None and r2 < r1:
+                nxt = None  # the job's stages are out of funnel order here: never offer a move back
+            rows.append({
+                "key": f"stuck:{a['id']}", "kind": "stuck", "rank": 2, "when": x["since"],
+                "title": f"{a['candidate_name']} has been in {a['stage']} for {x['days']} days",
+                "detail": name, "candidate_id": a["candidate_id"], "job_id": job_id, "stage": a["stage"],
+                "next_stage": nxt, "days": x["days"], "import_run": x["run"],
+                "href": f"/candidates/{a['candidate_id']}"})
+    rows.sort(key=lambda i: i["when"] or "")
+    return rows[:STUCK_CAP], hidden, max(0, len(rows) - STUCK_CAP)
+
+
+def snooze_import(store: Store, run: str, days: int = STUCK_SNOOZE_DAYS) -> int:
+    """Snooze every stuck reminder about people whose stage came from this one import or sync."""
+    from .importers import file_entries
+
+    pairs = {k for k, v in file_entries(store).items() if v.get("run") == run}
+    if not pairs:
+        return 0
+    n = 0
+    jobs: set[int] = set()
+    for a in store.open_applications():
+        if (a["candidate_id"], a["job_id"]) in pairs:
+            store.snooze(f"stuck:{a['id']}", days)
+            jobs.add(a["job_id"])
+            n += 1
+    for job_id in jobs:
+        store.snooze(f"stuck_job:{job_id}", days)
+    return n
+
+
+def _openings_item(store: Store) -> dict[str, Any] | None:
+    """Jobs an import made ask once how many openings they have."""
+    from .importers import openings_to_ask
+
+    ids = openings_to_ask(store)
+    if not ids:
+        return None
+    live = [j for j in store.list_jobs() if j["id"] in set(ids)]
+    if not live:
+        return None
+    names = ", ".join(job_label(j["title"], j.get("company")) for j in live[:3])
+    more = f" and {len(live) - 3} more" if len(live) > 3 else ""
+    return {"key": "openings:import", "kind": "openings", "rank": 3, "when": max(j["created_at"] for j in live),
+            "title": (f"How many openings does {names} have?" if len(live) == 1
+                      else f"How many openings do {len(live)} jobs from an import have?"),
+            "detail": "" if len(live) == 1 else f"{names}{more}. Client updates count hires against openings.",
+            "href": "/import/openings", "jobs": live}
 
 
 # ---------------------------------------------------------- status update
