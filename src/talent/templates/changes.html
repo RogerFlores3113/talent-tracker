@@ -37,6 +37,7 @@
     <div>{{ r.text }}</div>
     {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"><button class="btn small" type="submit">Undo</button></form>
     {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>{% endif %}
+    {% if r.undo_from_url and r.from_count > (1 if r.undoable else 0) %}<form method="post" action="{{ r.undo_from_url }}" class="inline" data-confirm="Undo {{ r.from_count }} change{{ '' if r.from_count == 1 else 's' }} your AI app made, from this one to the newest? People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are."><button class="btn small" type="submit">Undo this and everything after</button></form>{% endif %}
   </li>
   {% endfor %}
 </ul>

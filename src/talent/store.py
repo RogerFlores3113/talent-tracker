@@ -837,6 +837,7 @@ class _Term:
     form: str  # one word, or an alias phrase like "san francisco"
     prefix: bool  # the last word while typing: "pyth" finds "Python"
     expansions: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()  # the same first name in the name column: "mike" also finds Michael
 
     @property
     def forms(self) -> tuple[str, ...]:
@@ -844,8 +845,9 @@ class _Term:
 
     def fts(self) -> str:
         term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
-        if self.expansions:
-            term = "(" + " OR ".join([term, *(f'"{e}"' for e in self.expansions)]) + ")"
+        alts = [*(f'"{e}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
+        if alts:
+            term = "(" + " OR ".join([term, *alts]) + ")"
         return term
 
 
@@ -863,6 +865,13 @@ def _query_terms(text: str) -> list[_Term]:
         last = i + step >= len(kept)
         terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
         i += step
+    # A nickname as the first of several words is that first name too ("mike okonkwo" finds Michael
+    # Okonkwo), but only in the name, and only with the rest of the query matching as well.
+    first = terms[0] if len(terms) > 1 else None
+    if first and not first.expansions and first.form in _NICK_GROUPS:
+        group = set().union(*(_NICK_GROUPS.get(n, set()) | {n} for n in _NICK_GROUPS[first.form]))
+        group |= {nick for formal in _NICK_GROUPS[first.form] for nick in _NICKNAMES[formal].split()}
+        terms[0] = _Term(first.form, first.prefix, (), tuple(sorted(group - {first.form})))
     return terms
 
 
@@ -1698,10 +1707,14 @@ class Store:
                 return {"status": status, "at": r["at"]} if not r["undone_at"] and status == job["status"] else None
         return None
 
-    def undo_ai_action(self, action_id: int, *, by: str = "app") -> str:
+    def undo_ai_action(self, action_id: int, *, by: str = "app",
+                       before_delete: Callable[[], Any] | None = None) -> str:
         """Undo one thing the AI app did and say what, as "Moved Lee Chen from Screening to Sourced in Backend".
         Raises ValueError with the reason when it can't be undone (it was changed again since, or the
-        recruiter has worked on that person or job since), and nothing changes."""
+        recruiter has worked on that person or job since), and nothing changes.
+
+        Undoing a person or job the AI added deletes it, so `before_delete` (the app's backup) runs first;
+        if it raises ValueError, nothing is deleted."""
         a = self.ai_action(action_id)
         if a["undone_at"]:
             raise ValueError("That change was already undone.")
@@ -1722,12 +1735,16 @@ class Store:
             reason = self._candidate_touched(a["candidate_id"])
             if reason:
                 raise ValueError(reason)
+            if before_delete:
+                before_delete()
             self.delete_candidate(a["candidate_id"])  # its log rows go with it
             return what
         if kind == "job_created":
             reason = self._job_touched(a["job_id"], a["new_data"])
             if reason:
                 raise ValueError(reason)
+            if before_delete:
+                before_delete()
             self.delete_job(a["job_id"])
             return what
         old, new = a["old_data"] or {}, a["new_data"] or {}
@@ -2599,12 +2616,14 @@ class Store:
                         outcomes: dict[str, str] | None = None, by: str = "app") -> dict[str, Any]:
         """Rename, add, reorder and set what stages count as, in one go: every step lands or none does.
 
-        Stages left out of `order` keep their place, and the result's "left_out" names them. With
-        by="ai", at most one existing stage may change what it counts as per call, and never one with
-        people in it (that would move them in or out of the running without anyone seeing); the
-        recruiter does that in the app. The AI's edit is logged so it can be undone from Changes."""
+        Stages left out of `order` keep their place, and the result's "left_out" names them; "changes"
+        says what changed in plain words. With by="ai", only a stage added in the same call may get an
+        outcome (open, hired or lost); what an existing stage counts as stays put (changing it would move
+        people in or out of the running, or count someone as hired), so the recruiter does that in the app.
+        The AI's edit is logged so it can be undone from Changes."""
         job = self.get_job(job_id)
         left_out: list[str] = []
+        body = ""
         with self._write():
             before = self.job_stages(job_id)
             for old, new in (rename or {}).items():
@@ -2631,14 +2650,14 @@ class Store:
             for name, outcome in (outcomes or {}).items():
                 self.set_stage_outcome(job_id, name, outcome)
             stages = self.job_stages(job_id)
+            body = _stages_change_body(before, stages)
             if by == "ai":
                 self._check_ai_outcomes(job_id, before, stages)
-                body = _stages_change_body(before, stages)
                 if body:
                     self._log_ai("stages_edit", job_id=job_id, body=body,
                                  old={"stages": before, "_at": job["updated_at"]},
                                  new={"stages": stages, "_at": self.get_job(job_id)["updated_at"]})
-        return {"stages": stages, "left_out": left_out}
+        return {"stages": stages, "left_out": left_out, "changes": body}
 
     def _place_stages(self, job_id: int, names: list[str]) -> list[str]:
         """Put the named stages in this order, in the places they take up now; every other stage keeps
@@ -2658,19 +2677,13 @@ class Store:
         return [s["name"] for s in stages if s["id"] not in set(wanted)]
 
     def _check_ai_outcomes(self, job_id: int, before: list[dict[str, Any]], after: list[dict[str, Any]]) -> None:
+        """The AI may say what a stage it adds in this call counts as, but never change what an existing
+        stage counts as (open to out or hired, or back): that is the recruiter's call, in the app."""
         prior = {s["id"]: s for s in before}
         changed = [s for s in after if s["id"] in prior and s["outcome"] != prior[s["id"]]["outcome"]]
-        if len(changed) > 1:
-            raise ValueError(f"This would change what {len(changed)} stages count as "
-                             f"({', '.join(s['name'] for s in changed)}). Change one per call, after checking "
-                             "with the recruiter.")
-        for s in changed:
-            n = self._row("SELECT count(*) AS n FROM applications WHERE job_id = ? AND lower(stage) = lower(?)",
-                          (job_id, s["name"]))["n"]
-            if n:
-                raise ValueError(f"{s['name']} has {n} {'person' if n == 1 else 'people'} in it, so changing what "
-                                 "it counts as would move them in or out of the running. Ask the recruiter to "
-                                 "change it in the app.")
+        if changed:
+            raise ValueError(f"No change made. Ask the recruiter to change what {prior[changed[0]['id']]['name']} "
+                             "counts as in the app.")
 
     def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""

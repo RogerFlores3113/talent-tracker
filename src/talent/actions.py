@@ -253,24 +253,43 @@ def ai_identity_changes(store: Store, now: datetime | None = None, days: int = 7
     return out
 
 
+def _offer_name(name: str | None) -> bool:
+    return "offer" in _stage_key(name).split()
+
+
 def ai_pipeline_changes(store: Store, now: datetime | None = None, days: int = 7) -> list[dict[str, Any]]:
-    """Today items for what the AI app did to pipelines lately (and nobody undid): people it moved out
-    of a job, and jobs it closed or put on hold."""
+    """Today items for what the AI app did to pipelines lately: people it moved out of a job, people it
+    put in a hire stage or an Offer-like one, and jobs it closed or put on hold. A move drops off once it
+    was undone, or once the person is no longer where the AI put them (the recruiter moved them since)."""
     now = now or datetime.now(timezone.utc)
     since = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
     out_by_job: dict[int, dict[str, Any]] = {}
+    items: list[dict[str, Any]] = []
     for r in store._rows(
-            """SELECT a.id, a.job_id, a.at, j.title FROM ai_actions a JOIN jobs j ON j.id = a.job_id
+            """SELECT a.id, a.job_id, a.at, j.title, j.company, s.name AS stage, s.outcome, c.name AS candidate_name
+               FROM ai_actions a JOIN jobs j ON j.id = a.job_id
                JOIN timeline t ON t.id = a.target_id
+               JOIN candidates c ON c.id = t.candidate_id
                JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(t.body)
-               WHERE a.kind = 'stage_move' AND a.undone_at IS NULL AND a.at >= ? AND s.outcome = 'lost'
+               JOIN applications p ON p.candidate_id = t.candidate_id AND p.job_id = a.job_id
+                                  AND lower(p.stage) = lower(t.body)
+               WHERE a.kind IN ('stage_move', 'pipeline_add') AND a.undone_at IS NULL AND a.at >= ?
+                 AND NOT EXISTS (SELECT 1 FROM timeline l WHERE l.candidate_id = t.candidate_id
+                                   AND l.job_id = a.job_id AND l.kind = 'stage' AND l.id > t.id)
                ORDER BY a.id DESC""", (since,)):
-        item = out_by_job.setdefault(r["job_id"], {"id": r["id"], "at": r["at"], "title": r["title"], "n": 0})
-        item["n"] += 1
+        if r["outcome"] == "lost":
+            item = out_by_job.setdefault(r["job_id"], {"id": r["id"], "at": r["at"], "title": r["title"], "n": 0})
+            item["n"] += 1
+        elif r["outcome"] == "hired" or (r["outcome"] == "open" and _offer_name(r["stage"])):
+            items.append({"key": f"aihire:{r['id']}", "kind": "ai_change", "rank": 1, "when": r["at"],
+                          "job_id": r["job_id"],
+                          "title": f"Your AI app moved {r['candidate_name']} to {r['stage']} on "
+                                   f"{r['title']}{' (' + r['company'] + ')' if r['company'] else ''}. Review or undo.",
+                          "detail": "Check it's right before anyone hears about it.", "href": "/changes?who=ai&since=7"})
     items = [{"key": f"aimove:{i['id']}", "kind": "ai_change", "rank": 1, "when": i["at"], "job_id": job_id,
               "title": f"Your AI app moved {i['n']} {'person' if i['n'] == 1 else 'people'} out of {i['title']}. "
                        "Review or undo.", "detail": "", "href": "/changes?who=ai&since=7"}
-             for job_id, i in out_by_job.items()]
+             for job_id, i in out_by_job.items()] + items
     words = {"closed": "closed", "on_hold": "put {} on hold"}
     for job in store._rows("SELECT id, title FROM jobs WHERE status IN ('closed', 'on_hold') AND updated_at >= ?",
                            (since,)):
