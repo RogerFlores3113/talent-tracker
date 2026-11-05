@@ -4,6 +4,15 @@
 {% block body %}
 {% set qp = request.query_params %}
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
+{% if dupes %}
+<section class="panel" id="duplicates">
+  <h2>Same person?</h2>
+  <p class="fine">These look like they could be {{ c.name }} too. Merging keeps this profile, adds anything it's missing, moves the timeline and jobs over, then deletes the other one.</p>
+  <ul class="items">
+    {% for d in dupes %}<li><a href="/candidates/{{ d.id }}">{{ d.name }}</a> <span class="muted">{{ sub(d) }}</span> <a class="btn small" href="/candidates/{{ c.id }}/merge/{{ d.id }}">Merge</a></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
 <article class="profile">
   <div class="head">
     <div>
@@ -76,8 +85,9 @@
     {% for t in c.timeline %}
     <li class="t-{{ t.kind }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
       {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
-      {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
-      {% if t.kind == 'change' and t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.kind == 'change' and t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
+      {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}
+      {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body and not (t.data and t.data.merged) %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
+      {% if t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
     {% endfor %}
   </ul>
   {% else %}<p class="none">Nothing logged yet. Notes, calls, emails and stage changes show up here.</p>{% endif %}
@@ -86,7 +96,7 @@
   <p class="fine">Ask Claude to look up their current role and update this profile.</p>
   {{ recipe_buttons(refresh_prompt, "Refresh with Claude") }}
 
-  <form method="post" action="/candidates/{{ c.id }}/delete" data-msg="Delete {{ c.name }} for good? This also removes their timeline and job stages." onsubmit="return confirm(this.dataset.msg)">
+  <form method="post" action="/candidates/{{ c.id }}/delete" data-msg="Delete {{ c.name }}? This also removes their timeline and job stages, and can't be undone. Copies stay in automatic backups until they roll off." onsubmit="return confirm(this.dataset.msg)">
     <button class="link danger" type="submit">Delete candidate</button>
   </form>
 </article>

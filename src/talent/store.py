@@ -17,6 +17,7 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -79,6 +80,15 @@ CHANGE_SOURCES = {"app": "App", "ai": "AI app", "import": "CSV import"}
 # On a merge (same email or LinkedIn saved again) these take the newer value;
 # name, source and about are never overwritten, other fields are only filled when empty.
 MERGE_OVERWRITES = ("current_title", "current_company", "location")
+# Longest value each field takes, so a pasted 2 MB blob can't land in a profile.
+FIELD_LIMITS = {
+    "name": 200, "email": 320, "phone": 50, "linkedin_url": 500, "website": 500, "current_title": 200,
+    "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
+    "tags": 3000,  # all skills joined into one text
+}
+# Where the next new candidate and job id must start, so a deleted id is never handed out again
+# (an old AI chat that says "candidate 3" must not reach someone new). Kept in the settings table.
+ID_MARKS = {"candidates": "last_candidate_id", "jobs": "last_job_id"}
 
 CANDIDATE_FIELDS: tuple[str, ...] = (
     "name",
@@ -408,18 +418,53 @@ class NotFound(LookupError):
     pass
 
 
+def fold_text(text: str | None) -> str:
+    """Lowercase with accents removed, so 'José Álvarez' compares equal to 'jose alvarez'."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def _name_tokens(name: str | None) -> list[str]:
-    return re.sub(r"[^\w\s]|_", " ", (name or "").casefold()).split()
+    return re.sub(r"[^\w\s]|_", " ", fold_text(name)).split()
+
+
+def fold_name(name: str | None) -> str:
+    """A name's comparison key: 'José  Álvarez-Ruiz' -> 'jose alvarez ruiz'."""
+    return " ".join(_name_tokens(name))
+
+
+def phone_key(phone: str | None) -> str | None:
+    """The last 10 digits of a phone number, so '+1 (415) 555-0100' and '415.555.0100' match."""
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[-10:] if len(digits) >= 7 else None
+
+
+def _compatible(x: str, y: str) -> bool:
+    """Same word, or one is an initial or a start of the other ('R' and 'Raman', 'Dan' and 'Daniel')."""
+    return x.startswith(y) or y.startswith(x)
+
+
+def _names_line_up(ta: list[str], tb: list[str]) -> bool:
+    if not _compatible(ta[0], tb[0]):
+        return False
+    if len(ta) == 1 or len(tb) == 1:  # only a first name on one side
+        return True
+    # Both have a last name: it must be compatible, or appear among the other's later names
+    # ('Ana Ruiz' and 'Ana Ruiz-Lopez'). A shared first name alone is not enough.
+    return _compatible(ta[-1], tb[-1]) or ta[-1] in tb[1:] or tb[-1] in ta[1:]
 
 
 def same_person_name(a: str | None, b: str | None) -> bool:
     """Could these two names be the same person? 'Priya R.' and 'Priya Raman', 'P. Raman' and
-    'Priya Raman', 'ANA D.' and 'Ana Diaz' can; 'Ana Ruiz' and 'Ben Cole' can't."""
+    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman' can; 'Ana Ruiz' and
+    'Ben Cole' can't, and neither can 'Maya Smith' and 'Maya Okafor' (same first name, different last)."""
     ta, tb = _name_tokens(a), _name_tokens(b)
-    if not ta or not tb or ta == tb or ta[0] == tb[0] or sorted(ta) == sorted(tb):
+    if not ta or not tb or ta == tb or sorted(ta) == sorted(tb):
         return True
-    short, long = sorted((ta, tb), key=len)
-    return all(x.startswith(y) or y.startswith(x) for x, y in zip(short, long))
+    if _names_line_up(ta, tb):
+        return True
+    # Written last name first ('Raman, P.'): try one side the other way round.
+    return len(ta) == 2 and _names_line_up(ta[::-1], tb)
 
 
 class IdentityConflict(ValueError):
@@ -646,6 +691,11 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 10000")
+        # Deleted rows are overwritten with zeros, so a deleted person can't be read back out of
+        # the file. Some builds (macOS, Windows Python) default to off.
+        self._conn.execute("PRAGMA secure_delete = ON")
+        self._conn.create_function("fold_name", 1, fold_name, deterministic=True)
+        self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -692,6 +742,19 @@ class Store:
             finally:
                 target.close()
 
+    def _next_id(self, table: str) -> int:
+        """A fresh id for a new candidate or job, above every id ever used (deleted ones too).
+
+        Call inside a write transaction. The first statement takes the write lock, so the app
+        window and the MCP server can't pick the same id at once."""
+        key = ID_MARKS[table]
+        self._conn.execute("INSERT INTO settings(key, value) VALUES (?, '0') ON CONFLICT(key) DO NOTHING", (key,))
+        mark = self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()[0]
+        top = self._conn.execute(f"SELECT coalesce(max(id), 0) FROM {table}").fetchone()[0]
+        new_id = max(int(mark) if str(mark).isdigit() else 0, top) + 1
+        self._conn.execute("UPDATE settings SET value = ? WHERE key = ?", (str(new_id), key))
+        return new_id
+
     # --------------------------------------------------------------- settings
     def settings(self) -> dict[str, str]:
         out = dict(DEFAULT_SETTINGS)
@@ -729,6 +792,12 @@ class Store:
             out["tags"] = ", ".join(split_tags(out["tags"])) or None
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
+        for k, v in out.items():
+            limit = FIELD_LIMITS.get(k)
+            if limit and isinstance(v, str) and len(v) > limit:
+                label = {"tags": "the skills list"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
+                raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
+                                 f"The limit is {limit:,}, so nothing was saved.")
         if "linkedin_url" in out:
             out["linkedin_url"] = normalize_linkedin(out["linkedin_url"])
         if "last_contacted_at" in out and out["last_contacted_at"]:
@@ -767,10 +836,10 @@ class Store:
             clash = self._clash(None, fields)
             if clash:
                 raise clash
-            cur = self._conn.execute(
-                f"INSERT INTO candidates ({cols}) VALUES ({marks})", tuple(fields.values())
+            new_id = self._next_id("candidates")
+            self._conn.execute(
+                f"INSERT INTO candidates (id, {cols}) VALUES (?, {marks})", (new_id, *fields.values())
             )
-            new_id = cur.lastrowid
             self._sync_tags(new_id, fields.get("tags"))
             if work_history:
                 self._write_history(new_id, work_history)
@@ -798,8 +867,31 @@ class Store:
         return None
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
+        """Everyone saved under this name, ignoring case, accents and punctuation ('Jose Alvarez'
+        finds 'José Álvarez')."""
+        key = fold_name(name)
+        if not key:
+            return [self._hydrate(r) for r in self._rows(
+                "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC",
+                (_clean(name) or "",))]
         return [self._hydrate(r) for r in self._rows(
-            "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC", (_clean(name) or "",))]
+            "SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))]
+
+    def possible_duplicates(self, candidate_id: int) -> list[dict[str, Any]]:
+        """Other people who may be this same person: the same name (ignoring case and accents),
+        or the same email, LinkedIn URL or phone number."""
+        c = self.get_candidate(candidate_id)
+        key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
+        rows = self._rows(
+            """SELECT * FROM candidates WHERE id <> ? AND (
+                   (? <> '' AND fold_name(name) = ?)
+                   OR (? IS NOT NULL AND lower(email) = lower(?))
+                   OR (? IS NOT NULL AND linkedin_url = ?)
+                   OR (? IS NOT NULL AND phone_key(phone) = ?))
+               ORDER BY updated_at DESC LIMIT 10""",
+            (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
+             phone, phone))
+        return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
                          **data: Any) -> tuple[dict[str, Any], bool]:
@@ -844,9 +936,35 @@ class Store:
                 merged[k] = v
             elif cur != v:
                 kept.append(k)
-        cand = self._update(existing["id"], merged, work_history or None, by=by, merge=True)
+        history = work_history or self._history_for_new_role(existing["id"], row, merged)
+        cand = self._update(existing["id"], merged, history, by=by, merge=True)
         cand["_kept"] = kept
         return cand, False
+
+    def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
+                              merged: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """When a save changes the title or company, the saved work history follows, so it doesn't
+        still show the old role "to now". Same company: the current role is updated in place.
+        New company: the current role gets an end year and the new role goes on top. None when
+        nothing needs to change (or there is no saved history to keep in step)."""
+        def same(a: Any, b: Any) -> bool:
+            return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+        title = merged.get("current_title", row.get("current_title"))
+        company = merged.get("current_company", row.get("current_company"))
+        if same(title, row.get("current_title")) and same(company, row.get("current_company")):
+            return None
+        history = self.work_history(candidate_id)
+        if not history:
+            return None
+        top = history[0]
+        current = (top.get("end") or "").strip().lower() in ("", "present", "now", "current", "today")
+        if current and same(top.get("title"), title) and same(top.get("company"), company):
+            return None
+        if current and (same(top.get("company"), company) or not top.get("company")):
+            return [{**top, "title": title or top.get("title"), "company": company or top.get("company")}, *history[1:]]
+        rest = [{**top, "end": str(datetime.now().year)} if current else top, *history[1:]]
+        return [{"title": title, "company": company, "start": None, "end": None, "summary": None}, *rest]
 
     def get_candidate(self, candidate_id: int) -> dict[str, Any]:
         row = self._row("SELECT * FROM candidates WHERE id = ?", (candidate_id,))
@@ -938,10 +1056,16 @@ class Store:
             if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
                 raise NotFound(f"No timeline entry with id {timeline_id}")
             data = json.loads(entry["data"]) if entry.get("data") else None
+            if entry["kind"] == "stage" and data and data.get("pipeline"):
+                if data.get("undone_at"):
+                    raise ValueError("That change was already undone.")
+                return self._undo_stage(entry, data, by)
             if entry["kind"] != CHANGE_KIND or not data or not data.get("old"):
                 raise ValueError("Only a change to a profile can be undone.")
             if data.get("undone_at"):
                 raise ValueError("That change was already undone.")
+            if data.get("merged"):
+                raise ValueError("A merge can't be undone here. The backup taken just before it has both people.")
             cid = entry["candidate_id"]
             row = self._row("SELECT * FROM candidates WHERE id = ?", (cid,)) or {}
             history = self.work_history(cid)
@@ -971,12 +1095,127 @@ class Store:
         cand["_restored"], cand["_skipped"] = list(restore), skipped
         return cand
 
+    def mark_ai_stage(self, candidate_id: int, job_id: int, old_stage: str | None) -> None:
+        """Mark the newest stage entry for this candidate and job as the AI's, with what it replaced,
+        so the recruiter can undo it (an add takes them back out, a move puts them back)."""
+        with self._lock, self._conn:
+            entry = self._row("SELECT * FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'"
+                              " ORDER BY id DESC LIMIT 1", (candidate_id, job_id))
+            if entry is None or entry.get("data") or (old_stage or "").lower() == (entry["body"] or "").lower():
+                return
+            data = {"by": "ai", "pipeline": {"job_id": job_id, "old": old_stage, "new": entry["body"]}}
+            self._conn.execute("UPDATE timeline SET source = ?, data = ? WHERE id = ?",
+                               (CHANGE_SOURCES["ai"], json.dumps(data), entry["id"]))
+
+    def _undo_stage(self, entry: dict[str, Any], data: dict[str, Any], by: str) -> dict[str, Any]:
+        """Undo an AI stage move or pipeline add (see mark_ai_stage). Call inside a transaction."""
+        cid, move = entry["candidate_id"], data["pipeline"]
+        app = self._row("SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, move["job_id"]))
+        if app is None or app["stage"].lower() != (move["new"] or "").lower():
+            raise ValueError("They were moved again since, so there is nothing to undo.")
+        ts = now_iso()
+        if move.get("old"):
+            self._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
+                               (move["old"], ts, app["id"]))
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
+                " VALUES (?, ?, 'stage', ?, ?, ?, ?)", (cid, move["job_id"], move["old"], ts, ts,
+                                                        CHANGE_SOURCES.get(by, "App")))
+        else:
+            self._conn.execute("DELETE FROM applications WHERE id = ?", (app["id"],))
+        data["undone_at"] = ts
+        self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
+        cand = self.get_candidate(cid)
+        cand["_restored"], cand["_skipped"] = ["job stage" if move.get("old") else "job pipeline"], []
+        return cand
+
     def delete_candidate(self, candidate_id: int) -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
         if cur.rowcount == 0:
             raise NotFound(f"No candidate with id {candidate_id}")
+
+    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
+        """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
+
+        keep's empty fields are filled from other (last contacted takes the later date), skills are
+        combined, and other's timeline, to-dos, work history and jobs move to keep. When both are in
+        the same job, keep ends up in the further stage. A "change" entry on keep records what came
+        from where (it can't be undone with Undo; the backup taken before merging can). The
+        returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
+        """
+        if keep_id == other_id:
+            raise ValueError("Pick two different people to merge.")
+        self.get_candidate(keep_id)
+        other = self.get_candidate(other_id)
+        with self._lock, self._conn:
+            krow = self._row("SELECT * FROM candidates WHERE id = ?", (keep_id,))
+            orow = self._row("SELECT * FROM candidates WHERE id = ?", (other_id,))
+            fields: dict[str, Any] = {}
+            for k in CANDIDATE_FIELDS:
+                kv, ov = krow.get(k), orow.get(k)
+                if k == "tags":
+                    tags = ", ".join(split_tags(split_tags(kv) + split_tags(ov))) or None
+                    if tags != kv:
+                        fields[k] = tags
+                elif k == "last_contacted_at":
+                    if ov and (not kv or ov > kv):
+                        fields[k] = ov
+                elif ov and not kv:
+                    fields[k] = ov
+            mine = self.work_history(keep_id)
+            seen = {((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) for e in mine}
+            extra = [e for e in self.work_history(other_id)
+                     if ((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) not in seen]
+            if extra:
+                fields["work_history"] = mine + extra
+            moved = self._conn.execute("UPDATE timeline SET candidate_id = ? WHERE candidate_id = ?",
+                                       (keep_id, other_id)).rowcount
+            self._conn.execute("UPDATE suggestions SET candidate_id = ? WHERE candidate_id = ?", (keep_id, other_id))
+            jobs: list[str] = []
+            for app in self._rows("SELECT a.*, j.title FROM applications a JOIN jobs j ON j.id = a.job_id"
+                                  " WHERE a.candidate_id = ?", (other_id,)):
+                ours = self._row("SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?",
+                                 (keep_id, app["job_id"]))
+                jobs.append(app["title"])
+                if ours is None:
+                    self._conn.execute("UPDATE applications SET candidate_id = ? WHERE id = ?", (keep_id, app["id"]))
+                    continue
+                pos = {s["name"].lower(): s["position"] for s in self.job_stages(app["job_id"])}
+                if pos.get(app["stage"].lower(), -1) > pos.get(ours["stage"].lower(), -1):
+                    self._conn.execute(
+                        "UPDATE applications SET stage = ?, stage_changed_at = ?, notes = coalesce(notes, ?)"
+                        " WHERE id = ?", (app["stage"], app["stage_changed_at"], app["notes"], ours["id"]))
+            # other's email and LinkedIn URL are unique, so other goes before keep takes them.
+            self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
+            created = min(krow["created_at"], orow["created_at"])
+            if created != krow["created_at"]:
+                self._conn.execute("UPDATE candidates SET created_at = ? WHERE id = ?", (created, keep_id))
+            old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields}
+            if fields:
+                self._apply(keep_id, fields)
+            filled = [k for k in fields if k not in ("tags", "work_history")]
+            bits = [f"filled {_labels(filled)}"] if filled else []
+            if "tags" in fields:
+                bits.append("added skills")
+            if moved:
+                bits.append(f"moved {moved} timeline entr{'y' if moved == 1 else 'ies'}")
+            if jobs:
+                bits.append(f"{len(jobs)} job{'' if len(jobs) == 1 else 's'}")
+            body = f"Merged in {other['name']} (id {other_id})" + (": " + ", ".join(bits) if bits else "") + "."
+            ts = now_iso()
+            by = by if by in CHANGE_SOURCES else "app"
+            info = {"id": other_id, "name": other["name"], "email": orow.get("email"),
+                    "linkedin_url": orow.get("linkedin_url"), "phone": orow.get("phone"), "timeline": moved,
+                    "jobs": jobs}
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (keep_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
+                 json.dumps({"by": by, "old": old, "new": fields, "merged": info})))
+        cand = self.get_candidate(keep_id)
+        cand["_merged"] = {"name": other["name"], "filled": filled, "timeline": moved, "jobs": jobs}
+        return cand
 
     def recent_candidates(self, limit: int = 25, offset: int = 0) -> list[dict[str, Any]]:
         return [self._hydrate(r) for r in self._rows(
@@ -1074,8 +1313,9 @@ class Store:
         )
         for r in rows:
             r["data"] = json.loads(r["data"]) if r.get("data") else None
-            r["undoable"] = bool(r["kind"] == CHANGE_KIND and r["data"] and r["data"].get("old")
-                                 and not r["data"].get("undone_at"))
+            r["undoable"] = bool(r["kind"] in (CHANGE_KIND, "stage") and r["data"]
+                                 and (r["data"].get("old") or r["data"].get("pipeline"))
+                                 and not r["data"].get("undone_at") and not r["data"].get("merged"))
         return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -1181,16 +1421,17 @@ class Store:
         plan = _stage_plan(stages) if stages else list(DEFAULT_STAGES)
         ts = now_iso()
         with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO jobs (title, company, location, description, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (_clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts),
+            job_id = self._next_id("jobs")
+            self._conn.execute(
+                "INSERT INTO jobs (id, title, company, location, description, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, _clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts),
             )
             self._conn.executemany(
                 "INSERT INTO job_stages(job_id, name, position, outcome) VALUES (?, ?, ?, ?)",
-                [(cur.lastrowid, n, i, o) for i, (n, o) in enumerate(plan)],
+                [(job_id, n, i, o) for i, (n, o) in enumerate(plan)],
             )
-        return self.get_job(cur.lastrowid)
+        return self.get_job(job_id)
 
     def similar_open_jobs(self, title: str | None, company: str | None,
                           exclude: int | None = None) -> list[dict[str, Any]]:

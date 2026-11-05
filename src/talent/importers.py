@@ -143,20 +143,24 @@ def rows_to_candidates(header: list[str], rows: Iterable[list[str]], mapping: li
         yield data
 
 
-def backup_before_import(store: Store, keep: int = BACKUPS_KEPT) -> Path:
-    """Copy the whole database into the data folder's backups/ first. Keeps the newest `keep` of these."""
+def backup_before_import(store: Store, keep: int = BACKUPS_KEPT, reason: str = "import") -> Path:
+    """Copy the whole database into the data folder's backups/ first. Keeps the newest `keep` of these.
+
+    `reason` names the file ("before-import-...", "before-delete-..."); each reason keeps its own `keep`."""
     folder = backups_dir()
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    dest, n = folder / f"before-import-{stamp}.db", 1
+    prefix = "before-" + re.sub(r"[^a-z0-9]+", "-", reason.lower()).strip("-") + "-"
+    dest, n = folder / f"{prefix}{stamp}.db", 1
     while dest.exists():
-        dest, n = folder / f"before-import-{stamp}-{n}.db", n + 1
+        dest, n = folder / f"{prefix}{stamp}-{n}.db", n + 1
     try:
         os.close(os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         store.backup_to(dest)
     except (OSError, sqlite3.Error) as exc:
         dest.unlink(missing_ok=True)
-        raise ValueError(f"Couldn't save a backup before importing, so nothing was changed ({exc}).") from exc
-    old = sorted(folder.glob("before-import-*.db"), key=lambda f: (f.stat().st_mtime, f.name))
+        doing = "importing" if reason == "import" else "making this change"
+        raise ValueError(f"Couldn't save a backup before {doing}, so nothing was changed ({exc}).") from exc
+    old = sorted(folder.glob(f"{prefix}*.db"), key=lambda f: (f.stat().st_mtime, f.name))
     for f in old[:-keep] if keep > 0 else []:
         f.unlink(missing_ok=True)
     return dest

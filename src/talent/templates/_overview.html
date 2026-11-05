@@ -19,7 +19,7 @@
 <section class="welcome panel">
   <div class="sec-head">
     <h2>Add your first real candidate</h2>
-    {% if has_sample %}<form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs? Your own data stays.')"><button class="btn small" type="submit">Remove sample data</button></form>{% endif %}
+    {% if has_sample %}<form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs you haven\'t worked with? A backup is saved first, and anything you added or changed is kept.')"><button class="btn small" type="submit">Remove sample data</button></form>{% endif %}
   </div>
   {% if has_sample %}<p class="fine">You're looking at made-up sample data, marked Sample. Remove it when you're ready.</p>{% endif %}
   {{ start_options(False) }}

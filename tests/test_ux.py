@@ -131,7 +131,8 @@ def test_sample_data_badges_and_remove(store):
     assert store.count_candidates() == 1 and [j["id"] for j in store.list_jobs()] == [real_job["id"]]
     assert sample_ids(store) == (set(), set())
     assert "Removed the sample data" in c.get(r.headers["location"]).text
-    assert remove_sample_data(store) == (0, 0)
+    again = remove_sample_data(store)
+    assert (again["people"], again["jobs"], again["kept_people"]) == (0, 0, [])
 
 
 def test_welcome_stays_until_a_real_candidate_and_search_hidden_when_empty(store):
