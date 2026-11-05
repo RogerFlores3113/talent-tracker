@@ -67,11 +67,11 @@
           {% if i.kind == 'feedback_owed' %}
           <ul class="sessions">
           {% for o in i.owed %}
-            <li>{{ o.name }} <span class="fine">on {{ o.session }}</span>
-              <a class="link small" href="{{ o.mailto }}" title="Opens your own mail app with the request filled in. Nothing is sent until you send it.">Email {{ o.name }}</a>
-              <button type="button" class="link small" data-copy-text="{{ o.body }}">Copy request</button></li>
+            <li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a> <span class="fine">{{ o.session }}, {{ o.day }}</span></li>
           {% endfor %}
           </ul>
+          <a class="link small" href="{{ i.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ i.who }}</a>
+          <button type="button" class="link small" data-copy-text="{{ i.subject }}&#10;&#10;{{ i.body }}">Copy request</button>
           {% endif %}
         </div>
         <div class="item-acts">
@@ -127,7 +127,7 @@
           <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Reschedule</a>
           {% if i.started %}<a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Record outcome</a>{% endif %}
           {% elif i.kind == 'feedback_owed' %}
-          <a class="btn small" href="{{ i.href }}">Add feedback</a>
+          <a class="btn small" href="{{ i.href }}">{{ 'Add feedback' if i.candidate_id else 'See interviews' }}</a>
           {% endif %}
           {% if i.kind not in ('suggestion', 'interview_out') %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>

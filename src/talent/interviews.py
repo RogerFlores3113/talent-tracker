@@ -16,9 +16,18 @@ from urllib.parse import quote
 
 from . import actions
 from .store import (CHANGE_SOURCES, INTERVIEW_VERDICTS, VERDICT_LABELS, Store, _legacy_verdict, as_local,
-                    interview_note, now_iso, shown_zone, to_dt)
+                    interview_note, now_iso, quoted, shown_zone, to_dt)
 
 SESSION_MINUTES = 45  # interviews have no length saved; two starting closer than this overlap
+
+
+_LENGTH = re.compile(r"(?<![\w.])(\d{2,3})\s*(?:min|mins|minutes|m)\b", re.I)
+
+
+def session_minutes(t: dict[str, Any]) -> int:
+    """How long a session runs: '(30 min)' or '30 minutes' in its summary, else SESSION_MINUTES."""
+    m = _LENGTH.search(str(t.get("body") or ""))
+    return min(480, max(10, int(m.group(1)))) if m else SESSION_MINUTES
 
 
 def week_start(day: date | None = None) -> date:
@@ -104,9 +113,19 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
     owed = [{"name": lp["name"], "candidate_id": lp["candidate_id"], "interview_id": x["interview_id"],
              "session": x["name"], "at": x["at"], "outcome": x["needs_outcome"], "feedback": x["owed"]}
             for lp in loops for x in lp["sessions"] if x["needs_outcome"] or x["owed"]]
+    by_id = {t["id"]: t for t in rows}
+    entries = []
+    for o in owed:
+        t = by_id[o["interview_id"]]
+        for who in o["feedback"]:
+            email = next((email_of(n) for n in named(t) if display_name(n) == who and email_of(n)), None)
+            entries.append({"who": who, "email": email, "candidate_id": o["candidate_id"], "name": o["name"],
+                            "job_id": t.get("job_id"), "job": None, "interview_id": o["interview_id"],
+                            "session": o["session"], "at": o["at"], "day": actions.local_time(o["at"], "%a %b %-d")})
     return {"start": monday, "end": days[-1]["day"], "prev": monday - timedelta(days=7),
             "next": monday + timedelta(days=7), "days": days, "loops": loops, "total": len(rows), "clashes": clashes,
-            "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold())), "owed": owed}
+            "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold())), "owed": owed,
+            "owed_people": group_owed(entries)}
 
 
 def _chase_pairs(store: Store, pairs: set[tuple[int, Any]]) -> set[tuple[int, Any]]:
@@ -136,12 +155,13 @@ def _owing(t: dict[str, Any], now_iso: str, chase: set[tuple[int, Any]] | None =
 
 
 def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Two sessions closer than SESSION_MINUTES with the same interviewer, or with the same candidate."""
+    """Two sessions that overlap (each runs session_minutes long, 45 unless its summary says '(30 min)') with the
+    same interviewer, or with the same candidate. Back-to-back sessions are not a clash."""
     out = []
-    gap = timedelta(minutes=SESSION_MINUTES)
     for i, a in enumerate(rows):
+        end = to_dt(a["at"]) + timedelta(minutes=session_minutes(a))
         for b in rows[i + 1:]:
-            if to_dt(b["at"]) - to_dt(a["at"]) >= gap:
+            if to_dt(b["at"]) >= end:
                 break
             when = actions.local_time(a["at"], actions.IV_TIME)
             shared = {w.casefold() for w in interviewers(actions.interviewer_of(a))} & \
@@ -171,6 +191,8 @@ def week_text(w: dict[str, Any]) -> str:
     if w["load"]:
         lines.append("Interviewer load: " + ", ".join(f"{e['name']} {e['count']}" for e in w["load"]) + ".")
     lines += [f"Clash: {c['text']}." for c in w["clashes"]]
+    for p in w.get("owed_people") or []:
+        lines.append(f"Feedback owed: {p['summary']}.")
     for o in w.get("owed") or []:
         bits = (["needs an outcome"] if o["outcome"] else []) + (
             [f"feedback owed by {', '.join(o['feedback'])}"] if o["feedback"] else [])
@@ -207,13 +229,58 @@ def named(t: dict[str, Any]) -> list[str]:
     return list(seen.values())
 
 
+def _tokens(name: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", display_name(name or "").casefold())
+
+
+def name_matches(given: str, full: str) -> bool:
+    """'Priya' or 'Tia B.' loosely matches 'Priya Nair' or 'Tia Brandt': every word of the shorter name starts
+    a word of the longer one, in any case."""
+    a, b = _tokens(given), _tokens(full)
+    if not a or not b:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    return all(any(w.startswith(x) for w in b) for x in a)
+
+
+def resolve_name(given: str, names: list[str]) -> tuple[str | None, list[str]]:
+    """(the one name it means, []) or (None, the names it could be) or (None, []). An exact match (any case) wins."""
+    exact = [n for n in names if display_name(n).casefold() == display_name(given).casefold()]
+    if exact:
+        return display_name(exact[0]), []
+    hits = list(dict.fromkeys(display_name(n) for n in names if name_matches(given, n)))
+    return (hits[0], []) if len(hits) == 1 else (None, hits)
+
+
+def pick_interviewer(t: dict[str, Any], who: str | None) -> str | None:
+    """The named interviewer of this session that `who` means ('Priya' -> 'Priya Nair'). A name that matches
+    nobody on the session is kept as typed (someone who stood in); one that fits two raises, listing them."""
+    who = " ".join((who or "").split())
+    if not who:
+        return None
+    hit, many = resolve_name(who, named(t))
+    if hit:
+        return hit
+    if many:
+        raise ValueError(f"{quoted(who)} could be {', '.join(many[:-1])} or {many[-1]}. Say which one by their "
+                         "full name. Nothing was saved.")
+    return display_name(who)
+
+
+def _key_for(by: str, names: list[str]) -> str:
+    hit, _ = resolve_name(by, names)
+    return (hit or display_name(by)).casefold()
+
+
 def verdicts(t: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """{folded name: {by, verdict, at, source}}: each interviewer's latest verdict on this session ('' when
-    nobody was named)."""
+    nobody was named). A first name or short form ('Priya') counts as the named interviewer it fits."""
+    names = [display_name(n) for n in named(t)]
     out: dict[str, dict[str, Any]] = {}
     for v in _data(t).get("verdicts") or []:
         if isinstance(v, dict) and v.get("verdict") in VERDICT_SCORE:
-            out[display_name(v.get("by") or "").casefold()] = v
+            out[_key_for(v.get("by") or "", names)] = v
     return out
 
 
@@ -237,7 +304,8 @@ def owed_by(t: dict[str, Any]) -> list[str]:
     d = _data(t)
     if d.get("status") == "cancelled":
         return []
-    gave = {display_name(f.get("by") or "").casefold() for f in d.get("feedback") or [] if isinstance(f, dict)}
+    names = [display_name(n) for n in named(t)]
+    gave = {_key_for(f.get("by") or "", names) for f in d.get("feedback") or [] if isinstance(f, dict)}
     gave |= set(verdicts(t))
     return [display_name(w) for w in named(t) if display_name(w).casefold() not in gave]
 
@@ -271,8 +339,7 @@ def give_verdict(store: Store, interview_id: int, verdict: str, interviewer: str
     if not who and len(names) > 1:
         raise ValueError("Say whose verdict this is: " + ", ".join(display_name(n) for n in names) + ".")
     if who:
-        who = next((display_name(n) for n in names if display_name(n).casefold() == display_name(who).casefold()),
-                   display_name(who))
+        who = pick_interviewer(iv, who)
     data = dict(iv["data"])
     word = key.replace(" ", "_")
     body = (note or "").strip() or None
@@ -307,6 +374,16 @@ def give_verdict(store: Store, interview_id: int, verdict: str, interviewer: str
     return store.get_interview(interview_id)
 
 
+def owed_after(iv: dict[str, Any]) -> str:
+    """' Still owed on that session: Tia Brandt.' or ' Nobody else owes feedback on that session.' ('' when it
+    names no interviewers or hasn't happened yet)."""
+    if not named(iv) or iv.get("at", "") > now_iso():
+        return ""
+    left = owed_by(iv)
+    return (" Still owed on that session: " + ", ".join(left) + ".") if left else \
+        " Nobody else owes feedback on that session."
+
+
 def verdict_rows(t: dict[str, Any]) -> list[dict[str, Any]]:
     """Each named interviewer (and anyone else who gave a verdict) with their latest verdict label, or None."""
     vs = verdicts(t)
@@ -315,6 +392,12 @@ def verdict_rows(t: dict[str, Any]) -> list[dict[str, Any]]:
     have = {r["name"].casefold() for r in rows}
     rows += [{"name": v.get("by") or "", "verdict": v["verdict"]} for k, v in vs.items() if k not in have]
     return [{**r, "label": VERDICT_LABELS.get(r["verdict"] or "")} for r in rows]
+
+
+def verdicts_missing(t: dict[str, Any]) -> int:
+    """Named interviewers who gave no verdict on a session that has others' verdicts (0 when nobody gave one)."""
+    vs = verdicts(t)
+    return sum(1 for n in named(t) if display_name(n).casefold() not in vs) if vs else 0
 
 
 def tally(sessions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -363,6 +446,58 @@ def mailto(who: str, subject: str, body: str) -> str:
     return f"mailto:{quote(email_of(who) or '', safe='@')}?subject={quote(subject)}&body={quote(body)}"
 
 
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def person_request(who: str, items: list[dict[str, Any]]) -> tuple[str, str]:
+    """(subject, body) of ONE feedback request to one interviewer covering all the sessions they owe."""
+    if len(items) == 1:
+        i = items[0]
+        return request_text(who, i["name"], i["session"], i["day"])
+    first = display_name(who).split(" ")[0] or "there"
+    names = list(dict.fromkeys(i["name"] for i in items))
+    lines = "\n".join(f"- {i['name']}: {i['session']}, {i['day']}" for i in items)
+    subject = "Feedback on " + _and(names)
+    body = (f"Hi {first},\n\nCould you send me your feedback on these interviews? A few lines on how each went and "
+            f"your verdict (strong yes, yes, mixed, no or strong no) is plenty.\n\n{lines}\n\nThanks!")
+    return subject, body
+
+
+def group_owed(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per interviewer from per-session entries {who, email, candidate_id, name, job_id, job,
+    interview_id, session, at, day, chased}: {name, email, count, candidates, items, summary, subject, body,
+    mailto, chased}. 'Priya' and 'Priya Shah' are one person when only one name fits. Most owed first."""
+    known: list[str] = []
+    canon: dict[str, str] = {}
+    for n in sorted({e["who"] for e in entries}, key=lambda n: (-len(n), n.casefold())):
+        hit, _ = resolve_name(n, known)
+        canon[n] = hit or n
+        if not hit:
+            known.append(n)
+    people: dict[str, list[dict[str, Any]]] = {}
+    for e in sorted(entries, key=lambda e: (e["at"], e["interview_id"])):
+        people.setdefault(canon[e["who"]], []).append(e)
+    out = []
+    for who, items in people.items():
+        names = list(dict.fromkeys(i["name"] for i in items))
+        subject, body = person_request(who, items)
+        email = next((i["email"] for i in items if i.get("email")), None)
+        out.append({"name": who, "email": email, "count": len(items), "candidates": names, "items": items,
+                    "summary": f"{who} owes {len(items)}: " + ", ".join(names), "subject": subject, "body": body,
+                    "mailto": mailto(f"{who} <{email}>" if email else who, subject, body),
+                    "chased": any(i.get("chased", True) for i in items)})
+    return sorted(out, key=lambda p: (-p["count"], p["name"].casefold()))
+
+
+def owed_people(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """feedback_owed's loops, regrouped by the interviewer who owes: 'Priya Shah owes 3: Dana, Omar, Lena'."""
+    return group_owed([{"who": o["name"], "email": o.get("email"), "candidate_id": r["candidate_id"], "name": r["name"],
+                        "job_id": r["job_id"], "job": r["job"], "interview_id": o["interview_id"],
+                        "session": o["session"], "at": r["at"], "day": r["day"], "chased": o.get("chased", True)}
+                       for r in rows for o in r["owed"]])
+
+
 def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None = None,
                   hours: int = CHASE_HOURS, days: int = CHASE_DAYS, recent: bool = False) -> list[dict[str, Any]]:
     """Loops with feedback still owed: sessions at least `hours` ago and at most `days` ago, for people still in
@@ -408,16 +543,22 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
 
 
 def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Today: 'Feedback owed on Tomas Okafor (Tue Nov 3)', one per loop, a request per interviewer inside."""
+    """Today: 'Priya Shah owes feedback on 3 interviews', one per interviewer across all their candidates, with
+    one request (subject, body, mailto) to send."""
     out = []
-    for r in feedback_owed(store, now):
-        people = list(dict.fromkeys(o["name"] for o in r["owed"]))
-        several = len({o["interview_id"] for o in r["owed"]}) > 1
-        out.append({"key": r["key"], "kind": "feedback_owed", "rank": 1, "when": r["at"],
-                    "title": f"Feedback owed on {r['name']}'s interview{'s' if several else ''} ({r['day']})",
-                    "detail": " · ".join(x for x in (r["job"], "Owed by " + ", ".join(people)) if x),
-                    "owed": r["owed"], "candidate_id": r["candidate_id"], "job_id": r["job_id"],
-                    "href": f"/jobs/{r['job_id']}/decide#c{r['candidate_id']}"})
+    for p in owed_people(feedback_owed(store, now)):
+        first = p["items"][0]
+        jobs = list(dict.fromkeys(i["job"] for i in p["items"]))
+        one = len(p["candidates"]) == 1 and len({i["job_id"] for i in p["items"]}) == 1
+        out.append({"key": "feedback_owed:" + re.sub(r"\W+", "-", p["name"].casefold()).strip("-"),
+                    "kind": "feedback_owed", "rank": 1, "when": first["at"], "who": p["name"],
+                    "title": f"{p['name']} owes feedback on {p['count']} interview{'' if p['count'] == 1 else 's'}",
+                    "detail": " · ".join(x for x in (", ".join(jobs), "On " + _and(p["candidates"])) if x),
+                    "owed": [{"name": i["name"], "session": i["session"], "day": i["day"],
+                              "interview_id": i["interview_id"], "candidate_id": i["candidate_id"]} for i in p["items"]],
+                    "subject": p["subject"], "body": p["body"], "mailto": p["mailto"], "email": p["email"],
+                    "candidate_id": first["candidate_id"] if one else None, "job_id": first["job_id"] if one else None,
+                    "href": (f"/jobs/{first['job_id']}/decide#c{first['candidate_id']}" if one else "/interviews")})
     return out
 
 
@@ -429,9 +570,14 @@ def feedback_owed_text(rows: list[dict[str, Any]]) -> str:
         return "Nobody owes interview feedback right now. " + rule
     n = sum(len(r["owed"]) for r in rows)
     fresh = sum(1 for r in rows for o in r["owed"] if not o.get("chased", True))
+    people = owed_people(rows)
     lines = [f"{n} feedback request{'' if n == 1 else 's'} owed across {len(rows)} loop{'' if len(rows) == 1 else 's'}"
-             + (f" ({fresh} not chased yet)" if fresh else "") + ". Draft the nudges for the recruiter to send from "
-             "their own mail. Nothing is sent by Talent Search. " + rule]
+             f", from {len(people)} {'person' if len(people) == 1 else 'people'}"
+             + (f" ({fresh} not chased yet)" if fresh else "") + ". Draft ONE nudge per interviewer covering all "
+             "their candidates (not one per candidate) for the recruiter to send from their own mail. Nothing is "
+             "sent by Talent Search. " + rule]
+    lines += ["By interviewer:"] + [f"- {p['summary']}" + (f" <{p['email']}>" if p["email"] else "")
+                                    + f". Suggested subject: {p['subject']}" for p in people]
     for r in rows:
         lines.append(f"## {r['name']} (candidate id {r['candidate_id']}), {r['job']}, {r['day']}")
         lines += [f"- {o['name']}" + (f" <{o['email']}>" if o["email"] else "") + f" owes feedback on {o['session']} "
@@ -453,5 +599,6 @@ def future_note(at: str | None, kind: str, now: datetime | None = None) -> str |
 
 
 __all__ = ["CHASE_DAYS", "CHASE_HOURS", "VERDICT_CHOICES", "feedback_owed", "feedback_owed_text", "future_note",
-           "give_verdict", "interviewers", "named", "owed_by", "rollup", "tally", "today_items", "verdict_rows",
+           "give_verdict", "group_owed", "interviewers", "name_matches", "named", "owed_by", "owed_people",
+           "pick_interviewer", "resolve_name", "session_minutes", "verdicts_missing", "rollup", "tally", "today_items", "verdict_rows",
            "verdicts", "week", "week_day", "week_start", "week_text"]

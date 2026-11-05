@@ -149,7 +149,7 @@ def test_decide_tally_inline_verdict_and_open_sessions_warning(store):
     r = client.post(f"/candidates/{cid}/interviews/{iv}/feedback",
                     data={"interviewer": "Kim Lee", "text": "Great systems depth", "verdict": "yes",
                           "next": f"/jobs/{jid}/decide"}, follow_redirects=False)
-    assert flash_of(r) == "Feedback saved."
+    assert flash_of(r) == "Feedback saved. Nobody else owes feedback on that session."  # c7 B: says who is owed
     assert store.get_interview(iv)["data"]["verdict"] == "mixed"
 
 
@@ -203,11 +203,11 @@ def test_feedback_chase_today_item_mailto_and_mcp(store):
                    interviewer="Kim Lee, Alex Ruiz <alex@lumen.com>")["id"]
     store.log(cid, "interview", "Fresh one", at=_ago(3), job_id=jid, interviewer="Dana Whitfield")  # under a day
     items = [i for i in actions.action_items(store)["items"] if i["kind"] == "feedback_owed"]
-    assert len(items) == 1
-    owed = items[0]["owed"]
-    assert [o["name"] for o in owed] == ["Kim Lee", "Alex Ruiz"]
-    assert owed[1]["mailto"].startswith("mailto:alex@lumen.com?subject=") and owed[0]["mailto"].startswith("mailto:?")
-    assert "Tomas Okafor" in owed[0]["body"] and "—" not in owed[0]["body"]
+    assert len(items) == 2  # c7 B: one item per interviewer, not per loop
+    by = {i["who"]: i for i in items}
+    assert [o["name"] for o in by["Kim Lee"]["owed"]] == ["Tomas Okafor"]
+    assert by["Alex Ruiz"]["mailto"].startswith("mailto:alex@lumen.com?subject=") and by["Kim Lee"]["mailto"].startswith("mailto:?")
+    assert "Tomas Okafor" in by["Kim Lee"]["body"] and "—" not in by["Kim Lee"]["body"]
     page = local_client(store).get("/").text
     assert "Feedback owed" in page and "Email Alex Ruiz" in page and "Copy request" in page
     res = call(build_server(store), "list_feedback_owed")

@@ -30,7 +30,7 @@ from . import __version__, actions, backups, importers, integrations, paths, rec
 from . import sessions
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
-from . import decide, interviews, offers
+from . import decide, interviews, loops, offers
 from . import chase
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -38,7 +38,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
-from .store import as_local
+from .store import as_local, parse_when
 from .store import BATCH_KINDS
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
@@ -1809,38 +1809,113 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def _ids(raw: str) -> list[int]:
         return [int(x) for x in re.split(r"[,\s]+", raw or "") if x.isdigit()][:6]
 
-    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
-    def decide_page(request: Request, job_id: int, ids: str = ""):
-        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+    def _decide_back(job_id: int, error: str) -> RedirectResponse:
+        """Always back to a fresh Decide form (never the page the stale form was sent from)."""
+        return RedirectResponse(f"/jobs/{job_id}/decide?{urlencode({'flash_error': error})}", status_code=303)
+
+    def _render_decide(request: Request, job_id: int, ids: str = "", warn: dict[str, Any] | None = None):
         job = job_or_404(job_id)
         try:
             d = decide.finalists(store, job_id, _ids(ids) or None)
         except ValueError as exc:
             return back(request, f"/jobs/{job_id}/decide", error=str(exc))
         return page(request, "decide.html", job=job, people=d["people"], more=d["more"], offer_stage=d["offer_stage"],
-                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))),
+                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))), warn=warn,
                     pass_label="Hiring team passed" if actions.inhouse(store) else "Client passed")
+
+    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
+    def decide_page(request: Request, job_id: int, ids: str = ""):
+        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+        return _render_decide(request, job_id, ids)
 
     @app.post("/jobs/{job_id}/decide")
     async def decide_form(request: Request, job_id: int):
-        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes."""
+        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes. When
+        feedback or an outcome is still missing for anyone in it, the page asks first (and can add nudge to-dos)."""
         job_or_404(job_id)
         form = await request.form()
         offer = str(form.get("offer") or "")
         if not offer.isdigit() and offer != "none":
-            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer, or No offer yet.")
+            return _decide_back(job_id, "Pick who gets the offer, or No offer yet.")
         passed = [int(v) for v in form.getlist("pass") if str(v).isdigit()]
+        offer_id = int(offer) if offer.isdigit() else None
+        reason, note = str(form.get("reason") or "") or None, str(form.get("note") or "") or None
+        if not form.get("confirmed"):
+            missing = decide.missing_for(store, job_id, ([] if offer_id is None else [offer_id]) + passed)
+            if missing:
+                return _render_decide(request, job_id, str(form.get("ids") or ""), warn={
+                    "lines": decide.warning_lines(missing), "offer": offer, "pass": passed, "reason": reason or "",
+                    "note": note or "", "ids": str(form.get("ids") or ""),
+                    "owed": bool(any(m["owed"] for m in missing))})
         try:
-            res = decide.record_decision(store, job_id, int(offer) if offer.isdigit() else None, passed,
-                                         reason=str(form.get("reason") or "") or None,
-                                         note=str(form.get("note") or "") or None, by="app")
+            res = decide.record_decision(store, job_id, offer_id, passed, reason=reason, note=note, by="app",
+                                         nudge=bool(form.get("nudge")))
         except (ValueError, NotFound) as exc:
-            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+            return _decide_back(job_id, str(exc))
+        lets = res.get("todos", 0) - res.get("nudged", 0)
         notice = f"Recorded: {res['text']}." + (
             f" Cancelled {res['cancelled']} interview{'' if res['cancelled'] == 1 else 's'} still ahead." if res["cancelled"]
-            else "") + (f" Added {res['todos']} to-do{'' if res['todos'] == 1 else 's'} on Today to let them know."
-                        if res.get("todos") else "") + " You can undo it under Changes."
+            else "") + (f" Added {lets} to-do{'' if lets == 1 else 's'} on Today to let them know." if lets > 0 else ""
+                        ) + (f" Added {res['nudged']} to-do{'' if res['nudged'] == 1 else 's'} to ask for the missing "
+                             "feedback." if res.get("nudged") else "") + " You can undo it under Changes."
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
+
+    # ------------------------------------------------- the loop planner
+    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+        job = job_or_404(job_id)
+        tpl = loops.get_template(store, job_id)
+        people = actions.in_play(store, job_id)
+        plan, error = None, ""
+        if candidate.isdigit() and tpl:
+            try:
+                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out))
+            except (ValueError, NotFound) as exc:
+                error = str(exc)
+        return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
+                    hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
+                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
+                    plan_error=error)
+
+    @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
+    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+        """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
+        return _loop_page(request, job_id, candidate, start, out)
+
+    @app.post("/jobs/{job_id}/loop/template")
+    async def loop_template_form(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        try:
+            saved = loops.save_template(store, job_id, str(form.get("sessions") or ""), str(form.get("hours") or ""))
+        except ValueError as exc:
+            return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        note = (f"Saved the loop template: {len(saved['sessions'])} session{'' if len(saved['sessions']) == 1 else 's'}."
+                if saved["sessions"] else "Removed the loop template.")
+        return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'notice': note})}", status_code=303)
+
+    @app.post("/jobs/{job_id}/loop/book")
+    async def loop_book_form(request: Request, job_id: int):
+        """Log the planned sessions as interviews (the same as logging each by hand). No calendar is written."""
+        job_or_404(job_id)
+        form = await request.form()
+        cid = str(form.get("candidate_id") or "")
+        names, ats = form.getlist("s_name"), form.getlist("s_at")
+        mins, whos = form.getlist("s_min"), form.getlist("s_who")
+        try:
+            if not cid.isdigit() or not names or not len(names) == len(ats) == len(mins) == len(whos):
+                raise ValueError("There is nothing to book. Plan the loop again.")
+            tpl = {x["name"].casefold(): x["name"] for x in (loops.get_template(store, job_id) or {"sessions": []})["sessions"]}
+            slots = [{"session": tpl[n.casefold()], "at": parse_when(a), "minutes": max(10, min(240, int(m))),
+                      "interviewer": w or None}
+                     for n, a, m, w in zip(names, ats, mins, whos) if n.casefold() in tpl and m.isdigit()][:loops.MAX_SESSIONS]
+            if not slots:
+                raise ValueError("There is nothing to book. Plan the loop again.")
+            loops.book(store, int(cid), job_id, slots, by="app")
+        except (ValueError, NotFound) as exc:
+            return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc), 'candidate': cid})}",
+                                    status_code=303)
+        note = f"Logged {len(slots)} interview{'' if len(slots) == 1 else 's'}. You can see them under Interviews."
+        return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'notice': note})}", status_code=303)
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/feedback")
     async def feedback_form(request: Request, candidate_id: int, entry_id: int):
@@ -1863,7 +1938,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return back(request, nxt, error=str(exc))
         sep = "&" if "?" in nxt else "?"
-        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
+        left = interviews.owed_after(store.get_interview(entry_id))
+        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.' + left})}#iv-{entry_id}",
+                                status_code=303)
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/verdict")
     async def verdict_form(request: Request, candidate_id: int, entry_id: int):
@@ -1879,7 +1956,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That interview isn't on this profile.")
         except ValueError as exc:
             return back(request, nxt, error=str(exc))
-        notice = f"Saved. The session now reads {interview_label(iv['data']) or 'as recorded'}."
+        notice = f"Saved. The session now reads {interview_label(iv['data']) or 'as recorded'}." + \
+            interviews.owed_after(iv)
         sep = "&" if "?" in nxt else "?"
         return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': notice})}#iv-{entry_id}", status_code=303)
 

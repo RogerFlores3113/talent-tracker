@@ -3275,6 +3275,9 @@ class Store:
             raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
         if iv["status"] == "cancelled":
             raise ValueError("That interview was cancelled, so it has no feedback. Put it back first if it happened.")
+        if who:  # 'Priya' or 'tia b.' means the named interviewer it fits, so nobody stays owed by a spelling
+            from . import interviews
+            who = interviews.pick_interviewer(iv, who)
         data = dict(iv["data"])
         notes = [f for f in data.get("feedback") or [] if isinstance(f, dict)]
         if any((f.get("by") or "").casefold() == (who or "").casefold() and f.get("text") == body for f in notes):

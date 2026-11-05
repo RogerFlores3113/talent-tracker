@@ -3,4 +3,5 @@
   <a href="/jobs/{{ job.id }}" class="{{ 'on' if request.url.path == '/jobs/' ~ job.id }}">Pipeline</a>
   <a href="/jobs/{{ job.id }}/shortlist" class="{{ 'on' if request.url.path.endswith('/shortlist') }}">Shortlist{% if waiting %} <span class="badge shortlist">{{ waiting }}</span>{% endif %}</a>
   <a href="/jobs/{{ job.id }}/decide" class="{{ 'on' if request.url.path.endswith('/decide') }}" title="Compare the finalists and record who gets the offer">Decide</a>
+  <a href="/jobs/{{ job.id }}/loop" class="{{ 'on' if request.url.path.endswith('/loop') }}" title="Plan an onsite loop: slots, who runs each session and invite text">Loop</a>
 </nav>
