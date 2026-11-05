@@ -4110,8 +4110,8 @@ VERDICT_LABELS = {"strong_yes": "Strong yes", "yes": "Yes", "lean_yes": "Lean ye
 INTERVIEW_OUTCOME_CHOICES = ("passed", "not passed", "no show", "strong yes", "yes", "mixed", "no", "strong no")
 # What the app offers when recording how an interview went (Today's buttons, the profile's menu): value, label.
 INTERVIEW_RESULT_CHOICES = (("strong yes", "Strong yes"), ("yes", "Yes"), ("mixed", "Mixed"), ("no", "No"),
-                            ("no show", "No show"))
-INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:4], ("strong no", "Strong no"), ("passed", "Passed"),
+                            ("strong no", "Strong no"), ("no show", "No show"))
+INTERVIEW_FORM_CHOICES = (*INTERVIEW_RESULT_CHOICES[:5], ("passed", "Passed"),
                           ("not passed", "Not passed"), ("no show", "No show"))
 FEEDBACK_LIMIT = 4000  # one interviewer's feedback on one interview
 LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
