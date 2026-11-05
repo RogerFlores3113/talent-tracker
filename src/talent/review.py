@@ -528,7 +528,9 @@ def _apply(store: Store, r: dict[str, Any]) -> str:
         entry = store.log(cid, p["kind"], p.get("body"), at=p.get("at"), job_id=p.get("job_id"), source=AI_SOURCE,
                           interviewer=p.get("interviewer"))
         store.mark_ai_note(entry)
-        return r["summary"]
+        from .chase import attach_interview_job  # the same interview kept again with its job: give it the job
+        fixed = attach_interview_job(store, entry, p.get("job_id"))
+        return r["summary"] + (f" ({fixed['skipped']})" if fixed["skipped"] else "")
     return _apply_more(store, r)
 
 

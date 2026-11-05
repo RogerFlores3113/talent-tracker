@@ -621,6 +621,7 @@ AI_ACTION_KINDS = {
     "offer_terms": "Recorded an offer", "offer_answer": "Recorded an answer to an offer",
     "card_keep": "Kept someone from a Shortlist card", "card_pass": "Passed on someone on a Shortlist card",
     "outreach_batch": "Logged outreach in one batch",
+    "interview_job": "Said which job an interview is for",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -1589,6 +1590,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_outcome":
         label = interview_label(new.get("data")) or ""
         return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
+    if kind == "interview_job":
+        return f"Set the job of an interview with {name} to {job}{what}"
     if kind == "interview_feedback":
         who = r.get("body") or ""
         return f"Added interview feedback on {name}" + (f" from {who}" if who else "") + what
@@ -2408,6 +2411,9 @@ class Store:
             if kind in INTERVIEW_PUT_BACK:
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
+            if kind == "interview_job":
+                from .chase import ai_job_blocker  # here: chase imports this module
+                return ai_job_blocker(self, a)
             if kind.startswith("client_"):
                 from .reports import ai_client_blocker  # here: reports imports this module
                 return ai_client_blocker(self, a)
@@ -2701,6 +2707,9 @@ class Store:
         if kind.startswith("offer_"):
             from .offers import ai_undo  # here: offers imports this module
             return ai_undo(self, a)
+        if kind == "interview_job":
+            from .chase import ai_job_undo  # here: chase imports this module
+            return ai_job_undo(self, a)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
