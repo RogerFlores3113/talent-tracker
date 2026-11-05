@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 
-from .store import LIVE_INTERVIEW, NotFound, Store, _stage_key, _stage_plan, parse_when, to_dt
+from .store import LIVE_INTERVIEW, NotFound, Store, _stage_key, _stage_plan, as_local, parse_when, to_dt
 
 FLAGS: tuple[tuple[str, str, str], ...] = (
     # (setting key, label, help)
@@ -56,7 +56,7 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 
 def local_days(then: datetime, now: datetime) -> int:
     """Calendar days from `then` to `now` on this computer's clock: 11 PM yesterday is 1 day ago at 1 AM."""
-    return (now.astimezone().date() - then.astimezone().date()).days
+    return (as_local(now).date() - as_local(then).date()).days
 
 
 def _days_ago(iso: str | None, now: datetime) -> int:
@@ -88,7 +88,7 @@ def local_time(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
         return ""
-    local = dt.astimezone()
+    local = as_local(dt)
     try:
         return local.strftime(fmt)
     except ValueError:  # Windows strftime has no %-d
@@ -254,7 +254,7 @@ def interview_label(t: dict[str, Any]) -> str:
 
 
 def _local_day(iso: str) -> date:
-    return to_dt(iso).astimezone().date()
+    return as_local(to_dt(iso)).date()
 
 
 def loop_day(t: dict[str, Any]) -> date:

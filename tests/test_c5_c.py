@@ -83,7 +83,11 @@ def test_mark_update_sent_tool_records_it_and_changes_can_take_it_back(store):
     be, ana, maya = _acme(store)
     _ai_move(store, maya, be["id"], "Client interview")
     server = build_server(store)
-    res = call(server, "mark_update_sent", client="ACME")
+    # Cycle 5 fixer H: with an unreviewed AI move in it, it isn't marked unless the recruiter says so (confirm).
+    with pytest.raises(Exception, match="Not marked as sent"):
+        call(server, "mark_update_sent", client="ACME")
+    assert reports.updates(store, "acme") == []
+    res = call(server, "mark_update_sent", client="ACME", confirm=True)
     assert res.content[0].text.startswith('Marked the update to "Acme" as sent')
     assert "hasn't reviewed" in text(res)  # it carried an AI move the recruiter hasn't seen
     sent = reports.updates(store, "acme")
@@ -140,7 +144,8 @@ def test_funnel_counts_only_steps_people_entered(store):
     store.move_stage(maya, be["id"], "Placed", by="app")  # straight from Sourced
     rep = reports.report(store, "acme")
     assert rep["reached"] == {"submitted": 1, "interview": 0, "offer": 0, "hired": 1}
-    assert "Submitted or presented 1, Interviewed 0, Offer 0, Hired 1" in reports.report_text(rep)
+    # Cycle 5 fixer H: an agency update names the funnel steps with the job's own stages (Placed, Client interview).
+    assert "Submitted 1, Client interview 0, Offer 0, Placed 1" in reports.report_text(rep)
 
 
 # ----------------------------------------------------- 4. what a stage counts as
@@ -297,7 +302,11 @@ def test_the_send_out_page_lists_due_updates_with_email_and_mark_as_sent(store):
     assert u["cc"] == ["sam@acme.example"] and u["unreviewed_ai_moves"][0]["name"] == "Maya Chen"
     assert "For the recruiter only" in res.content[-1].text
     # Mark as sent from the page comes back to it, and the update is no longer due.
+    # Cycle 5 fixer H: Mark as sent names the AI moves its page showed; one it didn't show stops it.
     r = c.post("/clients/acme/sent", data={"back": "due"}, follow_redirects=False)
+    assert "Not marked as sent" in flash_of(r, "flash_error") and reports.updates(store, "acme") == []
+    seen = body.split('name="ai_seen" value="')[1].split('"')[0]
+    r = c.post("/clients/acme/sent", data={"back": "due", "ai_seen": seen}, follow_redirects=False)
     assert r.headers["location"].startswith("/clients/due") and "Marked the update to Acme as sent" in flash_of(r)
     assert reports.due_updates(store)["parts"] == []
     assert "Client update due" not in c.get("/").text
@@ -338,7 +347,7 @@ def test_date_range_is_said_once_and_interviews_show_their_session(store):
     store.log(ana, "interview", "Onsite: system design", at=when, job_id=be["id"], interviewer="Priya")
     store.log(ana, "interview", "Onsite: coding", at=when, job_id=be["id"], interviewer="Ravi")
     line = next(l for l in reports.report_text(reports.report(store, "acme")).splitlines() if "Ana Ruiz (Backend" in l)
-    assert "Onsite: system design, with Priya" in line or "Onsite: coding, with Ravi" in line
+    assert line.startswith("- Ana Ruiz (Backend Engineer): onsite, 2 sessions, ")  # fixer H: a loop is one line
     acme = next(r for r in reports.overview(store) if r["key"] == "acme")
     assert acme["interviews"] == 1  # one person's loop, not two sessions
     assert reports.span_text("2026-11-02T12:00:00+00:00", "2026-11-05T12:00:00+00:00", "UTC") == \

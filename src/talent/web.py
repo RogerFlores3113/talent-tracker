@@ -33,6 +33,7 @@ from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, snippet_html, split_tags, to_dt)
+from .store import as_local
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -112,7 +113,7 @@ def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
         return ""
-    local = dt.astimezone()
+    local = as_local(dt)
     try:
         return local.strftime(fmt)
     except ValueError:  # Windows strftime has no %-d
@@ -125,7 +126,7 @@ def _local_date(iso: str | None) -> str:
     if "T" not in v:
         return v[:10]
     dt = to_dt(v)
-    return dt.astimezone().date().isoformat() if dt else v[:10]
+    return as_local(dt).date().isoformat() if dt else v[:10]
 
 
 def _shown(field: str, value: Any) -> str:
@@ -267,6 +268,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     search = search or SearchService(store, TypesenseIndex.from_env())
     key = key or paths.app_key()
     cookie_name = key_cookie_name(key)
+    reports.apply_zone(store)  # times show in the recruiter's own zone
     flash_name = flash_cookie_name(key)
     locked_logged = [float("-inf")]  # monotonic time can be under 60s on a just-booted computer
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
@@ -279,7 +281,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["local"] = _local
     env.filters["day"] = actions.day_text  # a date, Windows-safe
     env.globals["IV_TIME"] = IV_TIME
-    env.globals["local_zone"] = lambda: datetime.now().astimezone().tzname() or ""
+    env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
+    env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
+    env.globals["user_zone"] = lambda: reports.user_zone(store)
+    env.globals["shown_zone_name"] = lambda: reports.user_zone(store) or reports.fallback_zone(store)
+    env.globals["common_zones"] = reports.COMMON_ZONES
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
@@ -1073,6 +1079,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
                    close=actions.close_out_plan(store, job_id),
+                   shown_active=actions.job_numbers(store, job_id, actions._omitted(store, job_id, omit))["active"],
                    ask=actions.exit_interviews(store, int(ask_cancel), job_id) if ask_cancel.isdigit() else None)
         if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
             return page(request, "_add_results.html", **ctx)
@@ -1387,7 +1394,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
                     submittals=reports.submittals(store, c["key"]),
                     updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
-                    labels=reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS,
+                    labels=rep.get("labels") or (reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS),
                     zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=bool(reports.due_parts(store, c["key"])),
                     num=reports._num, ai_moves=[m for x in sections for m in x["rep"]["ai_moves"]],
                     since_day=_local(rep["since"], "%Y-%m-%d"),
@@ -1412,9 +1419,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
         manager = str(form["manager"]) if "manager" in form else None  # one hiring manager's update, in-house
+        since, until = str(form.get("since") or "") or None, str(form.get("until") or "") or None
         try:
-            done = reports.mark_sent(store, c["key"], str(form.get("since") or "") or None,
-                                     str(form.get("until") or "") or None, manager=manager)
+            # The confirm named the AI moves the page showed; one made since then stops it, so it's seen first.
+            seen = {int(v) for v in str(form.get("ai_seen") or "").split(",") if v.strip().isdigit()}
+            new = [m for m in reports.unreviewed_in(store, c["key"], manager, since, until)
+                   if m["action_id"] not in seen]
+            if new:
+                it = "it" if len(new) == 1 else "them"
+                raise ValueError(f"Not marked as sent: the update has {len(new)} move{'' if len(new) == 1 else 's'} "
+                                 f"your AI app made that you haven't seen here yet: {reports.ai_moves_list(new)}. "
+                                 f"Check {it} on this page, then mark the update as sent.")
+            done = reports.mark_sent(store, c["key"], since, until, manager=manager)
         except ValueError as exc:
             return RedirectResponse(f"{back}?{urlencode({'flash_error': str(exc)})}", status_code=303)
         who = f"{done['manager']}'s update" if done.get("manager") else (
@@ -1960,6 +1976,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job changes and notes now wait "
                "on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
+
+    @app.post("/settings/time-zone")
+    async def set_time_zone(request: Request):
+        """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
+        form = await request.form()
+        try:
+            name = reports.save_user_zone(store, str(form.get("time_zone") or ""))
+        except ValueError as exc:
+            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#time-zone", status_code=303)
+        msg = f"Times now show in {name}." if name else "Times now show in this computer's time zone."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#time-zone", status_code=303)
 
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)

@@ -10,25 +10,32 @@
 <section class="panel report" id="due-{{ loop.index }}">
   <div class="sec-head"><h2><a href="/clients/{{ p.slug }}">{{ p.name }}</a>{% if p.manager is not none %}: {{ p.manager or 'Jobs with no hiring manager' }}{% endif %}
     <span class="badge{{ ' overdue' if p.late_days > 0 }}">{{ 'Due today' if p.late_days == 0 else 'Due since ' ~ p.day }}</span></h2>
-    <span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
+    <span class="copy-status no-print">{% if p.rep.held %}<span class="badge overdue">({{ p.rep.held | length }} held back, review first)</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
   {% if p.ai_moves %}{% set ai_moves, ai_slug, ai_back = p.ai_moves, p.slug, 'due' %}{% include "_ai_moves.html" %}{% endif %}
   {% for o in p.overfilled %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.hired }} {{ p.rep.hire_word }} for {{ o.openings }} opening{{ 's' if o.openings != 1 }} (over by {{ o.over }}). Check those hires, or raise the job's openings, before you send this.</p>{% endfor %}
   {% if p.not_shown %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: left out as internal stages: {% for s, n in p.not_shown.items() %}{{ s }} ({{ n }}){{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ p.text }}</pre>
   <div class="actions-inline no-print">
-    {% if p.email %}{% set e = p.email %}<a class="btn small" href="{{ e.href }}">Email {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">Too long to fill in by link: the email opens empty, so copy the update first and paste it in.</span>{% endif %}
+    {% if p.email %}{% set e = p.email %}<a class="btn small" href="{{ e.href }}">Email {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">Too long to fill in by link: the email opens empty, so copy the update first and paste it in.</span>{% elif e.trimmed %} <span class="fine">The email gets a shorter version to fit the link; Copy gives the full one.</span>{% endif %}
     {% else %}<span class="fine">No email saved{% if p.manager is none %}. Add the contacts on <a href="/clients/{{ p.slug }}#details">its page</a>{% endif %}.</span>{% endif %}
     <form method="post" action="/clients/{{ p.slug }}/sent" class="inline" data-confirm="Mark this update to {{ p.manager or p.name }} as sent? A copy is kept, and the next one covers what happens from now.{% if p.ai_moves %} {{ p.ai_moves | length }} AI move{{ 's' if p.ai_moves | length != 1 }} in it {{ 'are' if p.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">
-      <input type="hidden" name="back" value="due">{% if p.manager_key is not none %}<input type="hidden" name="manager" value="{{ p.manager_key }}">{% endif %}
+      <input type="hidden" name="back" value="due"><input type="hidden" name="ai_seen" value="{{ p.ai_moves | map(attribute='action_id') | join(',') }}">{% if p.manager_key is not none %}<input type="hidden" name="manager" value="{{ p.manager_key }}">{% endif %}
       <button class="btn small primary" type="submit">Mark as sent</button></form>
   </div>
 </section>
 {% endfor %}
 
 {% if due.later %}
-<section class="panel">
+<section class="panel" id="later">
   <h2>Later this week</h2>
-  <ul class="plain">{% for d in due.later %}<li><a href="/clients/{{ d.slug }}">{{ d.name }}</a> <span class="muted">{{ d.day }}</span></li>{% endfor %}</ul>
+  <p class="fine no-print">Drafts as they stand now, to prep ahead. Each one is due on its day; what happens before then still goes in.</p>
+  {% for p in due.later_parts %}{% set tid = 'later-text-' ~ loop.index %}
+  <details class="report-part"><summary><a href="/clients/{{ p.slug }}">{{ p.name }}</a>{% if p.manager is not none %}: {{ p.manager or 'Jobs with no hiring manager' }}{% endif %} <span class="muted">{{ p.day }}</span>{% if p.rep.held %} <span class="badge overdue">({{ p.rep.held | length }} held back, review first)</span>{% endif %}</summary>
+    {% if p.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ p.notes | join('; ') }}.</p>{% endif %}
+    <span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy the draft</button><span class="fine" role="status"></span></span>
+    <pre class="code wrap" id="{{ tid }}">{{ p.text }}</pre>
+  </details>
+  {% else %}<ul class="plain">{% for d in due.later %}<li><a href="/clients/{{ d.slug }}">{{ d.name }}</a> <span class="muted">{{ d.day }}</span></li>{% endfor %}</ul>{% endfor %}
 </section>
 {% endif %}
 <p class="fine">An update is due from its day each week until you mark it as sent. Set a {{ 'company' if own else 'client' }}'s update day on its page{% if due.no_day %}; {{ due.no_day }} {{ 'has' if due.no_day == 1 else 'have' }} none yet{% endif %}. Email opens your own mail app; nothing is sent from here.</p>

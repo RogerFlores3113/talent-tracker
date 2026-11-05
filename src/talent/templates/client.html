@@ -23,13 +23,13 @@
   {% for s in sections %}{% set tid = 'report-text' if loop.first else 'report-text-' ~ loop.index %}
   <div class="report-part">
     <div class="sec-head">{% if s.rep.manager is not none %}<h3>{{ s.rep.manager or 'Jobs with no hiring manager' }}</h3>{% endif %}
-      <span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
+      <span class="copy-status no-print">{% if s.rep.held %}<span class="badge overdue" title="Your AI app's moves into {{ 'hired' if inhouse() else 'placed' }} or out stay out of the text until you review them">({{ s.rep.held | length }} held back, review first)</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
     <pre class="code wrap" id="{{ tid }}">{{ s.text }}</pre>
     {% if s.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ s.notes | join('; ') }}.</p>{% endif %}
     <div class="actions-inline no-print">
-    {% if s.email %}{% set e = s.email %}<a class="btn small" href="{{ e.href }}">Email this update to {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">It's too long to fill in by link, so the email opens empty: copy the update first, then paste it in.</span>{% endif %}{% endif %}
+    {% if s.email %}{% set e = s.email %}<a class="btn small" href="{{ e.href }}">Email this update to {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">It's too long to fill in by link, so the email opens empty: copy the update first, then paste it in.</span>{% elif e.trimmed %} <span class="fine">The email gets a shorter version to fit the link; Copy gives the full one.</span>{% endif %}{% endif %}
     {% if s.rep.manager_key is not none %}<form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {% if s.rep.manager %}{{ s.rep.manager }}'s update{% else %}the update for jobs with no hiring manager{% endif %} as sent? A copy is kept, and their next update covers what happens from now.{% if s.rep.ai_moves %} {{ s.rep.ai_moves | length }} AI move{{ 's' if s.rep.ai_moves | length != 1 }} in it {{ 'are' if s.rep.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">
-      <input type="hidden" name="manager" value="{{ s.rep.manager_key }}"><input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}">
+      <input type="hidden" name="manager" value="{{ s.rep.manager_key }}"><input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}"><input type="hidden" name="ai_seen" value="{{ s.rep.ai_moves | map(attribute='action_id') | join(',') }}">
       <button class="btn small" type="submit">Mark this one as sent</button></form>{% endif %}
     </div>
   </div>
@@ -39,7 +39,7 @@
     <a class="btn small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as CSV</a>
     <a class="small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until, 'out': '1'} | urlencode }}" title="The CSV leaves out people who are out, like Not a Fit or Withdrew">CSV with people who are out</a>
     <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {{ 'all these updates' if sections | length > 1 else 'this update' }} as sent? A copy is kept, and the next update covers what happens from now.{% if ai_moves %} {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} your AI app made {{ 'are' if ai_moves | length != 1 else 'is' }} in it and not reviewed yet: {% for m in ai_moves[:3] %}{{ m.name }} to {{ m.stage }}{{ ', ' if not loop.last }}{% endfor %}{% if ai_moves | length > 3 %} and {{ ai_moves | length - 3 }} more{% endif %}.{% endif %}">
-      <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}">
+      <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}"><input type="hidden" name="ai_seen" value="{{ ai_moves | map(attribute='action_id') | join(',') }}">
       <button class="btn small primary" type="submit">{{ 'Mark all as sent' if sections | length > 1 else 'Mark as sent' }}</button></form>
     <a class="small" href="/clients/due">Every update due this week</a>
   </div>

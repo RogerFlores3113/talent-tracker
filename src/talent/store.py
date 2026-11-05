@@ -666,7 +666,7 @@ def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
     if not m:
         return None
     g = m.groupdict()
-    now = datetime.now(zone) if zone is not None else datetime.now().astimezone()
+    now = datetime.now(zone) if zone is not None else as_local(datetime.now(timezone.utc))
     today = now.date()
     if g["word"]:
         day = today + timedelta(days={"today": 0, "tomorrow": 1, "yesterday": -1}[g["word"].lower()])
@@ -695,7 +695,7 @@ def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
 def _parse_loose(s: str, zone: tzinfo | None = None) -> datetime | None:
     """The date shapes people type in spreadsheets. None if it isn't one of them."""
     if s.lower() == "now":
-        return datetime.now().astimezone()
+        return as_local(datetime.now(timezone.utc))
     relative = _parse_relative(s, zone)
     if relative is not None:
         return relative
@@ -801,6 +801,25 @@ def zone_named(name: str) -> tzinfo | None:
     return None
 
 
+USER_ZONE_KEY = "user_time_zone"  # settings row: the recruiter's own time zone, when it isn't this computer's
+_SHOWN_ZONE: list[tzinfo | None] = [None]  # None: this computer's own zone
+
+
+def shown_zone() -> tzinfo | None:
+    """The zone times show in and typed times are read in: the recruiter's saved one, else this computer's."""
+    return _SHOWN_ZONE[0]
+
+
+def set_shown_zone(zone: tzinfo | str | None) -> None:
+    _SHOWN_ZONE[0] = zone_named(zone) if isinstance(zone, str) and zone.strip() else (
+        zone if isinstance(zone, tzinfo) else None)
+
+
+def as_local(dt: datetime) -> datetime:
+    """A time on the recruiter's clock (see shown_zone)."""
+    return dt.astimezone(_SHOWN_ZONE[0])
+
+
 def _split_zone(s: str) -> tuple[str, tzinfo | None]:
     """'2026-11-10 14:00 America/Los_Angeles' -> ('2026-11-10 14:00', its zone). A trailing word that isn't a
     zone (like PM) stays put. An unknown IANA-looking name is an error, so a typo isn't read as local time."""
@@ -845,7 +864,8 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
                     raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
                 dt = loose
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=zone) if zone is not None else dt.astimezone()  # else local time
+        dt = dt.replace(tzinfo=zone) if zone is not None else (  # else local time
+            dt.replace(tzinfo=_SHOWN_ZONE[0]) if _SHOWN_ZONE[0] is not None else dt.astimezone())
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -1596,6 +1616,8 @@ class Store:
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
         self._refresh_linkedin_keys()
+        row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
+        set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:

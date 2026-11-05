@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import actions
 from .store import NotFound, Store, _stage_key, now_iso, parse_when, quoted, stage_outcome, to_dt, zone_named
+from .store import USER_ZONE_KEY, as_local, set_shown_zone
 
 DEFAULT_DAYS = 7
 MOVES_SHOWN = 40  # moves listed in the text, then "and 12 more"
@@ -98,7 +99,8 @@ def in_zone(iso: str | None, tz_name: str | None, fmt: str = "%a %b %-d, %-I:%M 
     dt = to_dt(iso)
     if not dt:
         return ""
-    return _fmt(dt.astimezone(_zone(tz_name)), fmt).strip()
+    zone = _zone(tz_name)
+    return _fmt(dt.astimezone(zone) if zone is not None else as_local(dt), fmt).strip()
 
 
 def normalize_tz(value: str | None) -> str | None:
@@ -118,6 +120,47 @@ def normalize_tz(value: str | None) -> str | None:
         return v  # this computer has no time zone list to check against; times show in its own zone meanwhile
     raise ValueError(f"Couldn't find the time zone {value!r}. Use a name like America/New_York, Europe/London "
                      "or UTC, or ET, CT, MT or PT.")
+
+
+def user_zone(store: Store) -> str | None:
+    """The time zone the recruiter saved for themselves in Settings, or None (this computer's)."""
+    row = store._row("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,))
+    return (row["value"] or None) if row else None
+
+
+def computer_on_utc() -> bool:
+    """This computer's clock says UTC: a server or a fresh virtual machine, rarely where a recruiter sits."""
+    return (datetime.now().astimezone().tzname() or "").upper() in ("UTC", "Z")
+
+
+def fallback_zone(store: Store) -> str | None:
+    """With no zone saved and a computer on UTC, in-house: the company's own time zone, when one is set."""
+    if not actions.inhouse(store) or not computer_on_utc():
+        return None
+    keys = set(_all_jobs(store))
+    zones = {r["time_zone"] for r in store._rows("SELECT key, time_zone FROM clients WHERE time_zone IS NOT NULL")
+             if r["key"] in keys}
+    return zones.pop() if len(zones) == 1 else None
+
+
+def apply_zone(store: Store) -> str | None:
+    """Show times in the recruiter's zone from now on (Today, timelines, the AI's replies, typed times). Returns
+    the zone name used, or None for this computer's."""
+    name = user_zone(store) or fallback_zone(store)
+    set_shown_zone(name)
+    return name
+
+
+def save_user_zone(store: Store, value: str | None) -> str | None:
+    """Save the recruiter's own time zone ('America/Chicago', 'CT'); blank goes back to this computer's."""
+    name = normalize_tz(value)
+    if name:
+        actions._put_setting(store, USER_ZONE_KEY, name)
+    else:
+        with store._lock, store._conn:
+            store._conn.execute("DELETE FROM settings WHERE key = ?", (USER_ZONE_KEY,))
+    apply_zone(store)
+    return name
 
 
 def slug(key: str) -> str:
@@ -314,6 +357,8 @@ def save_client(store: Store, key: str, **fields: Any) -> dict[str, Any]:
         with store._lock, store._conn:
             store._conn.execute(f"UPDATE clients SET {', '.join(f'{k} = ?' for k in clean)}, updated_at = ? WHERE id = ?",
                                 (*clean.values(), now_iso(), c["id"]))
+        if "time_zone" in clean:
+            apply_zone(store)  # in-house on a UTC computer, the company's zone is the recruiter's
     return client(store, key)
 
 
@@ -427,7 +472,7 @@ def update_due(c: dict[str, Any], now: datetime | None = None) -> bool:
     """The client's update day has come this week and no update went out since it began."""
     if not c.get("update_day"):
         return False
-    local = (now or datetime.now(timezone.utc)).astimezone()
+    local = as_local(now or datetime.now(timezone.utc))
     want = UPDATE_DAYS.index(c["update_day"])
     if local.weekday() < want:
         return False
@@ -440,7 +485,7 @@ def _day_start(day: str | None, now: datetime) -> datetime | None:
     """When this week's update day began (local), or None when it has no day or the day hasn't come yet."""
     if not day or day not in UPDATE_DAYS:
         return None
-    local = now.astimezone()
+    local = as_local(now)
     want = UPDATE_DAYS.index(day)
     if local.weekday() < want:
         return None
@@ -579,6 +624,35 @@ def _unreviewed_ai(store: Store, moves: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
+HOLD_GROUPS = ("hired", "out")  # an unreviewed AI move into one of these waits for the recruiter
+
+
+def _held(store: Store, hist: dict[tuple[int, int], list[dict[str, Any]]], current: dict[tuple[int, int], str],
+          group: Any, in_range: Any) -> dict[tuple[int, int], dict[str, Any]]:
+    """{(candidate, job): their latest stage entry} where it's a move into hired or out that the AI app made in
+    this period and the recruiter hasn't reviewed or undone. The update reads as if it hadn't happened yet, so
+    nobody hears of a hire or a no before the recruiter has checked it."""
+    last: dict[int, tuple[tuple[int, int], dict[str, Any]]] = {}
+    for k, es in hist.items():
+        e = es[-1]
+        if (e["imported"] or not in_range(e["at"], e["id"]) or group(k[1], e["body"]) not in HOLD_GROUPS
+                or (current.get(k) or "").lower() != (e["body"] or "").lower()):
+            continue
+        last[e["id"]] = (k, e)
+    if not last:
+        return {}
+    seen = reviewed_ai(store)
+    marks = ",".join("?" * len(last))
+    out = {}
+    for r in store._rows(f"""SELECT id, target_id FROM ai_actions WHERE target_id IN ({marks})
+                             AND kind IN ('stage_move', 'pipeline_add') AND undone_at IS NULL ORDER BY id""",
+                         tuple(last)):
+        if r["id"] not in seen:
+            k, e = last[r["target_id"]]
+            out[k] = {**e, "action_id": r["id"]}
+    return out
+
+
 def _omit(store: Store, job_id: int) -> set[str]:
     """The stage keys a client update leaves out on this job: its status update's Leave out choice, but never a
     stage the client has seen (named like Submitted, an interview, an offer, or a hire stage)."""
@@ -626,6 +700,15 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
         return after and at <= end
 
     hist = _history(store, ids)
+    current = {(p["candidate_id"], p["job_id"]): p["stage"] for j in jobs for p in store.pipeline(j["id"])}
+    held = _held(store, hist, current, group, in_range)
+    held_ids = {e["id"] for e in held.values()}
+    for k, e in held.items():  # until it's reviewed, they stand where they were before the AI's move
+        prev = hist[k][-2] if len(hist[k]) > 1 else None
+        if prev:
+            current[k] = prev["body"]
+        else:
+            current.pop(k, None)
     # Where people stand now, on open and on-hold jobs.
     standing: dict[str, set[int]] = {g: set() for g, _ in GROUPS}
     not_shown: dict[str, int] = {}
@@ -633,6 +716,11 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     people: list[dict[str, Any]] = []
     for j in live:
         for a in store.pipeline(j["id"]):
+            if (a["candidate_id"], j["id"]) in held:
+                if (a["candidate_id"], j["id"]) not in current:
+                    continue
+                prev = hist[(a["candidate_id"], j["id"])][-2]
+                a = {**a, "stage": prev["body"], "stage_changed_at": prev["at"]}
             if hidden(j["id"], a["stage"]):
                 if a["candidate_id"] in booked.get(j["id"], {}):  # their interview is listed; told to the recruiter apart
                     booked_names[a["candidate_id"]] = a["candidate_name"]
@@ -642,7 +730,7 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
             g = group(j["id"], a["stage"])
             if j["status"] == "open":
                 standing[g].add(a["candidate_id"])
-            entries = hist.get((a["candidate_id"], j["id"]), [])
+            entries = [e for e in hist.get((a["candidate_id"], j["id"]), []) if e["id"] not in held_ids]
             subs = [e["at"] for e in entries if is_submittal(e["body"])]
             people.append({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "job_id": j["id"],
                            "job": j["title"], "title": a.get("current_title"), "company": a.get("current_company"),
@@ -659,8 +747,9 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     period: dict[str, set[int]] = {g: set() for g, _ in GROUPS}
     moves: list[dict[str, Any]] = []
     spans: dict[str, list[float]] = {g: [] for g in IN_PLAY}
-    current = {(p["candidate_id"], p["job_id"]): p["stage"] for j in jobs for p in store.pipeline(j["id"])}
+    closing = _close_out_entries(store, ids)
     for (cid, jid), entries in hist.items():
+        entries = [e for e in entries if e["id"] not in held_ids]
         stages = [e["body"] for e in entries]
         if (cid, jid) in current:
             stages.append(current[(cid, jid)])
@@ -676,10 +765,11 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                 spans[g].append((to_dt(nxt) - to_dt(e["at"])).total_seconds() / 86400)
             if not in_range(e["at"], e["id"]) or e["imported"] or hidden(jid, e["body"]):
                 continue
-            period[g].add(cid)
+            if e["id"] not in closing:  # a close-out is "position filled", not people the client turned down
+                period[g].add(cid)
             moves.append({"at": e["at"], "candidate_id": cid, "name": e["candidate_name"], "job_id": jid,
                           "job": by_id[jid]["title"], "stage": e["body"], "group": g, "entry_id": e["id"],
-                          "from": entries[i - 1]["body"] if i else None})
+                          "from": entries[i - 1]["body"] if i else None, "date_only": _date_only(e)})
     reached = {g: len(entered[g]) for g, _ in FUNNEL}
     # Back and forth to the same stage on one job is one move: the latest.
     seen_moves: set[tuple[int, int, str]] = set()
@@ -690,7 +780,6 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     moves = [{k: v for k, v in m.items() if k != "repeat"} for m in moves if not m["repeat"]]
     imported = sum(1 for es in hist.values() for e in es if e["imported"] and in_range(e["at"], e["id"]))
     # A close-out (everyone left moved out when the job filled) is one line, not one move per person.
-    closing = _close_out_entries(store, ids)
     closed_out: dict[int, dict[str, Any]] = {}
     for m in moves:
         if m["entry_id"] in closing:
@@ -700,6 +789,10 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     moves = [m for m in moves if m["entry_id"] not in closing]
     ai_moves = _unreviewed_ai(store, moves)
     ai_ids = {a["entry_id"] for a in ai_moves}
+    held_moves = [{"action_id": e["action_id"], "entry_id": e["id"], "candidate_id": cid, "name": e["candidate_name"],
+                   "stage": e["body"], "job": by_id[jid]["title"], "job_id": jid, "at": e["at"], "held": True}
+                  for (cid, jid), e in held.items()]
+    ai_moves = sorted(ai_moves + held_moves, key=lambda m: m["action_id"])
     for m in moves:
         m["by_ai"] = m["entry_id"] in ai_ids
     medians = {g: round(statistics.median(v), 1) for g, v in spans.items() if v}
@@ -707,21 +800,31 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     # Everyone still in the running on an open job, whatever their stage: an interview booked while they sit in
     # Sourced is still an interview with the client.
     pairs = _in_play_pairs(store, sorted(open_ids))
+    rows = [r for r in _upcoming(store, open_ids, pairs, INTERVIEW_DAYS, now) if (r["candidate_id"], r["job_id"]) in pairs]
+    loop_of = {r["id"]: (i, len(g)) for i, g in enumerate(actions.group_loops(rows)) for r in g}
     upcoming = [{"interview_id": r["id"], "at": r["at"], "at_client": in_zone(r["at"], c.get("time_zone")),
                  "candidate_id": r["candidate_id"], "name": r["candidate_name"], "job": r.get("job_title"),
-                 "summary": r.get("body"), "label": actions.interview_label(r)}
-                for r in _upcoming(store, open_ids, pairs, INTERVIEW_DAYS, now)
-                if (r["candidate_id"], r["job_id"]) in pairs]
+                 "summary": r.get("body"), "label": actions.interview_label(r),
+                 "loop": loop_of[r["id"]][0], "loop_size": loop_of[r["id"]][1]} for r in rows]
+    shown_people = {(p["candidate_id"], p["job_id"]) for p in people} | {
+        (cid, jid) for jid, b in booked.items() for cid in b}
+    results = [{"candidate_id": r["candidate_id"], "name": r["name"], "job_id": r["job_id"], "job": r["job_title"],
+                "verdict": r["verdict"], "line": r["line"], "at": r["outcome_at"]}
+               for jid in ids for r in actions.interview_results(store, jid, now, max(1, (now - to_dt(start)).days + 1))
+               if (r["candidate_id"], jid) in shown_people and in_range(r["outcome_at"])]
     still_hidden = [{"candidate_id": cid, "name": booked_names.get(cid, ""), "stage": stage, "job": by_id[jid]["title"]}
                     for jid, b in booked.items() for cid, stage in b.items()]
     open_jobs = [j for j in jobs if j["status"] == "open"]
     openings = sum(j.get("openings") or 1 for j in open_jobs)
+    held_hires = [k[1] for k, e in held.items() if group(k[1], e["body"]) == "hired"]
     hires = {j["id"]: sum(len(g["candidates"]) for g in store.pipeline_by_stage(j["id"]) if g["outcome"] == "hired")
-             for j in open_jobs}
+             - held_hires.count(j["id"]) for j in open_jobs}
     filled = sum(min(hires[j["id"]], j.get("openings") or 1) for j in open_jobs)
+    # An import guesses openings from its hires until the recruiter says: no "22 of 22 filled" from a guess.
+    unset = _openings_unset(store, [j["id"] for j in open_jobs])
     overfilled = [{"job_id": j["id"], "title": j["title"], "hired": hires[j["id"]], "openings": j.get("openings") or 1,
                    "over": hires[j["id"]] - (j.get("openings") or 1)}
-                  for j in open_jobs if hires[j["id"]] > (j.get("openings") or 1)]
+                  for j in open_jobs if hires[j["id"]] > (j.get("openings") or 1) and j["id"] not in unset]
     words = {actions.hire_word(store, j["id"]) for j in (open_jobs or jobs)}
     # Jobs that closed in the period, with who was hired, so the update says "Hired: Aisha Bello. Req closed."
     closed_jobs = [{"job_id": j["id"], "title": j["title"],
@@ -734,7 +837,9 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     return {"client": {k: c.get(k) for k in ("id", "name", "key", "slug", "contacts", "time_zone", "update_day",
                                              "last_update_sent_at")},
             "inhouse": own, "manager": label, "manager_key": manager, "booked_hidden": still_hidden,
-            "overfilled": overfilled, "ai_moves": ai_moves, "closed_out": list(closed_out.values()),
+            "overfilled": overfilled, "ai_moves": ai_moves, "held": held_moves, "closed_out": list(closed_out.values()),
+            "openings_unset": [{"job_id": j["id"], "title": j["title"]} for j in open_jobs if j["id"] in unset],
+            "results": results, "labels": _job_labels(store, jobs, own),
             "closed_jobs": closed_jobs,
             "hired": sum(hires.values()), "hire_word": "placed" if words == {"placed"} else "hired",
             "since": start, "until": end, "range_from": why, "now": now.isoformat(),
@@ -748,6 +853,49 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
             "email": hm_email or _contact_email(c.get("contacts")) or (None if manager is not None else next(
                 (j["hiring_manager_email"].strip() for j in jobs if (j.get("hiring_manager_email") or "").strip()),
                 None))}
+
+
+def _openings_unset(store: Store, job_ids: list[int]) -> set[int]:
+    """The jobs an import made whose openings the recruiter hasn't answered yet (the import's guess stands)."""
+    if not job_ids:
+        return set()
+    from .importers import openings_to_ask
+
+    return set(openings_to_ask(store)) & set(job_ids)
+
+
+def _job_labels(store: Store, jobs: list[dict[str, Any]], own: bool) -> dict[str, str]:
+    """The funnel's words for this update. For a client, each step says the jobs' own stage name when they all
+    have just one for it (Placed, Client interview), else the usual word (Hired, Interviewing)."""
+    labels = dict(INHOUSE_LABELS if own else GROUP_LABELS)
+    if own:
+        return labels
+    names: dict[str, set[str]] = {}
+    spell: dict[str, str] = {}
+    for j in jobs:
+        for name, g in stage_groups(store, j["id"]).items():
+            if g in ("submitted", "interview", "offer", "hired"):
+                names.setdefault(g, set()).add(name)
+        for st in store.job_stages(j["id"]):
+            spell.setdefault(st["name"].lower(), st["name"])
+    for g, ns in names.items():
+        if len(ns) == 1:
+            labels[g] = spell.get(next(iter(ns)), labels[g])
+    return labels
+
+
+def _date_only(entry: dict[str, Any]) -> bool:
+    """A stage date from a file that gave a day and no time (stored at the day's midnight or noon here): it is
+    shown as that day in every time zone, so a Nov 3 in the ATS never reads as Nov 2 for a client in Chicago."""
+    d = _data(entry.get("data"))
+    if not (d.get("by") in ("import", "sync") or d.get("imported") is True or "import_run" in d
+            or entry.get("source") in ("CSV import", "ATS sync")):
+        return False
+    if d.get("date_only") is True:
+        return True
+    dt = to_dt(entry.get("at"))
+    t = as_local(dt).time() if dt else None
+    return bool(t) and t.second == 0 and t.minute == 0 and t.hour in (0, 12)
 
 
 def reports_for(store: Store, key: str, since: str | datetime | None = None, until: str | datetime | None = None,
@@ -776,15 +924,23 @@ def span_text(since: str, until: str, tz: str | None = None) -> str:
 
 
 def title(rep: dict[str, Any]) -> str:
+    """'Acme: hiring update, Mon Nov 2 to Thu Nov 5, 2026'. In-house it goes to the hiring manager themselves, so
+    it never names them: 'Hiring update, Lumen Health, ...'."""
+    span = span_text(rep["since"], rep["until"])
+    if rep.get("inhouse"):
+        return f"Hiring update, {rep['client']['name']}, {span}"
     who = ""
     if rep.get("manager") is not None:
         who = f" for {rep['manager']}" if rep["manager"] else " for jobs with no hiring manager"
-    return f"{rep['client']['name']}: hiring update{who}, {span_text(rep['since'], rep['until'])}"
+    return f"{rep['client']['name']}: hiring update{who}, {span}"
 
 
 def seats_text(rep: dict[str, Any]) -> str:
     """'1 of 2 openings filled', or with more hires than openings '2 hired, 1 opening (over by 1)'."""
     over = rep.get("overfilled") or []
+    if rep.get("openings_unset"):  # openings are still an import's guess: say the hires, not "22 of 22 filled"
+        return f"{rep['hired']} {rep.get('hire_word', 'hired')} so far" if rep.get("hired") else (
+            f"None {rep.get('hire_word', 'hired')} yet")
     if not over:
         return actions.filled_text(rep["filled"], rep["openings"])
     seats = _plural(rep["openings"], "opening")
@@ -799,8 +955,11 @@ def recruiter_notes(rep: dict[str, Any]) -> list[str]:
     reviewed, who the update leaves out, people listed though their stage is left out, and jobs with more hires
     than openings. Never part of the paste text."""
     notes = []
-    if rep.get("ai_moves"):
-        notes.append(ai_moves_text(rep["ai_moves"]))
+    if rep.get("held"):
+        notes.append(held_text(rep["held"]))
+    unheld = [m for m in rep.get("ai_moves") or [] if not m.get("held")]
+    if unheld:
+        notes.append(ai_moves_text(unheld))
     if rep["not_shown"]:
         notes.append("Not shown: " + ", ".join(f"{s} ({n})" for s, n in rep["not_shown"].items()))
     if rep.get("booked_hidden"):
@@ -809,7 +968,21 @@ def recruiter_notes(rep: dict[str, Any]) -> list[str]:
     for o in rep.get("overfilled") or []:
         notes.append(f"{o['title']} has {o['hired']} {rep.get('hire_word', 'hired')} for "
                      f"{_plural(o['openings'], 'opening')} (over by {o['over']}). Check those hires before you send this")
+    if rep.get("openings_unset"):
+        notes.append("Openings not set yet for " + ", ".join(j["title"] for j in rep["openings_unset"])
+                     + ", so the update gives the hires without \"of N openings filled\". Set them on the job's page")
     return notes
+
+
+def held_text(held: list[dict[str, Any]], shown: int = 5) -> str:
+    """'(1 held back, review first) "Maya Chen" to Placed (Staff ML): your AI app made this move and you haven't
+    reviewed it, so the update text leaves it out until you do'."""
+    listed = ", ".join(f"{quoted(m['name'])} to {m['stage']} ({m['job']})" for m in held[:shown])
+    more = f" and {len(held) - shown} more" if len(held) > shown else ""
+    it = "it" if len(held) == 1 else "them"
+    return (f"({len(held)} held back, review first) {listed}{more}: your AI app made "
+            f"{'this move' if len(held) == 1 else 'these moves'} and you haven't reviewed {it}, so the update text "
+            f"leaves {it} out until you do")
 
 
 def ai_moves_text(moves: list[dict[str, Any]], shown: int = 5) -> str:
@@ -820,11 +993,14 @@ def ai_moves_text(moves: list[dict[str, Any]], shown: int = 5) -> str:
             "Check them on Changes, or mark them reviewed, before you send this")
 
 
-def report_text(rep: dict[str, Any]) -> str:
-    """The paste-ready update: no ids, times in the client's time zone, internal stages left out."""
+def report_text(rep: dict[str, Any], trim: int = 0) -> str:
+    """The paste-ready update: no ids, times in the client's time zone, internal stages left out. AI moves into
+    hired or out that the recruiter hasn't reviewed are held back (see _held). trim (1 to 3) shortens it to fit
+    an email link: 1 drops the all-time funnel and the median days, 2 lists fewer moves, 3 fewer still."""
     tz = rep["client"].get("time_zone")
     own = rep.get("inhouse")
-    labels = INHOUSE_LABELS if own else GROUP_LABELS
+    labels = rep.get("labels") or (INHOUSE_LABELS if own else GROUP_LABELS)
+    shown_moves = (MOVES_SHOWN, MOVES_SHOWN, 10, 5)[min(trim, 3)]
     lines = [title(rep)]
     if rep["range_from"] == "last_update":
         lines.append("Changes since the last update.")
@@ -847,27 +1023,57 @@ def report_text(rep: dict[str, Any]) -> str:
     moved = ("interview", "offer", "hired", "out") if own else ("submitted", "interview", "offer", "hired", "out")
     lines.append("- Moved into " + ", ".join(f"{labels[g]} {p[g]}" for g in moved))
     r = rep["reached"]
-    lines.append("- All time on these jobs: " + ", ".join(f"{label} {r[g]}" for g, label in funnel(rep)))
-    listed = [(m["at"], f"{m['name']} to {m['stage']} ({m['job']})") for m in rep["moves"]]
-    listed += [(co["at"], f"{_plural(co['count'], 'person', 'people')} closed, position filled ({co['job']})")
+    if not trim:
+        lines.append("- All time on these jobs: " + ", ".join(
+            f"{labels[g] if labels[g] != GROUP_LABELS[g] else label} {r[g]}" for g, label in funnel(rep)))
+    listed = [(m["at"], f"{m['name']} to {m['stage']} ({m['job']})", m.get("date_only")) for m in rep["moves"]]
+    listed += [(co["at"], f"{_plural(co['count'], 'person', 'people')} closed, position filled ({co['job']})", False)
                for co in rep.get("closed_out") or []]
     listed.sort(key=lambda x: x[0])
     if listed:
         lines += ["", "Moves this period:"]
-        for at, what in listed[:MOVES_SHOWN]:
-            lines.append(f"- {_day(at, tz)}: {what}")
-        if len(listed) > MOVES_SHOWN:
-            lines.append(f"- and {len(listed) - MOVES_SHOWN} more")
+        for at, what, plain in listed[:shown_moves]:
+            lines.append(f"- {_plain_day(at) if plain else _day(at, tz)}: {what}")
+        if len(listed) > shown_moves:
+            lines.append(f"- and {len(listed) - shown_moves} more")
     else:
         lines += ["", "Moves this period: none."]
-    if rep["median_days"]:
+    if rep.get("results"):
+        lines += ["", "Interview results:"]
+        many = len({x["job_id"] for x in rep["results"]}) > 1
+        lines += [x["line"] + (f", {x['job']}" if many else "") for x in rep["results"]]
+    if rep["median_days"] and not trim:
         lines += ["", "Median days in stage: " + ", ".join(
             f"{labels[g]} {_num(v)}" for g, v in rep["median_days"].items())]
     if rep["upcoming"]:
-        lines += ["", "Upcoming interviews:"]
-        lines += [f"- {u['at_client']}: {u['name']} ({u['job']})" + (f", {u['label']}" if u.get("label") else "")
-                  for u in rep["upcoming"]]
+        lines += ["", "Upcoming interviews:", *upcoming_lines(rep)]
     return "\n".join(lines)
+
+
+def _plain_day(iso: str) -> str:
+    """A date-only stage date as its own day, the same in every time zone (see _date_only)."""
+    return _fmt(as_local(to_dt(iso)), "%a %b %-d, %Y")
+
+
+def upcoming_lines(rep: dict[str, Any]) -> list[str]:
+    """One line per interview, and one per loop: '- Jordan Ellis (Backend): onsite, 4 sessions, Tue Nov 10 and
+    Thu Nov 12'."""
+    tz = rep["client"].get("time_zone")
+    out, done = [], set()
+    for u in rep["upcoming"]:
+        if u.get("loop_size", 1) < 2:
+            out.append(f"- {u['at_client']}: {u['name']} ({u['job']})" + (f", {u['label']}" if u.get("label") else ""))
+            continue
+        if u["loop"] in done:
+            continue
+        done.add(u["loop"])
+        group = [x for x in rep["upcoming"] if x.get("loop") == u["loop"]]
+        days = list(dict.fromkeys(in_zone(x["at"], tz, "%a %b %-d") for x in group))
+        heads = {((x.get("summary") or "").strip().splitlines() or [""])[0].split(":")[0].strip().lower() for x in group}
+        kind = next(iter(heads)) if len(heads) == 1 and 0 < len(next(iter(heads))) <= 30 else "interview loop"
+        when = days[0] if len(days) == 1 else ", ".join(days[:-1]) + " and " + days[-1]
+        out.append(f"- {u['name']} ({u['job']}): {kind}, {len(group)} sessions, {when}")
+    return out
 
 
 def funnel(rep: dict[str, Any]) -> tuple[tuple[str, str], ...]:
@@ -927,8 +1133,15 @@ def email_link(rep: dict[str, Any], text: str) -> dict[str, Any] | None:
     if cc:
         head += "&cc=" + quote(",".join(cc), safe="@,")
     full = head + f"&body={quote(text, safe='')}"
+    trimmed = False
+    if len(full) > MAIL_LIMIT and "moves" in rep and text == report_text(rep):
+        for level in (1, 2, 3):  # a shorter body (no all-time funnel or medians, fewer moves) before giving up
+            short = head + f"&body={quote(report_text(rep, trim=level), safe='')}"
+            if len(short) <= MAIL_LIMIT:
+                full, trimmed = short, True
+                break
     long = len(full) > MAIL_LIMIT
-    return {"href": head if long else full, "to": to, "cc": cc, "long": long}
+    return {"href": head if long else full, "to": to, "cc": cc, "long": long, "trimmed": trimmed}
 
 
 def mailto(rep: dict[str, Any], text: str) -> str | None:
@@ -950,7 +1163,8 @@ def mark_sent(store: Store, key: str, since: str | None = None, until: str | Non
     reps = reports_for(store, key, since, until, now) if manager is None else [
         report(store, key, since, until, now, manager=manager)]
     rep = reps[0]
-    text = "\n\n".join(report_text(r) for r in reps)
+    text = "\n\n".join((f"For {r['manager'] or 'jobs with no hiring manager'}:\n" if len(reps) > 1 else "")
+                       + report_text(r) for r in reps)
     c = ensure_client(store, key)
     raw = store._row("SELECT value FROM settings WHERE key = ?", (SENT_KEY.format(c["key"]),))
     state = _sent_state(store, c["key"])
@@ -971,6 +1185,38 @@ def mark_sent(store: Store, key: str, since: str | None = None, until: str | Non
             {"manager": manager, "state": raw["value"] if raw else None, "last": c.get("last_update_sent_at")})))
     return {"id": uid, "sent_at": ts, "since": rep["since"], "body": text, "manager": rep.get("manager"),
             "client": c["name"], "key": c["key"], "slug": c["slug"], "ai_moves": [m for r in reps for m in r["ai_moves"]]}
+
+
+def last_sent_to(store: Store, key: str, query: str | None) -> dict[str, Any] | None:
+    """For a hiring manager with no update due any more (their req closed and their last one went out): the copy
+    of the newest update that went to them, {"manager", "sent_at", "body"}, or None."""
+    names = {manager_key(j.get("hiring_manager")): (j.get("hiring_manager") or "").strip()
+             for j in client(store, key)["jobs"] if (j.get("hiring_manager") or "").strip()}
+    found = sorted({manager_key(n) for n in actions.match_companies(list(names.values()), query)})
+    if len(found) != 1:
+        return None
+    mk = found[0]
+    for u in updates(store, key, 200):
+        snap = _get_json(store, UPDATE_KEY.format(u["id"]))
+        who = snap.get("manager") if isinstance(snap, dict) else None
+        if who == mk or (who is None and f"For {names[mk]}:" in (u["body"] or "")):
+            return {"manager": names[mk], "sent_at": u["sent_at"], "body": u["body"]}
+    return None
+
+
+def unreviewed_in(store: Store, key: str, manager: str | None = None, since: str | None = None,
+                  until: str | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
+    """The AI moves in the update Mark as sent would record now that the recruiter hasn't reviewed or undone."""
+    key = actions.company_key(key)
+    reps = reports_for(store, key, since, until, now) if manager is None else [
+        report(store, key, since, until, now, manager=manager)]
+    return [m for r in reps for m in r["ai_moves"]]
+
+
+def ai_moves_list(moves: list[dict[str, Any]], shown: int = 3) -> str:
+    """'"Maya Chen" to Placed (Backend Engineer) and 2 more'."""
+    listed = ", ".join(f"{quoted(m['name'])} to {m['stage']} ({m['job']})" for m in moves[:shown])
+    return listed + (f" and {len(moves) - shown} more" if len(moves) > shown else "")
 
 
 def updates(store: Store, key: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -1015,7 +1261,7 @@ def due_list(store: Store, now: datetime | None = None) -> dict[str, Any]:
     "late_days", "managers": [(manager_key, name)] or None}], "later": [...same, not due yet...], "no_day": n}.
     Clients with nothing open and nothing closed since their last update are left out."""
     now = now or datetime.now(timezone.utc)
-    local = now.astimezone()
+    local = as_local(now)
     rows = {r["key"]: r for r in store._rows("SELECT * FROM clients")}
     out: dict[str, Any] = {"due": [], "later": [], "no_day": 0}
     for key, jobs in sorted(_all_jobs(store).items(), key=lambda kv: _spelling(kv[1]).lower()):
@@ -1055,7 +1301,14 @@ def due_updates(store: Store, now: datetime | None = None) -> dict[str, Any]:
                           "late_days": d["late_days"], "manager": rep.get("manager"), "manager_key": rep["manager_key"],
                           "rep": rep, "text": text, "email": email_link(rep, text), "notes": recruiter_notes(rep),
                           "ai_moves": rep["ai_moves"], "overfilled": rep["overfilled"], "not_shown": rep["not_shown"]})
-    return {"parts": parts, "later": lst["later"], "no_day": lst["no_day"], "now": now.isoformat()}
+    later = []  # the drafts for later this week, as they stand now, so Thursday's prep can start
+    for d in lst["later"]:
+        for rep in reports_for(store, d["key"], now=now):
+            text = report_text(rep)
+            later.append({"key": d["key"], "name": d["name"], "slug": d["slug"], "day": d["day"],
+                          "manager": rep.get("manager"), "manager_key": rep["manager_key"], "rep": rep, "text": text,
+                          "notes": recruiter_notes(rep), "ai_moves": rep["ai_moves"]})
+    return {"parts": parts, "later": lst["later"], "later_parts": later, "no_day": lst["no_day"], "now": now.isoformat()}
 
 
 def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
