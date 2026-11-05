@@ -57,12 +57,12 @@ def test_stopwords_aliases_and_closest_matches(store):
     assert ids("js") == {a["id"]} and ids("kubernetes") == {b["id"]}
     assert ids("back end new york") == {b["id"]} and ids("san francisco") == {a["id"]}
 
-    res = store.search_candidates("react golang")
+    res = store.search_candidates("react cobol")  # golang now also means go, which Ben has
     assert res.closest and {h.candidate["id"] for h in res.hits} == {a["id"]}
     assert not store.search_candidates("react").closest
     assert store.search_candidates("zzz yyy").total == 0 and not store.search_candidates("zzz yyy").closest
 
-    out = call(build_server(store), "search_candidates", query="react golang")
+    out = call(build_server(store), "search_candidates", query="react cobol")
     assert text(out).startswith("No exact matches. Closest matches:") and structured(out)["closest"] is True
 
 

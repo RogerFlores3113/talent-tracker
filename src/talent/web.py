@@ -229,30 +229,44 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
     @app.get("/search", response_class=HTMLResponse)
-    def search_fragment(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
-        result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50)
-        return page(request, "_results.html", result=result, q=q, total_all=store.count_candidates(), searching=True)
+    def search_fragment(request: Request, q: str = "", location: str = "", title: str = "", tag: str = "",
+                        offset: int = 0):
+        offset = max(0, offset)
+        result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50,
+                               offset=offset)
+        ctx = dict(result=result, q=q, location=location, title=title, tag=tag, offset=offset,
+                   total_all=store.count_candidates(), searching=True)
+        # "Show more" asks for the next cards only, which replace the button.
+        return page(request, "_result_cards.html" if offset else "_results.html", **ctx)
 
     # ------------------------------------------------------------ table
     @app.get("/candidates", response_class=HTMLResponse)
-    def table(request: Request, q: str = "", tag: str = "", sort: str = "updated", dir: str = "desc",
-              page_no: int = 1):
+    def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
+              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0):
         per = 100
+        page_no = max(1, page_no)
         sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
         direction = "ASC" if dir == "asc" else "DESC"
+        suggestion = None
         if q.strip():
-            result = search.search(q, tag=tag or None, limit=per, offset=(page_no - 1) * per)
+            result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                   limit=per, offset=(page_no - 1) * per)
             rows, total = [h.candidate for h in result.hits], result.total
+            suggestion = result.suggestion
         else:
-            where, params = "", []
-            if tag:
-                where, params = "WHERE c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ?)", [tag]
+            conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
+                                                       source=source or None)
+            where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
-        return page(request, "table.html", rows=rows, total=total, q=q, tag=tag, sort=sort, dir=dir,
-                    page_no=page_no, pages=max(1, (total + per - 1) // per), tags=store.list_tags(40))
+        ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
+                   page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
+                   suggestion=suggestion, corrected=bool(suggestion and result.corrected))
+        if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
+            return page(request, "_table_rows.html", **ctx)
+        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources())
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
@@ -290,7 +304,7 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
                     kinds=[k for k in TIMELINE_KINDS if k != "stage"],
-                    refresh_prompt=recipes.save_from_linkedin(c.get("linkedin_url") or c["name"]))
+                    refresh_prompt=recipes.refresh_candidate(c))
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
@@ -722,8 +736,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
                    limit: int = 25, offset: int = 0):
         r = search.search(q, location=location, title=title, tag=tag, limit=max(1, min(limit, 200)),
                           offset=max(0, offset))
-        return {"total": r.total, "engine": r.engine,
-                "results": [{**h.candidate, "snippet": h.snippet} for h in r.hits]}
+        return {"total": r.total, "engine": r.engine, "exact_total": r.exact_total, "suggestion": r.suggestion,
+                "corrected": r.corrected,
+                "results": [{**h.candidate, "snippet": h.snippet, "closest": h.closest, "reason": h.reason}
+                            for h in r.hits]}
 
     @app.post("/api/candidates", status_code=201)
     def api_create(body: CandidateIn):

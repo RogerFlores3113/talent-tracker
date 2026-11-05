@@ -155,15 +155,18 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=READ, meta=tool_meta("results"))
     def search_candidates(query: str = "", location: str | None = None, title: str | None = None,
                           tag: str | None = None, limit: int = 10) -> CallToolResult:
-        """Search saved candidates by any words: skills, past or current companies, titles, names, places.
+        """Search saved candidates by any words: skills, past or current companies, titles, names, places,
+        the jobs they're in (title or company, like "Acme Fintech") and their timeline notes and interviews.
 
         An email address or LinkedIn URL as the query finds that exact person, so use it to check for duplicates.
-        Matches whole words, with the last word as a prefix ("pyth" finds "Python"). Filler words like "who" or
-        "people" are ignored. Shorthand like sf, nyc, ml, js, k8s or frontend also matches the other spelling.
-        If nobody has every word, you get the closest matches (marked as such). There is no typo tolerance,
-        so if a search finds nothing, retry with other spellings or fewer words.
+        Matches whole words and their forms ("engineers" finds "engineer"), with the last word as a prefix
+        ("pyth" finds "Python"). Filler words like "who" or "people" are ignored. Shorthand like sf, nyc, la,
+        bay area, ml, js, k8s, golang, postgres or frontend also matches the other spelling.
+        Fewer than 3 people with every word: the closest matches (some of the words) follow, marked as such.
+        A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?".
         Leave query empty to list the most recently updated candidates.
-        location / title narrow by a substring of those fields; tag narrows to one exact skill tag.
+        location / title narrow by part of those fields (shorthand works, case doesn't matter);
+        tag narrows to one skill tag.
         """
         q = (query or "").strip()
         is_id, _ = store.lookup_exact(q)
@@ -176,23 +179,48 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                                  "tags", "email", "linkedin_url", "last_contacted_at", "updated_at")}
             if h.snippet:
                 c["match"] = snippet_text(h.snippet)
+            if h.reason:
+                c["reason"] = h.reason
+            if h.closest:
+                c["closest"] = True
             c["app_url"] = app_url(f"/candidates/{c['id']}")
             results.append(_slim(c))
         what = "email" if "@" in q else "LinkedIn URL"
+        n_closest = sum(1 for c in results if c.get("closest"))
+        exact_total = res.exact_total if res.exact_total is not None else res.total
+        lines: list[str] = []
+        if res.corrected:
+            lines.append(f"Nothing matched \"{q}\". Showing results for {res.suggestion}.")
         if is_id:
             head = f"Exact match for that {what}:" if results else (
                 f"No saved candidate has that {what}. Try searching their name too.")
         elif res.closest:
             head = "No exact matches. Closest matches:"
         else:
-            head = (f"{res.total} match{'' if res.total == 1 else 'es'}"
-                    + (f", showing {len(results)}" if res.total > len(results) else "") + ":")
-        lines = [head] + ([DATA_NOTE] if results else []) + [
-            f"- {_line(c)}" + (f". Match: {c['match']}" if c.get("match") else "") for c in results]
+            head = (f"{exact_total} match{'' if exact_total == 1 else 'es'}"
+                    + (f", showing {len(results) - n_closest}" if exact_total > len(results) - n_closest else "")
+                    + (f", plus {res.total - exact_total} closest match{'' if res.total - exact_total == 1 else 'es'}"
+                       " with some of the words" if res.total > exact_total else "") + ":")
+        lines.append(head)
+        if results:
+            lines.append(DATA_NOTE)
+        for c in results:
+            line = f"- {_line(c)}"
+            if c.get("reason"):
+                line += f". {c['reason']}" + (f": {c['match']}" if c.get("match") else "")
+            elif c.get("match"):
+                line += f". Match: {c['match']}"
+            if c.get("closest") and not res.closest:
+                line += " (closest match)"
+            lines.append(line)
         if not results and not is_id:
             lines = ["No saved candidates match. Try fewer or different words, or no filters."]
-        return _result("\n".join(lines), {"total": res.total, "results": results, "closest": res.closest,
-                                          "exact": res.exact, "app_url": app_url("/?q=" + quote(q))})
+        if res.suggestion and not res.corrected:
+            lines.append(f"Did you mean {res.suggestion}?")
+        return _result("\n".join(lines), {
+            "total": res.total, "exact_total": exact_total, "results": results, "closest": res.closest,
+            "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q,
+            "app_url": app_url("/?q=" + quote(res.suggestion if res.corrected else q))})
 
     @mcp.tool(annotations=READ, meta=tool_meta("candidate"))
     def get_candidate(candidate_id: int) -> CallToolResult:

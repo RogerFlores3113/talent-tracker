@@ -37,6 +37,10 @@ h1 { font-size: 24px; margin: 0 0 8px; } h2 { font-size: 17px; margin: 0 0 8px; 
 .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .row2 { color: var(--muted); font-size: 14px; }
 .snip { margin-top: 4px; font-size: 14px; }
+.why { margin-top: 4px; font-size: 13px; color: var(--muted); }
+.suggest { margin: 12px 0 4px; }
+.cards li.divider { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.cards li.more, tr.more td { text-align: center; padding: 8px; }
 mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
 .empty { text-align: center; padding: 48px 16px; background: var(--surface); border: 1px dashed var(--line);
          border-radius: var(--radius); margin-top: 16px; }

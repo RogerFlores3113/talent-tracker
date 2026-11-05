@@ -210,7 +210,7 @@ def test_migrates_v2_to_v3(tmp_path, monkeypatch):
     s.close()
     monkeypatch.setattr(store_mod, "_MIGRATIONS", all_steps)
     s = Store(path)
-    assert s.schema_version == 3
+    assert s.schema_version == len(all_steps)
     note = [t for t in s.timeline(cid) if t["kind"] == "note"][0]
     assert note["data"] is None and not note["undoable"]
     s.update_candidate(cid, location="Reno")
@@ -223,7 +223,7 @@ def test_fresh_and_v1_databases_reach_v3(tmp_path):
     path = tmp_path / "old.db"
     shutil.copy(FIXTURES / "v1.db", path)
     s = Store(path)
-    assert s.schema_version == 3
+    assert s.schema_version == len(store_mod._MIGRATIONS)
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(timeline)")}
     assert "data" in cols
     s.close()

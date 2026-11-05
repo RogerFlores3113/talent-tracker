@@ -13,39 +13,32 @@
     <option value="">Any skill</option>
     {% for t in tags %}<option value="{{ t.tag }}" {{ 'selected' if t.tag | lower == tag | lower }}>{{ t.tag }} ({{ t.count }})</option>{% endfor %}
   </select>
+  <input type="text" name="location" value="{{ location }}" placeholder="Location (sf, nyc, bay area)" aria-label="Filter by location">
+  {% if sources %}<select name="source" aria-label="Filter by source" onchange="this.form.submit()">
+    <option value="">Any source</option>
+    {% for s in sources %}<option value="{{ s.source }}" {{ 'selected' if s.source | lower == source | lower }}>{{ s.source }} ({{ s.count }})</option>{% endfor %}
+  </select>{% endif %}
   <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">
   <button class="btn" type="submit">Go</button>
-  {% if q or tag %}<a href="/candidates" class="small">Clear</a>{% endif %}
+  {% if q or tag or location or source %}<a href="/candidates" class="small">Clear</a>{% endif %}
 </form>
+{% if suggestion and corrected %}<p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ suggestion }}</strong>.</p>
+{% elif suggestion %}<p class="suggest">Did you mean <a href="/candidates?{{ {'q': suggestion, 'tag': tag, 'location': location, 'source': source} | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
 {% if q %}<p class="fine">Sorted by best match.</p>{% endif %}
 <div class="table-wrap">
 <table class="dense">
   <thead><tr>
     {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated')] %}
-    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ {'tag': tag, 'sort': key, 'dir': 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))} | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
+    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ {'tag': tag, 'location': location, 'source': source, 'sort': key, 'dir': 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))} | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
     {% endfor %}
     <th>Skills</th>
   </tr></thead>
   <tbody>
-  {% for c in rows %}
-    <tr>
-      <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a></td>
-      <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td><td>{{ c.location or '' }}</td>
-      <td class="nowrap">{{ c.last_contacted_at | date if c.last_contacted_at else '' }}</td>
-      <td class="nowrap">{{ c.updated_at | date }}</td>
-      <td>{{ chips(c.tags[:4]) }}</td>
-    </tr>
-  {% else %}
-    <tr><td colspan="7" class="none">No candidates{{ ' match that' if q or tag }}.</td></tr>
-  {% endfor %}
+  {% include "_table_rows.html" %}
   </tbody>
 </table>
 </div>
-{% if pages > 1 %}
-<p class="pager">
-  {% if page_no > 1 %}<a href="/candidates?{{ {'q': q, 'tag': tag, 'sort': sort, 'dir': dir, 'page_no': page_no - 1} | urlencode }}">Previous</a>{% endif %}
-  Page {{ page_no }} of {{ pages }}
-  {% if page_no < pages %}<a href="/candidates?{{ {'q': q, 'tag': tag, 'sort': sort, 'dir': dir, 'page_no': page_no + 1} | urlencode }}">Next</a>{% endif %}
-</p>
+{% if page_no > 1 %}
+<p class="pager"><a href="/candidates?{{ {'q': q, 'tag': tag, 'location': location, 'source': source, 'sort': sort, 'dir': dir} | urlencode }}">Back to the start</a></p>
 {% endif %}
 {% endblock %}

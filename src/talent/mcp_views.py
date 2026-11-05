@@ -35,6 +35,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px}a,button.link{color:
 ul{margin:4px 0;padding-left:18px}.kind{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .empty{color:var(--muted);padding:12px}.click{cursor:pointer}.click:hover{border-color:var(--accent)}
 .contact{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:13px}
+.badge{display:inline-block;margin-left:8px;background:var(--chip);color:var(--muted);border-radius:999px;padding:1px 8px;font-size:12px;font-weight:600;vertical-align:middle}
 """
 
 _JS = r"""
@@ -68,10 +69,19 @@ req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-searc
 
 _RENDER = {
     "candidate": r"""
+const FIELD={current_title:"title",current_company:"company",linkedin_url:"LinkedIn",tags:"skills",work_history:"work history",last_contacted_at:"last contacted"};
+function savedText(s){if(s==null||s===false)return null;if(typeof s==="string")return s;
+ const changed=s.changed||s.fields||s.updated||[];
+ if(s.created||s.status==="saved"||s.status==="created"||s.status==="new")return"Saved";
+ if(Array.isArray(changed)&&changed.length)return"Updated: "+changed.map(f=>FIELD[f]||String(f).replace(/_/g," ")).join(", ");
+ if(s.status==="unchanged"||s.status==="same")return"Already saved, nothing new";
+ return s.label||s.text||(s.status?String(s.status):null)}
 function render(c){
+ if(!c.name&&c.candidate)c=Object.assign({},c.candidate,{saved_status:c.saved_status,app_url:c.app_url||c.candidate.app_url});
+ const saved=savedText(c.saved_status);
  const sub=[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")+(c.location?" · "+c.location:"");
  const card=el("div",{class:"card"},
-  el("div",{class:"row"},el("h1",{},c.name),appLink(c.app_url)),
+  el("div",{class:"row"},el("h1",{},c.name,saved?el("span",{class:"badge"},saved):null),appLink(c.app_url)),
   sub?el("div",{class:"muted"},sub):null,
   el("div",{class:"contact"},c.email?el("span",{},c.email):null,c.phone?el("span",{},c.phone):null,
    profileLink(c.linkedin_url),profileLink(c.website,"Website"),c.source?el("span",{class:"muted"},"Source: "+c.source):null),
@@ -86,12 +96,18 @@ function render(c){
     "results": r"""
 function render(d){
  const wrap=el("div",{});
- const head=d.closest?"No exact matches. Closest matches:":d.exact?"Exact match":d.total+(d.total===1?" match":" matches");
+ const exact=d.exact_total!=null?d.exact_total:d.total;
+ const head=d.closest?"No exact matches. Closest matches:":d.exact?"Exact match":exact+(exact===1?" match":" matches");
+ if(d.corrected&&d.suggestion)wrap.append(el("div",{class:"small"},"Showing results for ",el("b",{},d.suggestion)));
  wrap.append(el("div",{class:"row small muted"},el("span",{},head),appLink(d.app_url,"Open search in Talent Search")));
  if(!d.results.length)wrap.append(el("p",{class:"empty"},"No saved candidates match. Try fewer or different words."));
+ let shown=false;
  for(const c of d.results){const sub=[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")+(c.location?" · "+c.location:"");
-  wrap.append(openCard("card",c.app_url,el("div",{class:"row"},el("b",{},c.name),profileLink(c.linkedin_url)),sub?el("div",{class:"muted small"},sub):null,
+  if(c.closest&&!d.closest&&!shown){shown=true;wrap.append(el("h2",{},"Closest matches, with some of the words"))}
+  wrap.append(openCard("card",c.app_url,el("div",{class:"row"},el("b",{},c.name),c.closest?el("span",{class:"badge"},"Closest match"):null,profileLink(c.linkedin_url)),sub?el("div",{class:"muted small"},sub):null,
+   c.reason?el("div",{class:"small muted"},c.reason):null,
    c.match?el("div",{class:"small"},marked(c.match)):null,(c.tags&&c.tags.length)?el("div",{class:"chips"},c.tags.slice(0,6).map(t=>el("span",{class:"chip"},t))):null))}
+ if(d.suggestion&&!d.corrected)wrap.append(el("p",{class:"small"},"Did you mean ",el("b",{},d.suggestion),"?"));
  return wrap}""",
     "pipeline": r"""
 function render(d){
