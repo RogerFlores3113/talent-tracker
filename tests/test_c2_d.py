@@ -271,11 +271,13 @@ def test_exit_names_count_as_out_and_explicit_outcomes(store):
                                   {"name": "Parked", "outcome": "out"}]))
     assert job["stage_outcomes"]["Passed"] == "lost" and job["stage_outcomes"]["Parked"] == "lost"
     jid = job["id"]
-    out = structured(call(server, "edit_job_stages", job_id=jid, outcomes={"Parked": "open"},
+    out = structured(call(server, "edit_job_stages", job_id=jid,
                           add=[{"name": "Ghosted", "outcome": "lost"}],
                           rename={"Passed": {"name": "No go", "outcome": "lost"}}))
     assert out["stage_outcomes"] == {"Sourced": "open", "Intro call": "open", "Offer": "open", "Hired": "hired",
-                                     "No go": "lost", "Parked": "open", "Ghosted": "lost"}
+                                     "No go": "lost", "Parked": "lost", "Ghosted": "lost"}
+    with pytest.raises(Exception, match="change what Parked counts as"):  # existing stages: the recruiter's call
+        call(server, "edit_job_stages", job_id=jid, outcomes={"Parked": "open"})
     with pytest.raises(Exception, match="Say what Not moving forward should count as"):
         call(server, "edit_job_stages", job_id=jid, rename={"Intro call": "Not moving forward"})
     store.rename_stage(jid, "Intro call", "Not moving forward", outcome="lost")

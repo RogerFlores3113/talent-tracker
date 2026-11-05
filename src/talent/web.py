@@ -1115,7 +1115,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "undoable": bool(d.get("old")) and not d.get("undone_at") and not d.get("merged"),
                              "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo"})
         if who in ("", "ai"):
-            for a in store.ai_actions(since, limit):
+            ai = store.ai_actions(since, limit)
+            for a in ai:
                 if a["candidate_id"]:
                     name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
                 elif a["job_id"]:
@@ -1126,7 +1127,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows.append({"at": a["at"], "who": "ai", "name": name, "href": href,
                              "text": "; ".join(lines) if lines else a["summary"], "undoable": a["undoable"],
                              "undone": bool(a["undone_at"]), "note": a.get("undo_note"),
-                             "undo_url": f"/changes/ai/{a['id']}/undo"})
+                             "undo_url": f"/changes/ai/{a['id']}/undo",
+                             # newest first, so every newer AI change is already in this list
+                             "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undoable"]),
+                             "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
 
@@ -1170,15 +1174,55 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
         return back(request, "/changes", notice=notice)
 
+    def ai_backup():
+        """Undoing a person or job the AI added deletes it, so back up first, once per request, as Delete does."""
+        done: list[Path] = []
+
+        def run() -> None:
+            if not done:
+                done.append(importers.backup_before_import(store, reason="delete"))
+        return run
+
+    def undo_ai_batch(request: Request, todo: list[dict[str, Any]], none_left: str):
+        """Undo these AI changes, newest first, skipping ones already undone, and say what happened."""
+        undone, skipped = [], []
+        backup = ai_backup()
+        for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
+            if a["undone_at"]:
+                continue
+            try:
+                undone.append(store.undo_ai_action(a["id"], by="app", before_delete=backup))
+            except NotFound:
+                continue  # went with a person or job taken out just before
+            except ValueError as exc:
+                skipped.append(f"{a['summary']} ({str(exc).rstrip('.')})")
+        if not undone and not skipped:
+            return back(request, "/changes", notice=none_left)
+        notice = f"Undid {len(undone)} AI change{'' if len(undone) == 1 else 's'}" + (
+            ": " + _listed(undone) if undone else "") + "."
+        if skipped:
+            notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
+        return back(request, "/changes", notice=notice)
+
     @app.post("/changes/ai/{action_id}/undo")
     def undo_ai_action(request: Request, action_id: int):
         try:
-            what = store.undo_ai_action(action_id)
+            what = store.undo_ai_action(action_id, before_delete=ai_backup())
         except NotFound:
             return back(request, "/changes", error="That change is gone. Reload the page.")
         except ValueError as exc:
             return back(request, "/changes", error=f"Couldn't undo that. {exc}")
         return back(request, "/changes", notice=f"Undid: {what}.")
+
+    @app.post("/changes/ai/{action_id}/undo-from")
+    def undo_ai_from(request: Request, action_id: int):
+        """Undo this AI change and every AI change made after it."""
+        try:
+            store.ai_action(action_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        todo = [a for a in store.ai_actions(limit=1_000_000) if a["id"] >= action_id]
+        return undo_ai_batch(request, todo, "Those AI changes were already undone.")
 
     @app.post("/changes/undo-ai")
     async def undo_ai_since(request: Request):
@@ -1186,23 +1230,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         start = since_iso(str(form.get("since") or ""))
         if not start:
             return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
-        undone, skipped = [], []
-        for a in store.ai_actions(start, limit=1_000_000):  # newest first, so older values come back last
-            if a["undone_at"]:
-                continue
-            try:
-                undone.append(store.undo_ai_action(a["id"], by="app"))
-            except NotFound:
-                continue  # went with a person or job taken out just before
-            except ValueError as exc:
-                skipped.append(f"{a['summary']} ({str(exc).rstrip('.')})")
-        if not undone and not skipped:
-            return back(request, "/changes", notice="There were no AI changes to undo in that time.")
-        notice = f"Undid {len(undone)} AI change{'' if len(undone) == 1 else 's'}" + (
-            ": " + _listed(undone) if undone else "") + "."
-        if skipped:
-            notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
-        return back(request, "/changes", notice=notice)
+        return undo_ai_batch(request, store.ai_actions(start, limit=1_000_000),
+                             "There were no AI changes to undo in that time.")
 
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)

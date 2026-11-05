@@ -225,16 +225,19 @@ def test_edit_job_stages_outcome_limits(store):
     jid = store.add_job("Backend")["id"]
     lee = store.add_candidate(name="Lee")
     store.add_to_pipeline(lee["id"], jid, "Interviewing")
-    with pytest.raises(Exception, match="change what 3 stages count as"):
+    # Cycle 3 K: the AI can't change what any existing stage counts as, empty or not.
+    with pytest.raises(Exception, match="No change made. Ask the recruiter to change what Contacted counts as"):
         call(server, "edit_job_stages", job_id=jid,
              outcomes={"Interviewing": "lost", "Screening": "lost", "Contacted": "lost"})
-    with pytest.raises(Exception, match="Interviewing has 1 person in it.*Ask the recruiter to change it in the app"):
+    with pytest.raises(Exception, match="Ask the recruiter to change what Interviewing counts as in the app"):
         call(server, "edit_job_stages", job_id=jid, outcomes={"Interviewing": "lost"})
     with pytest.raises(Exception, match="Ask the recruiter"):  # a closing name counts too
         call(server, "edit_job_stages", job_id=jid, rename={"Interviewing": {"name": "Passed", "outcome": "lost"}})
     assert {s["name"]: s["outcome"] for s in store.job_stages(jid)}["Interviewing"] == "open"
-    out = structured(call(server, "edit_job_stages", job_id=jid, outcomes={"Withdrawn": "open"}))
-    assert out["stage_outcomes"]["Withdrawn"] == "open"
+    with pytest.raises(Exception, match="change what Withdrawn counts as"):
+        call(server, "edit_job_stages", job_id=jid, outcomes={"Withdrawn": "open"})
+    out = structured(call(server, "edit_job_stages", job_id=jid, add=["Parked"], outcomes={"Parked": "lost"}))
+    assert out["stage_outcomes"]["Parked"] == "lost" and out["stage_outcomes"]["Withdrawn"] == "lost"
     store.set_stage_outcome(jid, "Interviewing", "lost")  # the recruiter, in the app, can
 
 
@@ -259,7 +262,8 @@ def test_save_candidate_keeps_identity_fields_after_a_recent_ai_change(store):
     out, said = structured(res), text(res)
     saved = store.get_candidate(kenji["id"])
     assert saved["website"] == "https://kenji.dev" and not saved["phone"]
-    assert out["identity_kept"] == ["phone"] and "phone" in out["kept"]
+    # Cycle 3 K: phone was empty, so it was not saved, but it isn't listed as a "kept" saved value.
+    assert out["identity_kept"] == ["phone"] and "phone" not in out.get("kept", [])
     assert "Ask the recruiter to confirm in the app" in said and "changed this person's email" in said
 
 

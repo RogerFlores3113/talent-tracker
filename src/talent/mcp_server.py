@@ -51,7 +51,8 @@ except what you read.
 - You can add people, update them, add them to pipelines and move stages without asking. Clear at most one field
   per update_candidate call, and only when you're sure. Name, email, phone and LinkedIn say who someone is: change
   at most one of them per person every 10 minutes (save_candidate keeps the rest for the recruiter). In
-  edit_job_stages, change what at most one stage counts as, and never a stage that has people in it.
+  edit_job_stages, only a stage you add in that call can count as hired or out; what an existing stage counts as
+  is the recruiter's to change in the app.
 - The recruiter sees what you write under Changes in the app and can undo it there: people you add, profile
   edits, pipeline adds and stage moves, jobs you create or edit, stage edits, and to-dos you add or complete.
   Activity you log (log_activity, update_interview) stays on the timeline as a record. You cannot delete anything;
@@ -456,14 +457,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                          "skills in tags and anything else worth keeping in about.")
         if not created:
             out["changed"] = changed
-            if held:
-                kept = [*kept, *[k for k in held if k not in kept]]
+            if held:  # these were empty and stay empty for now: not "kept", just not saved
                 out["identity_kept"] = held
                 notes.append(f"Not saved: {_labels(held)}. These say who the person is, and {held_why}. "
                              "Ask the recruiter to confirm in the app.")
             if kept:
                 out["kept"] = kept
-                out["note"] = (f"Already saved, so these saved values were kept: {', '.join(kept)}. "
+                out["note"] = (f"Already saved, so these saved values were kept: {_labels(kept)}. "
                                "If the new ones are right, ask the recruiter, then use update_candidate.")
                 notes.append(out["note"])
         body = _candidate_text(view).replace(f" {DATA_NOTE}", "")
@@ -486,7 +486,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
         last_contacted_at: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> CallToolResult:
         """Change fields on a candidate by id. Pass an empty string (or empty list) to clear a field.
 
         You can clear at most one field per call. Name, email, phone and LinkedIn URL say who the person is: you
@@ -522,14 +522,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                              "the app.")
         cand = store.update_candidate(candidate_id, work_history=_history(work_history), by="ai", **data)
         changed = cand.pop("_changed", [])
-        return {**_slim(cand), "changed": changed}
+        who = f"{cand['name']} (id {candidate_id})"
+        if not changed:
+            sentence = f"Nothing to change on {who}; those values were already saved."
+        else:
+            cleared = [k for k in changed if k in clearing]
+            bits = [_labels([k]) + (" cleared" if k in cleared else "") for k in changed]
+            sentence = f"Updated {who}: {', '.join(bits)}."
+        return _said(sentence, {**_slim(cand), "changed": changed})
 
     @mcp.tool(annotations=WRITE)
     def log_activity(candidate_id: int, kind: str, summary: str | None = None, when: str | None = None,
                      job_id: int | None = None) -> CallToolResult:
         """Add something to a candidate's timeline.
 
-        kind: note, call, email, message, meeting or interview. `when` is ISO date/time (with time zone for
+        kind: note, call, email, message, meeting or interview. `summary` is what happened (`body` works too;
+        summary is preferred). `when` is ISO date/time (with time zone for
         interviews, e.g. 2026-11-12T15:00:00-08:00); leave empty for now. Past calls, emails, messages, meetings
         and interviews update "last contacted". Future interviews show on the recruiter's dashboard.
         Logging the same item twice is harmless. To reschedule, cancel or record how an interview went, use
@@ -631,34 +639,43 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=EDIT)
     def edit_job_stages(job_id: int, rename: dict[str, str | dict[str, str]] | None = None,
                         add: list[str | dict[str, str]] | None = None,
-                        order: list[str] | None = None, outcomes: dict[str, str] | None = None) -> dict[str, Any]:
+                        order: list[str] | None = None, outcomes: dict[str, str] | None = None) -> CallToolResult:
         """Customize a job's stages. rename maps old name to new name (candidates stay put), or to
         {"name": "Passed", "outcome": "lost"}. add takes new stage names; each lands before the closing stages
         unless you place it: "Take-home after Screening" or {"name": "Take-home", "after": "Screening",
-        "outcome": "open"}. outcomes sets what existing stages count as: {"Passed": "lost"}. Outcomes are open
-        (still in play), hired or lost (out); without one, names like Placed count as hired and Not a fit or
-        Passed as out. order lists stage names in the order you want; stages you leave out keep their place
-        (the result names them). You can change what at most one existing stage counts as per call, and not a
-        stage that has people in it: ask the recruiter to do that in the app. Every change in a call lands, or
-        none does. Stages can't be removed here. Check stage_outcomes in the result."""
+        "outcome": "lost"}. Outcomes are open (still in play), hired or lost (out); without one, names like
+        Placed count as hired and Not a fit or Passed as out. Only a stage added in this call can take an
+        outcome (in add, or in outcomes by its new name). What an existing stage counts as can't change here,
+        so don't rename one to a name that counts differently: ask the recruiter to change it in the app.
+        order lists stage names in the order you want; stages you leave out keep their place (the result names
+        them). Every change in a call lands, or none does. Stages can't be removed here. Check stage_outcomes
+        in the result."""
         try:
             res = store.edit_job_stages(job_id, rename=rename, add=add, order=order, outcomes=outcomes, by="ai")
         except ValueError as exc:
-            msg = str(exc)
-            raise ValueError(msg if msg.startswith("No change made") else f"No change made. {msg}") from None
+            # The call was rolled back, so name the stages as they are now, not as they were mid-call.
+            msg = re.sub(r"\s*(?:This job's|Its) stages are: .*$", "", str(exc), flags=re.S).strip()
+            msg = msg if msg.startswith("No change made") else f"No change made. {msg}"
+            now = ", ".join(s["name"] for s in store.job_stages(job_id))
+            raise ValueError(f"{msg} {_job_name(store.get_job(job_id))} still has these stages: {now}.") from None
         out: dict[str, Any] = {"job_id": job_id, **_stage_info(store, job_id)}
         if res["left_out"]:
             out["left_out_of_order"] = res["left_out"]
             out["note"] = ("These stages weren't in order, so they kept their place: "
                            + ", ".join(res["left_out"]) + ".")
-        return out
+        job = _job_name(store.get_job(job_id))
+        listed = ", ".join(out["stages"])
+        sentence = (f"Changed the stages of {job}: {res['changes']}. Stages now: {listed}." if res.get("changes")
+                    else f"No change to the stages of {job}. Stages: {listed}.")
+        return _said(sentence, out)
 
     # -------------------------------------------------------------- pipeline
     @mcp.tool(annotations=WRITE)
     def add_to_pipeline(candidate_id: int, job_id: int, stage: str | None = None,
                         notes: str | None = None) -> CallToolResult:
         """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there).
-        A stage can be given by the start of its name ("tech" for "Technical interview")."""
+        A stage can be given by the start of its name ("tech" for "Technical interview").
+        `notes` (or `note`; notes is preferred) is logged on their timeline."""
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
         out = _slim(store.add_to_pipeline(candidate_id, job_id, stage, notes, by="ai"))
         if not already:
@@ -673,8 +690,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def move_stage(candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> CallToolResult:
-        """Move a candidate to another of the job's stages, optionally with a note.
-        The start of a stage name is enough when it's unambiguous ("tech" for "Technical interview")."""
+        """Move a candidate to another of the job's stages, optionally with a note in `notes` (or `note`;
+        notes is preferred). The start of a stage name is enough when it's unambiguous ("tech" for
+        "Technical interview")."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes, by="ai"))
         if before:
@@ -778,9 +796,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return {"note": "Written by your AI app", **_slim(s)}
 
     @mcp.tool(annotations=WRITE)
-    def complete_suggestion(suggestion_id: int) -> dict[str, Any]:
+    def complete_suggestion(suggestion_id: int) -> CallToolResult:
         """Mark a dashboard suggestion as done (it stays in the record)."""
-        return _slim(store.complete_suggestion(suggestion_id, by="ai"))
+        was_done = bool((store._row("SELECT done_at FROM suggestions WHERE id = ?", (suggestion_id,)) or {}).get("done_at"))
+        s = _slim(store.complete_suggestion(suggestion_id, by="ai"))
+        about = []
+        if s.get("candidate_id"):
+            about.append(store.get_candidate(s["candidate_id"])["name"])
+        if s.get("job_id"):
+            about.append(_job_name(store.get_job(s["job_id"])))
+        what = f'"{s["text"]}"' + (f" (about {', '.join(about)})" if about else "")
+        return _said(f"That to-do was already done: {what}." if was_done else f"Marked the to-do done: {what}.", s)
 
     # --------------------------------------------------------------- support
     @mcp.tool(annotations=READ)
@@ -846,6 +872,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 ARG_ALIASES = {
     "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags"},
     "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags"},
+    "move_stage": {"note": "notes"},
+    "add_to_pipeline": {"note": "notes"},
+    "log_activity": {"body": "summary"},
 }
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one
 # extra field. Every other tool refuses an argument it doesn't know.
