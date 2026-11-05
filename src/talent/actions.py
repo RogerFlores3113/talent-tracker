@@ -6,6 +6,7 @@ kind of item can be switched off in Settings, and its threshold changed.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -47,9 +48,14 @@ STAGE_SETS: dict[str, tuple[str, tuple[str, ...] | None]] = {
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
+def local_days(then: datetime, now: datetime) -> int:
+    """Calendar days from `then` to `now` on this computer's clock: 11 PM yesterday is 1 day ago at 1 AM."""
+    return (now.astimezone().date() - then.astimezone().date()).days
+
+
 def _days_ago(iso: str | None, now: datetime) -> int:
     dt = to_dt(iso)
-    return (now - dt).days if dt else 0
+    return local_days(dt, now) if dt else 0
 
 
 def _int(cfg: dict[str, str], key: str, default: int) -> int:
@@ -201,6 +207,116 @@ def _live_interviews(store: Store, rows: list[dict[str, Any]], jobs: dict[int, d
                 continue
         out.append(r)
     return out
+
+
+IV_TIME = "%a %b %-d, %-I:%M %p %Z"  # interview times say their zone: 'Fri Nov 6, 10:00 PM CST'
+
+
+def _iv_data(t: dict[str, Any]) -> dict[str, Any]:
+    d = t.get("data")
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except ValueError:
+            d = None
+    return d if isinstance(d, dict) else {}
+
+
+def interview_name(t: dict[str, Any], limit: int = 60) -> str:
+    """What an interview is, from its summary's first line ('Onsite: system design'), or ''."""
+    line = ((t.get("body") or "").strip().splitlines() or [""])[0].strip()
+    return line if len(line) <= limit else line[:limit - 3].rstrip() + "..."
+
+
+def interviewer_of(t: dict[str, Any]) -> str:
+    return str(_iv_data(t).get("interviewer") or "").strip()
+
+
+def interview_label(t: dict[str, Any]) -> str:
+    """'Onsite: system design, with Priya Raman', 'with Priya Raman', or ''."""
+    who = interviewer_of(t)
+    return ", ".join(x for x in (interview_name(t), f"with {who}" if who else "") if x)
+
+
+def exit_prompts(store: Store, now: datetime | None = None, days: int = 90) -> list[dict[str, Any]]:
+    """Interviews still scheduled after their candidate left the job (an Out stage), was hired, or the job
+    closed, grouped per person and job: [{candidate_id, name, job_id, job, stage, why, interviews: [...]}].
+    Ones the recruiter chose to keep (since that move) are left out."""
+    now = now or datetime.now(timezone.utc)
+    rows = [r for r in store.upcoming_interviews(days=days, now=now) if r.get("job_id")]
+    if not rows:
+        return []
+    jobs = {j["id"]: j for j in store.list_jobs()}
+    apps = {(a["candidate_id"], a["job_id"]): a for a in store._rows(
+        """SELECT a.candidate_id, a.job_id, a.stage, a.stage_changed_at, s.outcome FROM applications a
+           LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+           WHERE a.candidate_id IN ({})""".format(",".join("?" * len({r["candidate_id"] for r in rows}))),
+        sorted({r["candidate_id"] for r in rows}))}
+    groups: dict[tuple[int, int], dict[str, Any]] = {}
+    for r in rows:
+        job = jobs.get(r["job_id"])
+        app = apps.get((r["candidate_id"], r["job_id"]))
+        outcome = (app or {}).get("outcome") or "open"
+        closed = bool(job and job["status"] == "closed")
+        if not job or (outcome == "open" and not closed):
+            continue
+        kept = str(_iv_data(r).get("kept_at") or "")
+        since = (app or {}).get("stage_changed_at") or "" if outcome != "open" else job.get("updated_at") or ""
+        if kept and kept >= since:
+            continue
+        why = "hired" if outcome == "hired" else "out" if outcome == "lost" else "closed"
+        g = groups.setdefault((r["candidate_id"], r["job_id"]), {
+            "candidate_id": r["candidate_id"], "name": r["candidate_name"], "job_id": r["job_id"], "job": job,
+            "stage": (app or {}).get("stage"), "why": why, "interviews": []})
+        g["interviews"].append(r)
+    return sorted(groups.values(), key=lambda g: g["interviews"][0]["at"])
+
+
+def _exit_title(store: Store, g: dict[str, Any]) -> str:
+    """'Dana Okafor is out of Backend Engineer but still has an interview Fri Nov 6'."""
+    ivs = g["interviews"]
+    days = list(dict.fromkeys(local_time(i["at"], "%a %b %-d") for i in ivs))
+    when = days[0] if len(days) == 1 else ", ".join(days[:-1]) + " and " + days[-1]
+    what = f"an interview {when}" if len(ivs) == 1 else f"{len(ivs)} interviews ({when})"
+    title = g["job"]["title"]
+    if g["why"] == "closed":
+        return f"{title} is closed but {g['name']} still has {what}"
+    if g["why"] == "hired":
+        return f"{g['name']} was {hire_word(store, g['job_id'])} for {title} but still has {what}"
+    return f"{g['name']} is out of {title} but still has {what}"
+
+
+def next_interview_days(store: Store, job_id: int, now: datetime | None = None) -> dict[int, list[dict[str, Any]]]:
+    """{candidate_id: [interviews]}: everything scheduled on the day of each in-the-running candidate's next
+    interview for this job (or with no job), so an onsite loop shows as its sessions, in time order."""
+    now = now or datetime.now(timezone.utc)
+    start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
+    rows = store._rows(
+        f"""SELECT t.id, t.candidate_id, t.at, t.body, t.data FROM timeline t
+           JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = ?
+           JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+           WHERE t.kind = 'interview' AND t.at >= ? AND (t.job_id = ? OR t.job_id IS NULL)
+             AND s.outcome = 'open' AND {LIVE_INTERVIEW}
+           ORDER BY t.at, t.id""", (job_id, start, job_id))
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        first = out.setdefault(r["candidate_id"], [r])[0]
+        if r is not first and to_dt(r["at"]).astimezone().date() == to_dt(first["at"]).astimezone().date():
+            out[r["candidate_id"]].append(r)
+    return out
+
+
+def interview_line(name: str, ivs: list[dict[str, Any]]) -> str:
+    """'- Tomasz: Fri Nov 6, 4:30 PM CST (Onsite: system design, with Priya)', or for a loop
+    '- Tomasz: Fri Nov 6, 3 interviews: 9:00 AM CST System design (with Priya); 10:00 AM CST Coding'."""
+    if len(ivs) == 1:
+        label = interview_label(ivs[0])
+        return f"- {name}: {local_time(ivs[0]['at'], IV_TIME).strip()}" + (f" ({label})" if label else "")
+    parts = []
+    for i in ivs:
+        bits = [interview_name(i) or "Interview", *([f"(with {interviewer_of(i)})"] if interviewer_of(i) else [])]
+        parts.append(f"{local_time(i['at'], '%-I:%M %p %Z').strip()} {' '.join(bits)}")
+    return f"- {name}: {local_time(ivs[0]['at'], '%a %b %-d')}, {len(ivs)} interviews: " + "; ".join(parts)
 
 
 def next_interviews(store: Store, job_id: int, now: datetime | None = None) -> dict[int, str]:
@@ -407,16 +523,33 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     next_week: list[dict[str, Any]] = []
     if on("flag_interviews"):
         week_end = (now + timedelta(days=7)).replace(microsecond=0).isoformat()
-        for t in _live_interviews(store, store.upcoming_interviews(days=14, now=now), jobs):
+        prompts = exit_prompts(store, now)
+        asked = {i["id"] for g in prompts for i in g["interviews"]}
+        for g in prompts:  # still on someone's calendar: ask, whatever the day, so nobody joins a dropped call
+            ivs = g["interviews"]
+            bits = [label(g["job_id"]), *(interview_label(i) for i in ivs[:3])]
+            items.append({
+                "key": f"interview_out:{g['candidate_id']}:{g['job_id']}", "kind": "interview_out", "rank": 0,
+                "when": ivs[0]["at"], "title": _exit_title(store, g), "detail": " · ".join(x for x in bits if x),
+                "candidate_id": g["candidate_id"], "job_id": g["job_id"], "interview_id": ivs[0]["id"],
+                "interview_ids": [i["id"] for i in ivs], "stage": g["stage"],
+                "href": f"/candidates/{g['candidate_id']}#timeline",
+            })
+        live = [t for t in store.upcoming_interviews(days=14, now=now) if t["id"] not in asked]
+        kept = [t for t in live if _iv_data(t).get("kept_at")]  # kept after a move out: a real interview
+        shown = {t["id"] for t in _live_interviews(store, live, jobs)} | {t["id"] for t in kept}
+        for t in (t for t in live if t["id"] in shown):
             job = jobs.get(t.get("job_id")) if t.get("job_id") else None
-            bits = [label(t.get("job_id"), t.get("job_title")), t.get("body"),
+            who = interviewer_of(t)
+            bits = [label(t.get("job_id"), t.get("job_title")), t.get("body"), f"with {who}" if who else None,
                     "job on hold" if job and job["status"] == "on_hold" else None]
             row = {
                 "key": f"interview:{t['id']}", "kind": "interview", "rank": 0, "when": t["at"],
                 "title": f"Interview with {t['candidate_name']}", "interview_id": t["id"],
                 "detail": " · ".join(x for x in bits if x), "on_hold": bool(job and job["status"] == "on_hold"),
-                "candidate_id": t["candidate_id"], "job_id": t.get("job_id"),
-                "href": f"/candidates/{t['candidate_id']}#timeline",
+                "candidate_id": t["candidate_id"], "job_id": t.get("job_id"), "interviewer": who or None,
+                "started": t["at"] <= now.replace(microsecond=0).isoformat(),
+                "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}",
             }
             if t["at"] > week_end:
                 if row["key"] in snoozed:
@@ -704,10 +837,11 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     lines += ["", "Changes since last week:", *changes] if changes else ["", "Changes since last week: none."]
     names = {a["candidate_id"]: a["candidate_name"] for g in groups
              if g["outcome"] == "open" and _stage_key(g["name"]) not in omit for a in g["candidates"]}
-    upcoming = sorted((at, cid) for cid, at in next_interviews(store, job_id, now).items() if cid in names)
+    upcoming = sorted((ivs[0]["at"], cid, ivs) for cid, ivs in next_interview_days(store, job_id, now).items()
+                      if cid in names)
     if upcoming:
         lines += ["", "Next interviews:"]
-        lines += [f"- {names[cid]}: {local_time(at, '%a %b %-d, %-I:%M %p %Z').strip()}" for at, cid in upcoming]
+        lines += [interview_line(names[cid], ivs) for _, cid, ivs in upcoming]
     return "\n".join(lines)
 
 
@@ -782,27 +916,83 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
     return sorted(rows.values(), key=lambda r: (r["company"] is None, (r["company"] or "").lower()))
 
 
-def held_jobs(store: Store, company: str | None = None) -> list[dict[str, Any]]:
+def _manager_names(store: Store) -> list[str | None]:
+    return [r["hiring_manager"] for r in store._rows(
+        "SELECT DISTINCT hiring_manager FROM jobs WHERE status IN ('open', 'on_hold')")]
+
+
+def _job_filter(store: Store, company: str | None, manager: str | None) -> Any:
+    """A test for jobs matching the company and hiring manager filters (each matched as in match_companies:
+    any case, the start of a name or one of its words, or a close spelling, so 'priya' finds Priya Raman)."""
+    cos = match_companies(_company_names(store), company) if company is not None else None
+    hms = match_companies(_manager_names(store), manager) if manager is not None else None
+    return lambda j: ((cos is None or (j.get("company") or "").strip().lower() in cos)
+                      and (hms is None or (j.get("hiring_manager") or "").strip().lower() in hms))
+
+
+def by_manager(store: Store) -> bool:
+    """Roll status updates up by hiring manager: in-house, once an open job names one."""
+    return inhouse(store) and any((m or "").strip() for m in _manager_names(store))
+
+
+def manager_rollup(store: Store, manager: str | None = None, omit_stages: list[str] | None = None,
+                   company: str | None = None) -> list[dict[str, Any]]:
+    """Like company_rollup, one row per hiring manager instead: [{manager, label, jobs, active, hired, openings,
+    filled, word, filled_text}] for open jobs (manager None for jobs with no hiring manager)."""
+    keep = _job_filter(store, company, manager)
+    rows: dict[str, dict[str, Any]] = {}
+    for j in store.list_jobs("open"):
+        if not keep(j):
+            continue
+        hm = (j.get("hiring_manager") or "").strip()
+        nums = job_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
+        r = rows.setdefault(re.sub(r"\s+", " ", hm.lower()), {
+            "manager": hm or None, "label": hm or None, "jobs": [], "active": 0, "hired": 0, "openings": 0,
+            "filled": 0, "words": set()})
+        r["jobs"].append(j)
+        for k, n in (("active", "active"), ("hired", "hired"), ("openings", "openings"), ("filled", "filled_seats")):
+            r[k] += nums[n]
+        r["words"].add(nums["word"])
+    for r in rows.values():
+        r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"
+        r["filled_text"] = filled_text(r["filled"], r["openings"])
+    return sorted(rows.values(), key=lambda r: (r["manager"] is None, (r["manager"] or "").lower()))
+
+
+def held_jobs(store: Store, company: str | None = None, manager: str | None = None) -> list[dict[str, Any]]:
     """On-hold jobs, for one company (matched as in match_companies) or all."""
-    wanted = match_companies(_company_names(store), company) if company is not None else None
-    return [j for j in store.list_jobs("on_hold") if wanted is None or (j.get("company") or "").strip().lower() in wanted]
+    keep = _job_filter(store, company, manager)
+    return [j for j in store.list_jobs("on_hold") if keep(j)]
 
 
 def status_digest(store: Store, company: str | None = None, now: datetime | None = None, *,
-                  omit_stages: list[str] | None = None) -> str:
-    """One paste-ready update for every open job (or one company's), with a roll-up per company first.
+                  omit_stages: list[str] | None = None, hiring_manager: str | None = None,
+                  group_by_manager: bool | None = None) -> str:
+    """One paste-ready update for every open job (or one company's, or one hiring manager's), with a roll-up
+    per company first (per hiring manager with a hiring_manager filter, or in-house once jobs name one).
 
-    company matches any case, by the start of the name, or by a close spelling. omit_stages applies to every
-    job; when None, each job uses its own Leave out choice. On-hold jobs are listed one line each at the end."""
+    company and hiring_manager match any case, by the start of the name, or by a close spelling. omit_stages
+    applies to every job; when None, each job uses its own Leave out choice. On-hold jobs are listed one line
+    each at the end."""
     now = now or datetime.now(timezone.utc)
-    groups = company_rollup(store, company, omit_stages)
-    held = held_jobs(store, company)
+    if group_by_manager is None:
+        group_by_manager = hiring_manager is not None or (company is None and by_manager(store))
+    if group_by_manager:
+        groups = [{**g, "company": g["manager"]} for g in manager_rollup(store, hiring_manager, omit_stages, company)]
+    else:
+        groups = company_rollup(store, company, omit_stages)
+    held = held_jobs(store, company, hiring_manager)
     if not groups and not held:
-        named = (company or "").strip().rstrip(".")
+        named = " and ".join(x.strip().rstrip(".") for x in (company, hiring_manager) if x and x.strip())
         return f"No open jobs{' for ' + named if named else ''}."
-    found = sorted({g["company"] for g in groups if g["company"]} | {j["company"] for j in held if j.get("company")},
-                   key=str.lower)
-    who = " and ".join(found) if company and company.strip() and found else "all open jobs"
+    if hiring_manager and hiring_manager.strip():
+        found = sorted({g["company"] for g in groups if g["company"]}
+                       | {j["hiring_manager"] for j in held if j.get("hiring_manager")}, key=str.lower)
+    else:
+        found = sorted({g["company"] for g in groups if g["company"]}
+                       | {j["company"] for j in held if j.get("company")}, key=str.lower)
+    named = (company and company.strip()) or (hiring_manager and hiring_manager.strip())
+    who = " and ".join(found) if named and found else "all open jobs"
     lines = [f"Status update for {who}, {local_time(now.isoformat(), '%a %b %-d, %Y')}"]
 
     def summary(g: dict[str, Any]) -> str:
@@ -810,7 +1000,8 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
         return f"{n} open job{'' if n == 1 else 's'}, {g['active']} in process, {g['filled_text']}."
 
     if len(groups) > 1:
-        lines += [f"- {g['company'] or 'No company'}: {summary(g)}" for g in groups]
+        none = "No hiring manager" if group_by_manager else "No company"
+        lines += [f"- {g['company'] or none}: {summary(g)}" for g in groups]
     elif groups and len(groups[0]["jobs"]) > 1:  # one company: its total, without repeating its name
         lines.append(summary(groups[0]))
     for g in groups:
@@ -1082,4 +1273,5 @@ def reasons(store: Store) -> list[tuple[str, str]]:
 __all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "close_out", "close_out_batches",
            "close_out_hint", "close_out_plan", "company_key", "undo_close_out", "company_rollup", "complete_followup", "due_text", "exit_interviews", "headline",
            "job_label", "job_numbers", "job_status_text", "local_time", "match_companies", "next_interviews",
+           "exit_prompts", "interview_label", "interview_line", "local_days", "manager_rollup", "next_interview_days",
            "parse_day", "recent_changes", "schedule_followup", "status_digest", "twin_hints", "with_out_stages"]

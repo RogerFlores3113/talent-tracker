@@ -30,7 +30,8 @@ from pydantic import BaseModel, Field
 from . import __version__, actions, recipes
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import (JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, _labels, normalize_linkedin,
+from .store import (INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, _labels,
+                    normalize_linkedin,
                     now_iso, same_person_name, snippet_text, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
@@ -43,7 +44,8 @@ except what you read.
 - Put a 2 to 4 sentence summary of the person in `about`; search ranks on it. Fill current_title,
   current_company, location, skills as `tags`, and `work_history` when you know them.
 - Log calls, emails, messages, meetings and interviews with log_activity (use the real date/time, with time zone
-  for interviews). That keeps "last contacted" and the interview list right. Summarize; don't paste whole emails.
+  for interviews, as an offset or a zone name like America/Chicago or CT). That keeps "last contacted" and the
+  interview list right. Summarize; don't paste whole emails. Log each session of an onsite loop on its own.
 - Each job has its own stages; job_pipeline and list_jobs show them. move_stage accepts any of them.
 - For a status update, paste the first text block of job_pipeline (one job) or status_digest (all open jobs,
   or one company's) as it is. To reschedule or cancel an interview or record how it went, use update_interview
@@ -130,7 +132,7 @@ def _local(iso: str | None) -> str:
 
 def _days_since(iso: str | None) -> int:
     dt = to_dt(iso)
-    return max(0, (datetime.now(timezone.utc) - dt).days) if dt else 0
+    return max(0, actions.local_days(dt, datetime.now(timezone.utc))) if dt else 0
 
 
 def _stage_info(store: Store, job_id: int) -> dict[str, Any]:
@@ -206,6 +208,16 @@ def _said(sentence: str, data: dict[str, Any]) -> CallToolResult:
     lines = [sentence, *(str(data[k]) for k in ("warning", "note", "close_out_hint") if data.get(k))]
     lines.append(json.dumps(data, ensure_ascii=False, default=str))
     return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
+
+
+def _filled_hint(store: Store, job: dict[str, Any]) -> dict[str, Any]:
+    """After a move to a hired stage fills the job's last opening: a hint to ask the recruiter about closing it,
+    and about anyone still in play."""
+    hint = actions.close_out_hint(store, job["id"])
+    ask = (f"That fills {'the last opening' if (job.get('openings') or 1) > 1 else 'the opening'} on {_job_name(job)}. "
+           "Ask the recruiter whether to close the job (update_job with status closed); don't close it unless they "
+           "say so.")
+    return {**hint, "close_out_hint": ask + (" " + hint["close_out_hint"] if hint.get("close_out_hint") else "")}
 
 
 def _when_words(iso: str | None) -> str:
@@ -533,24 +545,37 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def log_activity(candidate_id: int, kind: str, summary: str | None = None, when: str | None = None,
-                     job_id: int | None = None) -> CallToolResult:
+                     job_id: int | None = None, interviewer: str | None = None) -> CallToolResult:
         """Add something to a candidate's timeline.
 
         kind: note, call, email, message, meeting or interview. `summary` is what happened (`body` works too;
-        summary is preferred). `when` is ISO date/time (with time zone for
-        interviews, e.g. 2026-11-12T15:00:00-08:00); leave empty for now. Past calls, emails, messages, meetings
-        and interviews update "last contacted". Future interviews show on the recruiter's dashboard.
-        Logging the same item twice is harmless. To reschedule, cancel or record how an interview went, use
-        update_interview with the interview's id (logged.id) instead of logging a new one.
+        summary is preferred); for an interview, start it with what it is, e.g. "Onsite: system design".
+        `when` is the date/time, with time zone for interviews: ISO with an offset (2026-11-12T15:00:00-08:00),
+        or a time with a zone name (2026-11-12 3:00 PM America/Los_Angeles, or PT, ET, CT, MT); leave empty for
+        now. `interviewer` (interviews only) is who runs it. Past calls, emails, messages, meetings and
+        interviews update "last contacted". Future interviews show on the recruiter's dashboard. Logging the same
+        item twice is harmless. Several interviews on the same day for the same job are an onsite loop; log each
+        session. To reschedule, cancel or record how an interview went, use update_interview with the
+        interview's id (logged.id) instead of logging a new one.
         """
         before = {t["id"]: t for t in store.upcoming_interviews(days=365)
                   if t["candidate_id"] == candidate_id and t.get("job_id") == job_id} \
             if (kind or "").strip().lower() == "interview" else {}
-        entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app")
+        entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app",
+                          interviewer=interviewer)
         cand = store.get_candidate(candidate_id)
-        out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim({**entry, "at_local": _local(entry["at"])}),
+        logged = {**entry, "at_local": _local(entry["at"])}
+        if entry["kind"] == "interview":
+            logged = {**logged, "data": None, "interviewer": actions.interviewer_of(entry) or None}
+        out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim(logged),
                                "last_contacted_at": cand["last_contacted_at"]}
-        others = [t for i, t in before.items() if i != entry["id"]]
+        day = to_dt(entry["at"]).astimezone().date()
+        same_day = [t for i, t in before.items() if i != entry["id"] and to_dt(t["at"]).astimezone().date() == day]
+        others = [t for i, t in before.items() if i != entry["id"] and t not in same_day]
+        if same_day:  # an onsite loop: more sessions that day, not a replacement
+            n = len(same_day) + 1
+            out["note"] = (f"{cand['name']} now has {n} interviews on {_local(entry['at']).rsplit(',', 1)[0]} for "
+                           "this job, so they show as one loop. Nothing to cancel.")
         if others:
             listed = ", ".join(f"id {t['id']} on {_local(t['at'])}" for t in others)
             out["warning"] = (f"Logged. This candidate already has an interview scheduled ({listed}). If this one "
@@ -568,33 +593,69 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=EDIT)
     def update_interview(interview_id: int, when: str | None = None, cancel: bool = False,
                          outcome: str | None = None, note: str | None = None,
-                         reason: str | None = None) -> dict[str, Any]:
+                         reason: str | None = None, interviewer: str | None = None,
+                         keep: bool = False) -> CallToolResult:
         """Change an interview already on a candidate's timeline. Nothing is deleted.
 
         interview_id is the id log_activity returned (logged.id), or an interview's id in get_candidate's
-        timeline. `when` reschedules it (ISO with time zone). cancel=true marks it cancelled: it stays on the
-        timeline but leaves the dashboard and status updates. `reason` says why it moved or was cancelled.
-        outcome records how it went: passed, not passed or no show, with an optional note; it's refused while
-        the interview is still in the future. The recruiter sees every change on the timeline.
+        timeline. `when` reschedules it (with time zone, as in log_activity). cancel=true marks it cancelled: it
+        stays on the timeline but leaves the dashboard and status updates. `reason` says why it moved or was
+        cancelled. outcome records how it went: passed, not passed or no show, with an optional note; it's
+        refused while the interview is still in the future. `interviewer` names who runs it ("" clears it).
+        keep=true, only when the recruiter says so, keeps an interview whose candidate is out of the job (or
+        hired), so the dashboard stops asking to cancel it. The recruiter sees every change on the timeline.
         """
         if reason is None and note is not None and outcome is None and (when or cancel):
             reason, note = note, None  # a note sent with a new time is the reason it moved
+        before = store.get_interview(interview_id)
         iv = store.update_interview(interview_id, at=when, cancel=cancel, outcome=outcome, note=note,
-                                    reason=reason, by="ai")
+                                    reason=reason, interviewer=interviewer, keep=keep, by="ai")
         data = iv["data"]
         out: dict[str, Any] = {"data_note": DATA_NOTE, "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
             "job_id": iv.get("job_id"), "at": iv["at"], "at_local": _local(iv["at"]), "summary": iv.get("body"),
-            "status": iv["status"], "outcome_note": data.get("outcome_note"),
+            "status": iv["status"], "interviewer": data.get("interviewer"), "outcome_note": data.get("outcome_note"),
             "reschedule_note": data.get("reschedule_note"), "rescheduled_from": data.get("rescheduled_from")})}
-        return out
+        whose = f"{iv['candidate_name']}'s interview" + (f" ({actions.interview_name(iv)})" if actions.interview_name(iv)
+                                                         else "")
+        done = []
+        if cancel:
+            done.append(f"Cancelled {whose} {_when_words(iv['at'])}. It stays on the timeline, marked cancelled")
+        elif when and iv["at"] != before["at"]:
+            done.append(f"Moved {whose} to {_local(iv['at'])} (was {_local(before['at'])})")
+        if outcome is not None:
+            done.append(f"Recorded {whose} {_when_words(iv['at'])} as {INTERVIEW_OUTCOME_LABELS.get(iv['status'], iv['status'])}")
+        if interviewer is not None:
+            done.append(f"Interviewer for {whose}: {data['interviewer']}" if data.get("interviewer")
+                        else f"Cleared the interviewer on {whose}")
+        if keep:
+            done.append(f"Kept {whose} {_when_words(iv['at'])}. The dashboard stops asking to cancel it")
+        if not done:
+            done.append(f"Updated {whose} {_when_words(iv['at'])}")
+        return _said(". ".join(done) + ".", out)
 
     # ------------------------------------------------------------------ jobs
     @mcp.tool(annotations=READ)
-    def list_jobs(status: str | None = "open") -> list[dict[str, Any]]:
-        """Jobs with their stages and how many candidates are in each. status: open, on_hold, closed, or null for all."""
-        return [_slim({**j, "stage_counts": {s["name"]: s["count"] for s in j["stage_counts"]}})
+    def list_jobs(status: str | None = "open") -> CallToolResult:
+        """Jobs with their stages and how many candidates are in each. status: open, on_hold, closed, or null for all.
+        The text has one line per job, then the jobs as JSON."""
+        jobs = [_slim({**j, "stage_counts": {s["name"]: s["count"] for s in j["stage_counts"]}})
                 for j in store.list_jobs(status)]
+
+        def line(j: dict[str, Any]) -> str:
+            openings = j.get("openings") or 1
+            bits = [f"{j.get('active_count', 0)} in play", f"{j.get('hired_count', 0)} of {openings} hired"
+                    if openings > 1 else f"{j.get('hired_count', 0)} hired"]
+            if j.get("hiring_manager"):
+                bits.append(f"hiring manager {j['hiring_manager']}")
+            stages = ", ".join(f"{k} {v}" for k, v in j["stage_counts"].items() if v)
+            return (f"- {_job_name(j)} (job id {j['id']}, {str(j.get('status', 'open')).replace('_', ' ')}): "
+                    + ", ".join(bits) + (f". In stages: {stages}." if stages else ". No one in the pipeline yet."))
+
+        which = {"open": "open ", "on_hold": "on-hold ", "closed": "closed "}.get(status or "", "")
+        head = f"{len(jobs)} {which}job{'' if len(jobs) == 1 else 's'}" + (":" if jobs else ".")
+        text = "\n".join([head, *(line(j) for j in jobs), json.dumps(jobs, ensure_ascii=False, default=str)])
+        return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent={"jobs": jobs})
 
     @mcp.tool(annotations=WRITE)
     def create_job(title: str, company: str | None = None, location: str | None = None,
@@ -694,6 +755,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         notes is preferred). The start of a stage name is enough when it's unambiguous ("tech" for
         "Technical interview")."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
+        was_filled = actions.job_numbers(store, job_id)["filled"]
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes, by="ai"))
         if before:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
@@ -701,6 +763,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     if k in ("upcoming_interviews", "warning")})
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
+        if not was_filled and job["status"] == "open" and actions.job_numbers(store, job_id)["filled"]:
+            out.update(_filled_hint(store, job))
         sentence = (f"{name} is already in {out['stage']} on {_job_name(job)}." if before == out["stage"]
                     else f"Moved {name} to {out['stage']} on {_job_name(job)}" + (f" (was {before})." if before else "."))
         return _said(sentence, out)
@@ -737,22 +801,33 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return CallToolResult(content=content, structuredContent=data)
 
     @mcp.tool(annotations=READ)
-    def status_digest(company: str | None = None, omit_stages: list[str] | None = None) -> CallToolResult:
-        """One paste-ready status update for every open job, or only one company's (a client or team), with a
-        roll-up per company first and on-hold jobs as one line each. The same text as "Copy status" on the app's
-        Jobs page. company matches any case, by the start of the name ("lumen" for Lumen Health) or a close
-        spelling. Internal stages are left out as in job_pipeline; omit_stages works as there."""
-        rollup = actions.company_rollup(store, company, omit_stages)
-        held = actions.held_jobs(store, company)
-        text = actions.status_digest(store, company, omit_stages=omit_stages)
+    def status_digest(company: str | None = None, omit_stages: list[str] | None = None,
+                      hiring_manager: str | None = None) -> CallToolResult:
+        """One paste-ready status update for every open job, or only one company's (a client or team) or one
+        hiring manager's, with a roll-up first and on-hold jobs as one line each. The same text as "Copy status"
+        on the app's Jobs page. The roll-up is per company, or per hiring manager with hiring_manager or when the
+        recruiter hires in-house. company and hiring_manager match any case, by the start of the name ("lumen"
+        for Lumen Health, "priya" for Priya Raman) or a close spelling. Internal stages are left out as in
+        job_pipeline; omit_stages works as there."""
+        rollup = actions.company_rollup(store, company, omit_stages) if hiring_manager is None else \
+            [{**r, "company": None} for r in actions.manager_rollup(store, hiring_manager, omit_stages, company)]
+        held = actions.held_jobs(store, company, hiring_manager)
+        text = actions.status_digest(store, company, omit_stages=omit_stages, hiring_manager=hiring_manager)
         content = [TextContent(type="text", text=text)]
         if rollup:
             content.append(TextContent(type="text", text=PASTE_NOTE))
-        data = {"companies": [{"company": r["company"], "open_jobs": len(r["jobs"]), "active": r["active"],
-                               "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
-                               "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup],
-                "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
-                "app_url": app_url("/jobs")}
+        data: dict[str, Any] = {
+            "companies": [{"company": r["company"], "open_jobs": len(r["jobs"]), "active": r["active"],
+                           "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
+                           "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup if hiring_manager is None],
+            "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
+            "app_url": app_url("/jobs")}
+        if hiring_manager is not None or (company is None and actions.by_manager(store)):
+            data["hiring_managers"] = [
+                {"hiring_manager": r["manager"], "open_jobs": len(r["jobs"]), "active": r["active"],
+                 "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
+                 "job_ids": [j["id"] for j in r["jobs"]]}
+                for r in actions.manager_rollup(store, hiring_manager, omit_stages, company)]
         return CallToolResult(content=content, structuredContent=data)
 
     # ------------------------------------------------------------- dashboard
@@ -762,16 +837,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         jobs with thin pipelines, and stale profiles (only the kinds the recruiter has switched on)."""
         res = actions.action_items(store)
         keys = ("key", "kind", "title", "detail", "when", "candidate_id", "job_id", "suggestion_id", "interview_id",
-                "stage", "next_stage", "due_on", "due_text", "overdue")
+                "interview_ids", "interviewer", "stage", "next_stage", "due_on", "due_text", "overdue")
         items = [_slim({k: i.get(k) for k in keys}) for i in res["items"]]
         later = [_slim({k: i.get(k) for k in keys}) for i in res["next_week"]]
 
         def row(i: dict[str, Any]) -> str:
             return (f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")
-                    + (f" at {_local(i['when'])}" if i["kind"] == "interview" and i.get("when") else "")
+                    + (f" at {_local(i['when'])}" if i["kind"] in ("interview", "interview_out") and i.get("when") else "")
                     + (f" [{i['due_text']}]" if i.get("due_text") else "")
                     + "".join(f" [{k} {i[k]}]" for k in ("candidate_id", "job_id", "suggestion_id", "interview_id")
-                              if i.get(k)))
+                              if i.get(k) and not (k == "interview_id" and i.get("interview_ids")))
+                    + (f" [interview_ids {', '.join(map(str, i['interview_ids']))}]" if i.get("interview_ids") else "")
+                    + (" Ask the recruiter: cancel it (update_interview cancel) or keep it (update_interview keep)."
+                       if i["kind"] == "interview_out" else ""))
 
         if not items and not later:
             text = "Nothing needs attention right now."

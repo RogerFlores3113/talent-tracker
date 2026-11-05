@@ -20,7 +20,7 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -543,16 +543,97 @@ def _parse_loose(s: str) -> datetime | None:
     return None
 
 
+# Time zone words people type after a time. PT, PST and PDT all mean Pacific time (with daylight saving as it
+# falls on that day), since that is what someone typing "2 PM PST" in July means.
+_ZONE_WORDS = {
+    **dict.fromkeys(("pt", "pst", "pdt", "pacific"), "America/Los_Angeles"),
+    **dict.fromkeys(("mt", "mst", "mdt", "mountain"), "America/Denver"),
+    **dict.fromkeys(("ct", "cst", "cdt", "central"), "America/Chicago"),
+    **dict.fromkeys(("et", "est", "edt", "eastern"), "America/New_York"),
+    **dict.fromkeys(("akt", "akst", "akdt"), "America/Anchorage"),
+    **dict.fromkeys(("ht", "hst"), "Pacific/Honolulu"),
+    **dict.fromkeys(("utc", "gmt", "z"), "UTC"),
+}
+# Standard offsets (hours) and whether daylight saving applies, for when this computer has no zone database
+# (Windows without the tzdata package).
+_US_ZONES = {"America/Los_Angeles": (-8, True), "America/Denver": (-7, True), "America/Phoenix": (-7, False),
+             "America/Chicago": (-6, True), "America/New_York": (-5, True), "America/Anchorage": (-9, True),
+             "Pacific/Honolulu": (-10, False), "UTC": (0, False)}
+_ZONE_TAIL = re.compile(r"^(?P<rest>.*\S)\s+\(?(?P<zone>[A-Za-z]+(?:/[A-Za-z0-9_+-]+)+|[A-Za-z]{1,8})\)?$")
+DATE_HELP = ("Use a form like 2026-11-09, 2026-11-09 1:00 PM, 2026-11-09T13:00:00-08:00 or "
+             "2026-11-09 1:00 PM America/Los_Angeles (PT, ET, CT and MT work too).")
+
+
+class _USZone(tzinfo):
+    """A US time zone with today's daylight saving rule (2nd Sunday in March to 1st Sunday in November, 2 AM)."""
+
+    def __init__(self, name: str, hours: int, dst: bool) -> None:
+        self._name, self._std, self._dst = name, timedelta(hours=hours), dst
+
+    def _is_dst(self, dt: datetime) -> bool:
+        if not self._dst:
+            return False
+        y = dt.year
+        start = datetime(y, 3, 8 + (6 - datetime(y, 3, 8).weekday()) % 7, 2)
+        end = datetime(y, 11, 1 + (6 - datetime(y, 11, 1).weekday()) % 7, 2)
+        return start <= dt.replace(tzinfo=None) < end
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        return self._std + self.dst(dt)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        return timedelta(hours=1) if dt is not None and self._is_dst(dt) else timedelta(0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return self._name
+
+
+def zone_named(name: str) -> tzinfo | None:
+    """The time zone a word or IANA name means ('PT', 'est', 'America/Chicago'), or None if it isn't one."""
+    key = _ZONE_WORDS.get(name.strip().lower(), name.strip())
+    if key == "UTC":
+        return timezone.utc
+    if "/" not in key:
+        return None
+    key = next((k for k in _US_ZONES if k.lower() == key.lower()), key)
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(key)
+    except (ImportError, KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        pass
+    if key in _US_ZONES:
+        hours, dst = _US_ZONES[key]
+        return _USZone(key, hours, dst)
+    return None
+
+
+def _split_zone(s: str) -> tuple[str, tzinfo | None]:
+    """'2026-11-10 14:00 America/Los_Angeles' -> ('2026-11-10 14:00', its zone). A trailing word that isn't a
+    zone (like PM) stays put. An unknown IANA-looking name is an error, so a typo isn't read as local time."""
+    m = _ZONE_TAIL.match(s)
+    if not m:
+        return s, None
+    word = m.group("zone")
+    if word.lower() in ("am", "pm", "a", "p"):
+        return s, None
+    zone = zone_named(word)
+    if zone is None and "/" in word:
+        raise ValueError(f"Couldn't read the time zone {word!r}. Use a name like America/Los_Angeles, a short one "
+                         "like PT or ET, or an offset like 2026-11-09T13:00:00-08:00.")
+    return (m.group("rest"), zone) if zone is not None else (s, None)
+
+
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
     """Accept '2026-11-05', '2026-11-05 14:30', ISO with offset, '11/5/2026', '11/5/26',
     '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'today', 'yesterday', or a datetime. Returns UTC ISO.
 
-    A time with no zone is taken as this computer's local time, which is what
-    a recruiter means when they type one. Slash dates read month first (US),
-    unless the first number can't be a month.
+    A time can end with a zone: an IANA name ('America/Los_Angeles') or PT, ET, CT, MT (PST, EST... too),
+    or UTC. A time with no zone is taken as this computer's local time, which is what a recruiter means
+    when they type one. Slash dates read month first (US), unless the first number can't be a month.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return now_iso() if default_now else None
+    zone: tzinfo | None = None
     if isinstance(value, datetime):
         dt = value
     else:
@@ -560,13 +641,16 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
-            loose = _parse_loose(s)
-            if loose is None:
-                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-09, "
-                                 "2026-11-09 1:00 PM or Nov 9, 2026.") from None
-            dt = loose
+            s, zone = _split_zone(s)
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                loose = _parse_loose(s)
+                if loose is None:
+                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
+                dt = loose
     if dt.tzinfo is None:
-        dt = dt.astimezone()  # local time
+        dt = dt.replace(tzinfo=zone) if zone is not None else dt.astimezone()  # else local time
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -1995,11 +2079,12 @@ class Store:
 
     # -------------------------------------------------------------- timeline
     def log(self, candidate_id: int, kind: str, body: str | None = None, *, at: str | datetime | None = None,
-            job_id: int | None = None, source: str | None = None) -> dict[str, Any]:
+            job_id: int | None = None, source: str | None = None,
+            interviewer: str | None = None) -> dict[str, Any]:
         """Add a note, call, email, message, meeting or interview to the candidate's timeline.
 
         Logging the same thing twice (same kind, time and text) is a no-op, so
-        an AI re-reading an inbox doesn't double up.
+        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
         """
         kind = (kind or "").strip().lower()
         if kind not in TIMELINE_KINDS or kind in ("stage", CHANGE_KIND):
@@ -2014,6 +2099,9 @@ class Store:
         if job_id is not None:
             self.get_job(job_id)
         when = parse_when(at)
+        who = _clean(interviewer) if kind == "interview" else None
+        if who and len(who) > 200:
+            raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM timeline WHERE candidate_id = ? AND kind = ? AND at = ? AND coalesce(body, '') = ?",
@@ -2033,6 +2121,12 @@ class Store:
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
                         (when, candidate_id, when),
                     )
+            if who:  # who runs the interview lives in its data, like its status (a re-log fills it in)
+                raw = self._conn.execute("SELECT data FROM timeline WHERE id = ?", (entry_id,)).fetchone()["data"]
+                old = json.loads(raw) if raw else {}
+                if not old.get("interviewer"):
+                    self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?",
+                                       (json.dumps({**old, "interviewer": who}), entry_id))
         return self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
@@ -2076,9 +2170,12 @@ class Store:
     def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
                          restore: bool = False, outcome: str | None = None, note: str | None = None,
                          reason: str | None = None, candidate_id: int | None = None,
-                         by: str = "app") -> dict[str, Any]:
+                         interviewer: str | None = None, keep: bool = False, by: str = "app") -> dict[str, Any]:
         """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
-        restore, or record how it went.
+        restore, record how it went, or name the interviewer ('' clears it).
+
+        keep marks an interview the recruiter chose to keep after its candidate left the job (or was hired),
+        so Today stops asking whether to cancel it (until they're moved out again).
 
         outcome: passed, not passed or no show, with an optional note, only once the interview's time
         has come. Nothing is ever deleted; the old time is kept in the entry's data as `rescheduled_from`
@@ -2116,8 +2213,19 @@ class Store:
             data["outcome_note"] = _clean(note)
         if reason is not None:
             data["reschedule_note"] = _clean(reason)
-        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None):
-            raise ValueError("Say what to change: a new time, cancel, or an outcome.")
+        if interviewer is not None:
+            who = _clean(interviewer)
+            if who and len(who) > 200:
+                raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
+            if who:
+                data["interviewer"] = who
+            else:
+                data.pop("interviewer", None)
+        if keep:
+            data["kept_at"] = ts
+        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None
+                or interviewer is not None or keep):
+            raise ValueError("Say what to change: a new time, cancel, an outcome or the interviewer.")
         data["updated_by"] = CHANGE_SOURCES.get(by, by)
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
