@@ -158,7 +158,7 @@ def test_mcp_add_to_pipeline_straight_into_a_submitted_stage_warns(store):
     be, data, ana = _acme(store)
     res = call(build_server(store), "add_to_pipeline", candidate_id=ana, job_id=data["id"], stage="Client Submitted")
     first_line, warning = res.content[0].text.split("\n")[:2]
-    assert first_line.startswith("Added Ana Ruiz to Data Engineer")
+    assert first_line.startswith("Added \"Ana Ruiz\" to Data Engineer")
     assert warning.startswith("Heads up: Ana Ruiz was already submitted to Acme on ") and "Backend Engineer" in warning
     assert res.structuredContent["submitted_to"] == "Acme" and res.structuredContent["submitted_before"]
     # Adding again is a no-op and doesn't warn twice; a first submittal names the client without a warning.
