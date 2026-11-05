@@ -27,6 +27,7 @@
   </table>
   <p class="fine">Counts and names leave out each job's internal stages (like Sourced), as the copied text does.</p>
   {% endif %}
+  {% if hidden_notes %}<p class="fine">Only you see this, it isn't in the copied text. {{ hidden_notes | join('. ') }}.</p>{% endif %}
 </section>
 {% endif %}
 <ul class="cards">
@@ -42,6 +43,6 @@
 <form method="post" action="/jobs/wording" class="inline wording">
   <label class="inline-label"><input type="checkbox" name="inhouse" value="1" {{ 'checked' if inhouse() }}> I hire for my own company</label>
   <button class="btn small" type="submit">Save</button>
-  <span class="fine">Says "Hiring team passed" and "Where each team stands" instead of client wording.</span>
+  <span class="fine">Says "Hiring team passed" and "Where each team stands" instead of client wording. Also in <a href="/settings#hiring-for">Settings</a>.</span>
 </form>
 {% endblock %}

@@ -18,6 +18,12 @@
       {% endfor %}
     </div>
   </section>
+  <section class="panel" id="hiring-for">
+    <h2>Who you hire for</h2>
+    <p class="fine">Are you hiring for your own company or for clients? It sets the wording of status updates and move reasons.</p>
+    <label class="check"><input type="radio" name="hiring_for" value="own" {{ 'checked' if inhouse() }}> <span>My own company <span class="fine">Says "Hiring team passed" and "Where each team stands".</span></span></label>
+    <label class="check"><input type="radio" name="hiring_for" value="clients" {{ 'checked' if not inhouse() }}> <span>Clients <span class="fine">Says "Client passed" and "Status update for the client".</span></span></label>
+  </section>
   <section class="panel">
     <h2>Pipeline view</h2>
     {% for v, label in [('board', 'Board, with a column per stage'), ('table', 'Table, grouped by stage')] %}

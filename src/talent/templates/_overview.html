@@ -1,4 +1,4 @@
-{% from "_macros.html" import recipe_buttons, chips, sub, sample_badge %}
+{% from "_macros.html" import recipe_buttons, chips, sub, sample_badge, hiring_for_form %}
 {% set sample = sample_ids() %}
 {% macro start_options(with_sample) -%}
   <div class="options">
@@ -13,6 +13,7 @@
   <h1>Welcome to Talent Search</h1>
   <p class="lead">Your own candidate database, on this computer. Pick a way to start.</p>
   {{ start_options(True) }}
+  {{ hiring_for_form("/") }}
 </div>
 {% else %}
 {% if real_count == 0 %}
