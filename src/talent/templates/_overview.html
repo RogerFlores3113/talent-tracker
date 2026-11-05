@@ -38,7 +38,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','ai_change':'AI change','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','ai_change':'AI change','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -59,6 +59,8 @@
           <a class="btn small" href="{{ i.href }}">{{ 'Add people' if i.job_id else 'See jobs' }}</a>
           {% elif i.kind == 'stale' %}
           <a class="btn small" href="{{ i.href }}">{{ 'Refresh' if i.candidate_id else 'See the oldest' }}</a>
+          {% elif i.kind == 'shortlist' %}
+          <a class="btn small" href="{{ i.href }}">Review</a>
           {% endif %}
           {% if i.kind != 'suggestion' %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>

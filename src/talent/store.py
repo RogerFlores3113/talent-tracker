@@ -465,12 +465,40 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v6_data,
     ),
+    # v7: a Shortlist per job. The AI app proposes people it researched; the recruiter keeps them (saved and
+    # added to the job) or passes (with an optional reason). Passed profile links stay, so nobody is proposed
+    # for that job again. batch_id is the AI action that proposed the row, so Undo takes back only that batch.
+    """
+    CREATE TABLE prospects (
+        id           INTEGER PRIMARY KEY,
+        job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        linkedin_url TEXT,
+        name         TEXT NOT NULL,
+        title        TEXT,
+        company      TEXT,
+        location     TEXT,
+        fit          TEXT,
+        source       TEXT,
+        proposed_by  TEXT NOT NULL DEFAULT 'ai',
+        status       TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'kept', 'passed')),
+        pass_reason  TEXT,
+        candidate_id INTEGER REFERENCES candidates(id) ON DELETE SET NULL,
+        batch_id     INTEGER,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        decided_at   TEXT
+    );
+    CREATE INDEX prospects_job_idx ON prospects(job_id, status);
+    CREATE INDEX prospects_url_idx ON prospects(linkedin_url);
+    CREATE UNIQUE INDEX prospects_job_url_uq ON prospects(job_id, linkedin_url) WHERE linkedin_url IS NOT NULL;
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
     "candidate": "Added a person", "profile": "Edited a profile", "pipeline_add": "Added to a pipeline",
     "stage_move": "Moved a stage", "job_created": "Created a job", "job_edit": "Edited a job",
     "stages_edit": "Edited a job's stages", "todo_added": "Added a to-do", "todo_done": "Marked a to-do done",
+    "prospects_proposed": "Proposed people for a Shortlist",
 }
 AI_SOURCE = "AI app"
 
@@ -1081,6 +1109,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Added a to-do: {r.get('todo_text') or 'a to-do'}"
     if kind == "todo_done":
         return f"Marked a to-do done: {r.get('todo_text') or 'a to-do'}"
+    if kind == "prospects_proposed":
+        n = len(new.get("prospect_ids") or [])
+        return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -1764,6 +1795,8 @@ class Store:
                 if s is None or s["done_at"] != new.get("done_at"):
                     raise ValueError("That to-do was changed again since.")
                 self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
+            elif kind == "prospects_proposed":
+                note = self._undo_proposed(action_id, new)
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -1799,7 +1832,23 @@ class Store:
             return "You added a to-do for it, so it stays."
         if made and self._job_shape(job_id) != made:
             return "It was edited since, so it stays."
+        if self._row("SELECT 1 FROM prospects WHERE job_id = ? AND status <> 'proposed'", (job_id,)):
+            return "You reviewed its Shortlist, so it stays."
         return None
+
+    def _undo_proposed(self, action_id: int, new: dict[str, Any]) -> str | None:
+        """Take back the people one propose_candidates call put on a Shortlist that are still waiting. Anyone
+        the recruiter already kept or passed stays as they decided. Call inside a transaction."""
+        ids = [i for i in (new.get("prospect_ids") or []) if isinstance(i, int)]
+        marks = ", ".join("?" * len(ids)) or "NULL"
+        rows = self._rows(f"SELECT id, status FROM prospects WHERE id IN ({marks}) AND batch_id = ?", (*ids, action_id))
+        waiting = [r["id"] for r in rows if r["status"] == "proposed"]
+        decided = len(rows) - len(waiting)
+        if not waiting:
+            raise ValueError("You already kept or passed everyone in it." if decided
+                             else "They are no longer on the Shortlist.")
+        self._conn.execute(f"DELETE FROM prospects WHERE id IN ({', '.join('?' * len(waiting))})", waiting)
+        return f"left {decided} you already kept or passed" if decided else None
 
     def _undo_job_edit(self, job_id: int, old: dict[str, Any], new: dict[str, Any]) -> str | None:
         job = self._row("SELECT * FROM jobs WHERE id = ?", (job_id,)) or {}

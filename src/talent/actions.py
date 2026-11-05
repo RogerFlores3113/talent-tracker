@@ -460,6 +460,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
             })
 
     items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now)
+    from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
+    items += shortlist_items(store)
     if on("flag_stuck"):
         limit = _int(cfg, "stuck_days", 7)
         for a in store.open_applications():

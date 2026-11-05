@@ -76,9 +76,11 @@ def source_for_job(job: dict | None = None, count: int = 10, missing_job: str | 
         f"2. Then research up to {count} new people who fit, using real search results. For each, give a "
         f"profile link and one line on why they fit. Never invent people or details; if you can't find "
         f"enough, say so.\n"
-        f"3. For the ones I approve, call save_candidate with a 2 to 4 sentence `about`, current title, "
-        f"company, location, skills as tags, work history and the profile link, then add_to_pipeline for this job.\n"
-        f"Ask me before saving anyone new. {GUARD}"
+        f"3. Check list_prospects (status passed) so you skip people I already passed on, then put the new people "
+        f"on this job's Shortlist with propose_candidates: name, linkedin_url, title, company, location and fit. "
+        f"I keep or pass each one in Talent Search.\n"
+        f"Ask me before saving anyone new yourself; if I ask you to save someone, use save_candidate (or "
+        f"save_candidates for several) with a 2 to 4 sentence `about`, skills as tags and work history. {GUARD}"
     )
 
 
