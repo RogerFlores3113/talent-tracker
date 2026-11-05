@@ -17,6 +17,7 @@
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
   "use strict";
@@ -155,6 +156,24 @@
     const el = e.target;
     if (el.matches && el.matches("select[data-autosubmit]") && el.form) el.form.submit();
     // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
+    if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
+      const shared = document.getElementById("tbl-move");
+      if (!shared) return;
+      shared.elements.candidate_id.value = el.dataset.cid;
+      shared.elements.stage.value = el.value;
+      const o = el.selectedOptions && el.selectedOptions[0];
+      const reason = shared.querySelector(".reason");
+      if (o && o.dataset.out && reason) {
+        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
+        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
+        const who = reason.querySelector(".tbl-who");
+        if (who) who.textContent = "Why " + (el.dataset.who || "this person") + " is going to " + o.textContent + ":";
+        reason.hidden = false; return;
+      }
+      if (reason) reason.hidden = true;
+      shared.requestSubmit ? shared.requestSubmit() : shared.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+      return;
+    }
     const form = el.closest && el.closest("form.stage-form");
     if (!form) return;
     if (el.matches("select[data-stage-pick]")) {

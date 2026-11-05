@@ -233,10 +233,12 @@ class SearchService:
         return "typesense" if self.index is not None and time.monotonic() >= self._down_until else "built-in"
 
     def search(self, query: str = "", **kw: Any) -> SearchResult:
-        if kw.get("tag") or kw.get("source"):  # skill-tag and source filters live in SQLite
+        if any(kw.get(k) for k in ("tag", "source", "job_id", "client", "stage", "pipe")):  # these filters live in SQLite
             return self.store.search_candidates(query, **kw)
         kw.pop("tag", None)
         kw.pop("source", None)
+        for k in ("job_id", "client", "stage", "pipe", "days"):
+            kw.pop(k, None)
         if self.index is not None and time.monotonic() >= self._down_until:
             try:
                 self.index.sync(self.store)

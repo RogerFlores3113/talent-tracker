@@ -193,7 +193,8 @@ def _sync(args: argparse.Namespace) -> None:
     opts = {"source": source, "add_stages": bool(prof.get("add_stages", True)), "move_stages": not args.no_move,
             "profile": {**prof, "client": client}, "reopen_jobs": bool(args.reopen),
             "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
-    print(("Using the saved matches for this export" + (f" ({prof['file']})" if prof.get("file") else "") + ".")
+    print((f"Using the saved matches for exports like {prof['file']}." if prof.get("file")
+           else "Using the saved matches for this export.")
           if prof else "No saved profile for these columns yet, so the columns were guessed.")
     print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping) if m))
     preview = importers.preview_import(store, header, rows, mapping, **opts)

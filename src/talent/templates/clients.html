@@ -2,7 +2,7 @@
 {% set word = 'Reports' if inhouse() else 'Clients' %}
 {% block title %}{{ word }} · Talent Search{% endblock %}
 {% block body %}
-<div class="sec-head"><h1>{{ word }}</h1><span class="actions-inline">{% if rows %}<a class="btn small" href="/clients/chase">Waiting on feedback</a> <a class="btn small{{ ' primary' if rows | selectattr('due') | list }}" href="/clients/due">Updates due this week</a>{% endif %}</span></div>
+<div class="sec-head"><h1>{{ word }}</h1><span class="actions-inline">{% if rows %}<a class="btn small" href="/clients/review">Ops review</a> <a class="btn small" href="/clients/chase">Waiting on feedback</a> <a class="btn small{{ ' primary' if rows | selectattr('due') | list }}" href="/clients/due">Updates due this week</a>{% endif %}</span></div>
 <p class="lead">{% if inhouse() %}One row per company your jobs name. Open one for a hiring update to share: where people stand, who moved, how long each stage takes and the interviews coming up.{% else %}One row per client, from the company on each job. Open one for its update: where people stand, who moved since your last update, how long each stage takes and the interviews coming up.{% endif %}</p>
 {% if rows %}
 <div class="table-wrap"><table class="dense clients-table">

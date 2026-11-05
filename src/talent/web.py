@@ -31,7 +31,7 @@ from . import sessions
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, offers
-from . import chase, desk
+from . import chase, desk, opsreview
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -493,31 +493,41 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ------------------------------------------------------------ table
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
-              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0):
+              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = ""):
         per = 100
+        job_id = int(job) if job.strip().isdigit() else None
+        pipe = pipe if pipe in opsreview.PIPES else ""
+        day_n = int(days) if days.strip().isdigit() else None
+        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n)
         page_no = max(1, page_no)
         sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
         if q.strip():
             result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                   limit=per, offset=(page_no - 1) * per)
+                                   limit=per, offset=(page_no - 1) * per, **member)
             rows, total = [h.candidate for h in result.hits], result.total
             suggestion = result.suggestion
         else:
             conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
-                                                       source=source or None)
+                                                       source=source or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
+                                      client=client, stage=stage, pipe=pipe,
+                                      days="" if not pipe or day_n is None else day_n).items() if v != ""}
         ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
-                   page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
+                   job=job_id or "", client=client, stage=stage, keep=keep,
+                   pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources())
+        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+                    **store.membership_choices(job_id))
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
@@ -1654,6 +1664,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse("/clients/chase?" + urlencode({"notice": "Saved which stages the chase counts."}),
                                 status_code=303)
 
+    opsreview.register_routes(app, store, page)  # /clients/review, before /clients/{slug}
+
     def client_or_404(slug: str) -> dict[str, Any]:
         try:
             return reports.client(store, reports.unslug(slug))
@@ -1752,6 +1764,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"/clients/{c['slug']}/desk?" + urlencode({"notice": f"Marked {who} as chased today."}),
                                     status_code=303)
         return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {who} as chased today."}),
+                                status_code=303)
+
+    @app.post("/clients/{slug}/chased-all")
+    async def client_chased_all(request: Request, slug: str):
+        """Mark the whole client chased, every hiring manager at once, and keep Today quiet for N days."""
+        c = client_or_404(slug)
+        form = await request.form()
+        try:
+            n = chase.snooze_days_from(form.get("snooze"))
+        except ValueError as exc:
+            return RedirectResponse("/clients/chase?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        chase.mark_client_chased(store, c["key"], n)
+        span = f" Today stays quiet about them for {n} days." if n else ""
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {c['name']} as chased.{span}"}),
                                 status_code=303)
 
     @app.post("/clients/{slug}/note")
