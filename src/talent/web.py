@@ -31,7 +31,7 @@ from . import sessions
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, offers
-from . import chase
+from . import chase, desk
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -1611,6 +1611,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return reports.report(store, c["key"]), str(exc)
 
+    @app.get("/clients/{slug}/desk", response_class=HTMLResponse)
+    def client_desk_page(request: Request, slug: str):
+        """One client's run sheet: the update, who to chase, feedback owed, offers and follow-ups, in work order."""
+        c = client_or_404(slug)
+        return page(request, "desk.html", c=c, d=desk.desk(store, c["key"]), max_items=desk.MAX_ITEMS)
+
     @app.get("/clients/{slug}", response_class=HTMLResponse)
     def client_page(request: Request, slug: str, since: str = "", until: str = ""):
         c = client_or_404(slug)
@@ -1687,6 +1693,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mk = reports.manager_key(str(form.get("manager") or ""))
         chase.mark_chased(store, c["key"], mk)
         who = str(form.get("manager_name") or "").strip()[:200] or c["name"]
+        if form.get("back") == "desk":
+            return RedirectResponse(f"/clients/{c['slug']}/desk?" + urlencode({"notice": f"Marked {who} as chased today."}),
+                                    status_code=303)
         return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {who} as chased today."}),
                                 status_code=303)
 

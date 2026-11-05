@@ -276,10 +276,26 @@ def screen_note(text: str | None) -> str | None:
     return t
 
 
-def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
+ABOUT_CHARS = 360
+SUBMITTED_STAGE = "Submitted to client"
+
+
+def missing_stage_edit(store: Store, job_id: int) -> dict[str, Any]:
+    """The stage add that gives a job a Submitted stage: {"name", "after"}. It lands after the last in-play stage
+    that comes before any interview or offer stage (Screening on the default stages)."""
+    stages = store.job_stages(job_id)
+    first_late = next((i for i, s in enumerate(stages) if s["outcome"] != "open"
+                       or set(re.findall(r"[a-z]+", s["name"].lower())) & actions.LATE_STAGE_WORDS), len(stages))
+    after = stages[first_late - 1]["name"] if first_late > 0 else None
+    return {"name": SUBMITTED_STAGE, "after": after} if after else {"name": SUBMITTED_STAGE}
+
+
+def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = None,
+            note: str | None = None) -> dict[str, Any]:
     """The submittal draft for one person and job: {"subject", "body", "to", "email", "client", "manager"}. Built from
     their profile, the newest screen notes on this job, and comp and availability when a note or the profile says
-    them. The recruiter reads and sends it from their own mail."""
+    them. why_fit and note are the recruiter's own words for this write-up. The recruiter reads and sends it from
+    their own mail."""
     cand = store.get_candidate(candidate_id)
     job = store.get_job(job_id)
     own = actions.inhouse(store)
@@ -307,8 +323,19 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
     if hist:
         lines.append("Before: " + "; ".join(
             " at ".join(x for x in (h.get("title"), h.get("company")) if x) for h in hist if h.get("title") or h.get("company")))
+    tags = cand.get("tags")
+    tags = ", ".join(tags) if isinstance(tags, (list, tuple)) else (tags or "").strip()
+    if tags:
+        lines.append(f"Skills: {tags[:200]}")
+    about = " ".join((cand.get("about") or "").split())
+    if about:
+        lines.append(f"About: {about[:ABOUT_CHARS].rstrip()}{'...' if len(about) > ABOUT_CHARS else ''}")
     if cand.get("linkedin_url"):
         lines.append(f"Profile: {cand['linkedin_url']}")
+    if (why_fit or "").strip():
+        lines += ["", f"Why they fit: {' '.join(why_fit.split())}"]
+    if (note or "").strip():
+        lines += ["", " ".join(note.split())]
     if notes:
         lines += ["", "From my screen:"]
         lines += [f"- {n[:NOTE_CHARS].strip()}{'...' if len(n) > NOTE_CHARS else ''}" for n in notes]
@@ -326,7 +353,8 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
             "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail)}
 
 
-def submit(store: Store, candidate_id: int, job_id: int, by: str = "app") -> dict[str, Any]:
+def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fit: str | None = None,
+           note: str | None = None) -> dict[str, Any]:
     """Move someone into the job's Submitted stage and draft their write-up. {"moved", "stage", "before", "at",
     "writeup", "warning", "elsewhere"}. A second submit while they're already there moves nothing. Raises
     ValueError when they aren't on the job, are hired or out, or the job has no Submitted stage."""
@@ -357,7 +385,8 @@ def submit(store: Store, candidate_id: int, job_id: int, by: str = "app") -> dic
     else:
         warning = None  # already there: nothing new to warn about
     return {"moved": moved, "stage": target["name"], "before": app["stage"], "at": at, "warning": warning,
-            "elsewhere": other_clients(store, candidate_id, job_id), "writeup": writeup(store, candidate_id, job_id)}
+            "elsewhere": other_clients(store, candidate_id, job_id),
+            "writeup": writeup(store, candidate_id, job_id, why_fit, note)}
 
 
 # ------------------------------------------------------------------ the chase
