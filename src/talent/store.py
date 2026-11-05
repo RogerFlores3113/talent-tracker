@@ -465,6 +465,30 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v6_data,
     ),
+    # v8: clients (one per job company, matched by actions.company_key) with their contacts, notes, update day
+    # and time zone, and a copy of every client update the recruiter marked as sent.
+    """
+    CREATE TABLE clients (
+        id                  INTEGER PRIMARY KEY,
+        name                TEXT NOT NULL,
+        key                 TEXT NOT NULL UNIQUE,
+        contacts            TEXT,
+        notes               TEXT,
+        update_day          TEXT,
+        time_zone           TEXT,
+        last_update_sent_at TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    );
+    CREATE TABLE client_updates (
+        id        INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sent_at   TEXT NOT NULL,
+        since     TEXT,
+        body      TEXT NOT NULL
+    );
+    CREATE INDEX client_updates_client_idx ON client_updates(client_id, sent_at);
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {

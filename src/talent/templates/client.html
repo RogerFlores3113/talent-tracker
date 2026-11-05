@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% set word = 'company' if inhouse() else 'client' %}
+{% block title %}{{ c.name }} · Talent Search{% endblock %}
+{% block body %}
+{% set tz = c.time_zone %}
+<div class="sec-head"><h1>{{ c.name }}{% if due %} <span class="badge overdue">Update due</span>{% endif %}</h1>
+  <a class="btn small no-print" href="/clients">All {{ 'reports' if inhouse() else 'clients' }}</a></div>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+<form class="tablebar no-print" method="get" action="/clients/{{ c.slug }}">
+  <label class="inline-label">From <input type="date" name="since" value="{{ since or since_day }}"></label>
+  <label class="inline-label">to <input type="date" name="until" value="{{ until or until_day }}"></label>
+  <button class="btn" type="submit">Show</button>
+  {% if since or until %}<a class="small" href="/clients/{{ c.slug }}">Since the last update</a>{% endif %}
+  <span class="fine">{% if rep.range_from == 'last_update' %}Starts when you last marked an update as sent ({{ rep.since | local }}).{% elif rep.range_from == 'default' %}No update marked as sent yet, so this covers the last 7 days.{% else %}The days you picked.{% endif %}</span>
+</form>
+
+<section class="panel report" id="report">
+  <div class="sec-head"><h2>Update to share</h2>
+    <span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="report-text" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
+  <pre class="code wrap" id="report-text">{{ text }}</pre>
+  <div class="actions-inline no-print">
+    <button type="button" class="btn small" data-print>Print or save as PDF</button>
+    <a class="btn small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as CSV</a>
+    {% if mailto %}<a class="btn small" href="{{ mailto }}">Email this update to {{ rep.email }}</a>{% endif %}
+    <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark this update as sent? A copy is kept, and the next update covers what happens from now.">
+      <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}">
+      <button class="btn small primary" type="submit">Mark as sent</button></form>
+  </div>
+  <p class="fine no-print">Names, counts and moves leave out each job's internal stages (like Sourced), as its status update does. Moves come from stage history; ones an import marked and ones that were undone don't count{% if rep.imported_moves %} ({{ rep.imported_moves }} from imports left out){% endif %}. Times are in {{ tz or 'your time zone' }}.{% if mailto %} Email opens your own mail app with the update filled in; nothing is sent from here. A long update can get cut off there, so paste the copied text if it is.{% endif %}</p>
+</section>
+
+<section class="panel">
+  <h2>Funnel</h2>
+  <table class="dense">
+    <thead><tr><th>Stage group</th><th>In play now</th><th>Moved in this period</th></tr></thead>
+    <tbody>{% for g, label in groups %}{% if rep.stand[g] or rep.period[g] %}
+    <tr><td>{{ label }}</td><td>{{ rep.stand[g] if g not in ('hired', 'out') else '' }}</td><td>{{ rep.period[g] }}</td></tr>
+    {% endif %}{% endfor %}</tbody>
+  </table>
+  <p class="fine">All time on these jobs: {% for g, label in [('submitted', 'submitted or presented'), ('interview', 'interviewed'), ('offer', 'offer'), ('hired', 'hired')] %}{{ label }} {{ rep.reached[g] }}{{ ', ' if not loop.last }}{% endfor %}. Median days in stage: {% for g, v in rep.median_days.items() %}{{ labels[g] }} {{ v }}{{ ', ' if not loop.last }}{% else %}not enough history yet{% endfor %}.</p>
+</section>
+
+{% if rep.upcoming %}
+<section class="panel">
+  <h2>Upcoming interviews</h2>
+  <ul class="plain">{% for u in rep.upcoming %}<li><a href="/candidates/{{ u.candidate_id }}">{{ u.name }}</a>, {{ u.job }}: {{ u.at_client }}{% if u.summary %} <span class="muted">{{ u.summary }}</span>{% endif %}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="panel no-print">
+  <h2>Jobs</h2>
+  <ul class="plain">{% for j in c.jobs %}<li><a href="/jobs/{{ j.id }}">{{ j.title }}</a>{% if j.location %} <span class="muted">{{ j.location }}</span>{% endif %}{% if j.status != 'open' %} <span class="badge">{{ j.status | replace('_', ' ') }}</span>{% endif %}</li>{% endfor %}</ul>
+  <p class="fine">Each job's own status update is on its page, and the Jobs page copies one for every open job.</p>
+</section>
+
+<section class="panel no-print" id="submittals">
+  <h2>Submittals</h2>
+  {% if submittals %}
+  <table class="dense">
+    <thead><tr><th>Date</th><th>Person</th><th>Job</th><th>Stage</th></tr></thead>
+    <tbody>{% for s in submittals %}
+    <tr><td class="nowrap">{{ in_zone(s.at, None, '%b %-d, %Y') }}{% if s.imported %} <span class="muted">imported</span>{% endif %}</td><td><a href="/candidates/{{ s.candidate_id }}">{{ s.name }}</a></td><td>{{ s.job }}</td><td>{{ s.stage }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+  {% else %}<p class="fine">Nobody yet. Moving someone into a stage named like Submitted or Presented lists them here with the date.</p>{% endif %}
+</section>
+
+<section class="panel no-print" id="details">
+  <h2>Details</h2>
+  <form class="form" method="post" action="/clients/{{ c.slug }}">
+    <label>Name<input type="text" name="name" value="{{ c.name }}" maxlength="200"></label>
+    <label>Update day<select name="update_day"><option value="">No set day</option>{% for d in days %}<option value="{{ d }}" {{ 'selected' if c.update_day == d }}>{{ d }}</option>{% endfor %}</select></label>
+    <label>Time zone<input type="text" name="time_zone" value="{{ c.time_zone or '' }}" list="zones" placeholder="America/New_York, or ET, CT, MT, PT"></label>
+    <datalist id="zones">{% for z in zones %}<option value="{{ z }}">{% endfor %}</datalist>
+    <label class="wide">Contacts (one per line; the first email is used for Email this update)<textarea name="contacts" rows="3" maxlength="3000">{{ c.contacts or '' }}</textarea></label>
+    <label class="wide">Notes<textarea name="notes" rows="4" maxlength="5000">{{ c.notes or '' }}</textarea></label>
+    <div class="actions"><button class="btn primary" type="submit">Save</button></div>
+  </form>
+</section>
+
+<section class="panel no-print" id="sent">
+  <h2>Updates sent</h2>
+  {% if updates %}
+  {% for u in updates %}
+  <details><summary>{{ u.sent_at | local }}</summary><pre class="code wrap">{{ u.body }}</pre>
+    {% if loop.first %}<form method="post" action="/clients/{{ c.slug }}/updates/{{ u.id }}/undo" class="inline" data-confirm="Take back this Mark as sent? Its copy goes, and the next update starts where it did before.">
+      <button class="btn small" type="submit">Take back Mark as sent</button></form>{% endif %}
+  </details>
+  {% endfor %}
+  {% else %}<p class="fine">None marked as sent yet. Mark as sent keeps a copy here and starts the next update from that moment.</p>{% endif %}
+</section>
+{% endblock %}

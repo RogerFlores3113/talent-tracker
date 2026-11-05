@@ -210,3 +210,13 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 section.welcome.panel { margin-bottom: 20px; }
 @media (prefers-color-scheme: dark) { .badge.sample { background: #4a3b00; color: #ffe08a; } }
 .report-preview { white-space: pre-wrap; word-break: break-word; }
+
+/* Clients and client reports. Printing a report keeps the update and its numbers, without the app around them. */
+.report .actions-inline { margin-top: 8px; }
+.clients-table td { vertical-align: top; }
+@media print {
+  header.top, footer.foot, .no-print, .flash { display: none !important; }
+  body, main { background: #fff; color: #000; margin: 0; padding: 0; max-width: none; }
+  .panel { border: none; padding: 0; margin: 0 0 16px; }
+  .code { border: none; background: #fff; font-size: 12pt; white-space: pre-wrap; }
+}

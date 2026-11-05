@@ -2,6 +2,7 @@
 {% set sample_people = sample_ids()[0] %}
 {% set next_iv = next_iv or {} %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if resubmit %}<p class="flash warn" role="status">{{ resubmit }}</p>{% endif %}
 {% if ask %}<div class="flash warn ask-cancel" role="status">
   <form method="post" action="/jobs/{{ job.id }}/cancel-interviews" class="inline">
     <input type="hidden" name="candidate_id" value="{{ ask.candidate_id }}">

@@ -27,7 +27,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import __version__, actions, recipes
+from . import __version__, actions, recipes, reports
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
 from .store import (JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, _labels, normalize_linkedin,
@@ -699,6 +699,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
         out.update({k: v for k, v in actions.exit_interviews(store, candidate_id, job_id).items()
                     if k in ("upcoming_interviews", "warning")})
+        sub = reports.submittal_note(store, candidate_id, job_id)
+        if sub and sub["stage"] != before:  # a submittal: warn when they went to this client in the last 12 months
+            out["submitted_to"] = sub["client"]
+            if sub["warning"]:
+                out["submitted_before"] = sub["earlier"]
+                out["warning"] = " ".join(w for w in (out.get("warning"), sub["warning"]) if w)
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         sentence = (f"{name} is already in {out['stage']} on {_job_name(job)}." if before == out["stage"]
@@ -753,6 +759,34 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup],
                 "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
                 "app_url": app_url("/jobs")}
+        return CallToolResult(content=content, structuredContent=data)
+
+    @mcp.tool(annotations=READ)
+    def client_report(client: str, since: str | None = None) -> CallToolResult:
+        """A client's update for a period: where people stand by stage group, who moved (from stage history;
+        marked imports and undone moves don't count), median days in each stage group, upcoming interviews in the
+        client's time zone, and the funnel (submitted or presented, interviewed, offer, hired). In-house, the client
+        is the company itself. client matches as in status_digest ("acme" finds "Acme, Inc."). since is a date like
+        2026-11-01; by default the report starts at the last update the recruiter marked as sent in the app, else
+        7 days ago. The first text block is paste-ready. Per-job updates are in job_pipeline and status_digest.
+        Marking an update as sent is done in the app."""
+        keys = reports.find_clients(store, client)
+        if not keys:
+            raise ValueError(f"No client matches {client!r}. A client is a company named on a job; list_jobs shows them.")
+        if len(keys) > 1:
+            names = [reports.client(store, k)["name"] for k in keys]
+            raise ValueError(f"{client!r} matches more than one client: {', '.join(names)}. Say which one.")
+        rep = reports.report(store, keys[0], since)
+        text = reports.report_text(rep)
+        content = [TextContent(type="text", text=text)]
+        if rep["people"] or rep["moves"]:
+            content.append(TextContent(type="text", text=PASTE_NOTE))
+        data = {k: rep[k] for k in ("since", "until", "range_from", "in_play", "stand", "period", "reached",
+                                    "median_days", "openings", "filled")}
+        data.update({"client": rep["client"]["name"], "time_zone": rep["client"].get("time_zone"),
+                     "last_update_sent_at": rep["client"].get("last_update_sent_at"),
+                     "jobs": rep["jobs"], "moves": rep["moves"][:100], "upcoming_interviews": rep["upcoming"],
+                     "app_url": app_url(f"/clients/{quote(rep['client']['slug'])}")})
         return CallToolResult(content=content, structuredContent=data)
 
     # ------------------------------------------------------------- dashboard
@@ -875,6 +909,7 @@ ARG_ALIASES = {
     "move_stage": {"note": "notes"},
     "add_to_pipeline": {"note": "notes"},
     "log_activity": {"body": "summary"},
+    "client_report": {"company": "client"},
 }
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one
 # extra field. Every other tool refuses an argument it doesn't know.
