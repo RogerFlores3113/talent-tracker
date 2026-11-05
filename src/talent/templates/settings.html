@@ -41,6 +41,16 @@
   <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
 </section>
 
+<section class="panel" id="time-zone">
+  <h2>Your time zone</h2>
+  <p class="fine">Today, timelines, your AI app's replies and times you type use it. Client updates use each client's own zone. Leave it blank to use this computer's ({{ computer_zone() }}){% if shown_zone_name() and not user_zone() %}; for now times show in your company's zone, {{ shown_zone_name() }}, since this computer is on UTC{% endif %}.</p>
+  <form method="post" action="/settings/time-zone" class="inline">
+    <label class="inline-label">Time zone <input type="text" name="time_zone" value="{{ user_zone() or '' }}" list="user-zones" placeholder="America/Chicago, or ET, CT, MT, PT"></label>
+    <datalist id="user-zones">{% for z in common_zones %}<option value="{{ z }}">{% endfor %}</datalist>
+    <button class="btn" type="submit">Save</button>
+  </form>
+</section>
+
 <section class="panel" id="backups">
   <h2>Automatic backups</h2>
   <p>Before every import, delete, merge, undo of all AI changes, sample data removal or restore, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>

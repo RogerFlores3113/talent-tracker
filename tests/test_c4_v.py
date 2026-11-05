@@ -106,8 +106,10 @@ def test_inhouse_report_is_split_by_hiring_manager_with_their_own_email(store):
     assert [n for _, n in reports.managers(store, "lumen health")] == ["Dana Cole", "Priya Raman"]
     body = local_client(store).get("/clients/lumen-health").text
     dana, priya = _pre(body, 0), _pre(body, 1)
-    assert "hiring update for Dana Cole" in dana and "Bo Li" in dana and "Ana Ruiz" not in dana
-    assert "hiring update for Priya Raman" in priya and "Ana Ruiz" in priya and "Bo Li" not in priya
+    # Cycle 5 fixer H: an in-house update goes to the manager, so its title is "Hiring update, <Company>".
+    assert "Hiring update, Lumen Health" in dana and "Bo Li" in dana and "Ana Ruiz" not in dana
+    assert "Hiring update, Lumen Health" in priya and "Ana Ruiz" in priya and "Bo Li" not in priya
+    assert "for Dana Cole" not in dana and "for Priya Raman" not in priya
     assert 'data-copy-from="report-text"' in body and 'data-copy-from="report-text-2"' in body
     assert 'href="mailto:priya@lumen.example?' in body and 'href="mailto:hr@lumen.example?' in body
     for text in (dana, priya):
