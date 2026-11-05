@@ -1487,7 +1487,62 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         contact = outreach.contact_stage(store, job_id)
         return {"steps": seq.get("steps") or [], "since": seq.get("since"), "people": people,
                 "defaults": list(outreach.DEFAULT_STEPS), "contact": contact["name"] if contact else None,
-                "copy_from": outreach.sequence_jobs(store, exclude=job_id)}
+                "copy_from": outreach.sequence_jobs(store, exclude=job_id),
+                "not_following": outreach.not_following(store, job_id) if seq else [],
+                "preview": outreach.preview(seq.get("steps") or list(outreach.DEFAULT_STEPS)),
+                "enrolled": len(seq.get("enrolled") or [])}
+
+    @app.post("/jobs/{job_id}/sequence/enroll")
+    def enroll_existing(request: Request, job_id: int):
+        """Enroll the people already messaged on this job into its follow-up steps."""
+        job_or_404(job_id)
+        try:
+            got = outreach.enroll_existing(store, job_id)
+        except ValueError as exc:
+            return back(request, f"/jobs/{job_id}#followups", error=str(exc))
+        if not got:
+            return back(request, f"/jobs/{job_id}#followups", notice="Nobody needed enrolling.")
+        names = ", ".join(p["name"] for p in got[:3]) + (f" and {len(got) - 3} more" if len(got) > 3 else "")
+        return back(request, f"/jobs/{job_id}#followups", notice=(
+            f"Enrolled {len(got)} {'person' if len(got) == 1 else 'people'} ({names}). Their next follow-up comes "
+            "due from their first message, so some may be due now."))
+
+    @app.post("/jobs/{job_id}/followups/batch")
+    async def followups_batch(request: Request, job_id: int):
+        """I sent them all: log the follow-up each ticked person is due, once each."""
+        job_or_404(job_id)
+        form = await request.form()
+        ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
+        if not ids:
+            return back(request, f"/jobs/{job_id}#followups", error="Nobody was picked.")
+        try:
+            got = outreach.log_sent_batch(store, job_id, ids)
+        except NotFound as exc:
+            return back(request, f"/jobs/{job_id}#followups", error=str(exc))
+        n = len(got["logged"])
+        notice = f"Logged the follow-up to {n} {'person' if n == 1 else 'people'}." if n else "Nothing new to log."
+        if got["already"]:
+            notice += f" Already logged today for {', '.join(got['already'][:3])}, so not again."
+        return back(request, f"/jobs/{job_id}#followups", notice=notice)
+
+    @app.get("/jobs/{job_id}/outreach", response_class=HTMLResponse)
+    def outreach_page(request: Request, job_id: int):
+        """Everyone messaged on a job: first message, step, next due, replied, source, and reply rates."""
+        job = job_or_404(job_id)
+        return page(request, "outreach.html", job=job, t=outreach.table(store, job_id),
+                    not_following=len(outreach.not_following(store, job_id)))
+
+    @app.post("/jobs/{job_id}/outreach/bulk")
+    async def outreach_bulk(request: Request, job_id: int):
+        """A bulk action on the people ticked on the Outreach tab: sent, replied, pause, resume or enroll."""
+        job_or_404(job_id)
+        form = await request.form()
+        ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
+        try:
+            notice = outreach.bulk_apply(store, job_id, str(form.get("action") or ""), ids)
+        except (ValueError, NotFound) as exc:
+            return back(request, f"/jobs/{job_id}/outreach", error=str(exc))
+        return back(request, f"/jobs/{job_id}/outreach", notice=notice)
 
     @app.post("/jobs/{job_id}/sequence/copy")
     async def copy_sequence(request: Request, job_id: int):

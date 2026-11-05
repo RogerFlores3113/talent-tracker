@@ -255,5 +255,13 @@ section.welcome.panel { margin-bottom: 20px; }
 .week .slot { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin-bottom: 6px; font-size: 13px; }
 .week .clash { border-color: #c0392b; }
 .sequence-form .seq-step { display: grid; grid-template-columns: minmax(140px, 1fr) auto; gap: 4px 8px; margin-bottom: 8px; }
+.sequence-form .seq-step[hidden] { display: none; }
 .sequence-form .seq-step textarea { grid-column: 1 / -1; width: 100%; }
 .prospect-more p, .prospect-more ul { margin: 4px 0; }
+
+/* Outreach tab */
+.outreach-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.outreach-table th, .outreach-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.outreach-form { overflow-x: auto; }
+.outreach-form .bulk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }

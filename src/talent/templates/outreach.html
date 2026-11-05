@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Outreach · {{ job.title }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+  </div>
+  {% include "_job_tabs.html" %}
+</div>
+
+<section class="panel" id="outreach">
+  <div class="sec-head"><h2>{% if t.people %}{{ t.totals.contacted }} messaged, {{ t.totals.replied }} replied ({{ t.totals.rate }}){% else %}Nobody messaged yet{% endif %}</h2></div>
+  {% if not t.has_sequence %}
+  <p class="fine">No follow-up steps are set for this job. <a href="/jobs/{{ job.id }}?sequence=1#followups">Set them up</a> and each follow-up shows on Today with the text ready to paste. Nothing is sent for you.</p>
+  {% endif %}
+  {% if not t.people %}
+  <p class="none">Log a call, email or message on someone's profile (with this job) and they show up here.</p>
+  {% else %}
+  {% if not_following %}
+  <p class="flash warn"><strong>{{ not_following }} {{ 'person' if not_following == 1 else 'people' }} you messaged before the steps were set {% if not_following == 1 %}isn't{% else %}aren't{% endif %} following them.</strong> Tick them and press Enroll, or enroll everyone from the job page.</p>
+  {% endif %}
+  <form method="post" action="/jobs/{{ job.id }}/outreach/bulk" class="outreach-form">
+    <div class="bulk">
+      <span class="fine">With the ticked people:</span>
+      <button class="btn small" type="submit" name="action" value="sent" title="Logs a message on this job for each. Nothing is sent by the app.">Log sent</button>
+      <button class="btn small" type="submit" name="action" value="replied">Mark replied</button>
+      <button class="btn small" type="submit" name="action" value="pause" title="No follow-ups come due for them until you resume">Pause</button>
+      <button class="btn small" type="submit" name="action" value="resume">Resume</button>
+      {% if t.has_sequence %}<button class="btn small" type="submit" name="action" value="enroll" title="Follow-ups count from their first message">Enroll</button>{% endif %}
+    </div>
+    <table class="outreach-table">
+      <thead><tr>
+        <th><input type="checkbox" data-check-all aria-label="Tick everyone"></th>
+        <th>Name</th><th>Stage</th><th>First message</th><th>Sent</th><th>Next</th><th>Replied</th><th>Source</th>
+      </tr></thead>
+      <tbody>
+      {% for r in t.people %}
+        <tr>
+          <td><input type="checkbox" name="candidate_ids" value="{{ r.candidate_id }}" aria-label="Tick {{ r.name }}"></td>
+          <td><a href="/candidates/{{ r.candidate_id }}">{{ r.name }}</a></td>
+          <td>{{ r.stage }}</td>
+          <td>{{ r.first_on | date }}</td>
+          <td>{{ r.sent }}{% if r.step %} <span class="fine">({{ r.step }} steps)</span>{% endif %}</td>
+          <td>
+            {% if r.status == 'due' %}<span class="badge overdue">Due</span> {{ r.next_label }}, <span class="fine">{{ r.next_due_text }}</span>
+            {% elif r.status == 'waiting' %}{{ r.next_label }}, <span class="fine">{{ r.next_due_text }}</span>
+            {% elif r.status == 'paused' %}<span class="badge">Paused</span> <span class="fine">before {{ r.next_label }}</span>
+            {% elif r.status == 'not_following' %}<span class="badge warn">Not following</span>
+            {% elif r.status == 'finished' %}<span class="muted">No reply after every step</span>
+            {% elif r.status == 'moved_on' %}<span class="muted">Moved on</span>
+            {% elif r.status == 'no_sequence' %}<span class="muted">No steps set</span>
+            {% else %}<span class="muted">Done</span>{% endif %}
+          </td>
+          <td>{% if r.replied %}Yes <span class="fine">{{ r.replied_on | date }}</span>{% else %}<span class="muted">No</span>{% endif %}</td>
+          <td>{{ r.source or '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </form>
+  {% endif %}
+</section>
+
+{% if t.people %}
+<div class="grid-2">
+  <section class="panel">
+    <h2>Reply rate by step</h2>
+    <p class="fine">Of the people who got each message, how many replied after it.</p>
+    <table class="outreach-table">
+      <thead><tr><th>Message</th><th>Sent</th><th>Replied after</th><th>Rate</th></tr></thead>
+      <tbody>{% for s in t.by_step %}<tr><td>{{ s.step }}. {{ s.label }}</td><td>{{ s.sent }}</td><td>{{ s.replied }}</td><td>{{ s.rate }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </section>
+  <section class="panel">
+    <h2>Reply rate by source</h2>
+    <p class="fine">Where the people you messaged were found.</p>
+    <table class="outreach-table">
+      <thead><tr><th>Source</th><th>Messaged</th><th>Replied</th><th>Rate</th></tr></thead>
+      <tbody>{% for s in t.by_source %}<tr><td>{{ s.source }}</td><td>{{ s.contacted }}</td><td>{{ s.replied }}</td><td>{{ s.rate }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </section>
+</div>
+{% endif %}
+{% endblock %}
