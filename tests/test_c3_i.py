@@ -14,7 +14,8 @@ def _at(days=2):
 
 
 def _msg(r, key="notice"):
-    return parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
+    from conftest import flash_of
+    return flash_of(r, key) or parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
 
 
 def _people(store, job_id, stage, *names):
