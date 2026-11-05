@@ -43,6 +43,11 @@
     <span class="when" title="{{ r.at | local }}">{{ r.at | local('%b %-d, %Y, %-I:%M %p') }}</span>
     <span class="muted">· {{ r.who_label or who_options[r.who] }}</span>
     <div>{{ r.text }}</div>
+    {% if r.children %}{% set n = r.children | length %}<details class="import-people"><summary>{{ n }} {{ 'person' if n == 1 else 'people' }} with changed details</summary>
+      <ul class="timeline changes">{% for c in r.children[:50] %}<li><a href="{{ c.href }}"><strong>{{ c.name }}</strong></a> <span class="muted">{{ c.text }}</span>
+        {% if c.undoable %}<form method="post" action="{{ c.undo_url }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif c.undone %}<span class="fine">Undone</span>{% endif %}</li>{% endfor %}</ul>
+      {% if n > 50 %}<p class="fine">And {{ n - 50 }} more. Each is on that person's timeline.</p>{% endif %}
+    </details>{% endif %}
     {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"{% if r.confirm %} data-confirm="{{ r.confirm }}"{% endif %}><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
     {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>
     {% elif r.record %}<div class="fine">Kept as a record. There is nothing to undo.</div>

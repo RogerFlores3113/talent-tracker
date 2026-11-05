@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from .paths import backups_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
                     IdentityConflict, Store, normalize_linkedin, now_iso, parse_when, same_person_name,
-                    split_tags, stage_outcome)
+                    split_tags, stage_outcome, to_dt)
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
@@ -325,7 +325,7 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                                     "Use a date like 2026-11-05")
                     continue
                 try:
-                    data[target] = parse_when(v, default_now=False)
+                    data[target] = _as_day(v, parse_when(v, default_now=False))
                 except ValueError:
                     warnings.append(f"left {col_name} blank, couldn't read the date {v!r}")
             elif target == "note":
@@ -364,19 +364,41 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                "stage_at": {n: dates["stage_changed_at"]} if "stage_changed_at" in dates else {}}
 
 
+_HAS_TIME = re.compile(r"\d:\d|\d\s*[ap]\.?m\b|\dT\d|\b(?:noon|midnight)\b", re.I)
+
+
+def _as_day(v: str, when: str | None) -> str | None:
+    """A cell with a date and no time ('11/03/2026') as a moment that reads as that same calendar day in every
+    time zone people work in: noon UTC is still Nov 3 from Hawaii to Fiji. Someone far east or west of UTC gets
+    noon in their own zone instead, so the day stays right where they read it. A time in the cell is kept."""
+    if not when or _HAS_TIME.search(v):
+        return when
+    local = to_dt(when).astimezone()  # parse_when read the bare date as midnight here
+    offset = local.utcoffset()
+    day = datetime(local.year, local.month, local.day, 12, tzinfo=timezone.utc)
+    if offset is not None and abs(offset.total_seconds()) > 11 * 3600:
+        day = local.replace(hour=12, minute=0, second=0).astimezone(timezone.utc)
+    return day.replace(microsecond=0).isoformat()
+
+
 def _date_cell(v: str, col_name: str, warnings: list[str]) -> str | None:
-    """A date column's cell as UTC ISO, or None with a warning when it isn't a date we can trust."""
+    """A date column's cell as UTC ISO, or None with a warning when it isn't a date we can trust. A date with no
+    time is kept as that calendar day (see _as_day)."""
     if _RELATIVE_DATE.match(v.strip()):
         warnings.append(f"left {col_name} blank, {v!r} depends on when the sheet was written. Use a date like 2026-11-05")
         return None
     try:
-        when = parse_when(v, default_now=False)
+        raw = parse_when(v, default_now=False)
     except ValueError:
         warnings.append(f"left {col_name} blank, couldn't read the date {v!r}")
         return None
-    if when and when > datetime.now(timezone.utc).isoformat():
+    when = _as_day(v, raw)
+    if raw and raw > datetime.now(timezone.utc).isoformat():  # today's date is fine, though noon may be ahead
         warnings.append(f"left {col_name} blank, {v!r} is in the future")
         return None
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    if when and when > now.isoformat():
+        when = now.isoformat()  # today's date, read before noon: now, which is still today
     return when
 
 
@@ -438,7 +460,72 @@ def _collapse(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _merge_records(hit, rec)
         for k in keys:
             owner.setdefault(k, hit)
+    return _fold_keyless(out)
+
+
+def _fold_keyless(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A row with no email or LinkedIn joins the row with the same name and phone (or, with no phone on either,
+    the same company and no email or LinkedIn either) in the same file, by the rules _People.match uses
+    against saved people. Else a sync saved them twice over and flip-flopped one into the other's values."""
+    def keyed(rec: dict[str, Any]) -> bool:
+        return bool(rec["data"].get("email") or rec["data"].get("linkedin_url"))
+
+    def key(rec: dict[str, Any]) -> tuple[str, str, str] | None:
+        d = rec["data"]
+        name, phone = _fold(d.get("name")), _digits(d.get("phone"))
+        if not name:
+            return None
+        if phone:
+            return ("ph", name, phone)
+        company = _fold(d.get("current_company"))
+        return ("co", name, company) if company and not keyed(rec) else None
+
+    owner: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for rec in records:  # people with an email or LinkedIn first, so a keyless row goes into them
+        k = key(rec)
+        if k and keyed(rec) and k[0] == "ph":
+            owner.setdefault(k, rec)
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        k = key(rec)
+        if keyed(rec) or k is None:
+            out.append(rec)
+            continue
+        hit = owner.get(k)
+        if hit is None:
+            owner[k] = rec
+            out.append(rec)
+        elif hit["rows"][0] < rec["rows"][0]:
+            _merge_records(hit, rec)
+        else:  # this row comes first in the file, so the later row's values still win
+            first = {**rec, "rows": list(rec["rows"]), "data": dict(rec["data"]), "differs": dict(rec["differs"]),
+                     "notes": list(rec["notes"]), "jobs": list(rec["jobs"]), "warnings": list(rec["warnings"])}
+            _merge_records(first, hit)
+            hit.clear()
+            hit.update(first)
     return out
+
+
+def _latest_jobs(rec: dict[str, Any]) -> list[str]:
+    """Keep one row per job for this person: the one with the latest stage date (the last row when they have
+    no date), so a person on the same job twice in one file doesn't move back and forth on every sync.
+    Returns a line for each job that had more than one row."""
+    best: dict[tuple[str, str], tuple[str, str, str, bool, int]] = {}
+    count: Counter[tuple[str, str]] = Counter()
+    for j in rec["jobs"]:
+        key = (_fold(j[0]), _fold(j[1]))
+        count[key] += 1
+        cur = best.get(key)
+        if cur is None or (rec["stage_at"].get(j[4]) or "", j[4]) >= (rec["stage_at"].get(cur[4]) or "", cur[4]):
+            best[key] = j
+    if len(best) == len(rec["jobs"]):
+        return []
+    rec["jobs"] = [j for j in rec["jobs"] if best[(_fold(j[0]), _fold(j[1]))] is j]
+    name = rec["data"].get("name") or "Someone"
+    return [f"Row {j[4]}: {name} is on {job_label({'title': j[0], 'company': j[1]})} in {count[k]} rows. Only this "
+            f"row ({j[2] or 'no stage'}) counts, "
+            + ("it has the latest stage date" if rec["stage_at"].get(j[4]) else "the last of them")
+            for k, j in best.items() if count[k] > 1]
 
 
 def _label(rows: list[int]) -> str:
@@ -607,29 +694,39 @@ def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict
 class _Jobs:
     """Find a job by title and company (ignoring case), or make it. One lookup per import."""
 
-    def __init__(self, store: Store, aliases: dict[str, int] | None = None) -> None:
+    def __init__(self, store: Store, aliases: dict[str, int] | None = None, reopen: bool = False) -> None:
         self.store = store
         self.jobs = store.list_jobs()
         self.created: list[str] = []
         self.made: list[dict[str, Any]] = []
         self.aliases = dict(aliases or {})  # a sync profile's "title|company" -> job id, kept if the job is renamed
         self.keys: dict[str, int] = {}  # what this file matched, for the profile
+        self.reopen = reopen  # a closed or on-hold job the file still lists is opened again, instead of left alone
+        self.reopened: list[str] = []
 
     def get(self, title: str, company: str, any_status: bool) -> dict[str, Any]:
+        """The job, made if there's none by that title and client. A closed or on-hold one is returned as it is
+        (so the caller leaves its rows alone), never doubled by a new open job, unless reopen is set."""
         key = (_fold(title), _fold(company))
         name = "|".join(key)
         known = self.aliases.get(name)
         if known is not None:
-            hit = next((j for j in self.jobs if j["id"] == known and (any_status or j["status"] == "open")), None)
-            if hit:
+            hit = next((j for j in self.jobs if j["id"] == known), None)
+            if hit and (any_status or hit["status"] == "open"):
                 self.keys[name] = hit["id"]
                 return hit
         rank = {"open": 0, "on_hold": 1, "closed": 2}
-        found = sorted((j for j in self.jobs if (_fold(j["title"]), _fold(j.get("company"))) == key
-                        and (any_status or j["status"] == "open")), key=lambda j: rank.get(j["status"], 3))
+        found = sorted((j for j in self.jobs if (_fold(j["title"]), _fold(j.get("company"))) == key),
+                       key=lambda j: rank.get(j["status"], 3))
+        if not found and known is not None:
+            found = [j for j in self.jobs if j["id"] == known]  # renamed here since the last sync, and not open
         if found:
-            self.keys[name] = found[0]["id"]
-            return found[0]
+            job = found[0]
+            if job["status"] != "open" and not any_status and self.reopen:
+                job.update(self.store.update_job(job["id"], status="open"))
+                self.reopened.append(job_label(job))
+            self.keys[name] = job["id"]
+            return job
         job = self.store.add_job(title, company or None)
         self.jobs.append(job)
         self.created.append(job_label(job))
@@ -661,7 +758,8 @@ def _labels(fields: Iterable[str]) -> str:
 def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
                 source: str = "CSV import", backup: bool = True, add_stages: bool = False,
                 file_name: str | None = None, move_stages: bool = False,
-                profile: dict[str, Any] | None = None) -> dict[str, Any]:
+                profile: dict[str, Any] | None = None, reopen_jobs: bool = False,
+                replace_stages: bool = False) -> dict[str, Any]:
     """Add or update one candidate per row. A bad row is skipped and listed, never fatal.
 
     Backs up the database first (see backup_before_import). Rows with the same email or LinkedIn
@@ -691,10 +789,16 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
     in the app since the last import is kept: the file has to be newer to win. `missing_from_file` lists people
     in the file's jobs who aren't in it, left as they are. `profile` is a saved sync profile (see
     sync_profile): its stage order, client and job matches.
+
+    A job that's closed or on hold here is never made again as a new open job: its rows are left alone and
+    `closed_jobs` counts them, unless reopen_jobs=True opens it again (`reopened` names it). When one person has
+    several rows on one job, only the row with the latest stage date counts. replace_stages=True drops the empty
+    default stages from a job this import made, when the file brought stages of its own for it.
     """
     backup_file = backup_before_import(store, prune=False) if backup else None
     try:
-        result = _import(store, header, rows, mapping, source, add_stages, move_stages, profile or {})
+        result = _import(store, header, rows, mapping, source, add_stages, move_stages, profile or {},
+                         reopen_jobs=reopen_jobs, replace_stages=replace_stages)
     except BaseException:
         if backup_file:
             prune_backups()
@@ -807,7 +911,8 @@ def _meaning_place(stages: list[dict[str, Any]], order: list[str] | None, new: s
 
 
 def _import(store: Store, header: list[str], rows: list[list[str]], mapping: list[str], source: str,
-            add_stages: bool, move_stages: bool = False, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+            add_stages: bool, move_stages: bool = False, profile: dict[str, Any] | None = None, *,
+            reopen_jobs: bool = False, replace_stages: bool = False) -> dict[str, Any]:
     profile = profile or {}
     run = now_iso()  # marks this import's stage entries, so Today can snooze "all from this import"
     moved: list[str] = []
@@ -824,11 +929,14 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
     missing: dict[tuple[int, str], dict[str, str]] = {}
     stages_made: list[str] = []
     field_counts: Counter[str] = Counter()
+    closed: dict[int, dict[str, Any]] = {}
     records = _collapse(list(_records(header, rows, mapping)))
     client = str(profile.get("client") or "").strip()
     if client:  # the profile's client, for an export with no client column
         for rec in records:
             rec["jobs"] = [(t, c or client, st, ours, row) for t, c, st, ours, row in rec["jobs"]]
+    for rec in records:
+        merged_rows.extend(_latest_jobs(rec))
     order = _file_order(records, profile.get("stage_order"))
     people: _People | None = None
     jobs: _Jobs | None = None
@@ -913,18 +1021,20 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             except Exception as exc:
                 warned.append(f"{label}: note not saved ({exc})")
         for title, company, stage, any_status, row in rec["jobs"]:
-            jobs = jobs or _Jobs(store, profile.get("jobs"))
+            jobs = jobs or _Jobs(store, profile.get("jobs"), reopen=reopen_jobs)
             try:
                 pipelines += _place(store, jobs, cand, title, company, stage, any_status, f"Row {row}", warned,
                                     fallbacks=fallbacks, missing=missing, add_stages=add_stages, already=already,
                                     moves=moves, order=order, stage_at=rec["stage_at"].get(row),
-                                    made=stages_made, move=move_stages, moved=moved, run=run, seen=seen)
+                                    made=stages_made, move=move_stages, moved=moved, run=run, seen=seen,
+                                    closed=closed)
             except Exception as exc:
                 warned.append(f"Row {row}: not added to {title} ({exc})")
     mapped_cols = {i for i, m in enumerate(mapping) if m}
     not_imported = [h for i, h in enumerate(header) if i not in mapped_cols and h.strip()]
     jobs_created = jobs.created if jobs else []
     gone = _missing_from_file(store, seen) if move_stages else []
+    replaced = _replace_default_stages(store, jobs.made, stages_made) if jobs and replace_stages else 0
     if jobs and jobs.made:
         _guess_openings(store, jobs.made)
     return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
@@ -936,8 +1046,10 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             "jobs_created": jobs_created, "not_imported": not_imported, "dates_set": dated,
             "moved": moved, "missing_from_file": gone, "move_stages": move_stages, "stage_order": order,
             "job_keys": jobs.keys if jobs else {}, "new_job_ids": [j["id"] for j in jobs.made] if jobs else [],
+            "closed_jobs": sorted(closed.values(), key=lambda c: -c["rows"]),
+            "reopened": jobs.reopened if jobs else [], "defaults_dropped": replaced, "run": run,
             "_changed": bool(added or updated or notes or pipelines or dated or jobs_created or stages_made
-                             or moved),
+                             or moved or (jobs and jobs.reopened)),
             "dry_run": False}
 
 
@@ -964,12 +1076,18 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
            missing: dict[tuple[int, str], dict[str, str]] | None = None, add_stages: bool = False,
            already: list[str] | None = None, moves: Counter[str] | None = None, order: list[str] | None = None,
            stage_at: str | None = None, made: list[str] | None = None, move: bool = False,
-           moved: list[str] | None = None, run: str | None = None, seen: set[tuple[int, int]] | None = None) -> int:
+           moved: list[str] | None = None, run: str | None = None, seen: set[tuple[int, int]] | None = None,
+           closed: dict[int, dict[str, Any]] | None = None) -> int:
     """Put the person in that job's pipeline at that stage. 1 if they were added, 0 if already there.
-    With move=True someone already there at another stage is moved, when the file may (see _file_wins)."""
+    With move=True someone already there at another stage is moved, when the file may (see _file_wins).
+    A job that's closed or on hold here is left alone: nobody is added or moved on it (counted in `closed`)."""
     fallbacks = warned if fallbacks is None else fallbacks
     already = warned if already is None else already
     job = jobs.get(title, company, any_status)
+    if job["status"] != "open" and not any_status:
+        if closed is not None:
+            closed.setdefault(job["id"], {"job": job_label(job), "status": job["status"], "rows": 0})["rows"] += 1
+        return 0
     stages = store.job_stages(job["id"])
     want = stages[0]
     if stage:
@@ -1107,17 +1225,44 @@ def _missing_from_file(store: Store, seen: set[tuple[int, int]]) -> list[str]:
     return out
 
 
+def _replace_default_stages(store: Store, made: list[dict[str, Any]], stages_made: list[str]) -> int:
+    """On each job this import made that got stages of its own from the file, drop the default stages nobody is
+    in (Contacted, Screening...), so its board shows only the file's. A job keeps one in-play, one hired and one
+    out stage, so a default stays when the file has none of that kind. Returns how many stages were dropped."""
+    from .store import DEFAULT_STAGES
+
+    defaults = {n.casefold() for n, _ in DEFAULT_STAGES}
+    if not stages_made:
+        return 0
+    dropped = 0
+    for job in made:
+        stages = store.job_stages(job["id"])
+        if all(s["name"].casefold() in defaults for s in stages):
+            continue  # the file brought nothing of its own for this job
+        used = {r["stage"].casefold() for r in store._rows("SELECT DISTINCT stage FROM applications WHERE job_id = ?",
+                                                           (job["id"],))}
+        own = {s["outcome"] for s in stages if s["name"].casefold() not in defaults or s["name"].casefold() in used}
+        kept: set[str] = set()
+        for s in stages:
+            if s["name"].casefold() not in defaults or s["name"].casefold() in used:
+                continue
+            if s["outcome"] not in own and s["outcome"] not in kept:
+                kept.add(s["outcome"])  # the file has no stage of this kind, so the first default one stays
+                continue
+            try:
+                store.remove_empty_stage(job["id"], s["name"])
+                dropped += 1
+            except ValueError:
+                continue
+    return dropped
+
+
 def _guess_openings(store: Store, made: list[dict[str, Any]]) -> None:
-    """A job an import made gets as many openings as the file has hires on it (at least 1), so a client update
-    doesn't say "over by 7". Its openings are asked once, on the import page or Today (see openings_to_ask)."""
+    """A job an import made keeps the default openings until someone says how many it has: they're asked once,
+    on the import page or Today (see openings_to_ask). The file's hire count is never taken as the openings, or a
+    client update would say "22 of 22 openings filled" before anyone was asked."""
     import json
 
-    for job in made:
-        hired = store._row("SELECT count(*) AS n FROM applications a JOIN job_stages s ON s.job_id = a.job_id"
-                           " AND lower(s.name) = lower(a.stage) WHERE a.job_id = ? AND s.outcome = 'hired'",
-                           (job["id"],))["n"]
-        if hired > 1:
-            store.update_job(job["id"], openings=hired)
     ask = sorted(set(openings_to_ask(store)) | {j["id"] for j in made})
     with store._lock, store._conn:
         store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
@@ -1296,7 +1441,8 @@ def mapping_for(store: Store, header: list[str], rows: list[list[str]]) -> tuple
 
 def save_sync_profile(store: Store, header: list[str], mapping: list[str], result: dict[str, Any], *,
                       file_name: str | None = None, source: str | None = None, add_stages: bool = False,
-                      move_stages: bool = False, client: str | None = None) -> dict[str, Any]:
+                      move_stages: bool = False, client: str | None = None,
+                      replace_stages: bool | None = None) -> dict[str, Any]:
     """After an import: remember how this export was read, for next week's file. Keeps PROFILES_KEPT."""
     import json
 
@@ -1305,6 +1451,7 @@ def save_sync_profile(store: Store, header: list[str], mapping: list[str], resul
     prof = {"key": header_key(header), "file": (file_name or old.get("file") or "").strip()[:120],
             "header": header, "mapping": mapping, "source": source or old.get("source") or "CSV import",
             "add_stages": bool(add_stages), "move_stages": bool(move_stages),
+            "replace_stages": bool(old.get("replace_stages", True) if replace_stages is None else replace_stages),
             "stage_order": (result.get("stage_order") or old.get("stage_order") or [])[:200],
             "client": (client if client is not None else old.get("client") or "").strip()[:120],
             "jobs": dict(list(jobs.items())[-500:]), "saved_at": now_iso(), "runs": int(old.get("runs") or 0) + 1}
@@ -1412,9 +1559,24 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
     if result.get("missing_from_file"):
         extra.append(f"{_plural(len(result['missing_from_file']), 'person', 'people')} on these jobs here but not "
                      "in the file, left as they are")
+    if result.get("defaults_dropped"):
+        extra.append(f"{_plural(result['defaults_dropped'], 'empty default stage')} left off the new jobs")
     if extra:
         lines.append("Also: " + "; ".join(extra) + ".")
+    lines += closed_job_lines(result)
     return lines
+
+
+def closed_job_lines(result: dict[str, Any]) -> list[str]:
+    """'iOS Engineer (Initech) is closed here: leaving its 390 rows alone.' and 'Opening iOS Engineer (Initech)
+    again.' A closed job is never made again as a new one."""
+    out = [f"{c['job']} is {'on hold' if c['status'] == 'on_hold' else 'closed'} here: leaving its "
+           f"{_plural(c['rows'], 'row')} alone." for c in result.get("closed_jobs") or []]
+    reopened = result.get("reopened") or []
+    if reopened:
+        out.append(("Opened again: " if not result.get("dry_run") else "Will open again and sync: ")
+                   + ", ".join(reopened[:5]) + (f", and {len(reopened) - 5} more" if len(reopened) > 5 else "") + ".")
+    return out
 
 
 PANEL_LINES = 20  # lines a result panel shows before "and N more"

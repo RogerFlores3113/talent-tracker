@@ -2162,9 +2162,11 @@ def _check_arguments(mcp: FastMCP) -> None:
         unknown = [k for k in args if k not in accepted]
         if unknown and name not in LENIENT_TOOLS:
             hints = [f"{k}_id" for k in unknown if f"{k}_id" in accepted]
-            raise ToolError(f"No change made. {name} doesn't take {', '.join(unknown)}."
+            read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
+            raise ToolError(("" if read_only else "No change made. ") + f"{name} doesn't take {', '.join(unknown)}."
                             + (f" Did you mean {', '.join(hints)}?" if hints else "")
-                            + f" It accepts: {', '.join(accepted)}.")
+                            + (f" It accepts: {', '.join(accepted)}." if accepted
+                               else " It takes no arguments, so call it with none."))
         for k in unknown:
             args.pop(k)
         _check_ids(tool, name, args)

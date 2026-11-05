@@ -164,7 +164,7 @@ def record_import(store: Store, result: dict[str, Any], file_name: str | None, t
              "updated": result.get("updated", 0), "unchanged": result.get("unchanged", 0),
              "skipped": result.get("skipped_rows", 0), "pipelines": result.get("pipelines_added", 0),
              "notes": result.get("notes", 0), "moved": len(result.get("moved") or []), "changed": bool(backup),
-             "backup": backup}
+             "backup": backup, "started": result.get("run")}  # started: so Changes tucks its per-person rows under it
     log = [entry] + import_log(store)
     value = json.dumps(log[:IMPORT_LOG_KEPT])
     with store._lock, store._conn:
