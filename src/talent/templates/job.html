@@ -69,6 +69,7 @@
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>
+{% include "_sequence.html" %}
 <details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>{{ 'Status update' if inhouse() else 'Status update for the client' }}</summary>
   <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages are internal: their people aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
   {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't {{ 'put forward' if inhouse() else 'presented' }} yet.</p>{% endif %}

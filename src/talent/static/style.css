@@ -196,6 +196,7 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 /* Sample data, status update, follow-ups */
 .badge.sample { background: #fff3cd; color: #7a5a00; text-transform: none; }
 .badge.overdue { background: #fde2e1; color: #9b1c1c; text-transform: none; }
+.badge.warn { background: #fff3cd; color: #7a5a00; text-transform: none; }
 .badge.iv-cancelled { text-decoration: line-through; }
 .t-interview.cancelled .when { text-decoration: line-through; color: var(--muted); }
 .timeline li.struck > div:not(.fine) { text-decoration: line-through; color: var(--muted); }
@@ -251,3 +252,6 @@ section.welcome.panel { margin-bottom: 20px; }
 .week .day h3 { font-size: 13px; margin: 0 0 6px; }
 .week .slot { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin-bottom: 6px; font-size: 13px; }
 .week .clash { border-color: #c0392b; }
+.sequence-form .seq-step { display: grid; grid-template-columns: minmax(140px, 1fr) auto; gap: 4px 8px; margin-bottom: 8px; }
+.sequence-form .seq-step textarea { grid-column: 1 / -1; width: 100%; }
+.prospect-more p, .prospect-more ul { margin: 4px 0; }

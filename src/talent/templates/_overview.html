@@ -52,7 +52,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','feedback_owed':'Feedback owed','client_chase':'Client feedback','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings','offer':'Offer'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','feedback_owed':'Feedback owed','client_chase':'Client feedback','shortlist':'Shortlist','followup':'Follow-up due','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings','offer':'Offer'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -89,6 +89,12 @@
           <a class="btn small" href="{{ i.href }}">Chase</a>
           {% elif i.kind == 'shortlist' %}
           <a class="btn small" href="{{ i.href }}">Review</a>
+          {% elif i.kind == 'followup' and i.candidate_id %}
+          <button class="btn small" type="button" data-copy-text="{{ i.draft }}" title="{{ i.draft }}">Copy text</button>
+          <form method="post" action="/jobs/{{ i.job_id }}/followups/{{ i.candidate_id }}/sent"><button class="btn small" type="submit">I sent it</button></form>
+          <form method="post" action="/jobs/{{ i.job_id }}/followups/{{ i.candidate_id }}/replied"><button class="link small" type="submit">They replied</button></form>
+          {% elif i.kind == 'followup' %}
+          <a class="btn small" href="{{ i.href }}">See them</a>
           {% elif i.kind == 'openings' %}
           <a class="btn small" href="{{ i.href }}">Set openings</a>
           {% elif i.kind == 'stuck' and i.count %}

@@ -84,7 +84,7 @@
   {% if c.timeline %}
   <ul class="timeline">
     {% for t in c.timeline %}
-    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ 'reply' if t.data is mapping and t.data.reply else t.kind }}</span> <span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
       {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}{% if t.status == 'cancelled' %} <span class="badge">Cancelled</span>{% elif t.status in interview_outcomes %} <span class="badge">{{ interview_label(ivd) or interview_outcomes[t.status] }}</span>{% endif %}{% if ivd.rescheduled_from %} <span class="fine">moved from {{ ivd.rescheduled_from[-1] | local }}</span>{% endif %}{% endif %}
       {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
       {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}

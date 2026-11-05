@@ -125,7 +125,7 @@ def test_keep_saves_or_links_and_adds_to_the_first_stage(store):
     rows = {p["name"]: p for p in shortlist.listed(store, job["id"])}
     c = local_client(store)
     page = c.get(f"/jobs/{job['id']}/shortlist").text
-    assert "Ana Ruiz built payments APIs" in page and "Keep as Bo Li (#" in page and "Keep as someone new" in page
+    assert "Ana Ruiz built payments APIs" in page and "Same as Bo Li, Globex" in page and "Someone new" in page  # c6 labels
     assert "—" not in page and "–" not in page
     r = c.post(f"/jobs/{job['id']}/shortlist/{rows['Ana Ruiz']['id']}/keep", follow_redirects=False)
     assert flash_of(r) == "Saved Ana Ruiz and added them to Sourced."
@@ -181,7 +181,7 @@ def test_the_ai_can_only_propose(store, monkeypatch):
     # visibility "app") and refused without the card's key (tests/test_c5_e.py). Cycle 6 A: listed only to hosts
     # that say they show views, with the card's own key tool.
     app_only = [n for n in tools if (tools[n].meta or {}).get("ui", {}).get("visibility") == ["app"]]
-    assert sorted(app_only) == ["keep_prospect", "pass_prospect", "shortlist_card_key"]
+    assert sorted(app_only) == ["keep_prospect", "keep_prospects", "pass_prospect", "pass_prospects", "shortlist_card_key"]
     assert not [n for n in tools if n not in app_only and any(w in n for w in ("keep", "pass", "delete", "remove"))]
     assert tools["propose_candidates"].meta["ui"]["resourceUri"].endswith("shortlist.html")
     assert "propose_candidates" in INSTRUCTIONS and "only when the recruiter asks you to save" in INSTRUCTIONS

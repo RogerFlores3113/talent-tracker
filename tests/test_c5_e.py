@@ -272,7 +272,7 @@ def test_card_keep_asks_for_a_choice_then_keeps_as_the_chosen_person_or_passes(s
 
 def test_the_shortlist_card_has_buttons_only_when_the_host_can_call_tools():
     html = view_html("shortlist")
-    for bit in ("keep_prospect", "pass_prospect", "Keep as someone new", "Keep as #", "Reason (optional)",
+    for bit in ("keep_prospect", "pass_prospect", "Someone new", "Same as ", "Reason (optional)",  # c6 labels
                 "serverTools", "talent-search/shortlist", "Review in Talent Search"):
         assert bit in html, bit
     assert "innerHTML" not in html and "—" not in html and "–" not in html

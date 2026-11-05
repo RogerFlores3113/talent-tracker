@@ -1,6 +1,7 @@
 {% from "_macros.html" import sample_badge %}
 {% set sample_people = sample_ids()[0] %}
 {% set next_iv = next_iv or {} %}
+{% set elsewhere = elsewhere_badges(job.id) %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if resubmit %}<p class="flash warn" role="status">{{ resubmit }}</p>{% endif %}
 {% if ask %}<div class="flash warn ask-cancel" role="status">
@@ -22,7 +23,7 @@
     <tr class="group-head"><th colspan="6">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
     {% for a in g.candidates %}
     <tr>
-      <td><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}</td>
+      <td><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}</td>
       <td>{{ a.current_title or '' }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
       <td>{% include "_stage_select.html" %}</td>
       <td class="nowrap">{{ a.stage_changed_at | ago }}</td>
@@ -47,6 +48,7 @@
     {% for a in cards %}
     <div class="pc" draggable="true" data-cid="{{ a.candidate_id }}">
       <a href="/candidates/{{ a.candidate_id }}"><strong>{{ a.candidate_name }}</strong></a> {{ sample_badge(a.candidate_id in sample_people) }}
+      {% if a.candidate_id in elsewhere %}<span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}
       {% if a.current_title %}<div class="fine">{{ a.current_title }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</div>{% endif %}
       <div class="fine">{{ a.stage_changed_at | ago }} in stage</div>
       {% if a.candidate_id in next_iv %}<div class="next-iv">Interview {{ next_iv[a.candidate_id] | local }}</div>{% endif %}
