@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 from . import __version__, actions, recipes
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import JOB_STATUSES, TIMELINE_KINDS, NotFound, Store, now_iso, snippet_text, split_tags, to_dt
+from .store import (JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, now_iso, snippet_text,
+                    split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -186,7 +187,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         else:
             head = (f"{res.total} match{'' if res.total == 1 else 'es'}"
                     + (f", showing {len(results)}" if res.total > len(results) else "") + ":")
-        lines = [head] + [f"- {_line(c)}" + (f". Match: {c['match']}" if c.get("match") else "") for c in results]
+        lines = [head] + ([DATA_NOTE] if results else []) + [
+            f"- {_line(c)}" + (f". Match: {c['match']}" if c.get("match") else "") for c in results]
         if not results and not is_id:
             lines = ["No saved candidates match. Try fewer or different words, or no filters."]
         return _result("\n".join(lines), {"total": res.total, "results": results, "closest": res.closest,
@@ -225,14 +227,27 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         was kept). Tags are skills ("Python", "B2B sales") and are added to existing ones. work_history, if given,
         replaces the saved list (most recent first). `source` is where you found them (e.g. "LinkedIn").
         A new person with the same name as someone saved comes back with possible_duplicates: ask the recruiter.
+        If the email or LinkedIn URL belongs to someone with a different name, nothing is saved and you get
+        conflict with the existing person: ask the recruiter before doing anything else.
         """
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source)
         same_name = store.find_by_name(name)
-        cand, created = store.upsert_candidate(work_history=_history(work_history), by="ai", **data)
+        try:
+            cand, created = store.upsert_candidate(work_history=_history(work_history), by="ai", **data)
+        except IdentityConflict as exc:
+            what = "email" if exc.field == "email" else "LinkedIn URL"
+            other = exc.existing
+            return {"created": False, "conflict": True, "changed": [], "data_note": DATA_NOTE,
+                    "existing": _slim({k: other.get(k) for k in (
+                        "id", "name", "current_title", "current_company", "email", "linkedin_url")}),
+                    "warning": (f"No change made. That {what} already belongs to {other['name']} (id {other['id']}), "
+                                f"but you saved it as {exc.incoming_name}. Ask the recruiter whether they are the same "
+                                f"person. If they are, use update_candidate on id {other['id']}. If not, save "
+                                f"{exc.incoming_name} without that {what}.")}
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
-        out: dict[str, Any] = {"created": created, "candidate": _slim(cand)}
+        out: dict[str, Any] = {"created": created, "data_note": DATA_NOTE, "candidate": _slim(cand)}
         if not created:
             out["changed"] = changed
             if kept:
@@ -296,7 +311,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Logging the same item twice is harmless.
         """
         entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app")
-        out: dict[str, Any] = {"logged": _slim(entry),
+        out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim(entry),
                                "last_contacted_at": store.get_candidate(candidate_id)["last_contacted_at"]}
         if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
             out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
@@ -315,8 +330,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                    description: str | None = None, stages: list[str] | None = None) -> dict[str, Any]:
         """Create a job the recruiter is hiring for. stages is optional; the default is
         Sourced, Contacted, Screening, Interviewing, Offer, Hired, Rejected, Withdrawn."""
+        twins = store.similar_open_jobs(title, company)
         job = store.add_job(title, company, location, description, stages=stages)
-        return {**_slim(job), "stages": [s["name"] for s in store.job_stages(job["id"])]}
+        out = {**_slim(job), "stages": [s["name"] for s in store.job_stages(job["id"])]}
+        if twins:
+            ids = ", ".join(str(j["id"]) for j in twins)
+            out["warning"] = (f"Created, but open job id {ids} has the same title and company. Ask the recruiter "
+                              "whether this is a second opening or a duplicate they should close.")
+        return out
 
     @mcp.tool(annotations=EDIT)
     def update_job(job_id: int, title: str | None = None, company: str | None = None, location: str | None = None,
@@ -396,6 +417,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             f" ({job['location']})" if job.get("location") else "")
         lines = [head, f"Status: {job['status'].replace('_', ' ')}. {total} candidate{'' if total == 1 else 's'}, "
                        f"{active} still in the running."]
+        if total:
+            lines.append(DATA_NOTE)
         for s in stages:
             if not s["candidates"]:
                 continue
@@ -425,7 +448,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if not items:
             text = "Nothing needs attention right now."
         else:
-            text = "\n".join(
+            text = DATA_NOTE + "\n" + "\n".join(
                 f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")
                 + (f" at {_local(i['when'])}" if i["kind"] == "interview" and i.get("when") else "")
                 + "".join(f" [{k} {i[k]}]" for k in ("candidate_id", "job_id", "suggestion_id") if i.get(k))
@@ -435,9 +458,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result(text, {"items": items, "stale_more": res["stale_more"], "app_url": app_url("/")})
 
     @mcp.tool(annotations=WRITE)
-    def add_suggestion(text: str, candidate_id: int | None = None, job_id: int | None = None) -> dict[str, Any]:
-        """Leave the recruiter a to-do on their dashboard, e.g. "Send Priya a follow-up about the offer"."""
-        return _slim(store.add_suggestion(text, candidate_id, job_id, source="AI app"))
+    def add_suggestion(text: str, candidate_id: int | None = None, job_id: int | None = None,
+                       due: str | None = None) -> dict[str, Any]:
+        """Leave the recruiter a to-do on their dashboard, e.g. "Send Priya a follow-up about the offer".
+
+        `due` (optional, e.g. 2026-12-01 or Dec 1, 2026) hides it until that day, like a follow-up date."""
+        s = actions.add_followup(store, text, (due or "").strip() or None, candidate_id=candidate_id,
+                                 job_id=job_id, source="AI app")
+        return {"data_note": DATA_NOTE, **_slim(s)}
 
     @mcp.tool(annotations=WRITE)
     def complete_suggestion(suggestion_id: int) -> dict[str, Any]:

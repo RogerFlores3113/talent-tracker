@@ -74,6 +74,8 @@ FIELD_LABELS = {
     "current_title": "title", "current_company": "company", "linkedin_url": "LinkedIn",
     "last_contacted_at": "last contacted", "tags": "skills", "work_history": "work history",
 }
+# Who made a change -> the timeline entry's source ("from AI app", "from CSV import").
+CHANGE_SOURCES = {"app": "App", "ai": "AI app", "import": "CSV import"}
 # On a merge (same email or LinkedIn saved again) these take the newer value;
 # name, source and about are never overwritten, other fields are only filled when empty.
 MERGE_OVERWRITES = ("current_title", "current_company", "location")
@@ -406,6 +408,38 @@ class NotFound(LookupError):
     pass
 
 
+def _name_tokens(name: str | None) -> list[str]:
+    return re.sub(r"[^\w\s]|_", " ", (name or "").casefold()).split()
+
+
+def same_person_name(a: str | None, b: str | None) -> bool:
+    """Could these two names be the same person? 'Priya R.' and 'Priya Raman', 'P. Raman' and
+    'Priya Raman', 'ANA D.' and 'Ana Diaz' can; 'Ana Ruiz' and 'Ben Cole' can't."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb or ta == tb or ta[0] == tb[0] or sorted(ta) == sorted(tb):
+        return True
+    short, long = sorted((ta, tb), key=len)
+    return all(x.startswith(y) or y.startswith(x) for x, y in zip(short, long))
+
+
+class IdentityConflict(ValueError):
+    """A save matched someone by email or LinkedIn, but the name says it's a different person."""
+
+    def __init__(self, existing: dict[str, Any], incoming_name: str, field: str, value: str) -> None:
+        self.existing, self.incoming_name, self.field, self.value = existing, incoming_name, field, value
+        super().__init__(f"{value} already belongs to {existing['name']} (id {existing['id']}), but this says "
+                         f"{incoming_name}, so nothing was changed.")
+
+
+class DuplicateValue(ValueError):
+    """An email or LinkedIn URL that another candidate already has."""
+
+    def __init__(self, field: str, owner: dict[str, Any]) -> None:
+        self.field, self.owner = field, owner
+        self.label = "email" if field == "email" else "LinkedIn URL"
+        super().__init__(f"That {self.label} already belongs to {owner['name']} (id {owner['id']}).")
+
+
 # Highlight markers inside snippets. Control characters can't come from
 # normal typing, so the UI can HTML-escape a snippet first and then turn
 # these into <mark> tags without ever trusting candidate text as HTML.
@@ -448,10 +482,11 @@ def _clean(value: Any) -> Any:
 
 
 def split_tags(value: str | Iterable[str] | None) -> list[str]:
-    """'Python, sales;  python ' -> ['Python', 'sales']. Keeps first spelling, dedupes ignoring case."""
+    """'Python, sales;  python | ci/cd' -> ['Python', 'sales', 'ci/cd']. Splits on , ; and |, never on /.
+    Keeps the first spelling and dedupes ignoring case."""
     if value is None:
         return []
-    parts = re.split(r"[,;\n]", value) if isinstance(value, str) else [str(v) for v in value]
+    parts = re.split(r"[,;|\n]", value) if isinstance(value, str) else [str(v) for v in value]
     out: list[str] = []
     seen: set[str] = set()
     for p in parts:
@@ -729,6 +764,9 @@ class Store:
         cols = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
         with self._lock, self._conn:
+            clash = self._clash(None, fields)
+            if clash:
+                raise clash
             cur = self._conn.execute(
                 f"INSERT INTO candidates ({cols}) VALUES ({marks})", tuple(fields.values())
             )
@@ -749,6 +787,16 @@ class Store:
             return self._hydrate(self._row("SELECT * FROM candidates WHERE linkedin_url = ?", (li,)))
         return None
 
+    def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
+        """The first prepared email or LinkedIn value in `fields` that someone else already has."""
+        for f, sql in (("email", "lower(email) = lower(?)"), ("linkedin_url", "linkedin_url = ?")):
+            if fields.get(f):
+                owner = self._row(f"SELECT id, name FROM candidates WHERE {sql} AND id <> ?",
+                                  (fields[f], candidate_id or 0))
+                if owner:
+                    return DuplicateValue(f, owner)
+        return None
+
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
         return [self._hydrate(r) for r in self._rows(
             "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC", (_clean(name) or "",))]
@@ -764,10 +812,19 @@ class Store:
         stays put) when nothing changed. Returns (candidate, created); on a merge the
         candidate dict also carries "_changed" (fields written) and "_kept" (fields that
         had a different saved value that was kept).
+
+        A match whose saved name clearly isn't the incoming one (see same_person_name) raises
+        IdentityConflict and changes nothing, so one person's row can't overwrite someone else.
         """
         existing = self.find_duplicate(data.get("email"), data.get("linkedin_url"))
         if existing is None:
             return self.add_candidate(work_history=work_history, **data), True
+        incoming_name = _clean(data.get("name"))
+        if incoming_name and not same_person_name(existing["name"], incoming_name):
+            email = _clean(data.get("email"))
+            by_email = bool(email and (existing.get("email") or "").lower() == email.lower())
+            raise IdentityConflict(existing, incoming_name, "email" if by_email else "linkedin_url",
+                                   email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
         incoming = self._prepare(data)
         row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
         merged: dict[str, Any] = {}
@@ -821,6 +878,9 @@ class Store:
                 *, by: str, merge: bool = False) -> dict[str, Any]:
         with self._lock, self._conn:
             old, new = self._diff(candidate_id, fields, work_history)
+            clash = self._clash(candidate_id, new)
+            if clash:
+                raise clash
             if new:
                 self._apply(candidate_id, new)
                 body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
@@ -857,19 +917,21 @@ class Store:
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
                        body: str) -> int:
-        by = "ai" if by == "ai" else "app"
+        by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
         return self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (candidate_id, CHANGE_KIND, body, ts, ts, "AI app" if by == "ai" else "App",
+            (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
              json.dumps({"by": by, "old": old, "new": new})),
         ).lastrowid
 
     def undo_change(self, timeline_id: int, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
         """Put back the old values from a "change" timeline entry, and log that as a change too.
 
-        Fields edited again since that change are left alone. Refuses anything that isn't
-        a change entry, or one already undone.
+        Fields edited again since that change are left alone, and so is an email or LinkedIn URL
+        that another candidate has now; the returned candidate's "_skipped" says which, as
+        "LinkedIn URL (it now belongs to Bob Lee, id 2)". Refuses anything that isn't a change
+        entry, or one already undone.
         """
         with self._lock, self._conn:
             entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
@@ -890,15 +952,24 @@ class Store:
             restore = {k: v for k, v in data["old"].items() if current(k) == data["new"].get(k)}
             if not restore:
                 raise ValueError("Those fields were changed again since, so there is nothing to undo.")
+            skipped = []
+            for k in ("email", "linkedin_url"):
+                clash = self._clash(cid, {k: restore.get(k)})
+                if clash:
+                    restore.pop(k)
+                    skipped.append(f"{clash.label} (it now belongs to {clash.owner['name']}, id {clash.owner['id']})")
+            if not restore:
+                raise ValueError("Can't undo: the " + " and the ".join(skipped) + ".")
             before = {k: current(k) for k in restore}
-            try:
-                self._apply(cid, restore)
-            except sqlite3.IntegrityError:
-                raise ValueError("Can't undo: another candidate now has that email or LinkedIn URL.") from None
+            self._apply(cid, restore)
             data["undone_at"] = now_iso()
+            if skipped:
+                data["undo_skipped"] = skipped
             self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), timeline_id))
             self._record_change(cid, before, restore, by, "Undid a change to " + _labels(restore))
-        return self.get_candidate(cid)
+        cand = self.get_candidate(cid)
+        cand["_restored"], cand["_skipped"] = list(restore), skipped
+        return cand
 
     def delete_candidate(self, candidate_id: int) -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
@@ -1120,6 +1191,14 @@ class Store:
                 [(cur.lastrowid, n, i, o) for i, (n, o) in enumerate(plan)],
             )
         return self.get_job(cur.lastrowid)
+
+    def similar_open_jobs(self, title: str | None, company: str | None,
+                          exclude: int | None = None) -> list[dict[str, Any]]:
+        """Open jobs with the same title and company (ignoring case), to warn about a duplicate."""
+        return self._rows(
+            "SELECT * FROM jobs WHERE status = 'open' AND lower(title) = lower(?)"
+            " AND lower(coalesce(company, '')) = lower(?) AND id <> ? ORDER BY id",
+            (_clean(title) or "", _clean(company) or "", exclude or 0))
 
     def get_job(self, job_id: int) -> dict[str, Any]:
         row = self._row("SELECT * FROM jobs WHERE id = ?", (job_id,))

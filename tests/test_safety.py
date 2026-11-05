@@ -26,7 +26,7 @@ def changes(store, cid):
 def test_merge_keeps_name_source_about_and_fills_blanks(store):
     a, _ = store.upsert_candidate(name="Bo Chen", email="bo@x.com", about="Python dev", source="Referral",
                                   current_title="Engineer", tags=["Python"])
-    b, created = store.upsert_candidate(name="Robert Chen", email="BO@x.com", about="Something else",
+    b, created = store.upsert_candidate(name="Bo C.", email="BO@x.com", about="Something else",
                                         source="CSV import", current_title="Staff Engineer", phone="555",
                                         location="Austin", tags=["python", "SQL"])
     assert not created and b["id"] == a["id"]

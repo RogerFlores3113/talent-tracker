@@ -7,18 +7,38 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
 import webbrowser
+from pathlib import Path
 
 import httpx
 
 from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, port_file
 
 
+def _private(path: Path) -> Path:
+    """Create the file readable by this user only (0600), and tighten an existing one. Not on Windows."""
+    if os.name != "nt":
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600))
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return path
+
+
+def _write_port_file(port: int) -> None:
+    try:  # so the AI app's "Open in Talent Search" links point at the right port
+        _private(port_file()).write_text(str(port))
+    except OSError:
+        pass
+
+
 def _setup_logging(to_stderr: bool) -> None:
-    handlers: list[logging.Handler] = [logging.FileHandler(data_dir() / "app.log", encoding="utf-8")]
+    handlers: list[logging.Handler] = [logging.FileHandler(_private(data_dir() / "app.log"), encoding="utf-8")]
     if to_stderr and sys.stderr is not None:
         handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -59,10 +79,7 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         return
     port = _pick_port(port)
     app = create_app(Store(db_path()))
-    try:  # so the AI app's "Open in Talent Search" links point at the right port
-        port_file().write_text(str(port))
-    except OSError:
-        pass
+    _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
     if open_browser:
         threading.Timer(1.2, webbrowser.open, args=[url]).start()
@@ -131,8 +148,9 @@ def main(argv: list[str] | None = None) -> None:
             if not any(m in ("name", "first_name", "last_name") for m in mapping):
                 sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
             r = importers.import_rows(store, header, rows, mapping)
-            print(f"Added {r['added']}, updated {r['updated']}, skipped {len(r['skipped'])}.")
-            for line in r["skipped"][:20]:
+            print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
+                  f"skipped {r['skipped_rows']}.")
+            for line in (r["skipped"] + r["warnings"])[:20]:
                 print("  " + line)
     elif cmd in ("connect-claude", "connect-codex", "connect-lmstudio"):
         from . import integrations

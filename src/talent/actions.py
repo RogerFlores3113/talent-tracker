@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .store import NotFound, Store, to_dt
+from .store import NotFound, Store, parse_when, to_dt
 
 FLAGS: tuple[tuple[str, str, str], ...] = (
     # (setting key, label, help)
@@ -44,6 +44,16 @@ def job_label(title: str | None, company: str | None) -> str:
     return ", ".join(x for x in (title, company) if x)
 
 
+def twin_hints(jobs: list[dict[str, Any]]) -> dict[int, str]:
+    """{job id: location, or '#id'} for open jobs that share a title and company with another open job,
+    so two "Backend Engineer, Acme" openings can be told apart in lists."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for j in jobs:
+        if j.get("status", "open") == "open":
+            groups.setdefault(((j.get("title") or "").lower(), (j.get("company") or "").lower()), []).append(j)
+    return {j["id"]: (j.get("location") or f"#{j['id']}") for g in groups.values() if len(g) > 1 for j in g}
+
+
 def local_time(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
@@ -75,19 +85,33 @@ def _drop_setting(store: Store, key: str) -> None:
 
 # --------------------------------------------------------------- follow-ups
 def parse_day(value: str) -> date:
+    """'2026-12-01', or any date store.parse_when reads ('12/1/2026', 'Dec 1, 2026', 'today'), as a local day."""
+    v = (value or "").strip()
     try:
-        return date.fromisoformat(value.strip()[:10])
+        return date.fromisoformat(v[:10])
     except ValueError:
+        pass
+    try:
+        return to_dt(parse_when(v, default_now=False)).astimezone().date()
+    except (ValueError, AttributeError):
         raise ValueError("Pick a follow-up date like 2026-12-01.") from None
+
+
+def add_followup(store: Store, text: str, on: date | str | None = None, *, candidate_id: int | None = None,
+                 job_id: int | None = None, source: str = "App") -> dict[str, Any]:
+    """Add a to-do to Today. With `on`, it shows from that day on (the log form's "Follow up on")."""
+    day = parse_day(on) if isinstance(on, str) else on
+    s = store.add_suggestion(text, candidate_id=candidate_id, job_id=job_id, source=source)
+    if day is None:
+        return s
+    _put_setting(store, f"{FOLLOWUP_PREFIX}{s['id']}", day.isoformat())
+    return {**s, "due_on": day.isoformat()}
 
 
 def schedule_followup(store: Store, candidate_id: int, on: date | str, job_id: int | None = None) -> dict[str, Any]:
     """Add "Follow up with <name>" to Today, starting on the given day."""
-    day = parse_day(on) if isinstance(on, str) else on
     cand = store.get_candidate(candidate_id)
-    s = store.add_suggestion(f"Follow up with {cand['name']}", candidate_id=candidate_id, job_id=job_id, source="App")
-    _put_setting(store, f"{FOLLOWUP_PREFIX}{s['id']}", day.isoformat())
-    return {**s, "due_on": day.isoformat()}
+    return add_followup(store, f"Follow up with {cand['name']}", on, candidate_id=candidate_id, job_id=job_id)
 
 
 def complete_followup(store: Store, suggestion_id: int) -> None:
@@ -180,7 +204,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
             if due.get(s["id"], "") > today:
                 scheduled += 1
                 continue
-            mine = s["id"] in due
+            mine = s["id"] in due and (s.get("source") or "") != "AI app"
             detail = [label(s.get("job_id"), s.get("job_title"))]
             if not mine:
                 detail.append("Suggested by your AI app")
@@ -309,5 +333,5 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None) -> s
     return "\n".join(lines)
 
 
-__all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "complete_followup", "job_label", "job_status_text",
-           "local_time", "next_interviews", "parse_day", "schedule_followup"]
+__all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "complete_followup", "job_label",
+           "job_status_text", "local_time", "next_interviews", "parse_day", "schedule_followup", "twin_hints"]

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .paths import backups_dir
-from .store import CANDIDATE_FIELDS, Store, parse_when, split_tags
+from .store import CANDIDATE_FIELDS, DuplicateValue, IdentityConflict, Store, parse_when, split_tags
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
@@ -122,7 +122,7 @@ def _rows(header: list[str], rows: Iterable[list[str]],
             elif target == "last_name":
                 last = v
             elif target == "tags":
-                data["tags"] = split_tags((data.get("tags") or []) + split_tags(re.sub(r"[|/]", ",", v)))
+                data["tags"] = split_tags((data.get("tags") or []) + split_tags(v))  # , ; | (never / as in ci/cd)
             elif target == "last_contacted_at":
                 try:
                     data[target] = parse_when(v, default_now=False)
@@ -163,6 +163,12 @@ def backup_before_import(store: Store, keep: int = BACKUPS_KEPT) -> Path:
 
 
 def _row_error(exc: Exception) -> str:
+    if isinstance(exc, IdentityConflict):
+        return (f"{exc.value} belongs to {exc.existing['name']} but this row says {exc.incoming_name}, "
+                "so it was left alone")
+    if isinstance(exc, DuplicateValue):
+        return (f"its email and LinkedIn match two different people already here (that {exc.label} belongs to "
+                f"{exc.owner['name']}), so it was left alone")
     if isinstance(exc, sqlite3.IntegrityError):
         if "linkedin" in str(exc).lower() or "email" in str(exc).lower():
             return "its email and LinkedIn match two different people already here, so it was left alone"
@@ -180,12 +186,15 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
                 source: str = "CSV import", backup: bool = True) -> dict[str, Any]:
     """Add or update one candidate per row. A bad row is skipped and listed, never fatal.
 
-    Backs up the database first (see backup_before_import). `skipped` lists skipped rows and
-    cells we left blank, as "Row N: reason"; `skipped_rows` counts only whole rows.
+    Backs up the database first (see backup_before_import). A row that matched someone and
+    changed nothing counts as `unchanged`, not `updated`. `skipped` lists the rows left out, as
+    "Row N: reason" (`skipped_rows` counts them); `warnings` lists cells we left blank and notes
+    we couldn't save, on rows that were still imported. Changes are logged as made by the import.
     """
     backup_file = backup_before_import(store) if backup else None
-    added = updated = skipped_rows = notes = 0
+    added = updated = unchanged = skipped_rows = notes = 0
     skipped: list[str] = []
+    warned: list[str] = []
     for i, (data, warnings) in enumerate(_rows(header, rows, mapping), start=2):
         note = data.pop("note", None)
         if not data.get("name"):
@@ -194,24 +203,29 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
             continue
         data.setdefault("source", source)
         try:
-            res = store.upsert_candidate(**data)
+            res = store.upsert_candidate(by="import", **data)
             cand, created = res[0], bool(res[1])
         except Exception as exc:  # one bad row must never stop the rest
             skipped.append(f"Row {i}: {_row_error(exc)}")
             skipped_rows += 1
             continue
-        added += created
-        updated += not created
-        skipped.extend(f"Row {i}: {w}" for w in warnings)
+        if created:
+            added += 1
+        elif cand.get("_changed"):
+            updated += 1
+        else:
+            unchanged += 1
+        warned.extend(f"Row {i}: {w}" for w in warnings)
         if note:
             try:
                 if not _has_note(store, cand["id"], note):
                     store.log(cand["id"], "note", note, source=source)
                     notes += 1
             except Exception as exc:
-                skipped.append(f"Row {i}: note not saved ({exc})")
-    return {"added": added, "updated": updated, "skipped": skipped, "skipped_rows": skipped_rows,
-            "notes": notes, "backup": str(backup_file) if backup_file else None}
+                warned.append(f"Row {i}: note not saved ({exc})")
+    return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
+            "skipped_rows": skipped_rows, "warnings": warned, "notes": notes,
+            "backup": str(backup_file) if backup_file else None}
 
 
 def export_csv(store: Store) -> str:
