@@ -197,3 +197,4 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 .logform .followup { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
 section.welcome.panel { margin-bottom: 20px; }
 @media (prefers-color-scheme: dark) { .badge.sample { background: #4a3b00; color: #ffe08a; } }
+.report-preview { white-space: pre-wrap; word-break: break-word; }

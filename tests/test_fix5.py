@@ -182,10 +182,11 @@ def test_echoing_tools_mark_candidate_text_once(store):
     out = text(call(server, "search_candidates", query="dev"))
     assert out.index(DATA_NOTE) < out.index("- Ana")
     for tool, args in (("save_candidate", {"name": "Bo"}),
-                       ("log_activity", {"candidate_id": ana["id"], "kind": "note", "summary": "Hi"}),
-                       ("add_suggestion", {"text": "Ping Bo"})):
+                       ("log_activity", {"candidate_id": ana["id"], "kind": "note", "summary": "Hi"})):
         out = text(call(server, tool, **args))
         assert out.count(DATA_NOTE) == 1, tool
+    out = text(call(server, "add_suggestion", text="Ping Bo"))  # the AI's own words, not the candidate's
+    assert DATA_NOTE not in out and "Written by your AI app" in out
     assert text(call(server, "search_candidates", query="zzzz")).count(DATA_NOTE) == 0
 
 

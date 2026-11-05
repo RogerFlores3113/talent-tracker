@@ -11,12 +11,14 @@ client dependency to bundle.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -43,6 +45,45 @@ SCHEMA = {
 }
 
 
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def url_allowed(url: str) -> bool:
+    """https anywhere, or http on this computer only."""
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    return bool(host) and (parts.scheme == "https" or (parts.scheme == "http" and _loopback(host)))
+
+
+def shown_url(url: str) -> str:
+    """The address without any user name or password in it, for showing and logging."""
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "(not a valid address)"
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
+def env_status() -> dict[str, Any] | None:
+    """What TYPESENSE_URL is set to, for the Privacy and Settings pages. None when unset."""
+    url = os.environ.get("TYPESENSE_URL")
+    if not url:
+        return None
+    return {"url": shown_url(url), "refused": not url_allowed(url), "has_key": bool(os.environ.get("TYPESENSE_API_KEY"))}
+
+
 def to_document(c: dict[str, Any]) -> dict[str, Any]:
     doc = {"id": str(c["id"]), "name": c["name"], "updated_ts": int(datetime.fromisoformat(c["updated_at"]).timestamp())}
     for f in ("current_title", "current_company", "location", "about", "tags"):
@@ -59,8 +100,15 @@ class TypesenseIndex:
 
     @classmethod
     def from_env(cls) -> "TypesenseIndex | None":
+        """The index from TYPESENSE_URL and TYPESENSE_API_KEY. A plain-http address is only
+        used on this computer: candidate data never crosses the network unencrypted."""
         url, key = os.environ.get("TYPESENSE_URL"), os.environ.get("TYPESENSE_API_KEY")
-        return cls(url, key) if url and key else None
+        if not (url and key):
+            return None
+        if not url_allowed(url):
+            log.warning("Ignoring TYPESENSE_URL %s: it must use https unless it's on this computer.", shown_url(url))
+            return None
+        return cls(url, key)
 
     def _req(self, method: str, path: str, *, headers: dict[str, str] | None = None, **kw: Any) -> httpx.Response:
         return self.client.request(method, f"{self.url}{path}", headers={**self.headers, **(headers or {})}, **kw)

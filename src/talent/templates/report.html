@@ -3,11 +3,16 @@
 {% block body %}
 <h1>Report a problem</h1>
 {% if link %}
-<p class="lead">Your report is ready on GitHub. Check it there, remove anything private, then press Submit.</p>
-<p><a class="btn primary" href="{{ link }}" target="_blank" rel="noopener noreferrer">Open the report on GitHub</a></p>
-<p class="fine">You need a free GitHub account to submit. Nothing has been sent yet.</p>
+<p class="lead">Here is what the report will say. Check it, and remove anything private.</p>
+<section class="panel">
+  <h2>{{ preview_title }}</h2>
+  <pre class="code report-preview">{{ preview_body }}</pre>
+</section>
+<p class="fine">Emails, phone numbers and links were taken out. Check for names too.</p>
+<p><a class="btn primary" href="{{ link }}" target="_blank" rel="noopener noreferrer">Open the report on GitHub</a> <a class="btn ghost" href="/report?where={{ where | urlencode }}">Start over</a></p>
+<p class="fine">Opening it shows GitHub your text. It is posted only when you press Submit on GitHub. You need a free GitHub account to submit.</p>
 {% else %}
-<p class="lead">Tell us what went wrong. This builds a pre-filled GitHub issue. Nothing is sent from this app.</p>
+<p class="lead">Tell us what went wrong. This builds a pre-filled GitHub issue that you check before anything leaves this computer.</p>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <form method="post" action="/report" class="form">
   <label class="wide">What went wrong, in a few words<input type="text" name="summary" maxlength="120" required value="{{ summary or '' }}"></label>

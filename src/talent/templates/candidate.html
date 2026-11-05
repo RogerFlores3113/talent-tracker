@@ -54,7 +54,7 @@
       <a href="/jobs/{{ p.job_id }}">{{ p.job_title }}</a>{% if p.job_company %} <span class="muted">{{ p.job_company }}</span>{% endif %}
       <form method="post" action="/jobs/{{ p.job_id }}/move" class="inline">
         <input type="hidden" name="candidate_id" value="{{ c.id }}">
-        <select name="stage" aria-label="Stage for {{ p.job_title }}" onchange="this.form.submit()">
+        <select name="stage" aria-label="Stage for {{ p.job_title }}" data-autosubmit>
           {% for s in stages[p.job_id] %}<option {{ 'selected' if s.name | lower == p.stage | lower }}>{{ s.name }}</option>{% endfor %}
         </select>
       </form>
@@ -96,7 +96,7 @@
   <p class="fine">Ask Claude to look up their current role and update this profile.</p>
   {{ recipe_buttons(refresh_prompt, "Refresh with Claude") }}
 
-  <form method="post" action="/candidates/{{ c.id }}/delete" data-msg="Delete {{ c.name }}? This also removes their timeline and job stages, and can't be undone. Copies stay in automatic backups until they roll off." onsubmit="return confirm(this.dataset.msg)">
+  <form method="post" action="/candidates/{{ c.id }}/delete" data-confirm="Delete {{ c.name }}? This also removes their timeline and job stages, and can't be undone. Copies stay in automatic backups until they roll off.">
     <button class="link danger" type="submit">Delete candidate</button>
   </form>
 </article>

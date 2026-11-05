@@ -7,8 +7,11 @@ Development:  ./data, or TALENT_DATA_DIR if set.
 """
 from __future__ import annotations
 
+import hmac
 import os
+import secrets
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "Talent Search"
@@ -97,3 +100,61 @@ def app_url(path: str = "/") -> str:
     except (OSError, ValueError):
         port = DEFAULT_PORT
     return f"http://127.0.0.1:{port}{path}"
+
+
+# ------------------------------------------------------------ app window key
+# The app window is locked with a per-install key so other programs and other
+# accounts on this computer can't read it. The key lives in a 0600 file in the
+# data folder and reaches the browser only as an HttpOnly cookie. The launch URL
+# carries a one-time code instead of the key, so the key never lands in browser
+# history, logs, the port file or the AI app's links.
+LAUNCH_CODE_TTL = 300  # seconds a launch code works
+
+
+def _write_private(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    _private(path, 0o600)
+
+
+def app_key() -> str:
+    """This install's secret for the app window, created on first run."""
+    path = data_dir() / "app.key"
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        key = ""
+    if len(key) < 32:
+        key = secrets.token_urlsafe(32)
+        _write_private(path, key)
+    elif path.stat().st_mode & 0o077:
+        _private(path, 0o600)
+    return key
+
+
+def new_launch_code() -> str:
+    """A one-time code for the launch URL. Only the newest one works, once, for a few minutes."""
+    code = secrets.token_urlsafe(24)
+    _write_private(data_dir() / "launch.code", code)
+    return code
+
+
+def use_launch_code(code: str) -> bool:
+    """True (and the code is used up) when it's the current, unexpired launch code."""
+    path = data_dir() / "launch.code"
+    try:
+        current = path.read_text(encoding="utf-8").strip()
+        fresh = time.time() - path.stat().st_mtime < LAUNCH_CODE_TTL
+    except OSError:
+        return False
+    if not (code and current and hmac.compare_digest(code.encode(), current.encode())):
+        return False
+    path.unlink(missing_ok=True)
+    return fresh
+
+
+def launch_url(port: int | None = None) -> str:
+    """Opens the app window and unlocks it. Never log or store this address."""
+    base = f"http://127.0.0.1:{port}" if port else app_url("").rstrip("/")
+    return f"{base}/launch?code={new_launch_code()}"

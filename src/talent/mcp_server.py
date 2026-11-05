@@ -507,10 +507,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        due: str | None = None) -> dict[str, Any]:
         """Leave the recruiter a to-do on their dashboard, e.g. "Send Priya a follow-up about the offer".
 
-        `due` (optional, e.g. 2026-12-01 or Dec 1, 2026) hides it until that day, like a follow-up date."""
+        `due` (optional, e.g. 2026-12-01 or Dec 1, 2026) hides it until that day, like a follow-up date.
+        The recruiter sees it as plain text marked as from their AI app; links in it are not clickable."""
         s = actions.add_followup(store, text, (due or "").strip() or None, candidate_id=candidate_id,
                                  job_id=job_id, source="AI app")
-        return {"data_note": DATA_NOTE, **_slim(s)}
+        return {"note": "Written by your AI app", **_slim(s)}
 
     @mcp.tool(annotations=WRITE)
     def complete_suggestion(suggestion_id: int) -> dict[str, Any]:

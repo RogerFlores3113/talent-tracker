@@ -1,29 +1,33 @@
 """The app window: a local web UI on 127.0.0.1 opened in the user's browser."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import re
 import secrets
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, importers, integrations, recipes
+from . import __version__, actions, importers, integrations, paths, recipes
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
-from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, FIELD_LABELS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS,
-                    NotFound, Store, _labels, snippet_html, split_tags, to_dt)
-from .typesense_index import SearchService, TypesenseIndex
+from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, JOB_STATUSES,
+                    STAGE_OUTCOMES, TIMELINE_KINDS, NotFound, Store, _labels, snippet_html, split_tags, to_dt)
+from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
@@ -32,6 +36,15 @@ UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the imp
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
+OPEN_PATHS = {"/launch", "/api/health"}  # everything else needs the app window's key
+KEY_HEADER = "x-talent-key"
+KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock this window."
+CHANGE_WHO = {"ai": "Your AI app", "import": "CSV import", "app": "You, in the app"}
+CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
+CHANGES_SHOWN = 300
 TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
@@ -136,8 +149,21 @@ def _history_to_text(entries: list[dict[str, Any]]) -> str:
                      for e in entries)
 
 
-def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
+def key_cookie_name(key: str) -> str:
+    """Cookies are shared by every port on 127.0.0.1, so each install's cookie gets its own name."""
+    return "talent_key_" + hashlib.sha256(key.encode()).hexdigest()[:10]
+
+
+def safe_local_path(path: str) -> bool:
+    """A path on this server: not '//host', '/\\host' or anything a browser could read as another site."""
+    return (path.startswith("/") and not path.startswith(("//", "/\\")) and "\\" not in path
+            and not any(ch.isspace() or ord(ch) < 32 for ch in path))
+
+
+def create_app(store: Store, search: SearchService | None = None, key: str | None = None) -> FastAPI:
     search = search or SearchService(store, TypesenseIndex.from_env())
+    key = key or paths.app_key()
+    cookie_name = key_cookie_name(key)
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     res = resource_dir()
     templates = Jinja2Templates(directory=str(res / "templates"))
@@ -162,6 +188,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         host_header = (request.headers.get("host") or "").strip().lower()
         if _hostname(host_header) not in LOCAL_HOSTS:
             return PlainTextResponse("Forbidden", status_code=403)
+        request.state.unlocked = has_key(request)
+        path = request.url.path
+        if not request.state.unlocked and path not in OPEN_PATHS and not path.startswith("/static/"):
+            return locked(request)
         fetch_site = (request.headers.get("sec-fetch-site") or "").lower()
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
@@ -180,7 +210,31 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Content-Security-Policy", CSP)
         return response
+
+    def has_key(request: Request) -> bool:
+        given = request.cookies.get(cookie_name) or request.headers.get(KEY_HEADER) or ""
+        return hmac.compare_digest(given.encode(), key.encode())
+
+    def locked(request: Request) -> Response:
+        if request.url.path.startswith("/api/"):
+            resp: Response = JSONResponse({"detail": LOCKED}, status_code=401)
+        else:
+            resp = page(request, "message.html", status_code=401, title="This window is locked", message=LOCKED)
+        for k, v in (("X-Frame-Options", "DENY"), ("X-Content-Type-Options", "nosniff"),
+                     ("Referrer-Policy", "same-origin"), ("Content-Security-Policy", CSP)):
+            resp.headers[k] = v
+        return resp
+
+    @app.get("/launch")
+    def launch(request: Request, code: str = ""):
+        """The app icon and `talent open` come here with a one-time code; it leaves a cookie that unlocks the window."""
+        if not (request.state.unlocked or paths.use_launch_code(code)):
+            return locked(request)
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(cookie_name, key, max_age=KEY_MAX_AGE, httponly=True, samesite="strict", path="/")
+        return resp
 
     def page(request: Request, name: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
         return templates.TemplateResponse(request, name, {"engine": search.engine, **ctx}, status_code=status_code)
@@ -191,9 +245,13 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     def back(request: Request, default: str = "/", notice: str = "", error: str = "") -> RedirectResponse:
         """Redirect to the page the form was on, with an optional one-line message (shown by base.html)."""
         ref = request.headers.get("referer") or ""
-        target = urlsplit(ref)
-        path, query = (target.path, target.query) if target.hostname in LOCAL_HOSTS and target.path else \
-            (urlsplit(default).path, urlsplit(default).query)
+        host = (request.headers.get("host") or "").lower()
+        try:  # only a page of this very server, never '//other.site' or another port
+            target = urlsplit(ref)
+            ours = target.scheme in ("http", "https") and target.netloc.lower() == host and safe_local_path(target.path)
+        except ValueError:
+            ours = False
+        path, query = (target.path, target.query) if ours else (urlsplit(default).path, urlsplit(default).query)
         params = [(k, v) for k, v in parse_qsl(query) if k not in ONE_SHOT_PARAMS]
         params += [(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v]
         return RedirectResponse(path + ("?" + urlencode(params) if params else ""), status_code=303)
@@ -711,6 +769,83 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             return back(request, error=str(exc))
         return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
 
+    # ---------------------------------------------------------- AI changes
+    def change_rows(who: str = "", since: str | None = None, limit: int = CHANGES_SHOWN) -> list[dict[str, Any]]:
+        """Change entries across every candidate, newest first."""
+        where, params = ["t.kind = ?"], [CHANGE_KIND]
+        if who in CHANGE_SOURCES:
+            where.append("t.source = ?")
+            params.append(CHANGE_SOURCES[who])
+        if since:
+            where.append("t.at >= ?")
+            params.append(since)
+        rows = store._rows(
+            f"""SELECT t.id, t.candidate_id, t.body, t.at, t.source, t.data, c.name AS candidate_name
+                FROM timeline t JOIN candidates c ON c.id = t.candidate_id WHERE {' AND '.join(where)}
+                ORDER BY t.at DESC, t.id DESC LIMIT ?""", (*params, limit))
+        for r in rows:
+            r["data"] = _json_or_none(r["data"])
+            d = r["data"] or {}
+            r["undoable"] = bool(d.get("old")) and not d.get("undone_at")
+            r["who"] = d.get("by") if d.get("by") in CHANGE_WHO else "app"
+        return rows
+
+    def since_iso(since: str) -> str | None:
+        if since in CHANGE_SINCE:
+            return (datetime.now(timezone.utc) - timedelta(days=int(since))).replace(microsecond=0).isoformat()
+        try:
+            dt = to_dt(since) if since else None
+        except ValueError:
+            return None
+        return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat() if dt else None
+
+    @app.get("/changes", response_class=HTMLResponse)
+    def changes_page(request: Request, who: str = "", since: str = ""):
+        who = who if who in CHANGE_WHO else ""
+        since = since if since in CHANGE_SINCE else ""
+        start = since_iso(since)
+        rows = change_rows(who, start)
+        ai_since = start or since_iso("1")
+        ai_pending = sum(1 for r in change_rows("ai", ai_since) if r["undoable"])
+        return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
+                    since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN)
+
+    @app.post("/changes/{timeline_id}/undo")
+    def undo_from_changes(request: Request, timeline_id: int):
+        try:
+            cand = store.undo_change(timeline_id, by="app")
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        notice = f"Undid the change to {cand['name']}'s {_labels(cand['_restored'])}."
+        if cand["_skipped"]:
+            notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/changes/undo-ai")
+    async def undo_ai_since(request: Request):
+        form = await request.form()
+        start = since_iso(str(form.get("since") or ""))
+        if not start:
+            return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
+        undone, kept = 0, []
+        for r in change_rows("ai", start, limit=100000):  # newest first, so older values come back last
+            if not r["undoable"]:
+                continue
+            try:
+                store.undo_change(r["id"], by="app")
+                undone += 1
+            except (ValueError, NotFound):
+                kept.append(r["candidate_name"])
+        if not undone and not kept:
+            return back(request, "/changes", notice="There were no AI changes to undo in that time.")
+        notice = f"Undid {undone} AI change{'' if undone == 1 else 's'}."
+        if kept:
+            names = ", ".join(dict.fromkeys(kept))
+            notice += f" Left {len(kept)} alone because the fields were edited again since ({names})."
+        return back(request, "/changes", notice=notice)
+
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, saved: bool = False):
@@ -722,7 +857,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
                     thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
                     sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
-                    backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()))
+                    backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
+                    typesense=env_status())
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
@@ -774,7 +910,7 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy(request: Request):
-        return page(request, "privacy.html", data_folder=str(data_dir().resolve()))
+        return page(request, "privacy.html", data_folder=str(data_dir().resolve()), typesense=env_status())
 
     @app.get("/report", response_class=HTMLResponse)
     def report_page(request: Request, where: str = ""):
@@ -787,9 +923,11 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         if not summary:
             return page(request, "report.html", link=None, error="Say in a few words what went wrong.",
                         env_line=recipes.environment_line(), where=str(form.get("where") or ""))
-        link = recipes.issue_url(summary, str(form.get("details") or ""), where=str(form.get("where") or "app"))
+        details, where = str(form.get("details") or ""), str(form.get("where") or "app")
+        link = recipes.issue_url(summary, details, where=where)
+        title, body = recipes.issue_text(summary, details, where=where)
         return page(request, "report.html", link=link, summary=summary, env_line=recipes.environment_line(),
-                    where=str(form.get("where") or ""))
+                    where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
     # ----------------------------------------------------- AI app setup
     @app.get("/connect", response_class=HTMLResponse)
@@ -818,7 +956,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")
-    def health():
+    def health(request: Request):
+        """Open without the key so a second launch can find the running app. Says nothing about the data."""
+        if not request.state.unlocked:
+            return {"ok": True, "version": __version__}
         return {"ok": True, "version": __version__, "search": search.engine, "candidates": store.count_candidates()}
 
     @app.get("/api/candidates")
@@ -853,13 +994,6 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
-    @app.delete("/api/candidates/{candidate_id}", status_code=204)
-    def api_delete(candidate_id: int):
-        try:
-            store.delete_candidate(candidate_id)
-        except NotFound:
-            raise HTTPException(404, "Candidate not found")
-
     @app.get("/api/today")
     def api_today():
         return actions.action_items(store)
@@ -872,6 +1006,9 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         return page(request, "message.html", status_code=404, title="Not found",
                     message=detail if detail and detail != "Not Found" else "That page doesn't exist.")
 
+    for route in app.routes:  # HEAD works wherever GET does (link checkers, curl -I)
+        if isinstance(route, APIRoute) and "GET" in route.methods and route.path != "/launch":  # HEAD never spends a code
+            route.methods.add("HEAD")
     return app
 
 
@@ -880,6 +1017,13 @@ def _hostname(host_header: str) -> str:
     if host_header.startswith("["):
         return host_header.split("]", 1)[0] + "]"
     return host_header.rsplit(":", 1)[0] if host_header.count(":") == 1 else host_header
+
+
+def _json_or_none(text: str | None) -> Any:
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

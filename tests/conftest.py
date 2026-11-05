@@ -7,12 +7,19 @@ from talent.store import Store
 LOCAL_URL = "http://127.0.0.1:8765"
 
 
-def local_client(store, **kwargs):
+def local_client(store, origin: bool = True, unlocked: bool = True, **kwargs):
+    """origin: send our own Origin header, like the app's own pages. unlocked: carry the
+    app window's key cookie, like a browser opened from the app icon."""
     from fastapi.testclient import TestClient
 
-    from talent.web import create_app
+    from talent import paths
+    from talent.web import create_app, key_cookie_name
 
-    return TestClient(create_app(store), base_url=LOCAL_URL, headers={"Origin": LOCAL_URL}, **kwargs)
+    c = TestClient(create_app(store), base_url=LOCAL_URL, headers={"Origin": LOCAL_URL} if origin else None, **kwargs)
+    if unlocked:
+        key = paths.app_key()
+        c.cookies.set(key_cookie_name(key), key)
+    return c
 
 
 @pytest.fixture(autouse=True)
