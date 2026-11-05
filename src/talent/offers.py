@@ -682,8 +682,8 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         if row is not None and sum(1 for k, v in changed.items() if v is None and row.get(k)) > 1:
             raise ValueError("Clear one field per call, and only when you're sure. Nothing was changed.")
         if row is not None and not changed:
-            return _plain(f"Nothing changed: the offer for {quoted(name)} on {job} already says that.",
-                          {"offer": public(row)})
+            return _plain(f"Nothing changed: the offer for {quoted(name)} on {job} already says that."
+                          f"{_read_days(days)}", {"offer": public(row), **({"read_as": days} if days else {})})
         check_cap(store, candidate_id)
         if review.cautious(store):
             waiting = queue(store, "terms", candidate_id, job_id, {"fields": changed}, session)

@@ -30,7 +30,7 @@ from . import __version__, actions, backups, importers, integrations, paths, rec
 from . import sessions
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
-from . import decide, interviews, offers
+from . import decide, interviews, offers, plan
 from . import chase
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -1942,6 +1942,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                 status_code=303)
 
     offers.register_routes(app, store, page, back)  # the offer page, its answer and its one-click move
+    plan.register_routes(app, store, page, back)  # the Hiring plan page
 
     @app.post("/changes/decision/{batch_id}/undo")
     def undo_decision_form(request: Request, batch_id: int):

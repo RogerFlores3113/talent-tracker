@@ -32,7 +32,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase
 from . import decide, interviews, offers, sessions
-from . import outreach, wording
+from . import outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
@@ -2624,6 +2624,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result(text, data)
 
     offers.register_tools(mcp, store, session)  # record_offer, record_offer_answer, list_offers
+    plan.register_tools(mcp, store, session)  # list_hiring_plan, set_plan_seat
 
     # ------------------------------------------------------------- dashboard
     @mcp.tool(annotations=READ, meta=tool_meta("today"))
@@ -2790,6 +2791,7 @@ ARG_ALIASES = {
     "move_stage": {"note": "notes"},
     "add_to_pipeline": {"note": "notes"},
     "log_activity": {"body": "summary", "candidates": "candidate_ids", "people": "candidate_ids"},
+    "set_plan_seat": {"title": "role", "start": "target_start", "start_date": "target_start", "id": "seat_id"},
     "propose_candidates": {"prospects": "people", "candidates": "people"},
     "client_report": {"company": "client"},
 }

@@ -14,6 +14,7 @@
 //                             their interviews still to come, which get cancelled; data-open their sessions
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
+//   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -77,6 +78,8 @@
     try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
     if (!zone) return;
     document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
+    // One click: "Use America/Chicago" saves this browser's zone as it is.
+    document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
   else prefillZones();
