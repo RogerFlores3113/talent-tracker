@@ -242,7 +242,7 @@ def test_snooze_import_route_and_openings_ask(store):
                                     "col2": "job_title", "col3": "job_company", "col4": "stage", "add_stages": "1"})
     assert "How many openings does each new job have?" in r.text
     job = next(j for j in store.list_jobs() if j["title"] == "iOS")
-    assert job["openings"] == 7  # as many as the file has hires, not 1
+    assert job["openings"] == 1  # the default, until asked: the hire count is never taken as the openings
     page = c.get("/").text
     assert "How many openings does iOS, Initech have?" in page and "Set openings" in page
     r = c.post("/import/openings", data={f"openings_{job['id']}": "8"}, follow_redirects=False)

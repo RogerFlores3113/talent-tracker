@@ -1640,10 +1640,20 @@ def in_play(store: Store, job_id: int) -> list[dict[str, Any]]:
 
 
 def out_stage_name(store: Store, job_id: int) -> str:
-    """The stage a close-out moves people to: Rejected if the job has it as Out, else its first Out stage,
-    else 'Rejected' (added when the close-out runs)."""
+    """The stage a close-out moves people to: the job's own rejection stage. Of its Out stages that read as a
+    rejection ('Rejected', 'Rejected by Client'), the one people are in, most first; with nobody in any, Rejected,
+    else the first of them. A job with none of those uses its first Out stage, else 'Rejected' (added when the
+    close-out runs). So an imported job uses its 'Rejected by Client', not the empty default 'Rejected'."""
     lost = [s["name"] for s in store.job_stages(job_id) if s["outcome"] == "lost"]
-    return next((n for n in lost if _stage_key(n) == "rejected"), lost[0] if lost else "Rejected")
+    rejects = ([n for n in lost if "reject" in _stage_key(n)] or [n for n in lost if "withdr" not in _stage_key(n)]
+               or lost)
+    used = {r["stage"].casefold(): r["n"] for r in store._rows(
+        "SELECT stage, count(*) AS n FROM applications WHERE job_id = ? GROUP BY lower(stage)", (job_id,))}
+    busy = sorted((n for n in rejects if used.get(n.casefold())), key=lambda n: (-used[n.casefold()],
+                                                                                  _stage_key(n) != "rejected"))
+    if busy:
+        return busy[0]
+    return next((n for n in rejects if _stage_key(n) == "rejected"), rejects[0] if rejects else "Rejected")
 
 
 def close_out_plan(store: Store, job_id: int) -> dict[str, Any] | None:

@@ -150,13 +150,16 @@ def _sync(args: argparse.Namespace) -> None:
     source = args.source or prof.get("source") or importers.default_source(header)
     client = args.client if args.client is not None else prof.get("client") or ""
     opts = {"source": source, "add_stages": bool(prof.get("add_stages", True)), "move_stages": not args.no_move,
-            "profile": {**prof, "client": client}}
+            "profile": {**prof, "client": client}, "reopen_jobs": bool(args.reopen),
+            "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
     print(("Using the saved matches for this export" + (f" ({prof['file']})" if prof.get("file") else "") + ".")
           if prof else "No saved profile for these columns yet, so the columns were guessed.")
     print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping) if m))
     preview = importers.preview_import(store, header, rows, mapping, **opts)
     for line in importers.diff_lines(preview):
         print(line)
+    if preview.get("closed_jobs") and not args.reopen:
+        print("To sync a closed job's rows, open it again in the app, or run this with --reopen.")
     if args.dry_run:
         print("Nothing was changed (dry run).")
         return
@@ -170,7 +173,8 @@ def _sync(args: argparse.Namespace) -> None:
             return
     r = importers.import_rows(store, header, rows, mapping, file_name=path.name, **opts)
     importers.save_sync_profile(store, header, mapping, r, file_name=path.name, source=source,
-                                add_stages=opts["add_stages"], move_stages=opts["move_stages"], client=client)
+                                add_stages=opts["add_stages"], move_stages=opts["move_stages"], client=client,
+                                replace_stages=opts["replace_stages"])
     backups.record_import(store, r, path.name, len(rows))
     print(f"Added {r['added']}, updated {r['updated']}, moved {len(r['moved'])}, unchanged {r['unchanged']}, "
           f"skipped {r['skipped_rows']}.")
@@ -211,6 +215,10 @@ def main(argv: list[str] | None = None) -> None:
     syn.add_argument("--client", default=None, help="the client for jobs in a file with no client column")
     syn.add_argument("--source", default=None, help="where these people came from")
     syn.add_argument("--no-move", action="store_true", help="don't move people already in a job")
+    syn.add_argument("--reopen", action="store_true",
+                     help="open jobs you closed here again and sync their rows (else their rows are left alone)")
+    syn.add_argument("--keep-default-stages", action="store_true",
+                     help="keep the empty default stages on new jobs that bring their own stages")
     exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
     exp.add_argument("file")
     args = parser.parse_args(argv)

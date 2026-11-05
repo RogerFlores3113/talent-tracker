@@ -263,6 +263,21 @@ def safe_local_path(path: str) -> bool:
             and not any(ch.isspace() or ord(ch) < 32 for ch in path))
 
 
+def tuck_import_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Changes shows one row per import: the per-person edits it made go under it (its "children"), not
+    beside it. An edit is the import's when it was written while that import ran."""
+    imports = [r for r in rows if r.get("span")]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("by_import"):
+            home = next((i for i in imports if i["span"][0] <= r["at"] <= i["span"][1]), None)
+            if home is not None:
+                home.setdefault("children", []).append(r)
+                continue
+        out.append(r)
+    return out
+
+
 def create_app(store: Store, search: SearchService | None = None, key: str | None = None) -> FastAPI:
     search = search or SearchService(store, TypesenseIndex.from_env())
     key = key or paths.app_key()
@@ -764,7 +779,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return map_step(request, token, header, rows, mapping,
                         (prof or {}).get("source") or importers.default_source(header), _file_name(upload.filename),
                         add_stages=bool((prof or {}).get("add_stages", True)),
-                        move_stages=True, client=(prof or {}).get("client"))
+                        move_stages=True, client=(prof or {}).get("client"),
+                        replace_stages=bool((prof or {}).get("replace_stages", True)))
 
     def _file_name(name: Any) -> str:
         """The uploaded file's own name, without any folder, for Changes and the backup list."""
@@ -783,7 +799,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
-                 add_stages: bool = True, move_stages: bool = True, client: str | None = None) -> HTMLResponse:
+                 add_stages: bool = True, move_stages: bool = True, client: str | None = None,
+                 reopen_jobs: bool = False, replace_stages: bool = True) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         prof = importers.sync_profile(store, header)
         client = (client or "").strip()[:120]
@@ -791,7 +808,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if has_name and len(rows) <= PREVIEW_MAX_ROWS:
             try:
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
-                                                   move_stages=move_stages, profile={**(prof or {}), "client": client})
+                                                   move_stages=move_stages, profile={**(prof or {}), "client": client},
+                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -802,8 +820,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
-                    move_stages=move_stages, profile=prof, client=client,
-                    no_client="job_title" in mapping and "job_company" not in mapping)
+                    move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
+                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -826,7 +844,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
                         str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
                         add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
-                        client=str(form.get("client") or ""))
+                        client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
+                        replace_stages=form.get("replace_stages") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -840,23 +859,27 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
         move_stages = form.get("move_stages") == "1"
+        reopen_jobs, replace_stages = form.get("reopen_jobs") == "1", form.get("replace_stages") == "1"
         client = str(form.get("client") or "").strip()[:120]
         filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
             return map_step(request, token, header, rows, mapping, source, filename,
                             error="Pick which column holds the name.", add_stages=add_stages,
-                            move_stages=move_stages, client=client)
+                            move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
+                            replace_stages=replace_stages)
         prof = importers.sync_profile(store, header) or {}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
-                                           profile={**prof, "client": client})
+                                           profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
+                                           replace_stages=replace_stages)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
         importers.save_sync_profile(store, header, mapping, result, file_name=filename, source=source,
-                                    add_stages=add_stages, move_stages=move_stages, client=client)
+                                    add_stages=add_stages, move_stages=move_stages, client=client,
+                                    replace_stages=replace_stages)
         backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
             result["backup_name"] = Path(result["backup"]).name
@@ -864,7 +887,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ask = set(importers.openings_to_ask(store))
         new_jobs = [store.get_job(i) for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
-                    panels=importers.result_panels(result), new_jobs=new_jobs[:30])
+                    panels=importers.result_panels(result), new_jobs=new_jobs[:30],
+                    closed_lines=importers.closed_job_lines(result))
 
     @app.get("/import/openings", response_class=HTMLResponse)
     def import_openings_page(request: Request):
@@ -1659,7 +1683,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "text": ("Undo: " if (r["body"] or "").startswith("Undid") else "")
                              + ("; ".join(lines) if lines else r["body"] or ""),
                              "undoable": bool(d.get("old")) and not d.get("undone_at") and not d.get("merged"),
-                             "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo"})
+                             "undone": bool(d.get("undone_at")), "undo_url": f"/changes/{r['id']}/undo",
+                             "by_import": d.get("by") == "import"})
         if who in ("", "ai"):
             ai = store.ai_actions(since, limit)
             for a in ai:
@@ -1727,6 +1752,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
                              "text": c["text"], "undoable": c["undoable"], "undone": not c["undoable"],
                              "undo_url": f"/changes/stage-outcome/{c['id']}/undo"})
+        rows = tuck_import_rows(rows)
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
 
@@ -1746,6 +1772,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             out.append({"at": e["at"], "who": "import", "name": "CSV import", "href": "/settings#backups",
                         "text": backups.import_text(e), "undoable": state == "ok", "undone": False, "hint": hint,
                         "undo_url": f"/changes/import/{name}/undo", "undo_label": "Undo this import",
+                        "span": (e.get("started") or e["at"], e["at"]),
                         "confirm": "Undo this import? Your data goes back to how it was just before it. A copy with "
                                    "the import in it is backed up first."})
         return out

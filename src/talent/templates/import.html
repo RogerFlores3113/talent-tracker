@@ -56,6 +56,11 @@
       Left unticked, those people go in the closest stage by name, or the job's first stage. Changed it? Check again to see the result.</span></label>{% endif %}
     {% if preview.moved or preview.already_in or move_stages %}{% set n = preview.moved | length %}<label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
       <span>Move people whose stage in the file is different{% if n %} ({{ n }} will move){% endif %}. Each move is dated from the file's stage date column, or today, and shows in client updates as a real move. Anyone you moved here since the last import stays put unless the file's date is newer.</span></label>{% endif %}
+    {% if preview.jobs_created and (preview.missing_stages or preview.defaults_dropped) %}<label class="check"><input type="checkbox" name="replace_stages" value="1" {{ 'checked' if replace_stages }}>
+      <span>Replace the default stages on the new jobs with the file's own, so their boards don't carry empty Contacted, Screening, Interviewing and Offer stages. A default stays only when the file has no stage of that kind.</span></label>
+    {% elif replace_stages %}<input type="hidden" name="replace_stages" value="1">{% endif %}
+    {% if preview.closed_jobs or reopen_jobs %}<label class="check"><input type="checkbox" name="reopen_jobs" value="1" {{ 'checked' if reopen_jobs }}>
+      <span>Open {{ 'this job' if (preview.closed_jobs or preview.reopened) | length == 1 else 'these jobs' }} again and sync {{ 'its' if (preview.closed_jobs or preview.reopened) | length == 1 else 'their' }} rows: {% for c in (preview.closed_jobs or []) %}{{ c.job }}{{ ', ' if not loop.last }}{% endfor %}{{ preview.reopened | join(', ') }}. Left unticked, a job you closed here stays closed and nobody is added or moved on it. Changed it? Check again to see the result.</span></label>{% endif %}
     {% for p in panels %}{{ panel_list(p, 'preview') }}{% endfor %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}
@@ -80,6 +85,8 @@
 {% if result.stages_added and result.missing_stages %}<p class="fine">Added {{ result.missing_stages | length }} new stage{{ '' if result.missing_stages | length == 1 else 's' }}: {% for m in result.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
 {% if result.pipelines_added or result.jobs_created %}<p class="fine">Put {{ result.pipelines_added }} {{ 'person' if result.pipelines_added == 1 else 'people' }} in job pipelines{% if result.jobs_created %} and made {{ result.jobs_created | length }} new job{{ '' if result.jobs_created | length == 1 else 's' }}: {{ result.jobs_created[:10] | join(', ') }}{% endif %}.</p>{% endif %}
 {% if result.not_imported %}<p class="fine">Not imported: {{ result.not_imported | join(', ') }}.</p>{% endif %}
+{% for line in closed_lines or [] %}<p class="fine">{{ line }}</p>{% endfor %}
+{% if result.defaults_dropped %}<p class="fine">Left {{ result.defaults_dropped }} empty default stage{{ '' if result.defaults_dropped == 1 else 's' }} off the new jobs, so they show the file's own stages.</p>{% endif %}
 {% if result.moved %}<p class="fine">Moved {{ result.moved | length }} {{ 'person' if result.moved | length == 1 else 'people' }} to the stage the file shows. Each move is on their timeline, where you can undo it.</p>{% endif %}
 {% if new_jobs %}{{ openings_form(new_jobs, result.backup_name) }}{% endif %}
 <p class="fine">We saved how this file was read. Next time you import a file with the same columns, the same matches are used, and on the command line: talent sync FILE</p>
