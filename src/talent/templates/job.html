@@ -31,9 +31,11 @@
   {% endif %}
   {% if close %}
   <p>{% if close.closed %}This job is closed, but {% endif %}{{ close.count }} {{ 'person is' if close.count == 1 else 'people are' }} still in play: {{ close.names }}.</p>
-  <form method="post" action="/jobs/{{ job.id }}/close-out" class="inline" data-confirm="Move {{ close.count }} {{ 'person' if close.count == 1 else 'people' }} to {{ close.stage }} with the reason Position filled{{ ' and cancel ' ~ close.interviews ~ ' upcoming interview' ~ ('' if close.interviews == 1 else 's') if close.interviews }}?">
-    <button class="btn small" type="submit">Move the other {{ close.count }} to {{ close.stage }} (Position filled) and cancel their upcoming interviews</button>
-    <span class="fine">{% if close.interviews %}{{ close.interviews }} upcoming interview{{ '' if close.interviews == 1 else 's' }} will be cancelled. {% endif %}Each move can be undone from the person's timeline.</span></form>
+  {% set cancel_ivs = ' and cancel ' ~ close.interviews ~ ' upcoming interview' ~ ('' if close.interviews == 1 else 's') if close.interviews else '' %}
+  <form method="post" action="/jobs/{{ job.id }}/close-out" class="inline" data-confirm="Move {{ close.count }} {{ 'person' if close.count == 1 else 'people' }} to {{ close.stage }} with the reason Position filled{{ cancel_ivs }}?">
+    <button class="btn small" type="submit">Move the other {{ close.count }} to {{ close.stage }} (Position filled){{ ' and cancel their upcoming interviews' if close.interviews }}</button>
+    {% if not close.closed %}<label class="inline-label"><input type="checkbox" name="close_job" value="1" checked> Also close the job</label>{% endif %}
+    <span class="fine">{% if close.interviews %}{{ close.interviews }} upcoming interview{{ '' if close.interviews == 1 else 's' }} will be cancelled. {% endif %}Status updates say "position filled" for them, not rejected. You can undo the whole close-out from Changes.</span></form>
   {% endif %}
 </div>
 {% endif %}
@@ -65,7 +67,7 @@
     <button class="btn small" type="submit">Add to-do</button>
   </form>
 </section>
-<details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>Status update for the hiring manager</summary>
+<details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>Status update for {{ 'the hiring manager' if inhouse() else 'the client' }}</summary>
   <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages are internal: their people aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
   {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't presented yet.</p>{% endif %}
   <form method="post" action="/jobs/{{ job.id }}/omit" class="inline omit-stages">
