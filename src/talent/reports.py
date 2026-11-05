@@ -556,6 +556,11 @@ def mark_ai_reviewed(store: Store, action_ids: list[int]) -> int:
     new = real - have
     if new:
         _put_json(store, REVIEWED_KEY, sorted(have | new)[-REVIEWED_KEEP:])
+    for i in real:  # one reviewed state: Today's "Right?" and Review read the same mark
+        try:
+            store.confirm_ai_action(i)
+        except ValueError:  # undone since: nothing to mark
+            pass
     return len(new)
 
 
@@ -569,7 +574,8 @@ def _unreviewed_ai(store: Store, moves: list[dict[str, Any]]) -> list[dict[str, 
     seen = reviewed_ai(store)
     out = []
     for r in store._rows(f"""SELECT id, target_id FROM ai_actions WHERE target_id IN ({marks})
-                             AND kind IN ('stage_move', 'pipeline_add') AND undone_at IS NULL ORDER BY id""",
+                             AND kind IN ('stage_move', 'pipeline_add') AND undone_at IS NULL
+                             AND confirmed_at IS NULL ORDER BY id""",
                          tuple(by_entry)):
         if r["id"] in seen:
             continue

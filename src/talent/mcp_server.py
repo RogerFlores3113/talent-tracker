@@ -36,7 +36,7 @@ from .store import INTERVIEW_OUTCOME_CHOICES
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
 from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
-                    TIMELINE_KINDS, _EMAIL_RE, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
+                    TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
                     to_dt)
 from .typesense_index import SearchService, TypesenseIndex
@@ -192,6 +192,24 @@ def _cap_text() -> str:
 
 def _wait_text(r: dict[str, Any]) -> str:
     return f"Waiting for the recruiter's review: {r['summary']}. {review.WAIT_NOTE}"
+
+
+def _waiting(r: dict[str, Any]) -> dict[str, Any]:
+    return {"id": r["id"], "summary": r["summary"]}
+
+
+def _check_note_cap(store: Store, candidate_id: int, what: str = "Nothing logged") -> None:
+    """The per-person hourly limit on what the AI app logs (notes, move notes, interviews, feedback)."""
+    if store.ai_notes_this_hour(candidate_id) >= AI_NOTE_CAP:
+        name = store.get_candidate(candidate_id)["name"]
+        raise ValueError(f"{what}. Your AI app already logged {AI_NOTE_CAP} entries on {quoted(name)} this "
+                         "hour. Ask the recruiter to add more in the app, or try again later.")
+
+
+def _check_cap(store: Store, n: int) -> None:
+    """The hourly limit, across everyone, on saved values the AI app replaces or clears."""
+    if n and not store.ai_overwrites_left(n):
+        raise ValueError(_cap_text())
 
 
 def _budget_text(name: str) -> str:
@@ -881,23 +899,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         session. To reschedule, cancel or record how an interview went, use update_interview with the
         interview's id (logged.id) instead of logging a new one.
         """
-        what_kind = (kind or "").strip().lower()
-        if store.ai_notes_this_hour(candidate_id) >= AI_NOTE_CAP:
-            name = store.get_candidate(candidate_id)["name"]
-            raise ValueError(f"Nothing logged. Your AI app already logged {AI_NOTE_CAP} entries on {quoted(name)} this "
-                             "hour. Ask the recruiter to add more in the app, or try again later.")
-        if what_kind in TIMELINE_KINDS and what_kind not in ("stage", "interview") and review.cautious(store):
+        what_kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
+        what_kind = KIND_ALIASES.get(what_kind, what_kind)  # an InMail is a message, here as in the app
+        _check_note_cap(store, candidate_id)
+        if what_kind in TIMELINE_KINDS and what_kind != "stage" and review.cautious(store):
             body = (summary or "").strip()
             if what_kind == "note" and not body:
                 raise ValueError("A note needs some text.")
             if len(body) > NOTE_LIMIT:
                 raise ValueError(f"That {what_kind} is too long ({len(body):,} characters). The limit is "
                                  f"{NOTE_LIMIT:,}, so nothing was saved. Shorten it or split it into a few entries.")
+            who = (interviewer or "").strip() if what_kind == "interview" else ""
+            if len(who) > 200:
+                raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
             if job_id is not None:
                 store.get_job(job_id)
-            waiting = review.queue_note(store, candidate_id, what_kind, body or None, parse_when(when), job_id, session)
+            at = parse_when(when) if when and str(when).strip() else None
+            waiting = review.queue_note(store, candidate_id, what_kind, body or None, at, job_id, session, who or None)
             return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "logged": None,
-                                               "pending_review": {"id": waiting["id"], "summary": waiting["summary"]}})
+                                               "pending_review": _waiting(waiting)})
         before = {t["id"]: t for t in store.upcoming_interviews(days=365)
                   if t["candidate_id"] == candidate_id and t.get("job_id") == job_id} \
             if what_kind == "interview" else {}
@@ -958,6 +978,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if reason is None and note is not None and outcome is None and (when or cancel):
             reason, note = note, None  # a note sent with a new time is the reason it moved
         before = store.get_interview(interview_id)
+        moves = bool(when and str(when).strip()) and parse_when(when) != before["at"]
+        records = cancel or moves or outcome is not None or note is not None  # what replaces a saved value
+        swaps = interviewer is not None and bool((before["data"].get("interviewer") or "").strip())
+        if (records or swaps or reason is not None) and review.cautious(store):  # waits; a keep or a new name lands
+            args = {k: v for k, v in {"at": when if moves else None, "cancel": cancel or None, "outcome": outcome,
+                                      "note": note, "reason": reason, "interviewer": interviewer}.items()
+                    if v is not None}
+            waiting = review.queue_interview(store, interview_id, args, session)
+            if keep:
+                store.update_interview(interview_id, keep=True, by="ai")
+            return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "interview": {
+                "id": before["id"], "candidate_id": before["candidate_id"], "status": before["status"]},
+                "pending_review": _waiting(waiting)})
+        _check_cap(store, int(records))
         iv = store.update_interview(interview_id, at=when, cancel=cancel, outcome=outcome, note=note,
                                     reason=reason, interviewer=interviewer, keep=keep, by="ai")
         data = iv["data"]
@@ -994,6 +1028,27 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         under Changes and can undo it there.
         """
         before = store.get_interview(interview_id)
+        _check_note_cap(store, before["candidate_id"], "Nothing saved")
+        if review.cautious(store):
+            body, who = (feedback or "").strip(), (interviewer or "").strip()
+            if not body:
+                raise ValueError("Feedback needs some text: what the interviewer said.")
+            if len(body) > FEEDBACK_LIMIT:
+                raise ValueError(f"That feedback is too long ({len(body):,} characters). The limit is "
+                                 f"{FEEDBACK_LIMIT:,}, so nothing was saved.")
+            if len(who) > 200:
+                raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
+            if before["status"] == "cancelled":
+                raise ValueError("That interview was cancelled, so it has no feedback. Put it back first if it happened.")
+            if any((f.get("by") or "").casefold() == who.casefold() and f.get("text") == body
+                   for f in before["data"].get("feedback") or [] if isinstance(f, dict)):
+                return _said(f"That feedback was already saved on {quoted(before['candidate_name'])}'s interview.",
+                             {"data_note": DATA_NOTE, "interview": {"id": before["id"],
+                                                                     "candidate_id": before["candidate_id"]}})
+            waiting = review.queue_feedback(store, interview_id, body, who or None, session)
+            return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "interview": {
+                "id": before["id"], "candidate_id": before["candidate_id"], "status": before["status"]},
+                "pending_review": _waiting(waiting)})
         iv = store.add_interview_feedback(interview_id, feedback, interviewer, by="ai")
         notes = iv["data"].get("feedback") or []
         same = len(notes) == len(before["data"].get("feedback") or [])
@@ -1167,7 +1222,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         them). Every change in a call lands, or none does. Stages can't be removed here. Check stage_outcomes
         in the result."""
         try:
-            res = store.edit_job_stages(job_id, rename=rename, add=add, order=order, outcomes=outcomes, by="ai")
+            args = {k: v for k, v in {"rename": rename, "add": add, "order": order, "outcomes": outcomes}.items() if v}
+            if review.cautious(store):  # checked now, made only when the recruiter keeps it
+                waiting = review.queue_stages(store, job_id, args, session)
+                return _said(_wait_text(waiting), {"job_id": job_id, **_stage_info(store, job_id),
+                                                   "pending_review": _waiting(waiting)})
+            _check_cap(store, len(rename or {}) + (1 if order else 0))
+            res = store.edit_job_stages(job_id, by="ai", **args)
         except ValueError as exc:
             # The call was rolled back, so name the stages as they are now, not as they were mid-call.
             msg = re.sub(r"\s*(?:This job's|Its) stages are: .*$", "", str(exc), flags=re.S).strip()
@@ -1204,6 +1265,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         `notes` (or `note`; notes is preferred) is logged on their timeline. Only a stage still in play works (not
         one that counts as hired or out): ask the recruiter before anyone goes further."""
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
+        held_note = None
+        note_text = (notes or "").strip() if not already else ""
+        if note_text:
+            _check_note_cap(store, candidate_id, "Nothing saved")
         if not already:
             s = store.resolve_stage(job_id, stage)
             if s["outcome"] != "open":
@@ -1213,9 +1278,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     f"{_job_name(store.get_job(job_id))}, and add_to_pipeline can only add people to a stage still in "
                     f"play: {', '.join(in_play) or 'none'}. Add them there (or leave out stage), and ask the recruiter "
                     "before anyone moves further.")
-        out = _slim(store.add_to_pipeline(candidate_id, job_id, stage, notes, by="ai"))
+        cautious_note = bool(note_text) and review.cautious(store)  # the add lands; its note waits
+        out = _slim(store.add_to_pipeline(candidate_id, job_id, stage, None if cautious_note else notes, by="ai"))
         if not already:
             store.mark_ai_stage(candidate_id, job_id, None)  # so the recruiter can undo it
+        if cautious_note:
+            held_note = review.queue_note(store, candidate_id, "note", note_text, None, job_id, session)
         if already:
             out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
         else:
@@ -1224,6 +1292,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         sentence = (f"{quoted(name)} is already in {_job_name(job)}, in {out['stage']}." if already
                     else f"Added {quoted(name)} to {_job_name(job)}, in {out['stage']}.")
+        if held_note:
+            out["pending_review"] = _waiting(held_note)
+            sentence += " Its note: " + _wait_text(held_note)
         return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
@@ -1232,18 +1303,23 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         notes is preferred). The start of a stage name is enough when it's unambiguous ("tech" for
         "Technical interview")."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
+        if before is None:
+            store.get_job(job_id)  # "No job with id 7", never a database error
+        if notes and notes.strip():
+            _check_note_cap(store, candidate_id, "Nothing moved")
         target = store.resolve_stage(job_id, stage) if before is not None else None
         ends = target is not None and target["outcome"] in ("hired", "lost") and target["name"] != before
         if ends and review.cautious(store):  # into Hired or Out: waits for the recruiter
             waiting = review.queue_move(store, candidate_id, job_id, target["name"], before, notes, session)
             return _said(_wait_text(waiting), {"candidate_id": candidate_id, "job_id": job_id, "stage": before,
                                                "pending_review": {"id": waiting["id"], "summary": waiting["summary"]}})
-        held_note = None
-        if notes and (notes or "").strip() and review.cautious(store):  # the move lands; its note waits
-            held_note = review.queue_note(store, candidate_id, "note", notes.strip(), now_iso(), job_id, session)
+        held_note, note_text = None, (notes or "").strip()
+        if note_text and review.cautious(store):  # the move lands; its note waits
             notes = None
         was_filled = actions.job_numbers(store, job_id)["filled"]
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes, by="ai"))
+        if note_text and notes is None:  # queued only once the move was made
+            held_note = review.queue_note(store, candidate_id, "note", note_text, None, job_id, session)
         if held_note:
             out["pending_review"] = {"id": held_note["id"], "summary": held_note["summary"]}
             out["note"] = _wait_text(held_note)
@@ -1709,6 +1785,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         company is marked. A copy is kept on the client's page, and the recruiter can take it back from Changes."""
         key = _one_client(client)
         manager = _one_manager(key, hiring_manager)
+        if review.cautious(store):
+            name = dict(reports.managers(store, key)).get(manager) if manager is not None else None
+            waiting = review.queue_sent(store, key, manager, name, session)
+            c = reports.client(store, key)
+            return _said(_wait_text(waiting), {"client": c["name"], "hiring_manager": name,
+                                               "pending_review": _waiting(waiting),
+                                               "app_url": app_url(f"/clients/{quote(c['slug'])}")})
+        _check_cap(store, 1)
         out = reports.ai_mark_sent(store, key, manager=manager)
         who = f"{quoted(out['manager'])}'s update" if out.get("manager") else f"the update to {quoted(out['client'])}"
         data = {"client": out["client"], "hiring_manager": out.get("manager"), "sent_at": out["sent_at"],
@@ -1735,9 +1819,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         clears = [k for k, v in given.items() if not str(v).strip() and before.get(k)]
         if len(clears) > 1:
             raise ValueError("Clear one field per call, and only when you're sure. Nothing was changed.")
+        old, new = review.client_diff(store, key, given)
+        over = [k for k in new if k == "contacts" or old.get(k) not in (None, "")]  # who updates go to, or a replace
+        waiting = None
+        if over and review.cautious(store):
+            waiting = review.queue_client(store, key, {k: new[k] for k in over}, {k: old[k] for k in over}, session)
+            given = {k: v for k, v in given.items() if k not in over}
+        else:
+            _check_cap(store, sum(1 for k in new if old.get(k) not in (None, "")))
+        if waiting and not given:
+            return _said(f"Nothing changed for {quoted(before['name'])} yet. {_wait_text(waiting)}",
+                         {"client": before["name"], "pending_review": _waiting(waiting),
+                          "app_url": app_url(f"/clients/{quote(before['slug'])}")})
         out = reports.ai_save_client(store, key, **given)
         c = out["client"]
         if not out["changed"]:
+            if waiting:
+                return _said(f"Nothing changed for {quoted(c['name'])} yet. {_wait_text(waiting)}",
+                             {"client": c["name"], "pending_review": _waiting(waiting),
+                              "app_url": app_url(f"/clients/{quote(c['slug'])}")})
             return _said(f"Nothing changed for {quoted(c['name'])}: those details were already saved.",
                          {"client": c["name"], "app_url": app_url(f"/clients/{quote(c['slug'])}")})
         words = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
@@ -1747,6 +1847,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 "changed": sorted(out["changed"]), "app_url": app_url(f"/clients/{quote(c['slug'])}")}
         if "contacts" in out["changed"]:
             data["note"] = "The recruiter sees who updates go to on the client's page before anything is emailed."
+        if waiting:
+            data["pending_review"] = _waiting(waiting)
+            return _said(f"Changed {quoted(c['name'])}: {', '.join(bits)}. {_wait_text(waiting)}", data)
         return _said(f"Changed {quoted(c['name'])}: {', '.join(bits)}. The recruiter can undo it on Changes.", data)
 
     # ------------------------------------------------------------- dashboard

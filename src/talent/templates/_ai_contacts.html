@@ -1,0 +1,10 @@
+{# A change to who a client's updates go to that the AI app made and the recruiter hasn't kept or undone yet, by the
+   Email button. Needs ck (the client's key). For the recruiter only: never part of the update text. #}
+{% set cx = ai_contacts_change(ck) %}
+{% if cx %}<div class="flash warn no-print recruiter-only" role="alert">
+  <p><strong>Contacts changed by your AI app</strong> {{ cx.at | ago }}. Updates now go to: {{ cx.new | replace('\n', ', ') }}{% if cx.old %} (was {{ cx.old | replace('\n', ', ') }}){% else %} (there were none){% endif %}. Check them before you email this.</p>
+  <div class="actions-inline">
+    <form method="post" action="/changes/ai/{{ cx.id }}/confirm" class="inline"><button class="btn small primary" type="submit">Keep</button></form>
+    <form method="post" action="/changes/ai/{{ cx.id }}/undo" class="inline" data-confirm="Put the contacts back to how they were?"><button class="btn small" type="submit">Undo</button></form>
+  </div>
+</div>{% endif %}

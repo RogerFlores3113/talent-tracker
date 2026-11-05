@@ -70,7 +70,7 @@
 
 <section class="panel" id="cautious">
   <h2>Cautious mode</h2>
-  <p>When it's on, your AI app's changes to saved details, moves into Hired or out, job changes and closes, and the notes it logs wait on <a href="/review">Review</a> until you keep or pass them. Filling empty fields and adding new people still apply straight away. Each AI session can be kept or passed in one go.</p>
+  <p>When it's on, your AI app's changes to saved details, moves into Hired or out, job and stage changes and closes, the notes, interviews and feedback it logs, interview cancels, new times and outcomes, a client's contacts, and Mark as sent wait on <a href="/review">Review</a> until you keep or pass them. Filling empty fields and adding new people still apply straight away. Each AI session can be kept or passed in one go.</p>
   <form method="post" action="/settings/cautious" class="stack">
     <label class="check"><input type="checkbox" name="ai_cautious" value="1" {{ 'checked' if s.ai_cautious == '1' }}>
       <span><strong>Cautious mode</strong> <span class="fine">Off by default.</span></span></label>

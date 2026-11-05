@@ -286,6 +286,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["version"] = __version__
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
+    env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
@@ -1957,8 +1958,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         on = form.get("ai_cautious") == "1"
         review.set_cautious(store, on)
-        msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job changes and notes now wait "
-               "on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
+        msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job, client and interview "
+               "changes, and notes now wait on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
 
     # ---------------------------------------------------------- settings etc
