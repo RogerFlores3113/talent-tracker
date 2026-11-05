@@ -13,6 +13,7 @@ Design notes
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
@@ -41,6 +42,18 @@ JOB_STATUSES = ("open", "on_hold", "closed")
 # "last contacted" when they happened in the past.
 TIMELINE_KINDS = ("note", "call", "email", "message", "meeting", "interview", "stage")
 CONTACT_KINDS = {"call", "email", "message", "meeting", "interview"}
+# "change" entries are the audit trail: written only by the store itself when a
+# candidate's fields change (old values kept in timeline.data so they can be undone).
+# Nobody can log one by hand, so it is not in TIMELINE_KINDS.
+CHANGE_KIND = "change"
+ALL_TIMELINE_KINDS = (*TIMELINE_KINDS, CHANGE_KIND)
+FIELD_LABELS = {
+    "current_title": "title", "current_company": "company", "linkedin_url": "LinkedIn",
+    "last_contacted_at": "last contacted", "tags": "skills", "work_history": "work history",
+}
+# On a merge (same email or LinkedIn saved again) these take the newer value;
+# name, source and about are never overwritten, other fields are only filled when empty.
+MERGE_OVERWRITES = ("current_title", "current_company", "location")
 
 CANDIDATE_FIELDS: tuple[str, ...] = (
     "name",
@@ -264,6 +277,10 @@ _MIGRATIONS: tuple[Any, ...] = (
         """ + _fts_triggers(),
         _migrate_v2_data,
     ),
+    # v3: audit trail. A "change" timeline entry keeps the old values as JSON so it can be undone.
+    """
+    ALTER TABLE timeline ADD COLUMN data TEXT;
+    """,
 )
 
 
@@ -414,6 +431,33 @@ def _history_text(entries: list[dict[str, Any]]) -> str | None:
         t, c = e.get("title"), e.get("company")
         bits.append(" at ".join(x for x in (t, c) if x))
     return "; ".join(b for b in bits if b) or None
+
+
+def _clean_history(entries: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Same cleaning _write_history does, so a saved list can be compared with a new one."""
+    clean = []
+    for e in entries or []:
+        if not isinstance(e, dict):
+            raise ValueError("Each work history entry needs title and/or company.")
+        row = {k: _clean(e.get(k)) for k in ("title", "company", "start", "end", "summary")}
+        if row["title"] or row["company"]:
+            clean.append(row)
+    return clean
+
+
+def _labels(fields: Iterable[str]) -> str:
+    return ", ".join(FIELD_LABELS.get(f, f) for f in fields)
+
+
+def _change_body(old: dict[str, Any], new: dict[str, Any]) -> str:
+    cleared = [k for k, v in new.items() if v in (None, "", [])]
+    updated = [k for k in new if k not in cleared]
+    parts = []
+    if updated:
+        parts.append("Updated " + _labels(updated))
+    if cleared:
+        parts.append(("Cleared " if not updated else "cleared ") + _labels(cleared))
+    return "; ".join(parts)
 
 
 DEFAULT_SETTINGS: dict[str, str] = {
@@ -570,21 +614,43 @@ class Store:
         return [self._hydrate(r) for r in self._rows(
             "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC", (_clean(name) or "",))]
 
-    def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None,
+    def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
                          **data: Any) -> tuple[dict[str, Any], bool]:
         """Add, or merge into an existing candidate matched by email or LinkedIn.
 
-        Only non-empty incoming values overwrite, so an AI client re-saving a
-        sparse profile never blanks out fields a recruiter filled in. Tags are
-        added to, never replaced, on a merge. Returns (candidate, created).
+        Merges are conservative, because a CSV row or an AI re-save can be stale or wrong:
+        name, source and about are never overwritten (only filled when empty); title, company
+        and location take the newer non-empty value; other fields are only filled when empty;
+        tags are added to. Blanks never erase anything. Nothing is written (and updated_at
+        stays put) when nothing changed. Returns (candidate, created); on a merge the
+        candidate dict also carries "_changed" (fields written) and "_kept" (fields that
+        had a different saved value that was kept).
         """
         existing = self.find_duplicate(data.get("email"), data.get("linkedin_url"))
         if existing is None:
             return self.add_candidate(work_history=work_history, **data), True
-        changes = {k: v for k, v in data.items() if _clean(v) not in (None, [], ())}
-        if "tags" in changes:
-            changes["tags"] = existing["tags"] + split_tags(changes["tags"])
-        return self.update_candidate(existing["id"], work_history=work_history or None, **changes), False
+        incoming = self._prepare(data)
+        row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
+        merged: dict[str, Any] = {}
+        kept: list[str] = []
+        for k, v in incoming.items():
+            if v in (None, ""):
+                continue
+            cur = row.get(k)
+            if k == "tags":
+                merged[k] = ", ".join(split_tags(split_tags(cur) + split_tags(v)))
+            elif k in MERGE_OVERWRITES:
+                merged[k] = v
+            elif k == "last_contacted_at":
+                if not cur or v > cur:
+                    merged[k] = v
+            elif not cur:
+                merged[k] = v
+            elif cur != v:
+                kept.append(k)
+        cand = self._update(existing["id"], merged, work_history or None, by=by, merge=True)
+        cand["_kept"] = kept
+        return cand, False
 
     def get_candidate(self, candidate_id: int) -> dict[str, Any]:
         row = self._row("SELECT * FROM candidates WHERE id = ?", (candidate_id,))
@@ -600,25 +666,100 @@ class Store:
         c["timeline"] = self.timeline(candidate_id, limit=timeline_limit)
         return c
 
-    def update_candidate(self, candidate_id: int, work_history: list[dict[str, Any]] | None = None,
-                         **data: Any) -> dict[str, Any]:
+    def update_candidate(self, candidate_id: int, work_history: list[dict[str, Any]] | None = None, *,
+                         by: str = "app", **data: Any) -> dict[str, Any]:
+        """Change fields (a blank clears one). Only real changes are written, and each call that
+        changes something leaves a "change" entry on the timeline with the old values, so it can
+        be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
+        carries "_changed", the fields that actually changed."""
         fields = self._prepare(data)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
+        return self._update(candidate_id, fields, work_history, by=by)
+
+    def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
+                *, by: str, merge: bool = False) -> dict[str, Any]:
         with self._lock, self._conn:
-            if fields:
-                fields["updated_at"] = now_iso()
-                sets = ", ".join(f"{k} = ?" for k in fields)
-                self._conn.execute(
-                    f"UPDATE candidates SET {sets} WHERE id = ?", (*fields.values(), candidate_id)
-                )
-                if "tags" in fields:
-                    self._sync_tags(candidate_id, fields["tags"])
-            if work_history is not None:
-                self._write_history(candidate_id, work_history)
-                self._conn.execute("UPDATE candidates SET updated_at = ? WHERE id = ?", (now_iso(), candidate_id))
-        return self.get_candidate(candidate_id)
+            old, new = self._diff(candidate_id, fields, work_history)
+            if new:
+                self._apply(candidate_id, new)
+                body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
+                self._record_change(candidate_id, old, new, by, body)
+        cand = self.get_candidate(candidate_id)
+        cand["_changed"] = list(new)
+        return cand
+
+    def _diff(self, candidate_id: int, fields: dict[str, Any],
+              work_history: list[dict[str, Any]] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(old, new) values of just the fields that would really change."""
+        row = self._row("SELECT * FROM candidates WHERE id = ?", (candidate_id,)) or {}
+        old: dict[str, Any] = {}
+        new: dict[str, Any] = {}
+        for k, v in fields.items():
+            if row.get(k) != v:
+                old[k], new[k] = row.get(k), v
+        if work_history is not None:
+            current, wanted = self.work_history(candidate_id), _clean_history(work_history)
+            if current != wanted:
+                old["work_history"], new["work_history"] = current, wanted
+        return old, new
+
+    def _apply(self, candidate_id: int, new: dict[str, Any]) -> None:
+        """Write already-prepared values. Call inside a transaction."""
+        cols = {k: v for k, v in new.items() if k != "work_history"}
+        cols["updated_at"] = now_iso()
+        sets = ", ".join(f"{k} = ?" for k in cols)
+        self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))
+        if "tags" in cols:
+            self._sync_tags(candidate_id, cols["tags"])
+        if "work_history" in new:
+            self._write_history(candidate_id, new["work_history"] or [])
+
+    def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
+                       body: str) -> int:
+        by = "ai" if by == "ai" else "app"
+        ts = now_iso()
+        return self._conn.execute(
+            "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (candidate_id, CHANGE_KIND, body, ts, ts, "AI app" if by == "ai" else "App",
+             json.dumps({"by": by, "old": old, "new": new})),
+        ).lastrowid
+
+    def undo_change(self, timeline_id: int, *, candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Put back the old values from a "change" timeline entry, and log that as a change too.
+
+        Fields edited again since that change are left alone. Refuses anything that isn't
+        a change entry, or one already undone.
+        """
+        with self._lock, self._conn:
+            entry = self._row("SELECT * FROM timeline WHERE id = ?", (timeline_id,))
+            if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
+                raise NotFound(f"No timeline entry with id {timeline_id}")
+            data = json.loads(entry["data"]) if entry.get("data") else None
+            if entry["kind"] != CHANGE_KIND or not data or not data.get("old"):
+                raise ValueError("Only a change to a profile can be undone.")
+            if data.get("undone_at"):
+                raise ValueError("That change was already undone.")
+            cid = entry["candidate_id"]
+            row = self._row("SELECT * FROM candidates WHERE id = ?", (cid,)) or {}
+            history = self.work_history(cid)
+
+            def current(k: str) -> Any:
+                return history if k == "work_history" else row.get(k)
+
+            restore = {k: v for k, v in data["old"].items() if current(k) == data["new"].get(k)}
+            if not restore:
+                raise ValueError("Those fields were changed again since, so there is nothing to undo.")
+            before = {k: current(k) for k in restore}
+            try:
+                self._apply(cid, restore)
+            except sqlite3.IntegrityError:
+                raise ValueError("Can't undo: another candidate now has that email or LinkedIn URL.") from None
+            data["undone_at"] = now_iso()
+            self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), timeline_id))
+            self._record_change(cid, before, restore, by, "Undid a change to " + _labels(restore))
+        return self.get_candidate(cid)
 
     def delete_candidate(self, candidate_id: int) -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
@@ -685,7 +826,7 @@ class Store:
         an AI re-reading an inbox doesn't double up.
         """
         kind = (kind or "").strip().lower()
-        if kind not in TIMELINE_KINDS or kind == "stage":
+        if kind not in TIMELINE_KINDS or kind in ("stage", CHANGE_KIND):
             raise ValueError(f"kind must be one of {', '.join(k for k in TIMELINE_KINDS if k != 'stage')}")
         body = _clean(body)
         if kind == "note" and not body:
@@ -716,11 +857,16 @@ class Store:
         return self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
-        return self._rows(
+        rows = self._rows(
             """SELECT t.*, j.title AS job_title FROM timeline t LEFT JOIN jobs j ON j.id = t.job_id
                WHERE t.candidate_id = ? ORDER BY t.at DESC, t.id DESC LIMIT ?""",
             (candidate_id, limit),
         )
+        for r in rows:
+            r["data"] = json.loads(r["data"]) if r.get("data") else None
+            r["undoable"] = bool(r["kind"] == CHANGE_KIND and r["data"] and r["data"].get("old")
+                                 and not r["data"].get("undone_at"))
+        return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
         now = now or datetime.now(timezone.utc)
