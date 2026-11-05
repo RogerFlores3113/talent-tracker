@@ -65,7 +65,8 @@ Requires [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync --all-groups
 uv run talent                # start the app and open the browser (http://127.0.0.1:8765)
-uv run talent serve          # server only
+uv run talent serve --port 8800   # pick the port (add --no-browser for the server only)
+uv run talent open           # open and unlock the running app's window in your browser
 uv run talent sample-data    # load made-up candidates
 uv run talent mcp            # MCP server over stdio (AI apps run this)
 uv run talent connect-claude # or connect-codex / connect-lmstudio: write the AI app's MCP config

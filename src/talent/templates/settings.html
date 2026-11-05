@@ -35,11 +35,24 @@
   <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
 </section>
 
+<section class="panel">
+  <h2>Changes to profiles</h2>
+  <p>See every edit to a candidate's details and who made it: you, an import or your AI app. Undo any of them, or undo everything your AI app changed since a given time.</p>
+  <p class="actions-inline"><a class="btn" href="/changes?who=ai">Review AI changes</a> <a class="btn ghost" href="/changes">All changes</a></p>
+</section>
+
+{% if typesense %}
+<section class="panel">
+  <h2>Typesense search</h2>
+  {% include "_typesense_note.html" %}
+</section>
+{% endif %}
+
 {% if sample_people or sample_jobs %}
 <section class="panel">
   <h2>Sample data</h2>
   <p>You have {{ sample_people }} sample candidate{{ '' if sample_people == 1 else 's' }} and {{ sample_jobs }} sample job{{ '' if sample_jobs == 1 else 's' }}, marked Sample. Removing them leaves everything you added yourself.</p>
-  <form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs? Your own data stays.')"><button class="btn" type="submit">Remove sample data</button></form>
+  <form method="post" action="/sample-data/remove" data-confirm="Remove the sample candidates and jobs? Your own data stays."><button class="btn" type="submit">Remove sample data</button></form>
 </section>
 {% endif %}
 {% endblock %}

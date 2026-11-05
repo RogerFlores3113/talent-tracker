@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, port_file
+from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, launch_url, port_file
 
 
 def _private(path: Path) -> Path:
@@ -66,6 +66,22 @@ def _pick_port(preferred: int) -> int:
         return s.getsockname()[1]
 
 
+def _recorded_port() -> int | None:
+    try:
+        return int(port_file().read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def open_window() -> bool:
+    """Open (and unlock) the app window of the running app. False when it isn't running."""
+    for port in dict.fromkeys(p for p in (_recorded_port(), DEFAULT_PORT) if p):
+        if _already_running(port):
+            webbrowser.open(launch_url(port))  # a one-time code, never the key itself
+            return True
+    return False
+
+
 def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     import uvicorn
 
@@ -75,14 +91,14 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     if _already_running(port):
         # Second double-click: just bring the window back.
         if open_browser:
-            webbrowser.open(f"http://127.0.0.1:{port}/")
+            webbrowser.open(launch_url(port))
         return
     port = _pick_port(port)
     app = create_app(Store(db_path()))
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
     if open_browser:
-        threading.Timer(1.2, webbrowser.open, args=[url]).start()
+        threading.Timer(1.2, lambda: webbrowser.open(launch_url(port))).start()
     logging.getLogger(__name__).info("Talent Search running at %s (data: %s)", url, data_dir())
     # log_config=None: the frozen windowed build has no console for uvicorn's default handlers.
     uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
@@ -92,8 +108,10 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="talent", description="Talent Search")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("app", help="start the app and open it in your browser (default)")
-    serve = sub.add_parser("serve", help="start the web server without opening a browser")
+    serve = sub.add_parser("serve", help="start the web server and open the app window")
     serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    serve.add_argument("--no-browser", action="store_true", help="don't open the window (run talent open later)")
+    sub.add_parser("open", help="open the window of the running app (unlocks it in this browser)")
     sub.add_parser("mcp", help="run the MCP server over stdio (AI apps start this)")
     sub.add_parser("sample-data", help="load made-up candidates to try the app")
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
@@ -118,7 +136,10 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd == "app":
         run_app()
     elif cmd == "serve":
-        run_app(port=args.port, open_browser=False)
+        run_app(port=args.port, open_browser=not args.no_browser)
+    elif cmd == "open":
+        if not open_window():
+            sys.exit("Talent Search isn't running. Start it from its app icon or with: talent serve")
     elif cmd == "sample-data":
         from .sample_data import load_sample_data
         from .store import Store
@@ -128,6 +149,11 @@ def main(argv: list[str] | None = None) -> None:
         from .store import Store
         from .typesense_index import TypesenseIndex
 
+        from .typesense_index import env_status
+
+        status = env_status()
+        if status and status["refused"]:
+            sys.exit(f"TYPESENSE_URL {status['url']} must use https unless it's on this computer.")
         index = TypesenseIndex.from_env()
         if index is None:
             sys.exit("Set TYPESENSE_URL and TYPESENSE_API_KEY first. Built-in search needs no index.")

@@ -1,0 +1,3 @@
+{% if typesense.refused %}<p class="error">TYPESENSE_URL is set to <code>{{ typesense.url }}</code>, but it isn't https or on this computer, so Talent Search ignores it and uses built-in search.</p>
+{% elif not typesense.has_key %}<p>TYPESENSE_URL is set to <code>{{ typesense.url }}</code>, but TYPESENSE_API_KEY isn't, so nothing is sent there.</p>
+{% else %}<p><strong>Typesense is on.</strong> A copy of every candidate's name, title, company, location, about and skills is sent to <code>{{ typesense.url }}</code> for search, because TYPESENSE_URL is set.</p>{% endif %}

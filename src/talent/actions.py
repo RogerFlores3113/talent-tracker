@@ -168,6 +168,42 @@ def next_interviews(store: Store, job_id: int, now: datetime | None = None) -> d
     return {r["candidate_id"]: r["at"] for r in rows}
 
 
+def ai_identity_changes(store: Store, now: datetime | None = None, days: int = 7) -> list[dict[str, Any]]:
+    """One Today item per candidate whose name, email, phone or LinkedIn the AI app changed lately
+    (and nobody undid), so a prompt-injected profile can't quietly redirect outreach."""
+    import json
+
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
+    watched = {"name": "name", "email": "email", "phone": "phone", "linkedin_url": "LinkedIn"}
+    rows = store._rows(
+        """SELECT t.id, t.candidate_id, t.at, t.data, c.name AS candidate_name FROM timeline t
+           JOIN candidates c ON c.id = t.candidate_id
+           WHERE t.kind = 'change' AND t.source = 'AI app' AND t.at >= ? ORDER BY t.at DESC, t.id DESC""", (since,))
+    found: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        try:
+            data = json.loads(r["data"] or "{}")
+        except ValueError:
+            continue
+        fields = [f for f in watched if f in (data.get("new") or {})]
+        if not fields or data.get("undone_at"):
+            continue
+        item = found.setdefault(r["candidate_id"], {
+            "key": f"aichange:{r['id']}", "kind": "ai_change", "rank": 1, "when": r["at"], "fields": [],
+            "candidate_id": r["candidate_id"], "name": r["candidate_name"], "href": "/changes?who=ai&since=7"})
+        item["fields"] += [f for f in fields if f not in item["fields"]]
+    out = []
+    for item in found.values():
+        fields = item.pop("fields")
+        labels = [watched[f] for f in watched if f in fields]
+        what = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+        name = item.pop("name")
+        out.append({**item, "title": f"Your AI app changed {name}'s {what}. Review or undo.",
+                    "detail": "Check it's right before you reach out."})
+    return out
+
+
 # ------------------------------------------------------------------ today
 def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     """{'items': [...], 'counts': {...}, 'hidden': n, 'scheduled': n, 'stale_total': n}.
@@ -217,6 +253,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 else f"/jobs/{s['job_id']}" if s.get("job_id") else "/",
             })
 
+    items += ai_identity_changes(store, now)
     if on("flag_stuck"):
         limit = _int(cfg, "stuck_days", 7)
         for a in store.open_applications():

@@ -1,7 +1,7 @@
 {% macro recipe_buttons(prompt, label="Do it with Claude", fill=None, small=False) -%}
 <div class="recipe-actions{{ ' small' if small }}">
-  <button type="button" class="btn ai" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} onclick="runRecipe(this)">{{ label }}</button>
-  <button type="button" class="btn ghost" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} onclick="copyRecipe(this)">Copy prompt</button>
+  <button type="button" class="btn ai" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} data-recipe="run">{{ label }}</button>
+  <button type="button" class="btn ghost" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} data-recipe="copy">Copy prompt</button>
   <span class="recipe-note fine" role="status"></span>
 </div>
 {%- endmacro %}

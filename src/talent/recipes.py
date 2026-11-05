@@ -161,11 +161,8 @@ def _scrub(text: str) -> str:
     return text
 
 
-def issue_url(summary: str, details: str = "", where: str = "app") -> str:
-    """A prefilled GitHub 'new issue' link. Opening it sends nothing; the user reviews and submits on GitHub.
-
-    Never put candidate data in here.
-    """
+def issue_text(summary: str, details: str = "", where: str = "app") -> tuple[str, str]:
+    """The (title, body) a problem report would have, with emails, phones and links taken out."""
     title = _scrub((summary or "Problem report").strip())[:120]
     details = _scrub(details or "")
     body = (
@@ -174,4 +171,14 @@ def issue_url(summary: str, details: str = "", where: str = "app") -> str:
         f"**Version**\n{environment_line()}\n\n"
         "_Please remove anything private (names, emails, notes) before submitting._"
     )
+    return title, body
+
+
+def issue_url(summary: str, details: str = "", where: str = "app") -> str:
+    """A prefilled GitHub 'new issue' link. Opening it shows GitHub the text (it's in the address);
+    it is posted only when the user presses Submit on GitHub.
+
+    Never put candidate data in here.
+    """
+    title, body = issue_text(summary, details, where)
     return ISSUES_URL + "?" + urlencode({"title": title, "body": body}, quote_via=quote)

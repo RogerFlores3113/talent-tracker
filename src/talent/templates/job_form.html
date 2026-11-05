@@ -32,7 +32,7 @@
       <input type="text" name="new_name" value="{{ s.name }}" aria-label="Rename {{ s.name }}"><button class="btn small" type="submit">Rename</button></form></td>
     <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline">
       <input type="hidden" name="op" value="outcome"><input type="hidden" name="stage" value="{{ s.name }}">
-      <select name="outcome" onchange="this.form.submit()" aria-label="{{ s.name }} counts as">{% for o in outcomes %}<option value="{{ o }}" {{ 'selected' if s.outcome == o }}>{{ {'open':'In play','hired':'Hired','lost':'Out'}[o] }}</option>{% endfor %}</select></form></td>
+      <select name="outcome" data-autosubmit aria-label="{{ s.name }} counts as">{% for o in outcomes %}<option value="{{ o }}" {{ 'selected' if s.outcome == o }}>{{ {'open':'In play','hired':'Hired','lost':'Out'}[o] }}</option>{% endfor %}</select></form></td>
     <td class="nowrap">{% for op, label in [('up', '↑'), ('down', '↓')] %}<form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="{{ op }}"><input type="hidden" name="stage" value="{{ s.name }}"><button class="btn small" type="submit" aria-label="Move {{ s.name }} {{ op }}">{{ label }}</button></form>{% endfor %}</td>
     <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="remove"><input type="hidden" name="stage" value="{{ s.name }}"><button class="link small" type="submit" title="Only works when nobody is in this stage">Remove</button></form></td>
   </tr>

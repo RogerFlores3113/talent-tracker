@@ -9,7 +9,7 @@
 </div>
 <form class="tablebar" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search candidates">
-  <select name="tag" aria-label="Filter by skill" onchange="this.form.submit()">
+  <select name="tag" aria-label="Filter by skill" data-autosubmit>
     <option value="">Any skill</option>
     {% for t in tags %}<option value="{{ t.tag }}" {{ 'selected' if t.tag | lower == tag | lower }}>{{ t.tag }} ({{ t.count }})</option>{% endfor %}
   </select>

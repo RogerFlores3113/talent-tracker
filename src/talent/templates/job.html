@@ -13,7 +13,7 @@
       <a href="/jobs/{{ job.id }}?view=board" class="{{ 'on' if view == 'board' }}">Board</a>
       <a href="/jobs/{{ job.id }}?view=table" class="{{ 'on' if view == 'table' }}">Table</a>
     </nav>
-    <span class="copy-status"><button type="button" class="btn" data-text="{{ status_text }}" onclick="copyText(this.dataset.text, this.nextElementSibling, 'Copied. Paste it into an email or chat.')">Copy status update</button><span class="fine" role="status"></span></span>
+    <span class="copy-status"><button type="button" class="btn" data-copy-text="{{ status_text }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy status update</button><span class="fine" role="status"></span></span>
     <a class="btn" href="/jobs/{{ job.id }}/edit">Edit job and stages</a>
   </div>
 </div>
@@ -30,38 +30,14 @@
 </div>
 <div id="add-results">{% include "_add_results.html" %}</div>
 
-<div id="pipeline">{% include "_pipeline.html" %}</div>
+<div id="pipeline" data-move-url="/jobs/{{ job.id }}/move">{% include "_pipeline.html" %}</div>
 {% if job.description %}<details class="panel"><summary>Job description</summary><p class="about">{{ job.description }}</p></details>{% endif %}
 <details class="panel"><summary>Status update for the hiring manager</summary>
   <p class="fine">The same text the Copy status update button copies. Names and days in each stage, and the next interviews in your time zone.</p>
   <pre class="code status-text">{{ status_text }}</pre>
 </details>
-<form method="post" action="/jobs/{{ job.id }}/delete" data-msg="Delete {{ job_label(job.title, job.company) }}? This removes the job and its pipeline. The candidates stay saved." onsubmit="return confirm(this.dataset.msg)">
+<form method="post" action="/jobs/{{ job.id }}/delete" data-confirm="Delete {{ job_label(job.title, job.company) }}? This removes the job and its pipeline. The candidates stay saved.">
   <button class="link danger" type="submit">Delete job</button>
   <span class="fine">The candidates stay in your database. To keep the job's history, close it instead under Edit job and stages.</span>
 </form>
-{% endblock %}
-{% block scripts %}
-<script>
-// Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.
-document.addEventListener("dragstart", e => {
-  const card = e.target.closest && e.target.closest("[data-cid]");
-  if (!card) return;
-  e.dataTransfer.setData("text/plain", card.dataset.cid);
-  e.dataTransfer.effectAllowed = "move";
-  card.classList.add("dragging");
-});
-document.addEventListener("dragend", e => { const c = e.target.closest && e.target.closest("[data-cid]"); if (c) c.classList.remove("dragging"); });
-document.addEventListener("dragover", e => { const col = e.target.closest && e.target.closest("[data-stage]"); if (col) { e.preventDefault(); col.classList.add("over"); } });
-document.addEventListener("dragleave", e => { const col = e.target.closest && e.target.closest("[data-stage]"); if (col && !col.contains(e.relatedTarget)) col.classList.remove("over"); });
-document.addEventListener("drop", e => {
-  const col = e.target.closest && e.target.closest("[data-stage]");
-  if (!col) return;
-  e.preventDefault(); col.classList.remove("over");
-  const cid = e.dataTransfer.getData("text/plain");
-  if (!cid) return;
-  htmx.ajax("POST", "/jobs/{{ job.id }}/move", {target: "#pipeline", swap: "innerHTML",
-    values: {candidate_id: cid, stage: col.dataset.stage, view: "board"}});
-});
-</script>
 {% endblock %}

@@ -17,8 +17,9 @@
   </section>
   {% endfor %}
   <section class="panel">
-    <h2>ChatGPT and others</h2>
+    <h2>Other AI apps</h2>
     <p>Apps that run local MCP servers (Cursor, Windsurf, Jan and others) can use the settings under “By hand” below.</p>
+    <p class="fine">ChatGPT itself can't connect to apps on this computer yet.</p>
     <p class="fine">Ollama on its own can't use tools like this. Use it through LM Studio or another MCP app instead.</p>
   </section>
 </div>
@@ -39,9 +40,9 @@
   <summary>By hand</summary>
   <p>Paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
   <pre class="code" id="json-snip">{{ json_snippet }}</pre>
-  <button class="btn" onclick="copyText(document.getElementById('json-snip').innerText, this, 'Copied')">Copy</button>
+  <button class="btn" type="button" data-copy-from="json-snip">Copy</button>
   <p>Codex settings (config.toml):</p>
   <pre class="code" id="codex-snip">{{ codex_snippet }}</pre>
-  <button class="btn" onclick="copyText(document.getElementById('codex-snip').innerText, this, 'Copied')">Copy</button>
+  <button class="btn" type="button" data-copy-from="codex-snip">Copy</button>
 </details>
 {% endblock %}
