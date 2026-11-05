@@ -109,6 +109,34 @@ def _shown(field: str, value: Any) -> str:
     return text if len(text) <= 60 else text[:57].rstrip() + "..."
 
 
+def _role(r: dict[str, Any]) -> str:
+    return " at ".join(x for x in (r.get("title"), r.get("company")) if x) or "a role"
+
+
+def _span(r: dict[str, Any]) -> str:
+    return f"{r.get('start') or '?'} to {r.get('end') or 'now'}"
+
+
+def history_change(old: Any, new: Any) -> str:
+    """Which work history roles changed: 'Senior Engineer at Acme to Staff Engineer at Acme; added PM at Ramp'."""
+    old = [r for r in old if isinstance(r, dict)] if isinstance(old, list) else []
+    new = [r for r in new if isinstance(r, dict)] if isinstance(new, list) else []
+    key = lambda r: (str(r.get("title") or "").casefold().strip(), str(r.get("company") or "").casefold().strip())
+    left, right, parts = list(old), list(new), []
+    for r in new:  # the same role on both sides: only its dates can have changed
+        hit = next((o for o in left if key(o) == key(r)), None)
+        if hit is not None:
+            left.remove(hit)
+            right.remove(r)
+            if (hit.get("start"), hit.get("end")) != (r.get("start"), r.get("end")):
+                parts.append(f"{_role(r)} now {_span(r)} (was {_span(hit)})")
+    for o, r in zip(left, right):
+        parts.append(f"{_role(o)} to {_role(r)}")
+    parts += [f"added {_role(r)}" for r in right[len(left):]]
+    parts += [f"removed {_role(o)}" for o in left[len(right):]]
+    return "; ".join(parts)
+
+
 def change_lines(data: Any) -> list[str]:
     """A change entry's old and new values: ['Company: Acme to Initech', 'Cleared email (was ana@x.com)']."""
     if not isinstance(data, dict) or not isinstance(data.get("new"), dict):
@@ -119,7 +147,9 @@ def change_lines(data: Any) -> list[str]:
         label = FIELD_LABELS.get(k, k.replace("_", " "))
         cap = label[:1].upper() + label[1:]
         was, now = _shown(k, old.get(k)), _shown(k, v)
-        if not now:
+        if k == "work_history" and was and now and (what := history_change(old.get(k), v)):
+            out.append(f"{cap}: {what}")
+        elif not now:
             out.append(f"Cleared {label}" + (f" (was {was})" if was else ""))
         elif not was:
             out.append(f"{cap}: {now} (was empty)")
@@ -344,9 +374,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = _form_fields(form)
         history = _history_from_text(str(form.get("work_history", "")))
+        job_id = str(form.get("job_id") or "")
+        if (form.get("create_anyway") != "1" and data.get("name")
+                and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None):
+            same_name = store.find_by_name(str(data["name"]))  # the same check the AI app's save gets
+            if same_name:
+                in_job = ({p["candidate_id"] for p in store.pipeline(int(job_id))}
+                          if job_id.isdigit() and store._row("SELECT id FROM jobs WHERE id = ?", (int(job_id),)) else set())
+                return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
+                            error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job)
         try:
             cand, created = store.upsert_candidate(work_history=history or None, **data)
-            job_id = str(form.get("job_id") or "")
             if job_id.isdigit():
                 store.add_to_pipeline(cand["id"], int(job_id))
                 return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -581,19 +619,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return map_step(request, token, header, rows, mapping, importers.default_source(header), upload.filename)
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
-                 source: str, filename: str | None = None, error: str | None = None) -> HTMLResponse:
+                 source: str, filename: str | None = None, error: str | None = None,
+                 add_stages: bool = True) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         preview = None
         if has_name and len(rows) <= PREVIEW_MAX_ROWS:
             try:
-                preview = importers.preview_import(store, header, rows, mapping, source=source)
+                preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     preview_lines=importers.preview_lines(preview) if preview else [],
-                    button_label=importers.button_label(preview, len(rows)))
+                    button_label=importers.button_label(preview, len(rows)), add_stages=add_stages)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -614,7 +653,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
         header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
-                        str(form.get("source") or "CSV import"))
+                        str(form.get("source") or "CSV import"), add_stages=form.get("add_stages") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -626,10 +665,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         header, rows = importers.read_csv(importers.decode(path.read_bytes()))
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
+        add_stages = form.get("add_stages") == "1"
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
-            return map_step(request, token, header, rows, mapping, source, error="Pick which column holds the name.")
+            return map_step(request, token, header, rows, mapping, source, error="Pick which column holds the name.",
+                            add_stages=add_stages)
         try:
-            result = importers.import_rows(store, header, rows, mapping, source=source)
+            result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:

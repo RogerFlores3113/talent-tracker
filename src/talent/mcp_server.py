@@ -14,6 +14,7 @@ Rules the tools enforce (from the product decisions):
 """
 from __future__ import annotations
 
+import json
 import re
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -28,8 +29,8 @@ from pydantic import BaseModel, Field
 from . import __version__, actions, recipes
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import (JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, _labels, now_iso,
-                    same_person_name, snippet_text, split_tags, to_dt)
+from .store import (JOB_STATUSES, TIMELINE_KINDS, IdentityConflict, NotFound, Store, _labels, normalize_linkedin,
+                    now_iso, same_person_name, snippet_text, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -157,12 +158,65 @@ def _result(text: str, data: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=data)
 
 
+def _job_name(job: dict[str, Any] | None) -> str:
+    """'Staff Backend Engineer (Acme Fintech)': a job with its client, as every reply names it."""
+    if not job:
+        return "that job"
+    title = job.get("title") or job.get("job_title") or "that job"
+    company = job.get("company") or job.get("job_company")
+    return f"{title} ({company})" if company else str(title)
+
+
+def _said(sentence: str, data: dict[str, Any]) -> CallToolResult:
+    """A write tool's reply. The text leads with one plain sentence (who, which stage, which job and client,
+    times in local time with zone), then any warning or note, then the record itself as JSON, which is also
+    the structured result."""
+    lines = [sentence, *(str(data[k]) for k in ("warning", "note") if data.get(k))]
+    lines.append(json.dumps(data, ensure_ascii=False, default=str))
+    return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
+
+
+def _when_words(iso: str | None) -> str:
+    """'for Sat Nov 7, 10:00 AM CST' for something still to come, 'on Thu Nov 5, 3:00 PM CST' for the past."""
+    dt = to_dt(iso)
+    if dt is None:
+        return ""
+    return ("for " if dt > datetime.now(timezone.utc) else "on ") + _local(iso)
+
+
+def _job_update_sentence(job: dict[str, Any], given: dict[str, Any]) -> str:
+    """'Updated Staff Backend Engineer (Acme Fintech): status closed, openings 2.'"""
+    bits = []
+    for k in given:
+        label = {"min_active": "active target", "hiring_manager_email": "hiring manager email"}.get(k, k.replace("_", " "))
+        value = job.get(k)
+        if k == "description":
+            bits.append("description changed" if value else "description cleared")
+        elif value in (None, ""):
+            bits.append(f"{label} cleared")
+        else:
+            bits.append(f"{label} {str(value).replace('_', ' ') if k == 'status' else value}")
+    return f"Updated {_job_name(job)}: {', '.join(bits)}." if bits else f"Nothing to change on {_job_name(job)}."
+
+
+def _differences(saved: dict[str, Any], given: dict[str, Any]) -> list[dict[str, str]]:
+    """Fields where what the AI sent differs from a saved person with the same name."""
+    out = []
+    for k in ("email", "phone", "linkedin_url", "current_title", "current_company", "location"):
+        new, old = given.get(k), saved.get(k)
+        if isinstance(new, str) and new.strip() and old and str(old).strip().casefold() != new.strip().casefold():
+            if k == "linkedin_url" and normalize_linkedin(new) == old:
+                continue
+            out.append({"field": _labels([k]), "saved": str(old), "yours": new.strip()})
+    return out
+
+
 def _candidate_text(c: dict[str, Any]) -> str:
     out = [_line(c)]
     for k, label in (("email", "Email"), ("phone", "Phone"), ("linkedin_url", "LinkedIn"), ("website", "Website"),
                      ("source", "Source"), ("last_contacted_at", "Last contacted"), ("updated_at", "Last updated")):
         if c.get(k):
-            out.append(f"{label}: {c[k]}")
+            out.append(f"{label}: {_local(c[k]) if k.endswith('_at') else c[k]}")
     if c.get("tags"):
         out.append("Skills: " + ", ".join(c["tags"]))
     if c.get("about"):
@@ -173,11 +227,17 @@ def _candidate_text(c: dict[str, Any]) -> str:
             + (f" ({w.get('start') or ''} to {w.get('end') or 'now'})" if w.get("start") or w.get("end") else "")
             for w in c["work_history"]))
     for p in c.get("pipelines", []):
-        out.append(f"Job {p['job_id']} {p['job_title']}: {p['stage']} since {p['stage_changed_at'][:10]}")
+        out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} (job id {p['job_id']})")
     if c.get("timeline"):
         out.append(f"Recent activity {DATA_NOTE}")
     for t in c.get("timeline", [])[:10]:
-        out.append(f"- {t['at'][:16]} {t['kind']}{': ' + t['body'] if t.get('body') else ''}")
+        job = f" ({_job_name(t)})" if t.get("job_title") else ""
+        if t["kind"] == "stage":
+            line = f"moved to {t.get('body') or 'a stage'}{job}"
+        else:
+            line = t["kind"] + job + (f" (interview id {t['id']}, {t['status']})" if t["kind"] == "interview" else "")
+            line += f": {t['body']}" if t.get("body") else ""
+        out.append(f"- {_local(t['at'])} {line}")
     return "\n".join(out)
 
 
@@ -265,9 +325,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def candidate_view(candidate_id: int) -> dict[str, Any]:
         """One candidate as get_candidate and save_candidate show it (and the in-chat candidate view reads)."""
         c = store.candidate_detail(candidate_id, timeline_limit=15)
-        c["pipelines"] = [{"job_id": a["job_id"], "job_title": a["job_title"], "stage": a["stage"],
-                           "stage_changed_at": a["stage_changed_at"]} for a in c["pipelines"]]
-        c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "job_title": t.get("job_title")})
+        c["pipelines"] = [_slim({"job_id": a["job_id"], "job_title": a["job_title"], "job_company": a.get("job_company"),
+                                 "stage": a["stage"], "stage_changed_at": a["stage_changed_at"]}) for a in c["pipelines"]]
+        c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "at_local": _local(t["at"]),
+                                "job_title": t.get("job_title"), "job_company": t.get("job_company"),
+                                **({"id": t["id"], "status": t.get("status")} if t["kind"] == "interview" else {})})
                          for t in c["timeline"]]
         return {**_slim(c), "app_url": app_url(f"/candidates/{candidate_id}")}
 
@@ -317,28 +379,38 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             same_name = store.find_by_name(name)
             if same_name:
                 n = len(same_name)
-                lines = "\n".join(f"- {_line(c)}" for c in same_name)
+                dupes = [{**brief(c), "app_url": app_url(f"/candidates/{c['id']}"),
+                          "differences": _differences(c, data)} for c in same_name]
+
+                def dupe_line(d: dict[str, Any], c: dict[str, Any]) -> str:
+                    diff = "; ".join(f"{x['field']}: saved {x['saved']!r}, yours {x['yours']!r}"
+                                     for x in d["differences"])
+                    return f"- {_line(c)}" + (f". Different from what you sent: {diff}" if diff else
+                                              ". Nothing you sent differs from what's saved")
+                lines = "\n".join(dupe_line(d, c) for d, c in zip(dupes, same_name))
                 warning = (f"Not saved yet. {n} saved candidate{'' if n == 1 else 's'} already "
                            f"{'has' if n == 1 else 'have'} this name. Show {'it' if n == 1 else 'them'} to the "
                            "recruiter and ask if it's the same person. If it is, use update_candidate on that id. "
                            "If it's someone new, call save_candidate again with create_anyway=true.")
                 return _result(f"{warning}\n{DATA_NOTE}\n{lines}",
                                {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
-                                "possible_duplicates": [{**brief(c), "app_url": app_url(f"/candidates/{c['id']}")}
-                                                        for c in same_name],
+                                "incoming_name": name, "possible_duplicates": dupes,
                                 "warning": warning, "data_note": DATA_NOTE})
         try:
             cand, created = store.upsert_candidate(work_history=_history(work_history), by="ai", **data)
         except IdentityConflict as exc:
             what = "email" if exc.field == "email" else "LinkedIn URL"
             other = exc.existing
+            page = app_url(f"/candidates/{other['id']}")
             warning = (f"No change made. That {what} already belongs to {other['name']} (id {other['id']}), "
                        f"but you saved it as {exc.incoming_name}. Ask the recruiter whether they are the same "
-                       f"person. If they are, use update_candidate on id {other['id']}. If not, save "
+                       f"person. If they are and the name has changed, ask the recruiter to change the name in the "
+                       f"app (their page: {page}); you can't change it from here. If they're someone else, save "
                        f"{exc.incoming_name} without that {what}.")
             return _result(f"{warning}\n{DATA_NOTE}\n- {_line(other)}",
                            {"created": False, "conflict": True, "changed": [], "saved_status": "Not saved",
-                            "data_note": DATA_NOTE, "existing": brief(other), "warning": warning})
+                            "data_note": DATA_NOTE, "existing": {**brief(other), "app_url": page},
+                            "incoming_name": exc.incoming_name, "warning": warning, "app_url": page})
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
         status = "Saved" if created else ("Updated: " + _labels(changed) if changed else "Already saved, nothing new")
         view = candidate_view(cand["id"])
@@ -417,7 +489,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def log_activity(candidate_id: int, kind: str, summary: str | None = None, when: str | None = None,
-                     job_id: int | None = None) -> dict[str, Any]:
+                     job_id: int | None = None) -> CallToolResult:
         """Add something to a candidate's timeline.
 
         kind: note, call, email, message, meeting or interview. `when` is ISO date/time (with time zone for
@@ -430,8 +502,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   if t["candidate_id"] == candidate_id and t.get("job_id") == job_id} \
             if (kind or "").strip().lower() == "interview" else {}
         entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app")
-        out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim(entry),
-                               "last_contacted_at": store.get_candidate(candidate_id)["last_contacted_at"]}
+        cand = store.get_candidate(candidate_id)
+        out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim({**entry, "at_local": _local(entry["at"])}),
+                               "last_contacted_at": cand["last_contacted_at"]}
         others = [t for i, t in before.items() if i != entry["id"]]
         if others:
             listed = ", ".join(f"id {t['id']} on {_local(t['at'])}" for t in others)
@@ -441,7 +514,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
             out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
                               "Use add_to_pipeline if they should be.")
-        return out
+        what = entry["kind"]
+        with_ = "on" if what == "note" else "with"
+        sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {cand['name']} {_when_words(entry['at'])}"
+                    + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "") + ".")
+        return _said(sentence, out)
 
     @mcp.tool(annotations=EDIT)
     def update_interview(interview_id: int, when: str | None = None, cancel: bool = False,
@@ -479,7 +556,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                    description: str | None = None, stages: list[str | dict[str, str]] | None = None,
                    hiring_manager: str | None = None, hiring_manager_email: str | None = None,
                    openings: int | None = None, target_date: str | None = None,
-                   min_active: int | None = None) -> dict[str, Any]:
+                   min_active: int | None = None) -> CallToolResult:
         """Create a job the recruiter is hiring for. stages is optional; the default is
         Sourced, Contacted, Screening, Interviewing, Offer, Hired, Rejected, Withdrawn.
 
@@ -496,19 +573,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             ids = ", ".join(str(j["id"]) for j in twins)
             out["warning"] = (f"Created, but open job id {ids} has the same title and company. Ask the recruiter "
                               "whether this is a second opening or a duplicate they should close.")
-        return out
+        names = out.get("stages") or []
+        return _said(f"Created {_job_name(job)} (job id {job['id']}) with {len(names)} stages: {', '.join(names)}.", out)
 
     @mcp.tool(annotations=EDIT)
     def update_job(job_id: int, title: str | None = None, company: str | None = None, location: str | None = None,
                    description: str | None = None, status: str | None = None, hiring_manager: str | None = None,
                    hiring_manager_email: str | None = None, openings: int | None = None,
-                   target_date: str | None = None, min_active: int | None = None) -> dict[str, Any]:
+                   target_date: str | None = None, min_active: int | None = None) -> CallToolResult:
         """Change a job's details. status: open, on hold (or paused) or closed. Empty string clears a text field
         (and target_date). openings is the headcount; min_active the job's own active candidate target."""
-        return _slim(store.update_job(job_id, **_given(
+        given = _given(
             title=title, company=company, location=location, description=description, status=status,
             hiring_manager=hiring_manager, hiring_manager_email=hiring_manager_email, openings=openings,
-            target_date=target_date, min_active=min_active)))
+            target_date=target_date, min_active=min_active)
+        out = _slim(store.update_job(job_id, **given))
+        return _said(_job_update_sentence(out, given), out)
 
     @mcp.tool(annotations=EDIT)
     def edit_job_stages(job_id: int, rename: dict[str, str | dict[str, str]] | None = None,
@@ -549,7 +629,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     # -------------------------------------------------------------- pipeline
     @mcp.tool(annotations=WRITE)
     def add_to_pipeline(candidate_id: int, job_id: int, stage: str | None = None,
-                        notes: str | None = None) -> dict[str, Any]:
+                        notes: str | None = None) -> CallToolResult:
         """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there).
         A stage can be given by the start of its name ("tech" for "Technical interview")."""
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
@@ -558,17 +638,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             store.mark_ai_stage(candidate_id, job_id, None)  # so the recruiter can undo it
         if already:
             out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
-        return out
+        job = store.get_job(job_id)
+        name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
+        sentence = (f"{name} is already in {_job_name(job)}, in {out['stage']}." if already
+                    else f"Added {name} to {_job_name(job)}, in {out['stage']}.")
+        return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
-    def move_stage(candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> dict[str, Any]:
+    def move_stage(candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> CallToolResult:
         """Move a candidate to another of the job's stages, optionally with a note.
         The start of a stage name is enough when it's unambiguous ("tech" for "Technical interview")."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes))
         if before:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
-        return out
+        job = store.get_job(job_id)
+        name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
+        sentence = (f"{name} is already in {out['stage']} on {_job_name(job)}." if before == out["stage"]
+                    else f"Moved {name} to {out['stage']} on {_job_name(job)}" + (f" (was {before})." if before else "."))
+        return _said(sentence, out)
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
     def job_pipeline(job_id: int, omit_stages: list[str] | None = None) -> CallToolResult:

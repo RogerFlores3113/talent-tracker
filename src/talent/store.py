@@ -430,12 +430,16 @@ _TIME = r"(?:[ T,]+(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\
 _DATE_FORMS = (
     # 11/5/2026, 11/5/26, 5.11.2026 (day first only when the first number can't be a month)
     re.compile(r"(?P<a>\d{1,2})[/.-](?P<b>\d{1,2})[/.-](?P<y>\d{4}|\d{2})" + _TIME + r"$", re.I),
-    # 2026/11/05
-    re.compile(r"(?P<y>\d{4})[/.](?P<m>\d{1,2})[/.](?P<d>\d{1,2})" + _TIME + r"$", re.I),
+    # 2026/11/05, and 2026-11-05 1:00 PM (an ISO day with a 12-hour time)
+    re.compile(r"(?P<y>\d{4})[/.-](?P<m>\d{1,2})[/.-](?P<d>\d{1,2})" + _TIME + r"$", re.I),
     # Mar 3, 2026 / March 3rd 2026
     re.compile(r"(?P<mon>[a-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
     # 3 Mar 2026 / 3 March, 2026
     re.compile(r"(?P<d>\d{1,2})(?:st|nd|rd|th)?\s+(?P<mon>[a-z]{3,9})\.?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
+    # No year: Dec 15, 15 Dec, 12/15 (the next one coming)
+    re.compile(r"(?P<mon>[a-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?(?P<y>)" + _TIME + r"$", re.I),
+    re.compile(r"(?P<d>\d{1,2})(?:st|nd|rd|th)?\s+(?P<mon>[a-z]{3,9})\.?(?P<y>)" + _TIME + r"$", re.I),
+    re.compile(r"(?P<a>\d{1,2})/(?P<b>\d{1,2})(?P<y>)" + _TIME + r"$", re.I),
 )
 
 
@@ -453,7 +457,7 @@ def _parse_loose(s: str) -> datetime | None:
         if not m:
             continue
         g = m.groupdict()
-        year = int(g["y"])
+        year = int(g["y"] or datetime.now().year)
         if year < 100:
             year += 2000 if year < 70 else 1900
         if g.get("mon"):
@@ -473,7 +477,10 @@ def _parse_loose(s: str) -> datetime | None:
                 return None
             hour = hour % 12 + (12 if g["ap"].lower().startswith("p") else 0)
         try:
-            return datetime(year, month, day, hour, minute, sec)
+            out = datetime(year, month, day, hour, minute, sec)
+            if not g["y"] and out.date() < datetime.now().date():  # no year: the next one coming
+                out = out.replace(year=year + 1)
+            return out
         except ValueError:
             return None
     return None
@@ -498,8 +505,8 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
         except ValueError:
             loose = _parse_loose(s)
             if loose is None:
-                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-05, 11/5/2026 "
-                                 "or Nov 5, 2026.") from None
+                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-09, "
+                                 "2026-11-09 1:00 PM or Nov 9, 2026.") from None
             dt = loose
     if dt.tzinfo is None:
         dt = dt.astimezone()  # local time
@@ -543,9 +550,46 @@ def _compatible(x: str, y: str) -> bool:
     return x.startswith(y) or y.startswith(x)
 
 
+# Common English nicknames and the first names they stand for. Used only for first names, and only
+# when the last names match too ("Mike Okonkwo" is "Michael Okonkwo", "Mike" alone is not).
+_NICKNAMES = {
+    "michael": "mike mick mickey", "robert": "bob bobby rob robbie bert", "elizabeth": "liz lizzie beth betsy eliza",
+    "william": "bill billy will willy liam", "james": "jim jimmy jamie", "richard": "rick ricky dick rich",
+    "thomas": "tom tommy", "joseph": "joe joey", "charles": "charlie chuck chas", "edward": "ed eddie ted ned",
+    "anthony": "tony", "christopher": "chris kit", "katherine": "kate katie kathy kat", "catherine": "cathy kate",
+    "margaret": "maggie meg peggy", "jennifer": "jen jenny", "rebecca": "becky becca", "patricia": "pat patty trish",
+    "alexander": "alex xander sasha", "alexandra": "alex sasha lexi", "benjamin": "ben benny", "daniel": "dan danny",
+    "matthew": "matt", "nicholas": "nick nicky", "samuel": "sam sammy", "steven": "steve", "stephen": "steve",
+    "jonathan": "jon jonny", "andrew": "andy drew", "gregory": "greg", "timothy": "tim timmy",
+    "kenneth": "ken kenny", "lawrence": "larry", "peter": "pete", "raymond": "ray", "ronald": "ron ronnie",
+    "donald": "don donny", "gerald": "gerry jerry", "frederick": "fred freddie", "francis": "frank",
+    "deborah": "deb debbie", "susan": "sue susie", "victoria": "vicky tori", "abigail": "abby",
+    "barbara": "barb", "dorothy": "dot dottie", "theodore": "ted teddy theo", "zachary": "zach zack",
+    "joshua": "josh", "nathaniel": "nate nat", "nathan": "nate", "jacob": "jake", "harold": "harry hal",
+    "henry": "hank harry", "john": "jack johnny", "leonard": "leo len lenny", "philip": "phil",
+    "phillip": "phil", "vincent": "vince vinny", "walter": "walt wally", "kimberly": "kim", "pamela": "pam",
+    "cynthia": "cindy", "jessica": "jess jessie", "samantha": "sam sammy", "allison": "allie ally",
+    "madeline": "maddie maddy", "eleanor": "ellie nell", "judith": "judy", "sandra": "sandy",
+}
+_NICK_GROUPS: dict[str, set[str]] = {}
+for _formal, _nicks in _NICKNAMES.items():
+    for _n in (_formal, *_nicks.split()):
+        _NICK_GROUPS.setdefault(_n, set()).add(_formal)
+
+
+def same_first_name(x: str, y: str) -> bool:
+    """'mike' and 'michael', 'liz' and 'elizabeth': a common nickname of the same first name."""
+    if x == y:
+        return True
+    gx, gy = _NICK_GROUPS.get(x), _NICK_GROUPS.get(y)
+    return bool(gx and gy and gx & gy)
+
+
 def _names_line_up(ta: list[str], tb: list[str]) -> bool:
     if not _compatible(ta[0], tb[0]):
-        return False
+        # A nickname counts only when both have a last name, which then has to match.
+        if len(ta) == 1 or len(tb) == 1 or not same_first_name(ta[0], tb[0]):
+            return False
     if len(ta) == 1 or len(tb) == 1:  # only a first name on one side
         return True
     # Both have a last name: it must be compatible, or appear among the other's later names
@@ -555,7 +599,8 @@ def _names_line_up(ta: list[str], tb: list[str]) -> bool:
 
 def same_person_name(a: str | None, b: str | None) -> bool:
     """Could these two names be the same person? 'Priya R.' and 'Priya Raman', 'P. Raman' and
-    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman' can; 'Ana Ruiz' and
+    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman', 'Mike Okonkwo' and
+    'Michael Okonkwo' (a common nickname, with the same last name) can; 'Ana Ruiz' and
     'Ben Cole' can't, and neither can 'Maya Smith' and 'Maya Okafor' (same first name, different last)."""
     ta, tb = _name_tokens(a), _name_tokens(b)
     if not ta or not tb or ta == tb or sorted(ta) == sorted(tb):
@@ -648,6 +693,25 @@ def split_tags(value: str | Iterable[str] | None) -> list[str]:
             seen.add(t.lower())
             out.append(t[:60])
     return out
+
+
+def join_tags(tags: list[str]) -> str | None:
+    """Skills as the candidates.tags text: 'Python, Go'. When a skill has a comma in it (given as a list
+    item, like 'B2B, enterprise sales'), the text uses ';' between skills instead, and ends with ';' when
+    there's only one, so stored_tags reads it back the same."""
+    if not tags:
+        return None
+    if not any("," in t for t in tags):
+        return ", ".join(tags)
+    tags = [t.replace(";", ",") for t in tags]
+    return "; ".join(tags) + (";" if len(tags) == 1 else "")
+
+
+def stored_tags(text: str | None) -> list[str]:
+    """The skills list back from the candidates.tags text (see join_tags)."""
+    if text and ";" in text:
+        return split_tags([p for p in text.split(";")])
+    return split_tags(text)
 
 
 def normalize_linkedin(url: str | None) -> str | None:
@@ -1016,7 +1080,7 @@ class Store:
     @staticmethod
     def _hydrate(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is not None:
-            row["tags"] = split_tags(row.get("tags"))
+            row["tags"] = stored_tags(row.get("tags"))
             row.pop("history_text", None)
         return row
 
@@ -1026,7 +1090,7 @@ class Store:
             raise ValueError(f"Unknown candidate field(s): {', '.join(sorted(unknown))}")
         out = {k: _clean(v) for k, v in data.items()}
         if "tags" in out:
-            out["tags"] = ", ".join(split_tags(out["tags"])) or None
+            out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
         for k, v in out.items():
@@ -1051,8 +1115,8 @@ class Store:
         return row[0] if row else tag
 
     def _sync_tags(self, candidate_id: int, tags_text: str | None) -> None:
-        tags = [self._canonical_tag(t, candidate_id) for t in split_tags(tags_text)]
-        text = ", ".join(tags) or None
+        tags = [self._canonical_tag(t, candidate_id) for t in stored_tags(tags_text)]
+        text = join_tags(tags)
         if text != tags_text:  # keep the search copy in the same spelling
             self._conn.execute("UPDATE candidates SET tags = ? WHERE id = ?", (text, candidate_id))
         self._conn.execute("DELETE FROM candidate_tags WHERE candidate_id = ?", (candidate_id,))
@@ -1111,12 +1175,23 @@ class Store:
             return [self._hydrate(r) for r in self._rows(
                 "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC",
                 (_clean(name) or "",))]
-        return [self._hydrate(r) for r in self._rows(
-            "SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))]
+        rows = self._rows("SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))
+        tokens = key.split()
+        if len(tokens) > 1 and tokens[0] in _NICK_GROUPS:
+            # 'Mike Okonkwo' also finds 'Michael Okonkwo': same last names, a nickname of the same first name.
+            seen = {r["id"] for r in rows}
+            for r in self._rows("SELECT * FROM candidates WHERE fold_name(name) LIKE ? ORDER BY updated_at DESC",
+                                ("% " + " ".join(tokens[1:]),)):
+                other = _name_tokens(r["name"])
+                if (r["id"] not in seen and other[1:] == tokens[1:] and other[0] != tokens[0]
+                        and same_first_name(other[0], tokens[0])):
+                    rows.append(r)
+        return [self._hydrate(r) for r in rows]
 
     def possible_duplicates(self, candidate_id: int) -> list[dict[str, Any]]:
-        """Other people who may be this same person: the same name (ignoring case and accents),
-        or the same email, LinkedIn URL or phone number."""
+        """Other people who may be this same person: the same name (ignoring case and accents), the
+        same email, LinkedIn URL or phone number, or a name that could be theirs ('Mike Okonkwo' and
+        'Michael Okonkwo', 'Priya R.' and 'Priya Raman') at the same current company."""
         c = self.get_candidate(candidate_id)
         key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
         rows = self._rows(
@@ -1128,6 +1203,13 @@ class Store:
                ORDER BY updated_at DESC LIMIT 10""",
             (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
              phone, phone))
+        if _clean(c.get("current_company")) and len(rows) < 10:
+            seen = {r["id"] for r in rows}
+            rows += [r for r in self._rows(
+                "SELECT * FROM candidates WHERE id <> ? AND lower(trim(current_company)) = lower(trim(?))"
+                " ORDER BY updated_at DESC LIMIT 200", (candidate_id, c["current_company"]))
+                if r["id"] not in seen and len(_name_tokens(r["name"])) > 1 and len(_name_tokens(c["name"])) > 1
+                and same_person_name(r["name"], c["name"])][:10 - len(rows)]
         return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
@@ -1163,7 +1245,7 @@ class Store:
                 continue
             cur = row.get(k)
             if k == "tags":
-                merged[k] = ", ".join(split_tags(split_tags(cur) + split_tags(v)))
+                merged[k] = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
             elif k in MERGE_OVERWRITES:
                 merged[k] = v
             elif k == "last_contacted_at":
@@ -1395,7 +1477,7 @@ class Store:
             for k in CANDIDATE_FIELDS:
                 kv, ov = krow.get(k), orow.get(k)
                 if k == "tags":
-                    tags = ", ".join(split_tags(split_tags(kv) + split_tags(ov))) or None
+                    tags = join_tags(split_tags(stored_tags(kv) + stored_tags(ov)))
                     if tags != kv:
                         fields[k] = tags
                 elif k == "last_contacted_at":
@@ -1552,7 +1634,8 @@ class Store:
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._rows(
-            """SELECT t.*, j.title AS job_title FROM timeline t LEFT JOIN jobs j ON j.id = t.job_id
+            """SELECT t.*, j.title AS job_title, j.company AS job_company FROM timeline t
+               LEFT JOIN jobs j ON j.id = t.job_id
                WHERE t.candidate_id = ? ORDER BY t.at DESC, t.id DESC LIMIT ?""",
             (candidate_id, limit),
         )
@@ -2069,8 +2152,19 @@ class Store:
                                (new, outcome or stage["outcome"], stage["id"]))
             self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND lower(stage) = lower(?)",
                                (new, job_id, stage["name"]))
+            self._follow_stage_rename(job_id, stage["name"], new)
         self._touch_job(job_id)
         return self.job_stages(job_id)
+
+    def _follow_stage_rename(self, job_id: int, old: str, new: str) -> None:
+        """Timeline stage entries name the stage as it's called now, so after 'Interviewing' becomes
+        'Onsite' the timeline (and an undo of a move) says Onsite. Call inside a transaction."""
+        self._conn.execute("UPDATE timeline SET body = ? WHERE job_id = ? AND kind = 'stage' AND lower(body) = lower(?)",
+                           (new, job_id, old))
+        for key in ("old", "new"):
+            self._conn.execute(
+                f"UPDATE timeline SET data = json_set(data, '$.pipeline.{key}', ?) WHERE job_id = ? AND kind = 'stage'"
+                f" AND json_valid(data) AND lower(json_extract(data, '$.pipeline.{key}')) = lower(?)", (new, job_id, old))
 
     def reorder_stages(self, job_id: int, names: list[str]) -> list[dict[str, Any]]:
         stages = self.job_stages(job_id)
@@ -2351,7 +2445,7 @@ def parse_day_text(value: Any) -> str | None:
     except ValueError:
         loose = _parse_loose(re.sub(r"\s+", " ", str(v)))
         if loose is None:
-            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01 or Dec 1, 2026.") from None
+            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01, Dec 1, 2026 or Dec 1.") from None
         return loose.date().isoformat()
 
 
