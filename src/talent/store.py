@@ -563,6 +563,7 @@ AI_ACTION_KINDS = {
     "prospects_proposed": "Proposed people for a Shortlist",
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
+    "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
 }
 # AI actions listed on Changes as a record only: there is nothing to put back.
 AI_RECORD_KINDS = frozenset({"interview_outcome"})
@@ -1445,6 +1446,11 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
     if kind == "save_batch":
         return _batch_summary(new, job if r.get("job_title") else None)
+    if kind == "client_sent":
+        return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
+            f" ({new['manager']})" if new.get("manager") else "")
+    if kind == "client_edit":
+        return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
     what = f": {new['summary']}" if new.get("summary") else ""
     if kind == "interview_cancel":
         return f"Cancelled an interview with {name}{what}"
@@ -1500,6 +1506,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("job", jid), (kind, jid))
     if kind.startswith("interview_"):
         return (("person", cid), ("interview", r.get("target_id")))
+    if kind.startswith("client_"):
+        return (("client", (r.get("new_data") or {}).get("_key")),)
     return (("todo", r.get("target_id")),)
 
 
@@ -2229,6 +2237,9 @@ class Store:
             if kind in ("interview_cancel", "interview_move"):
                 reason = self._interview_blocker(a)
                 return reason.rstrip(".").lower() if reason else None
+            if kind.startswith("client_"):
+                from .reports import ai_client_blocker  # here: reports imports this module
+                return ai_client_blocker(self, a)
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2331,6 +2342,9 @@ class Store:
         kind, what = a["kind"], a["summary"]
         if kind == "save_batch":
             return self._undo_save_batch(a, by, before_delete)
+        if kind.startswith("client_"):
+            from .reports import ai_client_undo  # here: reports imports this module
+            return ai_client_undo(self, a, by)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:

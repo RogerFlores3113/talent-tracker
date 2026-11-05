@@ -40,7 +40,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','suggestion':'Follow-up','ai_change':'AI change','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -61,6 +61,8 @@
           <a class="btn small" href="{{ i.href }}">{{ 'Add people' if i.job_id else 'See jobs' }}</a>
           {% elif i.kind == 'stale' %}
           <a class="btn small" href="{{ i.href }}">{{ 'Refresh' if i.candidate_id else 'See the oldest' }}</a>
+          {% elif i.kind == 'update_due' %}
+          <a class="btn small" href="{{ i.href }}">Send updates</a>
           {% elif i.kind == 'shortlist' %}
           <a class="btn small" href="{{ i.href }}">Review</a>
           {% elif i.kind == 'interview_out' %}
@@ -102,7 +104,7 @@
     </div>
     {% endif %}
     <form method="post" action="/actions/todo" class="inline add-todo">
-      <input type="text" name="text" placeholder="Add a to-do, like Send Acme the weekly update" required aria-label="New to-do">
+      <input type="text" name="text" placeholder="Add a to-do, like {{ 'Send Priya the weekly update' if inhouse() else 'Send Acme the weekly update' }}" required aria-label="New to-do">
       {% if jobs %}<select name="job_id" aria-label="Job (optional)"><option value="">No job</option>{% for j in jobs %}<option value="{{ j.id }}">{{ job_label(j.title, j.company) }}{% if j.location %} ({{ j.location }}){% endif %}</option>{% endfor %}</select>{% endif %}
       <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
       <button class="btn small" type="submit">Add to-do</button>

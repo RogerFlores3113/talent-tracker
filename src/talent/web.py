@@ -288,6 +288,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
     env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
+    env.globals["stage_groups_of"] = lambda job_id: {  # each stage's funnel step (in-house has no Submitted)
+        k: ("screening" if g == "submitted" and actions.inhouse(store) else g)
+        for k, g in reports.stage_groups(store, job_id).items()}
+    env.globals["funnel_choices"] = lambda: reports.funnel_choices(actions.inhouse(store))
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -1094,8 +1098,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     names[i], names[j] = names[j], names[i]
                     store.reorder_stages(job_id, names)
             elif op == "outcome":
-                res = actions.change_stage_outcome(store, job_id, name, str(form.get("outcome") or "open"))
+                picked = str(form.get("outcome") or "open")
+                step = picked.split(":", 1)[1] if picked.startswith("open:") else None
+                res = actions.change_stage_outcome(store, job_id, name, "open" if step else picked)
                 notice = res["notice"]
+                if step:  # In play, counted as this funnel step in client reports
+                    got = reports.set_stage_group(store, job_id, name, step)
+                    word = (reports.INHOUSE_LABELS if actions.inhouse(store) else reports.GROUP_LABELS)[step]
+                    notice = " ".join(x for x in (notice, f"Reports now count {got['stage']} as {word}.") if x)
                 if res["asks"]:  # people already in the stage who still have interviews: offer to cancel
                     return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': res['asks'][0]['candidate_id'], 'notice': notice})}#pipeline",
                                             status_code=303)
@@ -1272,6 +1282,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def clients_page(request: Request):
         return page(request, "clients.html", rows=reports.overview(store), no_company=reports.no_company_jobs(store))
 
+    @app.get("/clients/due", response_class=HTMLResponse)
+    def clients_due_page(request: Request):
+        """The Friday send-out: every update due this week, ready to copy, email and mark as sent."""
+        return page(request, "due.html", due=reports.due_updates(store), num=reports._num)
+
     def client_or_404(slug: str) -> dict[str, Any]:
         try:
             return reports.client(store, reports.unslug(slug))
@@ -1291,13 +1306,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         # In-house with hiring managers named, one update per manager; else the one client update.
         span = (None, None) if error else (since or None, until or None)
         parts = reports.reports_for(store, c["key"], *span) if reports.managers(store, c["key"]) else [rep]
-        sections = [{"rep": r, "text": (t := reports.report_text(r)), "mailto": reports.mailto(r, t),
-                     "notes": reports.recruiter_notes(r)} for r in parts]
+        sections = [{"rep": r, "text": (t := reports.report_text(r)), "email": (e := reports.email_link(r, t)),
+                     "mailto": e["href"] if e else None, "notes": reports.recruiter_notes(r)} for r in parts]
         return page(request, "client.html", c=c, rep=rep, sections=sections, error=error, since=since, until=until,
                     submittals=reports.submittals(store, c["key"]),
                     updates=reports.updates(store, c["key"]), groups=reports.GROUPS, days=reports.UPDATE_DAYS,
                     labels=reports.INHOUSE_LABELS if rep["inhouse"] else reports.GROUP_LABELS,
-                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=reports.update_due(c),
+                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=bool(reports.due_parts(store, c["key"])),
+                    num=reports._num, ai_moves=[m for x in sections for m in x["rep"]["ai_moves"]],
                     since_day=_local(rep["since"], "%Y-%m-%d"),
                     until_day=_local(rep["until"], "%Y-%m-%d"))
 
@@ -1318,12 +1334,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """Mark this update as sent: keep a copy, and start the next one from now."""
         c = client_or_404(slug)
         form = await request.form()
+        back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
+        manager = str(form["manager"]) if "manager" in form else None  # one hiring manager's update, in-house
         try:
-            reports.mark_sent(store, c["key"], str(form.get("since") or "") or None, str(form.get("until") or "") or None)
+            done = reports.mark_sent(store, c["key"], str(form.get("since") or "") or None,
+                                     str(form.get("until") or "") or None, manager=manager)
         except ValueError as exc:
-            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
-        notice = "Marked as sent. A copy is kept below, and the next update starts from now."
-        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+            return RedirectResponse(f"{back}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        who = f"{done['manager']}'s update" if done.get("manager") else (
+            "The update for jobs with no hiring manager" if manager is not None else "")
+        if back == "/clients/due":
+            notice = f"Marked {who or 'the update to ' + c['name']} as sent. A copy is kept on its page."
+        else:
+            notice = (f"Marked {who} as sent. A copy is kept below, and their next update starts from now." if who
+                      else "Marked as sent. A copy is kept below, and the next update starts from now.")
+        return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/clients/{slug}/ai-reviewed")
+    async def client_ai_reviewed(request: Request, slug: str):
+        """The recruiter has looked at the AI's moves in this update: stop flagging them."""
+        c = client_or_404(slug)
+        form = await request.form()
+        back = "/clients/due" if form.get("back") == "due" else f"/clients/{c['slug']}"
+        n = reports.mark_ai_reviewed(store, [str(v) for v in form.getlist("action_id")])
+        notice = (f"Marked {n} AI move{'' if n == 1 else 's'} as reviewed." if n
+                  else "Those AI moves were already marked as reviewed.")
+        return RedirectResponse(f"{back}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/clients/{slug}/updates/{update_id}/undo")
     def client_sent_undo(slug: str, update_id: int):
@@ -1336,12 +1372,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.get("/clients/{slug}/pipeline.csv")
-    def client_csv(slug: str, since: str = "", until: str = ""):
+    def client_csv(slug: str, since: str = "", until: str = "", out: str = ""):
         c = client_or_404(slug)
         rep, _ = client_report_or_error(c, since, until)
         stamp = datetime.now().strftime("%Y-%m-%d")
         name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
-        return Response(reports.pipeline_csv(rep), media_type="text/csv; charset=utf-8",
+        return Response(reports.pipeline_csv(rep, with_out=out == "1"), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
     # ------------------------------------------------------- dashboard acts
@@ -1449,6 +1485,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     name, href = a["candidate_name"], f"/candidates/{a['candidate_id']}#timeline"
                 elif a["job_id"]:
                     name, href = a["job_title"], f"/jobs/{a['job_id']}"
+                elif a["kind"].startswith("client_"):
+                    d = a.get("new_data") or {}
+                    name, href = d.get("_client") or "Client", f"/clients/{reports.slug(d.get('_key') or '')}"
                 else:
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []

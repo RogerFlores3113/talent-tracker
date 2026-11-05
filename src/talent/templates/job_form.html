@@ -29,7 +29,8 @@
 
 {% if j.id and stages %}
 <h2 id="stages">Stages</h2>
-<p class="fine">Rename, reorder or add stages for this job. “Counts as” tells Talent Search whether a stage is still in play, a hire, or a no.</p>
+<p class="fine">Rename, reorder or add stages for this job. “Counts as” tells Talent Search whether a stage is still in play, a hire, or a no, and which funnel step reports count an in-play stage as (a Tech screen or Takehome can count as Interviewing). Stages that count as {{ 'Sourcing' if inhouse() else 'Not presented yet' }}{{ '' if inhouse() else ' or Screening' }} are left out of {{ 'hiring' if inhouse() else 'client' }} updates until you choose.</p>
+{% set sg = stage_groups_of(j.id) %}
 <table class="dense stages-table">
   <thead><tr><th>Stage</th><th>Counts as</th><th>Order</th><th></th></tr></thead>
   <tbody>
@@ -40,7 +41,7 @@
       <input type="text" name="new_name" value="{{ s.name }}" aria-label="Rename {{ s.name }}"><button class="btn small" type="submit">Rename</button></form></td>
     <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline">
       <input type="hidden" name="op" value="outcome"><input type="hidden" name="stage" value="{{ s.name }}">
-      <select name="outcome" data-autosubmit aria-label="{{ s.name }} counts as">{% for o in outcomes %}<option value="{{ o }}" {{ 'selected' if s.outcome == o }}>{{ {'open':'In play','hired':'Hired','lost':'Out'}[o] }}</option>{% endfor %}</select></form></td>
+      <select name="outcome" data-autosubmit aria-label="{{ s.name }} counts as"><optgroup label="In play">{% for g, word in funnel_choices() %}<option value="open:{{ g }}" {{ 'selected' if s.outcome == 'open' and sg.get(s.name | lower) == g }}>{{ word }}</option>{% endfor %}</optgroup>{% for o in outcomes if o != 'open' %}<option value="{{ o }}" {{ 'selected' if s.outcome == o }}>{{ {'hired':'Hired','lost':'Out'}[o] }}</option>{% endfor %}</select></form></td>
     <td class="nowrap">{% for op, label in [('up', '↑'), ('down', '↓')] %}<form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="{{ op }}"><input type="hidden" name="stage" value="{{ s.name }}"><button class="btn small" type="submit" aria-label="Move {{ s.name }} {{ op }}">{{ label }}</button></form>{% endfor %}</td>
     <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="remove"><input type="hidden" name="stage" value="{{ s.name }}"><button class="link small" type="submit" title="Only works when nobody is in this stage">Remove</button></form></td>
   </tr>

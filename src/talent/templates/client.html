@@ -15,6 +15,7 @@
   <span class="fine">{% if rep.range_from == 'last_update' %}Starts when you last marked an update as sent ({{ rep.since | local }}).{% elif rep.range_from == 'default' %}No update marked as sent yet, so this covers the last 7 days.{% else %}The days you picked.{% endif %}</span>
 </form>
 
+{% if ai_moves %}{% set ai_slug, ai_back = c.slug, "" %}{% include "_ai_moves.html" %}{% endif %}
 {% for o in rep.overfilled %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.hired }} {{ rep.hire_word }} for {{ o.openings }} opening{{ 's' if o.openings != 1 }} (over by {{ o.over }}). Check those hires, or raise the job's openings, before you send this update.</p>{% endfor %}
 <section class="panel report" id="report">
   <div class="sec-head"><h2>{{ 'Updates to share' if sections | length > 1 else 'Update to share' }}</h2></div>
@@ -25,15 +26,22 @@
       <span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy</button><span class="fine" role="status"></span></span></div>
     <pre class="code wrap" id="{{ tid }}">{{ s.text }}</pre>
     {% if s.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ s.notes | join('; ') }}.</p>{% endif %}
-    {% if s.mailto %}<div class="actions-inline no-print"><a class="btn small" href="{{ s.mailto }}">Email this update to {{ s.rep.email }}</a></div>{% endif %}
+    <div class="actions-inline no-print">
+    {% if s.email %}{% set e = s.email %}<a class="btn small" href="{{ e.href }}">Email this update to {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">It's too long to fill in by link, so the email opens empty: copy the update first, then paste it in.</span>{% endif %}{% endif %}
+    {% if s.rep.manager_key is not none %}<form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {% if s.rep.manager %}{{ s.rep.manager }}'s update{% else %}the update for jobs with no hiring manager{% endif %} as sent? A copy is kept, and their next update covers what happens from now.{% if s.rep.ai_moves %} {{ s.rep.ai_moves | length }} AI move{{ 's' if s.rep.ai_moves | length != 1 }} in it {{ 'are' if s.rep.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">
+      <input type="hidden" name="manager" value="{{ s.rep.manager_key }}"><input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}">
+      <button class="btn small" type="submit">Mark this one as sent</button></form>{% endif %}
+    </div>
   </div>
   {% endfor %}
   <div class="actions-inline no-print">
     <button type="button" class="btn small" data-print>Print or save as PDF</button>
     <a class="btn small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as CSV</a>
-    <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {{ 'these updates' if sections | length > 1 else 'this update' }} as sent? A copy is kept, and the next update covers what happens from now.">
+    <a class="small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until, 'out': '1'} | urlencode }}" title="The CSV leaves out people who are out, like Not a Fit or Withdrew">CSV with people who are out</a>
+    <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {{ 'all these updates' if sections | length > 1 else 'this update' }} as sent? A copy is kept, and the next update covers what happens from now.{% if ai_moves %} {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} your AI app made {{ 'are' if ai_moves | length != 1 else 'is' }} in it and not reviewed yet: {% for m in ai_moves[:3] %}{{ m.name }} to {{ m.stage }}{{ ', ' if not loop.last }}{% endfor %}{% if ai_moves | length > 3 %} and {{ ai_moves | length - 3 }} more{% endif %}.{% endif %}">
       <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}">
-      <button class="btn small primary" type="submit">Mark as sent</button></form>
+      <button class="btn small primary" type="submit">{{ 'Mark all as sent' if sections | length > 1 else 'Mark as sent' }}</button></form>
+    <a class="small" href="/clients/due">Every update due this week</a>
   </div>
   {% set any_mail = sections | selectattr('mailto') | list %}
   <p class="fine no-print">Names, counts and moves leave out each job's internal stages (like Sourced), as its status update does, though a booked interview is still listed. Each person counts once, even when they're on two jobs. Moves come from stage history; ones an import marked and ones that were undone don't count{% if rep.imported_moves %} ({{ rep.imported_moves }} from imports left out){% endif %}. Times are in {{ tz or 'your time zone' }}.{% if any_mail %} Email opens your own mail app with the update filled in; nothing is sent from here. A long update can get cut off there, so paste the copied text if it is.{% endif %}</p>
@@ -47,7 +55,7 @@
     <tr><td>{{ labels[g] }}</td><td>{{ rep.stand[g] if g not in ('hired', 'out') else '' }}</td><td>{{ rep.period[g] }}</td></tr>
     {% endif %}{% endfor %}</tbody>
   </table>
-  <p class="fine">All time on these jobs: {% for g, label in ([] if inhouse() else [('submitted', 'submitted or presented')]) + [('interview', 'interviewed'), ('offer', 'offer'), ('hired', 'hired')] %}{{ label }} {{ rep.reached[g] }}{{ ', ' if not loop.last }}{% endfor %}. Median days in stage: {% for g, v in rep.median_days.items() %}{{ labels[g] }} {{ v }}{{ ', ' if not loop.last }}{% else %}not enough history yet{% endfor %}.</p>
+  <p class="fine">All time on these jobs: {% for g, label in ([] if inhouse() else [('submitted', 'submitted or presented')]) + [('interview', 'interviewed'), ('offer', 'offer'), ('hired', 'hired')] %}{{ label }} {{ rep.reached[g] }}{{ ', ' if not loop.last }}{% endfor %}. Median days in stage: {% for g, v in rep.median_days.items() %}{{ labels[g] }} {{ num(v) }}{{ ', ' if not loop.last }}{% else %}not enough history yet{% endfor %}.</p>
 </section>
 
 {% if rep.upcoming %}
@@ -84,7 +92,7 @@
     <label>Update day<select name="update_day"><option value="">No set day</option>{% for d in days %}<option value="{{ d }}" {{ 'selected' if c.update_day == d }}>{{ d }}</option>{% endfor %}</select></label>
     <label>Time zone<input type="text" name="time_zone" value="{{ c.time_zone or '' }}" list="zones" placeholder="America/New_York, or ET, CT, MT, PT"></label>
     <datalist id="zones">{% for z in zones %}<option value="{{ z }}">{% endfor %}</datalist>
-    <label class="wide">Contacts (one per line; the first email is used for Email this update)<textarea name="contacts" rows="3" maxlength="3000">{{ c.contacts or '' }}</textarea></label>
+    <label class="wide">Contacts (one per line; Email this update goes to the first email, with the others on Cc)<textarea name="contacts" rows="3" maxlength="3000">{{ c.contacts or '' }}</textarea></label>
     <label class="wide">Notes<textarea name="notes" rows="4" maxlength="5000">{{ c.notes or '' }}</textarea></label>
     <div class="actions"><button class="btn primary" type="submit">Save</button></div>
   </form>

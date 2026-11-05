@@ -1,0 +1,11 @@
+{# Moves the AI app made that the recruiter hasn't reviewed, above an update. Needs ai_moves, a slug (c.slug or
+   p.slug) and optionally back='due'. For the recruiter only: never part of the update text. #}
+<div class="flash warn no-print recruiter-only" role="alert">
+  <p>Your AI app made {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} in this update that you haven't reviewed. Check {{ 'them' if ai_moves | length != 1 else 'it' }} before anyone hears about {{ 'them' if ai_moves | length != 1 else 'it' }}:</p>
+  <ul class="plain">{% for m in ai_moves[:10] %}<li><a href="/candidates/{{ m.candidate_id }}#timeline">{{ m.name }}</a> to {{ m.stage }} ({{ m.job }}), {{ m.at | local }}</li>{% endfor %}{% if ai_moves | length > 10 %}<li>and {{ ai_moves | length - 10 }} more</li>{% endif %}</ul>
+  <div class="actions-inline">
+    <a class="btn small" href="/changes?who=ai&amp;since=7">Review or undo on Changes</a>
+    <form method="post" action="/clients/{{ ai_slug }}/ai-reviewed" class="inline">{% for m in ai_moves %}<input type="hidden" name="action_id" value="{{ m.action_id }}">{% endfor %}{% if ai_back %}<input type="hidden" name="back" value="{{ ai_back }}">{% endif %}
+      <button class="btn small" type="submit">They're right, mark reviewed</button></form>
+  </div>
+</div>
