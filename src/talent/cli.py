@@ -100,6 +100,8 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     if open_browser:
         threading.Timer(1.2, lambda: webbrowser.open(launch_url(port))).start()
     logging.getLogger(__name__).info("Talent Search running at %s (data: %s)", url, data_dir())
+    logging.getLogger(__name__).info("If the window says it's locked, open Talent Search from its app icon "
+                                     "or run: talent open")
     # log_config=None: the frozen windowed build has no console for uvicorn's default handlers.
     uvicorn.run(app, host="127.0.0.1", port=port, log_config=None, access_log=False)
 

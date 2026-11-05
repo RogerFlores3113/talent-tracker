@@ -5,7 +5,7 @@ import anyio
 import pytest
 from mcp.types import CallToolResult
 
-from conftest import local_client
+from conftest import flash_of, local_client
 from talent import importers
 from talent.mcp_server import build_server
 from talent.paths import backups_dir
@@ -29,7 +29,7 @@ def text(result):
 
 
 def notice(response):
-    return parse_qs(urlsplit(response.headers["location"]).query).get("notice", [""])[0]
+    return flash_of(response)
 
 
 def backups():

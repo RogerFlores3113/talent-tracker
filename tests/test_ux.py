@@ -6,7 +6,7 @@ import pytest
 from talent import actions
 from talent.sample_data import load_sample_data, remove_sample_data, sample_ids
 from talent.store import NotFound
-from conftest import local_client
+from conftest import flash_of, local_client
 
 ORIGIN = {"origin": "http://127.0.0.1:8765"}
 
@@ -83,7 +83,7 @@ def test_follow_up_date_on_log_form_shows_from_that_day(store):
     later = (date.today() + timedelta(days=5)).isoformat()
     r = c.post(f"/candidates/{cand['id']}/log", data={"kind": "call", "body": "Intro call", "follow_up": later},
                follow_redirects=False)
-    assert r.status_code == 303 and "notice=" in r.headers["location"]
+    assert r.status_code == 303 and flash_of(r) and "notice=" not in r.headers["location"]
     assert store.timeline(cand["id"])[0]["body"] == "Intro call"
     res = actions.action_items(store)
     assert not [i for i in res["items"] if i["kind"] == "suggestion"] and res["scheduled"] == 1
@@ -106,7 +106,7 @@ def test_follow_up_alone_and_bad_date(store):
     assert not store.timeline(cand["id"])  # no empty note logged
     r = c.post(f"/candidates/{cand['id']}/log", data={"kind": "call", "body": "x", "follow_up": "soon"},
                follow_redirects=False)
-    assert "error=" in r.headers["location"]
+    assert flash_of(r, "error") and "error=" not in r.headers["location"]
     page = c.get(f"/candidates/{cand['id']}").text
     assert 'name="follow_up"' in page and "Follow up on" in page
 
@@ -126,7 +126,7 @@ def test_sample_data_badges_and_remove(store):
     assert "Remove sample data" in settings and "16 sample candidates" in settings
     r = c.post("/sample-data/remove", headers={"referer": "http://127.0.0.1:8765/settings?saved=1"},
                follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"].startswith("/settings?notice=")
+    assert r.status_code == 303 and r.headers["location"] == "/settings" and flash_of(r)
     assert "saved=" not in r.headers["location"]  # old messages don't come back
     assert store.count_candidates() == 1 and [j["id"] for j in store.list_jobs()] == [real_job["id"]]
     assert sample_ids(store) == (set(), set())
@@ -156,7 +156,7 @@ def test_delete_job_keeps_candidates(store):
     c = client(store)
     assert "Delete job" in c.get(f"/jobs/{job['id']}").text
     r = c.post(f"/jobs/{job['id']}/delete", follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"].startswith("/jobs?notice=")
+    assert r.status_code == 303 and r.headers["location"] == "/jobs" and "Deleted" in flash_of(r)
     assert store.list_jobs() == [] and store.get_candidate(cand["id"])["name"] == "Stays"
     assert store.candidate_pipelines(cand["id"]) == []
     assert [s["text"] for s in store.open_suggestions()] == ["Ping Stays"]
@@ -200,7 +200,7 @@ def test_advance_and_snooze_errors_flash_instead_of_failing(store):
     ref = {"referer": "http://127.0.0.1:8765/"}
     r = c.post("/actions/advance", data={"candidate_id": "1", "job_id": "x", "stage": "Offer"}, headers=ref,
                follow_redirects=False)
-    assert r.status_code == 303 and "flash_error=" in r.headers["location"]
+    assert r.status_code == 303 and flash_of(r, "flash_error")
     cand = store.add_candidate(name="Ana")
     job = store.add_job("Role")
     r = c.post("/actions/advance", data={"candidate_id": cand["id"], "job_id": job["id"], "stage": "Offer"},
@@ -211,8 +211,8 @@ def test_advance_and_snooze_errors_flash_instead_of_failing(store):
     assert "No stage called" in r.text
     r = c.post("/actions/advance", data={"candidate_id": cand["id"], "job_id": job["id"], "stage": "Offer"}, headers=ref)
     assert "Moved Ana to Offer" in r.text and store.pipeline(job["id"])[0]["stage"] == "Offer"
-    assert "flash_error=" in c.post("/actions/snooze", data={"key": "k", "days": "soon"}, headers=ref,
-                                    follow_redirects=False).headers["location"]
+    assert flash_of(c.post("/actions/snooze", data={"key": "k", "days": "soon"}, headers=ref,
+                           follow_redirects=False), "flash_error")
     assert c.post("/actions/suggestions/999/done", headers=ref).status_code == 200
 
 

@@ -11,7 +11,8 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import quote, urlencode
+from typing import Iterable
+from urllib.parse import quote, urlencode, urlsplit
 
 from . import __version__
 
@@ -91,12 +92,28 @@ def save_from_linkedin(url: str = "") -> str:
     )
 
 
+def linkedin_profile(url: str | None) -> str | None:
+    """The URL when it's an https or http address on linkedin.com (or a subdomain), else None."""
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    ok = parts.scheme in ("http", "https") and (host == "linkedin.com" or host.endswith(".linkedin.com"))
+    return url.strip() if ok and url else None
+
+
 def refresh_candidate(c: dict) -> str:
-    """The candidate page's "Refresh with Claude": update someone already saved, never save them again."""
-    where = c.get("linkedin_url") or c.get("website") or "their public profile"
+    """The candidate page's "Refresh with Claude": update someone already saved, never save them again.
+
+    Only a linkedin.com profile goes in the prompt. Any other saved site could be one an import or a
+    web page put there, so the AI asks for the link instead of opening it."""
+    url = linkedin_profile(c.get("linkedin_url"))
+    look = (f"look up their current profile ({url})" if url else
+            "ask me for their profile link (I'll paste it), then look it up")
     return (
         f"Refresh {c.get('name') or 'this person'} (candidate {c.get('id')}) in Talent Search.\n\n"
-        f"Call get_candidate with candidate_id {c.get('id')}, then look up their current profile ({where}). "
+        f"Call get_candidate with candidate_id {c.get('id')}, then {look}. "
         f"Call update_candidate on candidate {c.get('id')} with only what changed: current title, company, "
         "location, a fresh 2 to 4 sentence `about`, skills as tags (the full list, since it replaces the saved "
         "one), and work history. Don't use save_candidate, because it never changes the saved `about`. "
@@ -174,10 +191,36 @@ def _scrub(text: str) -> str:
     return text
 
 
-def issue_text(summary: str, details: str = "", where: str = "app") -> tuple[str, str]:
-    """The (title, body) a problem report would have, with emails, phones and links taken out."""
-    title = _scrub((summary or "Problem report").strip())[:120]
-    details = _scrub(details or "")
+def _scrub_names(text: str, names: Iterable[str]) -> str:
+    """Take out saved candidates' names: the full name in any case, and a surname written capitalized."""
+    if not text:
+        return text
+    folded = text.casefold()
+    full, last = set(), set()
+    for name in names:
+        name = " ".join((name or "").split())
+        if len(name) < 3:
+            continue
+        if name.casefold() in folded:
+            full.add(name)
+        parts = name.split(" ")
+        if len(parts) > 1 and len(parts[-1]) >= 4 and parts[-1] in text:
+            last.add(parts[-1])
+    for name in sorted(full, key=len, reverse=True):
+        text = re.sub(r"(?<!\w)" + r"\s+".join(map(re.escape, name.split(" "))) + r"(?!\w)", "[name removed]", text,
+                      flags=re.I)
+    for word in sorted(last, key=len, reverse=True):
+        if word[:1].isupper():
+            text = re.sub(r"(?<!\w)" + re.escape(word) + r"(?!\w)", "[name removed]", text)
+    return text
+
+
+def issue_text(summary: str, details: str = "", where: str = "app", names: Iterable[str] = ()) -> tuple[str, str]:
+    """The (title, body) a problem report would have, with emails, phones, links and the names of saved
+    candidates (pass them as names) taken out."""
+    names = list(names)
+    title = _scrub(_scrub_names((summary or "Problem report").strip(), names))[:120]
+    details = _scrub(_scrub_names(details or "", names))
     body = (
         f"**What happened**\n{details.strip() or title}\n\n"
         f"**Where**\n{where}\n\n"
@@ -187,11 +230,11 @@ def issue_text(summary: str, details: str = "", where: str = "app") -> tuple[str
     return title, body
 
 
-def issue_url(summary: str, details: str = "", where: str = "app") -> str:
+def issue_url(summary: str, details: str = "", where: str = "app", names: Iterable[str] = ()) -> str:
     """A prefilled GitHub 'new issue' link. Opening it shows GitHub the text (it's in the address);
     it is posted only when the user presses Submit on GitHub.
 
     Never put candidate data in here.
     """
-    title, body = issue_text(summary, details, where)
+    title, body = issue_text(summary, details, where, names)
     return ISSUES_URL + "?" + urlencode({"title": title, "body": body}, quote_via=quote)

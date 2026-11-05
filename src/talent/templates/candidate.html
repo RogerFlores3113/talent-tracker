@@ -71,7 +71,7 @@
   {% endif %}
 
   <h2 id="timeline">Timeline</h2>
-  {% if qp.get('error') %}<p class="error">{{ qp.get('error') }}</p>{% endif %}
+  {% if (request.state.flash or {}).get('error') %}<p class="error">{{ request.state.flash.get('error') }}</p>{% endif %}
   <form method="post" action="/candidates/{{ c.id }}/log" class="logform">
     <select name="kind" aria-label="Kind">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
     <input type="text" name="body" placeholder="What happened? (for an interview, add the date)" aria-label="Note">
