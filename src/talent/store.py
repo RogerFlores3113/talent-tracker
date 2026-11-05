@@ -557,7 +557,9 @@ _MONTHS = {m: i for i, m in enumerate(
     ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
 _FULL_MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august", "september",
                 "october", "november", "december", "sept")
-_TIME = r"(?:[ T,]+(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?)?"
+# A time after a date: 14:30, 2:30 PM, 3pm, at 3 p.m. (an hour alone needs AM or PM).
+_TIME = (r"(?:[ T,]+(?:at\s+)?(?:(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?"
+         r"|(?P<h2>\d{1,2})\s*(?P<ap2>[ap]\.?m\.?)))?")
 _DATE_FORMS = (
     # 11/5/2026, 11/5/26, 5.11.2026 (day first only when the first number can't be a month)
     re.compile(r"(?P<a>\d{1,2})[/.-](?P<b>\d{1,2})[/.-](?P<y>\d{4}|\d{2})" + _TIME + r"$", re.I),
@@ -574,15 +576,64 @@ _DATE_FORMS = (
 )
 
 
-def _parse_loose(s: str) -> datetime | None:
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_RELATIVE = re.compile(r"(?:(?P<word>today|tomorrow|yesterday)|(?:(?P<which>next|this|last)\s+)?(?P<wd>[a-z]{3,9})\.?)"
+                       + _TIME + r"$", re.I)
+
+
+def _clock(g: dict[str, Any]) -> tuple[int, int, int] | None:
+    """(hour, minute, second) from a _TIME match, (0, 0, 0) when no time was given, None if it can't be a time."""
+    hour, minute, sec = int(g["h"] or g["h2"] or 0), int(g["mi"] or 0), int(g["s"] or 0)
+    ap = g["ap"] or g["ap2"]
+    if ap:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ap.lower().startswith("p") else 0)
+    return (hour, minute, sec) if hour < 24 and minute < 60 and sec < 60 else None
+
+
+def _parse_relative(s: str, zone: tzinfo | None) -> datetime | None:
+    """'yesterday 3pm', 'today 10am', 'tomorrow 2:30 pm', 'next Tuesday 2pm', 'last Fri'. The day is counted on
+    the calendar of the zone typed after it (this computer's own when none). With no time the day reads as
+    midday, the same way a day with no time is shown elsewhere, so it isn't taken for a 12:00 AM time. 'today'
+    alone is midday or now, whichever is earlier."""
+    m = _RELATIVE.match(s)
+    if not m:
+        return None
+    g = m.groupdict()
+    now = datetime.now(zone) if zone is not None else datetime.now().astimezone()
+    today = now.date()
+    if g["word"]:
+        day = today + timedelta(days={"today": 0, "tomorrow": 1, "yesterday": -1}[g["word"].lower()])
+    else:
+        wd = g["wd"].lower()
+        target = next((i for i, full in enumerate(_WEEKDAYS) if full.startswith(wd)), None)
+        if target is None and wd in ("tues", "thur", "thurs", "weds"):
+            target = 1 if wd == "tues" else 2 if wd == "weds" else 3
+        if target is None:
+            return None
+        ahead = (target - today.weekday()) % 7
+        which = (g["which"] or "").lower()
+        if which == "last":
+            day = today - timedelta(days=(today.weekday() - target) % 7 or 7)
+        else:  # 'Tuesday' and 'this Tuesday' can be today; 'next Tuesday' is the next one after today
+            day = today + timedelta(days=ahead or (7 if which == "next" else 0))
+    if g["h"] is None and g["h2"] is None:
+        noon = datetime(day.year, day.month, day.day, 12)
+        if day == today and now.replace(tzinfo=None) < noon:
+            return now.replace(tzinfo=None, microsecond=0)
+        return noon
+    clock = _clock(g)
+    return datetime(day.year, day.month, day.day, *clock) if clock else None
+
+
+def _parse_loose(s: str, zone: tzinfo | None = None) -> datetime | None:
     """The date shapes people type in spreadsheets. None if it isn't one of them."""
-    low = s.lower()
-    if low in ("today", "now", "yesterday"):
-        today = datetime.now().astimezone()
-        if low == "now":
-            return today
-        day = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        return day - timedelta(days=1) if low == "yesterday" else day
+    if s.lower() == "now":
+        return datetime.now().astimezone()
+    relative = _parse_relative(s, zone)
+    if relative is not None:
+        return relative
     for form in _DATE_FORMS:
         m = form.match(s)
         if not m:
@@ -602,13 +653,11 @@ def _parse_loose(s: str) -> datetime | None:
             month, day = (b, a) if a > 12 >= b else (a, b)  # US order unless that can't be right
         else:
             month, day = int(g["m"]), int(g["d"])
-        hour, minute, sec = int(g["h"] or 0), int(g["mi"] or 0), int(g["s"] or 0)
-        if g.get("ap"):
-            if not 1 <= hour <= 12:
-                return None
-            hour = hour % 12 + (12 if g["ap"].lower().startswith("p") else 0)
+        clock = _clock(g)
+        if clock is None:
+            return None
         try:
-            out = datetime(year, month, day, hour, minute, sec)
+            out = datetime(year, month, day, *clock)
             if not g["y"] and out.date() < datetime.now().date():  # no year: the next one coming
                 out = out.replace(year=year + 1)
             return out
@@ -705,7 +754,8 @@ def _split_zone(s: str) -> tuple[str, tzinfo | None]:
 
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
     """Accept '2026-11-05', '2026-11-05 14:30', ISO with offset, '11/5/2026', '11/5/26',
-    '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'today', 'yesterday', or a datetime. Returns UTC ISO.
+    '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'Nov 12 3pm', 'today', 'yesterday 3pm', 'tomorrow 2:30 PM',
+    'next Tuesday 2pm', or a datetime. Returns UTC ISO.
 
     A time can end with a zone: an IANA name ('America/Los_Angeles') or PT, ET, CT, MT (PST, EST... too),
     or UTC. A time with no zone is taken as this computer's local time, which is what a recruiter means
@@ -725,7 +775,7 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
             try:
                 dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             except ValueError:
-                loose = _parse_loose(s)
+                loose = _parse_loose(s, zone)
                 if loose is None:
                     raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
                 dt = loose
@@ -2759,13 +2809,19 @@ class Store:
             if r["id"] not in found and first(r["source"]):
                 found[r["id"]] = (f"Found via: {r['source'].strip()}", None, patterns[0])
         marks = ", ".join("?" for _ in _SEARCHED_KINDS)
-        for r in self._rows(
-                f"SELECT candidate_id, body FROM timeline WHERE kind IN ({marks}) AND ({any_like.format(col='body')})"
-                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes)):
+        who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
+        for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
+                f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
+                f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
+                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
             if r["candidate_id"] not in found:
-                hit = first(r["body"])
+                text = r["body"] or ""
+                if r["kind"] == "interview" and isinstance(r["interviewer"], str) and r["interviewer"].strip():
+                    text = (text + " " if text else "") + f"(interviewer: {r['interviewer'].strip()})"
+                hit = first(text)
                 if hit:
-                    found[r["candidate_id"]] = ("Matched a note", r["body"], hit)
+                    an = "an" if r["kind"][0] in "aeiou" else "a"
+                    found[r["candidate_id"]] = (f"Matched {an} {r['kind']}", text, hit)
         return found
 
     def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
@@ -2969,8 +3025,11 @@ class Store:
         for s in stages:
             if _stage_key(s["name"]) == key:
                 return s
-        # An unambiguous start of a name is enough: "tech" finds "Technical interview".
-        starts = [s for s in stages if key and _stage_key(s["name"]).startswith(key)]
+        starts: list[dict[str, Any]] = []
+        for test in (_stage_same, _stage_starts):  # short forms ("HM screen"), then an unambiguous start
+            starts = [s for s in stages if key and test(key, s["name"])]
+            if starts:
+                break
         if len(starts) == 1:
             return starts[0]
         listed = ", ".join(s["name"] for s in stages)
@@ -3481,6 +3540,33 @@ def _stage_name(name: Any) -> str:
 def _stage_key(name: str | None) -> str:
     """'Phone-screen ' and 'phone screen' compare equal."""
     return re.sub(r"[\W_]+", " ", name or "").strip().lower()
+
+
+# Short forms people use for stage words: "HM screen" is "Hiring manager screen".
+_STAGE_SHORT = {"hm": "hiring manager", "mgr": "manager", "mgmt": "management", "f2f": "face to face",
+                "tech": "technical", "intvw": "interview", "int": "interview", "rec": "recruiter",
+                "ta": "talent acquisition", "onsite": "on site", "dq": "disqualified"}
+
+
+def _stage_words(key: str) -> list[str]:
+    """A stage key with short forms spelled out and plurals dropped: 'hm screens' -> ['hiring', 'manager', 'screen']."""
+    words = " ".join(_STAGE_SHORT.get(w, w) for w in key.split()).split()
+    return [w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in words]
+
+
+def _stage_same(key: str, stage: str) -> bool:
+    """The same stage once short forms and plurals are allowed for: 'HM screen', 'Interview', 'onsite'."""
+    a, b = _stage_words(key), _stage_words(_stage_key(stage))
+    return a == b or "".join(a) == "".join(b)
+
+
+def _stage_starts(key: str, stage: str) -> bool:
+    """'tech' starts 'Technical interview'; 'tech int' and 'hm scr' start each word in turn."""
+    full = _stage_key(stage)
+    if full.startswith(key):
+        return True
+    a, b = _stage_words(key), _stage_words(full)
+    return len(a) <= len(b) and all(y.startswith(x) for x, y in zip(a, b))
 
 
 def _stage_plan(names: list[str | dict[str, Any]]) -> list[tuple[str, str]]:

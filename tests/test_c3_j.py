@@ -75,7 +75,7 @@ def test_get_candidate_shows_local_times_and_the_client(store):
 
 def test_date_errors_give_a_time_example_and_read_it():
     with pytest.raises(ValueError, match=r"2026-11-09 1:00 PM"):
-        parse_when("next tuesday 2pm")
+        parse_when("sometime next week")  # c4 X: "next tuesday 2pm" reads now
     local = to_dt(parse_when("2026-11-09 1:00 PM")).astimezone()
     assert (local.day, local.hour, local.minute) == (9, 13, 0)
 

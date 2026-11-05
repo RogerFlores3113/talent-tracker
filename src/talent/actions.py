@@ -9,7 +9,7 @@ import difflib
 import json
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 from .store import LIVE_INTERVIEW, NotFound, Store, _stage_key, _stage_plan, parse_when, to_dt
@@ -43,6 +43,7 @@ LATE_STAGE_WORDS = frozenset({"offer", "interview", "interviews", "interviewing"
 OUT_STAGES = ("Rejected", "Withdrawn")
 CLOSE_REASON = "Reason: Position filled"
 INHOUSE_KEY = "inhouse_wording"
+HIRING_FOR_ANSWERED_KEY = "hiring_for_answered"  # set once they've said own company or clients
 STAGE_SETS: dict[str, tuple[str, tuple[str, ...] | None]] = {
     "default": ("Default", None),
     "agency": ("Agency", ("Sourced", "Screened", "Submitted", "Client interview", "Offer", "Placed", "Client passed",
@@ -94,8 +95,9 @@ def local_time(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt.replace("%-", "%#"))
 
 
-def _in_stage(days: int) -> str:
-    return "today" if days <= 0 else "1 day" if days == 1 else f"{days} days"
+def _in_stage(days: int, new: str = "new today") -> str:
+    """How long someone has been in a stage: 'new today' (so it doesn't read as the day they applied), '3 days'."""
+    return new if days <= 0 else "1 day" if days == 1 else f"{days} days"
 
 
 # ---------------------------------------------------------------- settings
@@ -241,6 +243,33 @@ def interview_label(t: dict[str, Any]) -> str:
     """'Onsite: system design, with Priya Raman', 'with Priya Raman', or ''."""
     who = interviewer_of(t)
     return ", ".join(x for x in (interview_name(t), f"with {who}" if who else "") if x)
+
+
+OUTCOME_ASK_DAYS = 30  # how far back Today asks how an interview with no outcome went
+
+
+def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], asked: set[int],
+                  label: Callable[..., str]) -> list[dict[str, Any]]:
+    """'How did Ben Okafor's interview on Tue Nov 3 go?': interviews more than two hours past, in the last 30 days,
+    still scheduled with no outcome, for people still in that job. One item per interview, with outcome buttons."""
+    end = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
+    start = (now - timedelta(days=OUTCOME_ASK_DAYS)).replace(microsecond=0).isoformat()
+    rows = store._rows(
+        f"""SELECT t.*, c.name AS candidate_name, j.title AS job_title FROM timeline t
+           JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ? AND {LIVE_INTERVIEW} ORDER BY t.at""", (start, end))
+    out = []
+    for t in _live_interviews(store, [r for r in rows if r["id"] not in asked], jobs):
+        who = interviewer_of(t)
+        bits = [label(t.get("job_id"), t.get("job_title")), interview_name(t), f"with {who}" if who else None]
+        out.append({
+            "key": f"interview_outcome:{t['id']}", "kind": "interview_outcome", "rank": 1, "when": t["at"],
+            "title": f"How did {t['candidate_name']}'s interview on {local_time(t['at'], '%a %b %-d')} go?",
+            "detail": " · ".join(x for x in bits if x), "interview_id": t["id"], "interviewer": who or None,
+            "candidate_id": t["candidate_id"], "job_id": t.get("job_id"),
+            "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}",
+        })
+    return out
 
 
 def exit_prompts(store: Store, now: datetime | None = None, days: int = 90) -> list[dict[str, Any]]:
@@ -563,6 +592,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                     next_week.append(row)
             else:
                 items.append(row)
+        items += _outcome_asks(store, now, jobs, asked, label)
 
     if on("flag_suggestions"):
         horizon = (now + timedelta(days=14)).astimezone().date().isoformat()
@@ -890,7 +920,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
         lost = g["outcome"] == "lost"
         people = [f"{a['candidate_name']} ("
                   + ("position filled, " if lost and _out_reason(a) == "position filled" else "")
-                  + ("imported" if a["candidate_id"] in imported else _in_stage(_days_ago(a['stage_changed_at'], now)))
+                  + ("imported" if a["candidate_id"] in imported else _in_stage(_days_ago(a['stage_changed_at'], now),
+                                                                             "today" if lost else "new today"))
                   + ")"
                   for a in sorted(cands, key=lambda a: a["stage_changed_at"])]
         label = "Hiring team passed" if own and lost and _stage_key(g["name"]) in _CLIENT_EXITS else g["name"]
@@ -1409,8 +1440,8 @@ def change_stage_outcome(store: Store, job_id: int, stage: str, outcome: str) ->
     n = len(people)
     who = f"{n} {'person' if n == 1 else 'people'}" if n else "Nobody"
     effect = {"lost": "out of the running", "hired": "counted as hired", "open": "in play"}[new]
-    res["notice"] = (f"{found['name']} now counts as {OUTCOME_WORDS[new]}. {who} in it {'is' if n == 1 else 'are'} "
-                     f"now {effect}. You can undo this on Changes.")
+    res["notice"] = (f"{found['name']} now counts as {OUTCOME_WORDS[new]}. {who} in it {'is' if n <= 1 else 'are'} "
+                     f"{effect} now. You can undo this on Changes.")
     if new != "open":
         res["asks"] = [a for a in (exit_interviews(store, p["candidate_id"], job_id) for p in people) if a]
     if res["asks"]:
@@ -1469,7 +1500,13 @@ def inhouse(store: Store) -> bool:
     return store.setting(INHOUSE_KEY) == "1"
 
 
+def hiring_for_answered(store: Store) -> bool:
+    """They've said whether they hire for their own company or for clients, so the welcome stops asking."""
+    return inhouse(store) or store.setting(HIRING_FOR_ANSWERED_KEY) == "1"
+
+
 def set_inhouse(store: Store, on: bool) -> None:
+    _put_setting(store, HIRING_FOR_ANSWERED_KEY, "1")
     if on:
         _put_setting(store, INHOUSE_KEY, "1")
     else:

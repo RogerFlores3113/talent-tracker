@@ -285,6 +285,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
+    env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
     env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
@@ -643,6 +644,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That interview isn't on this profile.")
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
+                                    status_code=303)
+        if str(form.get("next") or "") == "/":  # recorded from Today: back there
+            return RedirectResponse("/?" + urlencode({"notice": f"{notice[:-1]} for {cand_or_404(candidate_id)['name']}."}),
                                     status_code=303)
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
                                 status_code=303)
@@ -1074,6 +1078,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         name = str(form.get("stage") or "")
         notice = ""
         try:
+            if op != "add" and not name.strip():  # a blank name would otherwise mean the first stage
+                raise ValueError("Pick which stage to change first. Nothing was changed.")
             if op == "add":
                 store.add_stage(job_id, str(form.get("new_name") or ""), after=str(form.get("after") or "") or None)
             elif op == "rename":
