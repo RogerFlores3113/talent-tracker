@@ -1,0 +1,78 @@
+{% from "_macros.html" import recipe_buttons, chips, sub %}
+{% if total_all == 0 and not jobs %}
+<div class="welcome">
+  <h1>Welcome to Talent Search</h1>
+  <p class="lead">Your own candidate database, on this computer. Pick a way to start.</p>
+  <div class="options">
+    <a class="option" href="/connect"><strong>Connect your AI app</strong><span>Then paste a LinkedIn link into Claude and say “save this person”.</span></a>
+    <a class="option" href="/import"><strong>Import a spreadsheet</strong><span>Bring in a CSV from Excel, Google Sheets or another tool.</span></a>
+    <a class="option" href="/paste"><strong>Paste a resume</strong><span>We pull out the name, email and links for you to check.</span></a>
+    <form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Delete them any time.</span></button></form>
+  </div>
+</div>
+{% else %}
+<div class="overview">
+  <section class="today">
+    <div class="sec-head">
+      <h2>{% if today['items'] %}{{ today['items'] | length }} thing{{ '' if today['items'] | length == 1 else 's' }} to do{% else %}Nothing needs you today{% endif %}</h2>
+      {% if today['items'] %}{{ recipe_buttons(recipes_plan, "Plan my day with Claude", small=True) if recipes_plan }}{% endif %}
+    </div>
+    {% if not today['items'] %}
+    <p class="none">No interviews, stuck candidates or follow-ups right now. You can choose what shows here in <a href="/settings">Settings</a>.</p>
+    {% endif %}
+    <ul class="items">
+    {% for i in today['items'] %}
+      <li class="item kind-{{ i.kind }}">
+        <div class="item-main">
+          <span class="kind">{{ {'interview':'Interview','suggestion':'Follow-up','stuck':'Stuck','thin':'Thin pipeline','stale':'Stale profile'}[i.kind] }}</span>
+          <a class="item-title" href="{{ '/candidates/' ~ i.candidate_id if i.candidate_id else '/jobs/' ~ i.job_id }}">{{ i.title }}</a>
+          <div class="fine">{% if i.kind == 'interview' %}{{ i.when | local }}{% if i.detail %} · {% endif %}{% endif %}{{ i.detail }}</div>
+        </div>
+        <div class="item-acts">
+          {% if i.kind == 'stuck' and i.next_stage %}
+          <form method="post" action="/actions/advance"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="stage" value="{{ i.next_stage }}"><button class="btn small" type="submit">Move to {{ i.next_stage }}</button></form>
+          {% elif i.kind == 'suggestion' %}
+          <form method="post" action="/actions/suggestions/{{ i.suggestion_id }}/done"><button class="btn small" type="submit">Done</button></form>
+          {% elif i.kind == 'thin' %}
+          <a class="btn small" href="/jobs/{{ i.job_id }}">Add people</a>
+          {% elif i.kind == 'stale' %}
+          <a class="btn small" href="/candidates/{{ i.candidate_id }}#refresh">Refresh</a>
+          {% endif %}
+          {% if i.kind != 'suggestion' %}
+          <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
+          {% endif %}
+        </div>
+      </li>
+    {% endfor %}
+    </ul>
+    {% if today.stale_more %}<p class="fine">And {{ today.stale_more }} more stale profile{{ '' if today.stale_more == 1 else 's' }}. <a href="/candidates?sort=updated&dir=asc">See the oldest</a></p>{% endif %}
+    {% if today.hidden %}<p class="fine">{{ today.hidden }} snoozed.</p>{% endif %}
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Open jobs</h2><a class="btn small" href="/jobs/new">New job</a></div>
+    {% if not jobs %}<p class="none">No open jobs. <a href="/jobs/new">Create one</a> to track a pipeline.</p>{% endif %}
+    <ul class="cards">
+    {% for j in jobs %}
+      <li><a class="card" href="/jobs/{{ j.id }}">
+        <div class="row1"><strong>{{ j.title }}</strong><span class="when">{{ j.active_count }} active{% if j.hired_count %} · {{ j.hired_count }} hired{% endif %}</span></div>
+        {% if j.company or j.location %}<div class="row2">{{ j.company or '' }}{% if j.company and j.location %} · {% endif %}{{ j.location or '' }}</div>{% endif %}
+        <div class="stagebar">{% for s in j.stage_counts if s.outcome == 'open' %}<span class="{{ 'has' if s.count }}">{{ s.name }} <b>{{ s.count }}</b></span>{% endfor %}</div>
+      </a></li>
+    {% endfor %}
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Recently updated</h2><a href="/candidates" class="small">All {{ total_all }} candidates in a table</a></div>
+    <ul class="cards">
+    {% for c in recent %}
+      <li><a class="card" href="/candidates/{{ c.id }}">
+        <div class="row1"><strong>{{ c.name }}</strong><span class="when">Updated {{ c.updated_at | ago }}</span></div>
+        <div class="row2">{{ sub(c) }}</div>
+      </a></li>
+    {% endfor %}
+    </ul>
+  </section>
+</div>
+{% endif %}

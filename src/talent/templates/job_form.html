@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit ' ~ j.title if j.id else 'New job' }} · Talent Search{% endblock %}
+{% block body %}
+<h1>{{ 'Edit ' ~ j.title if j.id else 'New job' }}</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form class="form" method="post" action="{{ '/jobs/' ~ j.id if j.id else '/jobs' }}">
+  <label>Job title<input type="text" name="title" value="{{ j.title or '' }}" required {{ 'autofocus' if not j.id }}></label>
+  <label>Company<input type="text" name="company" value="{{ j.company or '' }}"></label>
+  <label>Location<input type="text" name="location" value="{{ j.location or '' }}" placeholder="Remote, Austin, hybrid NYC"></label>
+  {% if j.id %}
+  <label>Status<select name="status">{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if j.status == s }}>{{ s | replace('_', ' ') | capitalize }}</option>{% endfor %}</select></label>
+  {% endif %}
+  <label class="wide">Description (the AI uses this when sourcing)<textarea name="description" rows="6">{{ j.description or '' }}</textarea></label>
+  {% if not j.id %}
+  <label class="wide">Stages, one per line (leave blank for the usual ones)
+    <textarea name="stages" rows="4" placeholder="Sourced&#10;Contacted&#10;Screening&#10;Interviewing&#10;Offer&#10;Hired&#10;Rejected&#10;Withdrawn"></textarea></label>
+  {% endif %}
+  <div class="actions"><button class="btn primary" type="submit">Save</button>
+    <a class="btn" href="{{ '/jobs/' ~ j.id if j.id else '/jobs' }}">Cancel</a></div>
+</form>
+
+{% if j.id and stages %}
+<h2 id="stages">Stages</h2>
+<p class="fine">Rename, reorder or add stages for this job. “Counts as” tells Talent Search whether a stage is still in play, a hire, or a no.</p>
+<table class="dense stages-table">
+  <thead><tr><th>Stage</th><th>Counts as</th><th>Order</th><th></th></tr></thead>
+  <tbody>
+  {% for s in stages %}
+  <tr>
+    <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline">
+      <input type="hidden" name="op" value="rename"><input type="hidden" name="stage" value="{{ s.name }}">
+      <input type="text" name="new_name" value="{{ s.name }}" aria-label="Rename {{ s.name }}"><button class="btn small" type="submit">Rename</button></form></td>
+    <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline">
+      <input type="hidden" name="op" value="outcome"><input type="hidden" name="stage" value="{{ s.name }}">
+      <select name="outcome" onchange="this.form.submit()" aria-label="{{ s.name }} counts as">{% for o in outcomes %}<option value="{{ o }}" {{ 'selected' if s.outcome == o }}>{{ {'open':'In play','hired':'Hired','lost':'Out'}[o] }}</option>{% endfor %}</select></form></td>
+    <td class="nowrap">{% for op, label in [('up', '↑'), ('down', '↓')] %}<form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="{{ op }}"><input type="hidden" name="stage" value="{{ s.name }}"><button class="btn small" type="submit" aria-label="Move {{ s.name }} {{ op }}">{{ label }}</button></form>{% endfor %}</td>
+    <td><form method="post" action="/jobs/{{ j.id }}/stages" class="inline"><input type="hidden" name="op" value="remove"><input type="hidden" name="stage" value="{{ s.name }}"><button class="link small" type="submit" title="Only works when nobody is in this stage">Remove</button></form></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<form method="post" action="/jobs/{{ j.id }}/stages" class="inline addstage">
+  <input type="hidden" name="op" value="add">
+  <input type="text" name="new_name" placeholder="New stage, like Take-home" required aria-label="New stage name">
+  <label class="inline-label">after <select name="after">{% for s in stages %}<option {{ 'selected' if loop.index == 3 }}>{{ s.name }}</option>{% endfor %}</select></label>
+  <button class="btn small primary" type="submit">Add stage</button>
+</form>
+<p><a href="/jobs/{{ j.id }}">Back to the pipeline</a></p>
+{% endif %}
+{% endblock %}

@@ -1,13 +1,20 @@
 {% extends "base.html" %}
 {% block body %}
-<form class="searchbar" action="/" method="get"
+{% set qp = request.query_params %}
+{% if qp.get('deleted') %}<p class="flash">Candidate deleted.</p>{% endif %}
+{% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab.</p>{% endif %}
+<form class="searchbar" action="/" method="get" role="search"
       hx-get="/" hx-target="#results" hx-push-url="true"
-      hx-trigger="input delay:120ms, submit">
-  <input type="search" name="q" value="{{ q }}" placeholder="Search skills, companies, titles, names…" autofocus autocomplete="off" aria-label="Search candidates">
-  <div class="filters">
-    <input type="text" name="title" value="{{ title }}" placeholder="Title contains" aria-label="Title filter">
-    <input type="text" name="location" value="{{ location }}" placeholder="Location contains" aria-label="Location filter">
-  </div>
+      hx-trigger="input delay:150ms, search, submit">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search skills, companies, titles, names, notes" {{ 'autofocus' if total_all }} autocomplete="off" aria-label="Search candidates">
+  <details class="filters-wrap" {{ 'open' if title or location or tag }}>
+    <summary>Filters</summary>
+    <div class="filters">
+      <input type="text" name="title" value="{{ title }}" placeholder="Title contains" aria-label="Title filter">
+      <input type="text" name="location" value="{{ location }}" placeholder="Location contains" aria-label="Location filter">
+      <input type="text" name="tag" value="{{ tag }}" placeholder="Has skill (exact)" aria-label="Skill filter">
+    </div>
+  </details>
 </form>
-<section id="results">{% include "_results.html" %}</section>
+<section id="results" aria-live="polite">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>
 {% endblock %}

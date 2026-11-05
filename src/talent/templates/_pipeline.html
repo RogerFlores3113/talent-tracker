@@ -1,0 +1,40 @@
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% set total = groups | sum(attribute='candidates', start=[]) | length %}
+{% if total == 0 %}
+<div class="empty"><h2>No one in this pipeline yet</h2><p>Search above to add people you already have, or source new ones with AI.</p></div>
+{% elif view == 'table' %}
+<div class="table-wrap"><table class="dense">
+  <thead><tr><th>Name</th><th>Title</th><th>Stage</th><th>In stage since</th><th>Last contacted</th></tr></thead>
+  {% for g in groups if g.candidates %}
+  <tbody class="group o-{{ g.outcome }}">
+    <tr class="group-head"><th colspan="5">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
+    {% for a in g.candidates %}
+    <tr>
+      <td><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a></td>
+      <td>{{ a.current_title or '' }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
+      <td>{% include "_stage_select.html" %}</td>
+      <td class="nowrap">{{ a.stage_changed_at | ago }}</td>
+      <td class="nowrap">{{ a.last_contacted_at | ago if a.last_contacted_at else 'never' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}
+</table></div>
+{% else %}
+<div class="board" role="list">
+  {% for g in groups %}
+  <section class="col o-{{ g.outcome }}" data-stage="{{ g.name }}" role="listitem" aria-label="{{ g.name }}">
+    <h3><span>{{ g.name }}</span><span class="muted">{{ g.candidates | length }}</span></h3>
+    {% for a in g.candidates %}
+    <div class="pc" draggable="true" data-cid="{{ a.candidate_id }}">
+      <a href="/candidates/{{ a.candidate_id }}"><strong>{{ a.candidate_name }}</strong></a>
+      {% if a.current_title %}<div class="fine">{{ a.current_title }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</div>{% endif %}
+      <div class="fine">{{ a.stage_changed_at | ago }} in stage</div>
+      {% include "_stage_select.html" %}
+    </div>
+    {% else %}<p class="fine drop-hint">Drop here</p>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</div>
+{% endif %}

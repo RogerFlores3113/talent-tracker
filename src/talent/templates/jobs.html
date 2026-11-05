@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Jobs · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>Jobs</h1><a class="btn primary" href="/jobs/new">New job</a></div>
+<nav class="tabs" aria-label="Job status">
+  {% for key, label in [('', 'All'), ('open', 'Open'), ('on_hold', 'On hold'), ('closed', 'Closed')] %}
+  <a href="/jobs{{ '?status=' ~ key if key }}" class="{{ 'on' if status == key }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+{% if not jobs %}
+<div class="empty"><h2>No jobs{{ ' here' if status }}</h2><p>A job holds a pipeline of candidates, with stages you can rename.</p>
+<p class="actions"><a class="btn primary" href="/jobs/new">Create a job</a></p></div>
+{% endif %}
+<ul class="cards">
+{% for j in jobs %}
+  <li><a class="card" href="/jobs/{{ j.id }}">
+    <div class="row1"><strong>{{ j.title }}</strong><span class="when">{% if j.status != 'open' %}<span class="badge">{{ j.status | replace('_', ' ') }}</span> {% endif %}{{ j.active_count }} active · {{ j.pipeline_count }} total</span></div>
+    {% if j.company or j.location %}<div class="row2">{{ j.company or '' }}{% if j.company and j.location %} · {% endif %}{{ j.location or '' }}</div>{% endif %}
+    <div class="stagebar">{% for s in j.stage_counts %}<span class="{{ 'has' if s.count }} o-{{ s.outcome }}">{{ s.name }} <b>{{ s.count }}</b></span>{% endfor %}</div>
+  </a></li>
+{% endfor %}
+</ul>
+{% endblock %}

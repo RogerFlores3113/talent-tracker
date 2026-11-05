@@ -79,3 +79,12 @@ def test_dev_launch_spec_points_at_this_python(monkeypatch, tmp_path):
 
 def test_generic_snippet_is_valid_json():
     assert "talent-search" in json.loads(integrations.generic_json_snippet(SPEC))["mcpServers"]
+
+
+def test_lmstudio_uses_same_shape_and_keeps_other_servers(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    out = integrations.connect_lmstudio(path, SPEC)
+    data = json.loads(path.read_text())
+    assert set(data["mcpServers"]) == {"other", "talent-search"} and out["backup"]
+    assert integrations.lmstudio_connected(path)

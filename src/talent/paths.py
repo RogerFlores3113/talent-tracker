@@ -42,3 +42,19 @@ def resource_dir() -> Path:
     if is_frozen():
         return Path(getattr(sys, "_MEIPASS")) / "talent"
     return Path(__file__).parent
+
+
+DEFAULT_PORT = 8765
+
+
+def port_file() -> Path:
+    return data_dir() / "app.port"
+
+
+def app_url(path: str = "/") -> str:
+    """Where the app window is (or will be) served. The app records its port when it starts."""
+    try:
+        port = int(port_file().read_text().strip())
+    except (OSError, ValueError):
+        port = DEFAULT_PORT
+    return f"http://127.0.0.1:{port}{path}"

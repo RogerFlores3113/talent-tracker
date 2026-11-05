@@ -112,10 +112,10 @@ def test_jobs_and_pipeline(store):
     c = store.add_candidate(name="Pat")
     job = store.add_job("Backend Engineer", company="Acme")
     a = store.add_to_pipeline(c["id"], job["id"])
-    assert a["stage"] == "sourced"
+    assert a["stage"] == "Sourced"
     assert store.add_to_pipeline(c["id"], job["id"])["id"] == a["id"]  # idempotent
     moved = store.move_stage(c["id"], job["id"], "interviewing", notes="Onsite Tuesday")
-    assert moved["stage"] == "interviewing" and moved["notes"] == "Onsite Tuesday"
+    assert moved["stage"] == "Interviewing" and moved["notes"] == "Onsite Tuesday"
     jobs = store.list_jobs()
     assert jobs[0]["pipeline_count"] == 1 and jobs[0]["active_count"] == 1
     store.move_stage(c["id"], job["id"], "hired")

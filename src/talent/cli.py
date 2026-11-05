@@ -14,9 +14,7 @@ import webbrowser
 
 import httpx
 
-from .paths import data_dir, db_path, is_frozen
-
-DEFAULT_PORT = 8765
+from .paths import DEFAULT_PORT, data_dir, db_path, is_frozen, port_file
 
 
 def _setup_logging(to_stderr: bool) -> None:
@@ -61,6 +59,10 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         return
     port = _pick_port(port)
     app = create_app(Store(db_path()))
+    try:  # so the AI app's "Open in Talent Search" links point at the right port
+        port_file().write_text(str(port))
+    except OSError:
+        pass
     url = f"http://127.0.0.1:{port}/"
     if open_browser:
         threading.Timer(1.2, webbrowser.open, args=[url]).start()
@@ -80,6 +82,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
     sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
+    sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
+    imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
+    imp.add_argument("file")
+    exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
+    exp.add_argument("file")
     args = parser.parse_args(argv)
     cmd = args.cmd or "app"
 
@@ -108,9 +115,29 @@ def main(argv: list[str] | None = None) -> None:
         if index is None:
             sys.exit("Set TYPESENSE_URL and TYPESENSE_API_KEY first. Built-in search needs no index.")
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
-    elif cmd in ("connect-claude", "connect-codex"):
+    elif cmd in ("import-csv", "export-csv"):
+        from pathlib import Path
+
+        from . import importers
+        from .store import Store
+
+        store = Store(db_path())
+        if cmd == "export-csv":
+            Path(args.file).write_text(importers.export_csv(store), encoding="utf-8", newline="")
+            print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
+        else:
+            header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
+            mapping = importers.guess_mapping(header)
+            if not any(m in ("name", "first_name", "last_name") for m in mapping):
+                sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
+            r = importers.import_rows(store, header, rows, mapping)
+            print(f"Added {r['added']}, updated {r['updated']}, skipped {len(r['skipped'])}.")
+            for line in r["skipped"][:20]:
+                print("  " + line)
+    elif cmd in ("connect-claude", "connect-codex", "connect-lmstudio"):
         from . import integrations
 
-        fn = integrations.connect_claude if cmd == "connect-claude" else integrations.connect_codex
+        fn = {"connect-claude": integrations.connect_claude, "connect-codex": integrations.connect_codex,
+              "connect-lmstudio": integrations.connect_lmstudio}[cmd]
         result = fn()
         print(f"Updated {result['path']}. Restart the app to load Talent Search.")

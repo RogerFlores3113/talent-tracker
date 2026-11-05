@@ -1,16 +1,27 @@
 # Talent Search
 
 A candidate database for recruiters that lives on your own computer. Search it
-instantly from a simple app window, and let Claude Desktop or Codex find, save
-and update candidates for you in plain English.
+instantly from a simple app window, track each job's pipeline, and let Claude
+Desktop, Codex or a local model in LM Studio find, save and update candidates
+for you in plain English.
 
 - **Download, double-click, done.** No terminal, no accounts, no servers.
 - **Fast search** across names, titles, companies, locations and each person's
   "about" summary, with highlights. Shorthand like `sf`, `nyc`, `swe`, `ml` just works.
-- **Works with your AI app.** One button connects Claude Desktop or Codex.
-  Then ask things like *"Save this person as a candidate"* (paste a profile)
-  or *"Who do I have in Austin with Rust experience?"*
-- **Private.** Everything is stored in one file on your computer.
+- **Works with your AI app.** One button connects Claude Desktop, Codex or LM Studio.
+  Then ask things like *"Save this person to Talent Search"* (paste a LinkedIn link)
+  or *"Who do I have in Austin with Rust experience?"* In Claude, results show up
+  as cards and a pipeline board right in the chat.
+- **Today page.** Upcoming interviews, candidates stuck in a stage, thin pipelines,
+  stale profiles and follow-ups your AI suggested. Turn each one on or off.
+- **Jobs with your own stages.** Rename and add stages per job, then drag people
+  across a board or work in a table grouped by stage.
+- **Ready-made AI recipes.** One click copies a prompt like "Source candidates for
+  this job" and opens Claude.
+- **Get data in and out.** CSV import with column matching, CSV export, a database
+  backup, and paste-a-resume.
+- **Private.** Everything is stored in one file on your computer. Talent Search uses
+  none of your data and has no telemetry. The AI can never delete anything.
 
 ## For recruiters
 
@@ -18,9 +29,9 @@ and update candidates for you in plain English.
 2. Open **Talent Search**. It opens in your web browser.
    - Mac: the first time, right-click the app and choose **Open** (it isn't notarized yet).
    - Windows: if SmartScreen appears, choose **More info**, then **Run anyway** (not code-signed yet).
-3. Go to **Connect AI**, press **Connect to Claude** or **Connect to Codex**,
-   then quit and reopen that app.
-4. No candidates yet? Press **load sample candidates** to try it out.
+3. Go to **Connect AI**, press **Connect Claude**, **Connect Codex** or
+   **Connect LM Studio**, then quit and reopen that app.
+4. No candidates yet? Press **Try it with sample data**.
 
 Your data is in `~/Library/Application Support/Talent Search` (Mac) or
 `%LOCALAPPDATA%\Talent Search` (Windows).
@@ -35,7 +46,8 @@ uv run talent                # start the app and open the browser (http://127.0.
 uv run talent serve          # server only
 uv run talent sample-data    # load made-up candidates
 uv run talent mcp            # MCP server over stdio (AI apps run this)
-uv run talent connect-claude # or connect-codex: write the AI app's MCP config
+uv run talent connect-claude # or connect-codex / connect-lmstudio: write the AI app's MCP config
+uv run talent import-csv people.csv   # or export-csv out.csv
 uv run pytest -q
 ```
 
@@ -61,12 +73,16 @@ typo tolerance and facets, set `TYPESENSE_URL` and `TYPESENSE_API_KEY`, then run
 
 ```
 src/talent/
-  store.py            SQLite schema, migrations, candidates/jobs/pipeline, FTS5 search
+  store.py            SQLite schema, migrations, candidates/jobs/stages/timeline, FTS5 search
+  actions.py          Today's action items (computed on read, toggled in Settings)
+  importers.py        CSV import/export and the local paste-a-resume parser
+  recipes.py          ready-made AI prompts, Claude deep link, GitHub issue links
+  mcp_views.py        MCP Apps in-chat views (candidate, results, board, today)
   typesense_index.py  optional Typesense mirror (outbox drain) + search fallback
-  mcp_server.py       MCP tools for Claude Desktop / Codex / local models
+  mcp_server.py       MCP tools, prompts and view resources (no delete tools)
   web.py              FastAPI app (HTMX pages + JSON API), localhost-only guard
-  integrations.py     one-click Claude Desktop / Codex config
-  cli.py              entry point: app (default), serve, mcp, sample-data, reindex
+  integrations.py     one-click Claude Desktop / Codex / LM Studio config
+  cli.py              entry point: app (default), serve, mcp, sample-data, import/export, reindex
 packaging/            PyInstaller spec, entry script, MCP smoke test
 docs/DESIGN.md        architecture, data model, roadmap, hosting research
 ```

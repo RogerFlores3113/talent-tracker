@@ -1,16 +1,42 @@
 {% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons %}
+{% block title %}{{ 'Edit ' ~ c.name if c.id else 'Add a candidate' }} · Talent Search{% endblock %}
 {% block body %}
-<h1>{{ 'Edit ' ~ c.name if c.id else 'Add a candidate' }}</h1>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if not c.id and not from_paste %}
+<h1>Add candidates</h1>
+<div class="options">
+  <a class="option" href="/connect"><strong>From LinkedIn, with your AI app</strong><span>Paste a profile link into Claude and say “save this person to Talent Search”.</span></a>
+  <a class="option" href="/paste"><strong>Paste a resume or profile</strong><span>We fill what we can. You check it before it's saved.</span></a>
+  <a class="option" href="/import"><strong>Import a CSV</strong><span>From Excel, Google Sheets or another tracker.</span></a>
+  <a class="option on" href="#form"><strong>Type it in</strong><span>The form below.</span></a>
+</div>
+<h2 id="form">Type it in</h2>
+{% elif from_paste %}
+<h1>Check the details</h1>
+<p class="lead">We filled in what we could find. Fix anything that's off, then save.</p>
+{% if dupe %}<p class="flash warn">This looks like <a href="/candidates/{{ dupe.id }}">{{ dupe.name }}</a>, who is already saved. Saving will add these details to their profile.</p>{% endif %}
+<details class="panel"><summary>Rather let AI read the whole thing?</summary>
+  <p class="fine">Claude fills every field, including work history and skills.</p>
+  {{ recipe_buttons(prompt, "Do it with Claude") }}
+</details>
+{% else %}
+<h1>Edit {{ c.name }}</h1>
+{% endif %}
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <form class="form" method="post" action="{{ '/candidates/' ~ c.id if c.id else '/candidates' }}">
+  {% if job_id %}<input type="hidden" name="job_id" value="{{ job_id }}">{% endif %}
   {% for f, label, kind in [
       ('name','Name','text'), ('current_title','Current title','text'), ('current_company','Company','text'),
       ('location','Location','text'), ('email','Email','email'), ('phone','Phone','tel'),
-      ('linkedin_url','LinkedIn URL','url'), ('website','Website','text'), ('tags','Tags (comma separated)','text'),
-      ('source','Where you found them','text')] %}
-  <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ c[f] or '' }}" {{ 'required' if f == 'name' }}></label>
+      ('linkedin_url','LinkedIn URL','text'), ('website','Website or GitHub','text'),
+      ('source','Where you found them','text'), ('last_contacted_at','Last contacted (date)','date')] %}
+  {% set v = c[f] or '' %}
+  <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ v[:10] if kind == 'date' else v }}" {{ 'required autofocus' if f == 'name' and not c.id }}></label>
   {% endfor %}
-  <label class="wide">About (what search looks at most)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
+  <label class="wide">Skills (comma separated)<input type="text" name="tags" value="{{ c.tags | join(', ') if c.tags is not string else c.tags }}" placeholder="python, sql, leadership"></label>
+  <label class="wide">About (search looks here first)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
+  <label class="wide">Work history, one role per line: Title | Company | Start | End
+    <textarea name="work_history" rows="4" placeholder="Senior Engineer | Stripe | 2021 | now">{{ history_text }}</textarea></label>
   <div class="actions"><button class="btn primary" type="submit">Save</button>
     <a class="btn" href="{{ '/candidates/' ~ c.id if c.id else '/' }}">Cancel</a></div>
 </form>

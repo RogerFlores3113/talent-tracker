@@ -63,19 +63,18 @@ def _backup(path: Path) -> Path | None:
     return dest
 
 
-def connect_claude(path: Path | None = None, spec: LaunchSpec | None = None) -> dict[str, Any]:
-    path = path or claude_config_path()
-    spec = spec or mcp_launch_spec()
+def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]:
+    """Add or refresh our entry in an `mcpServers` JSON file, keeping everything else."""
     config: dict[str, Any] = {}
     if path.exists() and path.read_text(encoding="utf-8").strip():
         try:
             config = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Claude's settings file isn't valid JSON, so we left it alone ({exc.msg}, line {exc.lineno})."
+                f"{app_name}'s settings file isn't valid JSON, so we left it alone ({exc.msg}, line {exc.lineno})."
             ) from exc
         if not isinstance(config, dict):
-            raise ValueError("Claude's settings file has an unexpected shape, so we left it alone.")
+            raise ValueError(f"{app_name}'s settings file has an unexpected shape, so we left it alone.")
     backup = _backup(path)
     servers = config.setdefault("mcpServers", {})
     already = servers.get(SERVER_KEY) == spec.as_json_entry()
@@ -87,12 +86,34 @@ def connect_claude(path: Path | None = None, spec: LaunchSpec | None = None) -> 
     return {"path": str(path), "backup": str(backup) if backup else None, "already_connected": already}
 
 
-def claude_connected(path: Path | None = None) -> bool:
-    path = path or claude_config_path()
+def _json_connected(path: Path) -> bool:
     try:
         return SERVER_KEY in json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {})
     except (OSError, ValueError, AttributeError):
         return False
+
+
+def connect_claude(path: Path | None = None, spec: LaunchSpec | None = None) -> dict[str, Any]:
+    return _connect_json(path or claude_config_path(), spec or mcp_launch_spec(), "Claude")
+
+
+def claude_connected(path: Path | None = None) -> bool:
+    return _json_connected(path or claude_config_path())
+
+
+# -------------------------------------------------------------- LM Studio
+def lmstudio_config_path() -> Path:
+    """LM Studio (0.3.17+) reads MCP servers from ~/.lmstudio/mcp.json, same shape as Claude's."""
+    home = os.environ.get("LMSTUDIO_HOME")
+    return (Path(home) if home else Path.home() / ".lmstudio") / "mcp.json"
+
+
+def connect_lmstudio(path: Path | None = None, spec: LaunchSpec | None = None) -> dict[str, Any]:
+    return _connect_json(path or lmstudio_config_path(), spec or mcp_launch_spec(), "LM Studio")
+
+
+def lmstudio_connected(path: Path | None = None) -> bool:
+    return _json_connected(path or lmstudio_config_path())
 
 
 # ------------------------------------------------------------------ Codex

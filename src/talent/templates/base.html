@@ -1,4 +1,4 @@
-<!doctype html>
+{% from "_macros.html" import recipe_buttons %}<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -7,16 +7,54 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
+{% set path = request.url.path %}
+<body class="{% block bodyclass %}{% endblock %}">
   <header class="top">
     <a class="brand" href="/">Talent Search</a>
-    <nav>
-      <a href="/" class="{{ 'on' if request.url.path == '/' }}">Candidates</a>
-      <a href="/candidates/new">Add candidate</a>
-      <a href="/connect" class="{{ 'on' if request.url.path == '/connect' }}">Connect AI</a>
+    <nav aria-label="Main">
+      <a href="/" class="{{ 'on' if path == '/' }}">Today</a>
+      <a href="/candidates" class="{{ 'on' if path.startswith('/candidates') and path != '/candidates/new' }}">Candidates</a>
+      <a href="/jobs" class="{{ 'on' if path.startswith('/jobs') }}">Jobs</a>
+      <a href="/candidates/new" class="{{ 'on' if path in ('/candidates/new', '/paste', '/import') }}">Add</a>
+      <a href="/recipes" class="{{ 'on' if path == '/recipes' }}">AI recipes</a>
+      <a href="/connect" class="{{ 'on' if path == '/connect' }}">Connect AI</a>
+      <a href="/settings" class="{{ 'on' if path == '/settings' }}">Settings</a>
     </nav>
   </header>
   <main>{% block body %}{% endblock %}</main>
-  <footer class="foot">Your data stays on this computer.</footer>
+  <footer class="foot">
+    Everything stays on this computer. Talent Search uses none of your data and has no telemetry.
+    <a href="/privacy">Privacy</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a> · v{{ version }}
+  </footer>
+  <script>
+  // AI recipes: copy the prompt, then try to open Claude with it filled in.
+  function copyText(text, note, msg) {
+    const done = () => { if (note) note.textContent = msg; };
+    if (navigator.clipboard && window.isSecureContext !== false) {
+      navigator.clipboard.writeText(text).then(done, () => { fallbackCopy(text); done(); });
+    } else { fallbackCopy(text); done(); }
+  }
+  function fallbackCopy(text) {
+    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t);
+    t.select(); try { document.execCommand("copy"); } catch (e) {} t.remove();
+  }
+  function promptFor(btn) {
+    let p = btn.dataset.prompt || "";
+    const src = btn.dataset.fill && document.getElementById(btn.dataset.fill);
+    if (src && src.value.trim()) p = p.replace("[paste the resume or profile here]", src.value.trim());
+    return p;
+  }
+  function runRecipe(btn) {
+    const p = promptFor(btn);
+    copyText(p, btn.closest(".recipe-actions").querySelector(".recipe-note"),
+      "Prompt copied. If Claude didn't open, open it and paste (Ctrl+V or Cmd+V).");
+    window.location.href = "claude://claude.ai/new?q=" + encodeURIComponent(p);
+  }
+  function copyRecipe(btn) {
+    copyText(promptFor(btn), btn.closest(".recipe-actions").querySelector(".recipe-note"),
+      "Copied. Paste it into Claude, Codex, ChatGPT or LM Studio.");
+  }
+  </script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons %}
+{% block title %}{{ job.title }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+  </div>
+  <div class="actions-inline">
+    <nav class="seg" aria-label="View">
+      <a href="/jobs/{{ job.id }}?view=board" class="{{ 'on' if view == 'board' }}">Board</a>
+      <a href="/jobs/{{ job.id }}?view=table" class="{{ 'on' if view == 'table' }}">Table</a>
+    </nav>
+    <a class="btn" href="/jobs/{{ job.id }}/edit">Edit job and stages</a>
+  </div>
+</div>
+
+<div class="addbar">
+  <form method="get" action="/jobs/{{ job.id }}" hx-get="/jobs/{{ job.id }}" hx-target="#add-results" hx-trigger="input delay:200ms, search, submit" class="inline">
+    <input type="search" name="q" value="{{ q }}" placeholder="Add someone you already have: search by name or skill" aria-label="Find a candidate to add" autocomplete="off">
+  </form>
+  <a class="btn small" href="/candidates/new?job_id={{ job.id }}">Add someone new</a>
+  <details class="ai-source"><summary>Find new people with AI</summary>
+    <p class="fine">Claude searches your saved candidates first, then researches new ones and asks you before saving anyone.</p>
+    {{ recipe_buttons(prompt, "Source with Claude") }}
+  </details>
+</div>
+<div id="add-results">{% include "_add_results.html" %}</div>
+
+<div id="pipeline">{% include "_pipeline.html" %}</div>
+{% if job.description %}<details class="panel"><summary>Job description</summary><p class="about">{{ job.description }}</p></details>{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+// Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.
+document.addEventListener("dragstart", e => {
+  const card = e.target.closest && e.target.closest("[data-cid]");
+  if (!card) return;
+  e.dataTransfer.setData("text/plain", card.dataset.cid);
+  e.dataTransfer.effectAllowed = "move";
+  card.classList.add("dragging");
+});
+document.addEventListener("dragend", e => { const c = e.target.closest && e.target.closest("[data-cid]"); if (c) c.classList.remove("dragging"); });
+document.addEventListener("dragover", e => { const col = e.target.closest && e.target.closest("[data-stage]"); if (col) { e.preventDefault(); col.classList.add("over"); } });
+document.addEventListener("dragleave", e => { const col = e.target.closest && e.target.closest("[data-stage]"); if (col && !col.contains(e.relatedTarget)) col.classList.remove("over"); });
+document.addEventListener("drop", e => {
+  const col = e.target.closest && e.target.closest("[data-stage]");
+  if (!col) return;
+  e.preventDefault(); col.classList.remove("over");
+  const cid = e.dataTransfer.getData("text/plain");
+  if (!cid) return;
+  htmx.ajax("POST", "/jobs/{{ job.id }}/move", {target: "#pipeline", swap: "innerHTML",
+    values: {candidate_id: cid, stage: col.dataset.stage, view: "board"}});
+});
+</script>
+{% endblock %}

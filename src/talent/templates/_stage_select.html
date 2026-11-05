@@ -1,0 +1,5 @@
+<form method="post" action="/jobs/{{ job.id }}/move" hx-post="/jobs/{{ job.id }}/move" hx-target="#pipeline" hx-trigger="change" class="stage-form">
+  <input type="hidden" name="candidate_id" value="{{ a.candidate_id }}"><input type="hidden" name="view" value="{{ view }}">
+  <select name="stage" aria-label="Stage for {{ a.candidate_name }}">{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select>
+  <noscript><button class="btn small" type="submit">Move</button></noscript>
+</form>

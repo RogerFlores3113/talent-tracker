@@ -1,0 +1,15 @@
+{% macro recipe_buttons(prompt, label="Do it with Claude", fill=None, small=False) -%}
+<div class="recipe-actions{{ ' small' if small }}">
+  <button type="button" class="btn ai" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} onclick="runRecipe(this)">{{ label }}</button>
+  <button type="button" class="btn ghost" data-prompt="{{ prompt }}" {% if fill %}data-fill="{{ fill }}"{% endif %} onclick="copyRecipe(this)">Copy prompt</button>
+  <span class="recipe-note fine" role="status"></span>
+</div>
+{%- endmacro %}
+
+{% macro chips(tags, link=True) -%}
+{% if tags %}<span class="chips">{% for t in tags %}{% if link %}<a class="chip" href="/candidates?tag={{ t | urlencode }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
+{%- endmacro %}
+
+{% macro sub(c) -%}
+{{ c.current_title or '' }}{% if c.current_company %}{{ ' at ' if c.current_title else '' }}{{ c.current_company }}{% endif %}{% if c.location %}{{ ' · ' if c.current_title or c.current_company }}{{ c.location }}{% endif %}
+{%- endmacro %}
