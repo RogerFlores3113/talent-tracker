@@ -73,6 +73,7 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
     days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
              "loops": []} for i in range(7)]
     loops = []
+    chase = _chase_pairs(store, {(t["candidate_id"], t.get("job_id")) for t in rows})
     for g in actions.group_loops(rows):
         by_day: dict[date, list[dict[str, Any]]] = {}
         for t in g:  # a session moved to another day shows on that day, still marked as part of its loop
@@ -80,12 +81,12 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
         first = g[0]
         loop = {"candidate_id": first["candidate_id"], "name": first["candidate_name"], "job_id": first.get("job_id"),
                 "job": actions.job_label(first.get("job_title"), first.get("job_company")) if first.get("job_title")
-                else None, "size": len(g), "sessions": [_owing(t, now) for t in g]}
+                else None, "size": len(g), "sessions": [_owing(t, now, chase) for t in g]}
         loops.append(loop)
         for d, ts in by_day.items():
             col = next((c for c in days if c["day"] == d), None)
             if col is not None:
-                col["loops"].append({**loop, "sessions": [_owing(t, now) for t in ts],
+                col["loops"].append({**loop, "sessions": [_owing(t, now, chase) for t in ts],
                                      "split": len(ts) < len(g)})
     load: dict[str, dict[str, Any]] = {}
     for t in rows:
@@ -108,12 +109,30 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
             "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold())), "owed": owed}
 
 
-def _owing(t: dict[str, Any], now_iso: str) -> dict[str, Any]:
+def _chase_pairs(store: Store, pairs: set[tuple[int, Any]]) -> set[tuple[int, Any]]:
+    """Of these (candidate, job) pairs, the ones whose feedback is still worth asking for: the person is in play
+    on an open job, or the session names no job. A closed req or someone hired or out owes nobody feedback."""
+    out = {p for p in pairs if p[1] is None}
+    jobs = {p[1] for p in pairs if p[1] is not None}
+    if not jobs:
+        return out
+    marks = ", ".join("?" * len(jobs))
+    live = {(r["candidate_id"], r["job_id"]) for r in store._rows(
+        f"""SELECT a.candidate_id, a.job_id FROM applications a JOIN jobs j ON j.id = a.job_id
+            JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
+            WHERE a.job_id IN ({marks}) AND j.status = 'open' AND s.outcome = 'open'""", tuple(jobs))}
+    return out | (pairs & live)
+
+
+def _owing(t: dict[str, Any], now_iso: str, chase: set[tuple[int, Any]] | None = None) -> dict[str, Any]:
     """A session as the week lists it, with needs_outcome (it has taken place and nobody said how it went) and
-    owed (the named interviewers who have given no feedback or verdict on it yet)."""
+    owed (the named interviewers who have given no feedback or verdict on it yet, while it's still worth asking:
+    see _chase_pairs)."""
     x = actions._session(t, now_iso)
     past = x["started"] and x["status"] == "scheduled"
-    return {**x, "needs_outcome": past, "owed": owed_by(t) if x["started"] and x["status"] != "cancelled" else []}
+    asks = chase is None or (t["candidate_id"], t.get("job_id")) in chase
+    return {**x, "needs_outcome": past,
+            "owed": owed_by(t) if asks and x["started"] and x["status"] != "cancelled" else []}
 
 
 def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -345,13 +364,15 @@ def mailto(who: str, subject: str, body: str) -> str:
 
 
 def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None = None,
-                  hours: int = CHASE_HOURS, days: int = CHASE_DAYS) -> list[dict[str, Any]]:
+                  hours: int = CHASE_HOURS, days: int = CHASE_DAYS, recent: bool = False) -> list[dict[str, Any]]:
     """Loops with feedback still owed: sessions at least `hours` ago and at most `days` ago, for people still in
     play on an open job, where a named interviewer has given no feedback or verdict. One row per loop:
     {key, candidate_id, name, job_id, job, day, at, owed: [{name, email, session, interview_id, subject, body,
-    mailto}]}, oldest first."""
+    mailto, chased}]}, oldest first. recent=True also lists sessions that took place under `hours` ago, as Decide
+    does, each owed entry with chased False (Today doesn't ask for those yet)."""
     now = now or datetime.now(timezone.utc)
-    hi = (now - timedelta(hours=hours)).replace(microsecond=0).isoformat()
+    due = (now - timedelta(hours=hours)).replace(microsecond=0).isoformat()
+    hi = now.replace(microsecond=0).isoformat() if recent else due
     lo = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
     where = "AND t.job_id = ?" if job_id is not None else "AND t.job_id IS NOT NULL"
     rows = store._rows(
@@ -376,7 +397,7 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
                 subject, body = request_text(who, first["candidate_name"], session, day)
                 owed.append({"name": display_name(who), "email": email_of(who), "session": session,
                              "interview_id": t["id"], "subject": subject, "body": body,
-                             "mailto": mailto(who, subject, body)})
+                             "mailto": mailto(who, subject, body), "chased": t["at"] <= due})
         if owed:
             out.append({"key": f"feedback_owed:{first['candidate_id']}:{first['job_id']}:"
                                f"{actions.loop_day(first).isoformat()}",
@@ -402,15 +423,21 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
 
 def feedback_owed_text(rows: list[dict[str, Any]]) -> str:
     """list_feedback_owed's text: each loop and who still owes feedback, with the request to send."""
+    rule = (f"This covers sessions from the last {CHASE_DAYS} days on open jobs. Today asks for feedback "
+            f"{CHASE_HOURS} hours after a session; one newer than that is listed as not chased yet.")
     if not rows:
-        return "Nobody owes interview feedback right now."
+        return "Nobody owes interview feedback right now. " + rule
     n = sum(len(r["owed"]) for r in rows)
-    lines = [f"{n} feedback request{'' if n == 1 else 's'} owed across {len(rows)} loop{'' if len(rows) == 1 else 's'}. "
-             "Draft the nudges for the recruiter to send from their own mail. Nothing is sent by Talent Search."]
+    fresh = sum(1 for r in rows for o in r["owed"] if not o.get("chased", True))
+    lines = [f"{n} feedback request{'' if n == 1 else 's'} owed across {len(rows)} loop{'' if len(rows) == 1 else 's'}"
+             + (f" ({fresh} not chased yet)" if fresh else "") + ". Draft the nudges for the recruiter to send from "
+             "their own mail. Nothing is sent by Talent Search. " + rule]
     for r in rows:
         lines.append(f"## {r['name']} (candidate id {r['candidate_id']}), {r['job']}, {r['day']}")
         lines += [f"- {o['name']}" + (f" <{o['email']}>" if o["email"] else "") + f" owes feedback on {o['session']} "
-                  f"(interview id {o['interview_id']})" for o in r["owed"]]
+                  f"(interview id {o['interview_id']})"
+                  + ("" if o.get("chased", True) else f", not chased yet (under {CHASE_HOURS} hours ago)")
+                  for o in r["owed"]]
     return "\n".join(lines)
 
 

@@ -1793,7 +1793,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, f"/jobs/{job_id}/decide", error=str(exc))
         notice = f"Recorded: {res['text']}." + (
             f" Cancelled {res['cancelled']} interview{'' if res['cancelled'] == 1 else 's'} still ahead." if res["cancelled"]
-            else "") + " You can undo it under Changes."
+            else "") + (f" Added {res['todos']} to-do{'' if res['todos'] == 1 else 's'} on Today to let them know."
+                        if res.get("todos") else "") + " You can undo it under Changes."
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/feedback")
@@ -2396,8 +2397,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         values: dict[str, str] = {}
         errors: dict[str, str] = {}
-        for key, _, _ in actions.FLAGS:
-            values[key] = "1" if form.get(key) else "0"
+        whole = bool(form.get("flags_shown"))  # the Settings page sends its Today boxes, ticked or not
+        for key, _, _ in actions.FLAGS:  # anyone else changes only the boxes they send
+            if whole or key in form:
+                values[key] = "1" if str(form.get(key) or "") not in ("", "0", "false", "off") else "0"
         for key, _ in actions.THRESHOLDS:
             raw = str(form.get(key) or "").strip()
             if not raw:

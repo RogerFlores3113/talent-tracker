@@ -1288,15 +1288,18 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     def list_feedback_owed(job_id: int | None = None) -> CallToolResult:
-        """Interviewers who still owe feedback, a day or more after a session (up to two weeks back), for people
-        still in play on an open job. One entry per loop, each owed interviewer with a short request (subject
-        and body) the recruiter can send from their own mail. Draft the nudges for the recruiter; Talent Search
-        sends nothing. Feedback saved with add_interview_feedback clears the entry."""
-        rows = interviews.feedback_owed(store, job_id=job_id)
+        """Interviewers who still owe feedback on sessions that have taken place (up to two weeks back), for
+        people still in play on an open job, the same people Decide and compare_finalists name. A session under a
+        day old is listed with chased false: Today doesn't ask for it yet, so a nudge can wait. One entry per loop,
+        each owed interviewer with a short request (subject and body) the recruiter can send from their own mail.
+        Draft the nudges for the recruiter; Talent Search sends nothing. Feedback saved with add_interview_feedback
+        clears the entry."""
+        rows = interviews.feedback_owed(store, job_id=job_id, recent=True)
         data = {"data_note": DATA_NOTE, "loops": [{
             **{k: r[k] for k in ("candidate_id", "name", "job_id", "job", "day")},
-            "owed": [_slim({k: o[k] for k in ("name", "email", "session", "interview_id", "subject", "body")})
-                     for o in r["owed"]]} for r in rows], "app_url": app_url("/interviews")}
+            "owed": [_slim({k: o[k] for k in ("name", "email", "session", "interview_id", "subject", "body",
+                                              "chased")}) for o in r["owed"]]} for r in rows],
+            "app_url": app_url("/interviews")}
         return _result(DATA_NOTE + "\n" + interviews.feedback_owed_text(rows), data)
 
     @mcp.tool(annotations=READ, meta=tool_meta("decide"))
@@ -1659,6 +1662,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup if hiring_manager is None],
             "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
             "app_url": app_url("/jobs")}
+        if not rollup and not held and ((company or "").strip() or (hiring_manager or "").strip()):
+            data["closed_recently"] = [{"job_id": j["id"], "title": j["title"], "company": j.get("company"),
+                                        "hiring_manager": j.get("hiring_manager"), "hired": j["hired"]}
+                                       for j in actions.recently_closed(store, company, hiring_manager)]
         if hiring_manager is not None or (company is None and actions.by_manager(store)):
             data["hiring_managers"] = [
                 {"hiring_manager": r["manager"], "open_jobs": len(r["jobs"]), "active": r["active"],

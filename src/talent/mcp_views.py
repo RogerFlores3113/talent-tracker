@@ -288,7 +288,7 @@ function render(d){
  const ps=d.people||[];
  if(!ps.length){wrap.append(el("p",{class:"empty"},"Nobody has interviewed or reached a late stage yet."));return wrap}
  const board=el("div",{class:"board"});
- for(const p of ps){const sub=[p.stage,p.days_in_process!=null?p.days_in_process+" days in process":null].filter(Boolean).join(" · ");
+ for(const p of ps){const sub=[p.stage,p.days_in_process!=null?p.days_in_process+(p.days_in_process==1?" day":" days")+" in process":null].filter(Boolean).join(" · ");
   board.append(el("div",{class:"col"},el("h3",{},el("span",{},p.name),appLink(p.app_url,"Open")),
    el("div",{class:"small muted"},sub),p.source?el("div",{class:"small muted"},"Source: "+p.source+(p.referrer?" (referred by "+p.referrer+")":"")):null,
    (p.interviews||[]).length?(p.interviews||[]).map(iv):el("div",{class:"small muted"},"No interviews logged."),
