@@ -42,5 +42,5 @@
   {% else %}<ul class="plain">{% for d in due.later %}<li><a href="/clients/{{ d.slug }}">{{ d.name }}</a> <span class="muted">{{ d.day }}</span></li>{% endfor %}</ul>{% endfor %}
 </section>
 {% endif %}
-<p class="fine">An update is due from its day each week until you mark it as sent. Set a {{ 'company' if own else 'client' }}'s update day on its page{% if due.no_day %}; {{ due.no_day }} {{ 'has' if due.no_day == 1 else 'have' }} none yet{% endif %}. Email opens your own mail app; nothing is sent from here.</p>
+<p class="fine">An update is due from its day each week until you mark it as sent. {{ 'Set the day hiring manager updates are due on the company page' if own else "Set a client's update day on its page" }}{% if due.no_day %}; {{ due.no_day }} {{ 'has' if due.no_day == 1 else 'have' }} none yet{% endif %}. Email opens your own mail app; nothing is sent from here.</p>
 {% endblock %}

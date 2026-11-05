@@ -136,7 +136,8 @@ def test_settings_toggle_today_items(store):
     from talent.sample_data import load_sample_data
     load_sample_data(store)
     c = client(store)
-    c.post("/settings", data={"flag_interviews": "1", "stuck_days": "3", "pipeline_view": "board"})
+    c.post("/settings", data={"flags_shown": "1", "flag_interviews": "1", "stuck_days": "3",
+                              "pipeline_view": "board"})  # the page sends flags_shown with its boxes (c6r H)
     s = store.settings()
     assert s["flag_stale"] == "0" and s["flag_interviews"] == "1" and s["stuck_days"] == "3"
     assert "Stale profile" not in c.get("/").text

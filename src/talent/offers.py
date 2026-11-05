@@ -46,6 +46,8 @@ LIMITS = {"salary": 200, "equity": 200, "bonus": 200, "notes": 4000, "reason": 5
 # What one snapshot of an offer holds, for Undo and for Review to tell it changed since.
 SNAP = ("status", *TERMS, "reason", "share_status", "out_at", "answered_at")
 ANSWER_DAYS = 14  # how long an answered offer offers its next move on Today
+DUE_SOON_DAYS = 3  # an offer out shows on Today from this many days before its answer is due
+MISSING_SHOWN = 1  # imported people in an offer stage with no offer: more than this fold into one Today line
 AI_KINDS = ("offer_terms", "offer_answer")
 
 
@@ -319,6 +321,26 @@ def move(store: Store, candidate_id: int, job_id: int, kind: str) -> dict[str, A
     return store.move_stage(candidate_id, job_id, nxt["to"], notes=nxt["notes"], by="app")
 
 
+def stage_nudge(store: Store, candidate_id: int, job_id: int) -> dict[str, Any] | None:
+    """After an offer is recorded for someone still in an earlier in-play stage: the move_stage step to the job's
+    Offer stage, as {"nudge": sentence, "suggested_step": {...}}, like log_activity's. None when they're there
+    already (or past it, hired or out), or the job has no stage named like Offer."""
+    app = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    if app is None or offer_like(app["stage"]):
+        return None
+    stages = store.job_stages(job_id)
+    at = next((i for i, s in enumerate(stages) if s["name"].lower() == app["stage"].lower()), None)
+    to = next((i for i, s in enumerate(stages) if s["outcome"] == "open" and offer_like(s["name"])), None)
+    if at is None or to is None or stages[at]["outcome"] != "open" or at > to:
+        return None
+    name, target = store.get_candidate(candidate_id)["name"], stages[to]["name"]
+    nudge = (f"{quoted(name)} is still in {app['stage']} on {_job_name(store.get_job(job_id))} with an offer "
+             f"recorded. If the offer is being made, call move_stage(candidate_id={candidate_id}, job_id={job_id}, "
+             f"stage=\"{target}\") so the board and status updates show it; ask the recruiter if you're not sure.")
+    return {"nudge": nudge, "suggested_step": {"tool": "move_stage", "candidate_id": candidate_id, "job_id": job_id,
+                                               "stage": target}}
+
+
 # ------------------------------------------------------------------ text
 def summary_text(store: Store, offer: dict[str, Any]) -> str:
     """A paste-ready summary of the terms for the recruiter's own email to the candidate. Notes stay out."""
@@ -375,20 +397,34 @@ def recruiter_lines(store: Store, job_id: int) -> list[str]:
 
 
 # ------------------------------------------------------------------ today
+def _hired_pairs(store: Store) -> set[tuple[int, int]]:
+    return {(r["candidate_id"], r["job_id"]) for r in store._rows(
+        """SELECT a.candidate_id, a.job_id FROM applications a JOIN job_stages s
+             ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage) WHERE s.outcome = 'hired'""")}
+
+
 def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Today: an offer whose answer is due tomorrow or earlier, an answered offer whose move isn't made yet, and
-    someone in an offer stage with no offer recorded."""
+    """Today: an offer whose answer is due within DUE_SOON_DAYS (or overdue), an answered offer whose move isn't
+    made yet, a hire whose offer still reads drafted or out, and someone in an offer stage with no offer recorded
+    (one line for the ones an import or sync put there)."""
     now = now or datetime.now(timezone.utc)
     today = _today(now)
     since = (now - timedelta(days=ANSWER_DAYS)).replace(microsecond=0).isoformat()
     items: list[dict[str, Any]] = []
+    hired = _hired_pairs(store)
     for o in listed(store):
         if o["job_status"] == "closed":
             continue
         name, job, link = o["candidate_name"], _job_name(o), href(o["candidate_id"], o["job_id"])
         base = {"kind": "offer", "candidate_id": o["candidate_id"], "job_id": o["job_id"], "href": link}
         due = _as_day(o.get("answer_by"))
-        if o["status"] == "out" and due and due <= today + timedelta(days=1):
+        if o["status"] in ("drafted", "out") and (o["candidate_id"], o["job_id"]) in hired:
+            items.append({**base, "key": f"offer_hired:{o['id']}:{o['status']}", "rank": 1, "when": o["updated_at"],
+                          "button": "Open offer",
+                          "title": f"{name} is hired on {job}, but the offer still reads {o['status']}. "
+                                   "Mark the offer accepted?",
+                          "detail": status_line(o, now) + ". Record the answer on the offer page."})
+        elif o["status"] == "out" and due and due <= today + timedelta(days=DUE_SOON_DAYS):
             late = due < today
             items.append({**base, "key": f"offer_due:{o['id']}:{o['answer_by']}", "rank": 0 if late else 1,
                           "when": o["answer_by"] + "T00:00:00+00:00", "overdue": late, "button": "Open offer",
@@ -405,6 +441,10 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
                               "move_url": link + "/move", "button": "Open offer",
                               "title": f"{said} on {job}. Move them to {nxt['to']}?",
                               "detail": "One click, and you can undo it on their timeline."})
+    from .importers import file_entries  # here: importers imports actions
+
+    from_file = file_entries(store)
+    imported: list[dict[str, Any]] = []
     for a in store._rows("""SELECT a.candidate_id, a.job_id, a.stage, a.stage_changed_at, c.name, j.title, j.company
                             FROM applications a JOIN jobs j ON j.id = a.job_id JOIN candidates c ON c.id = a.candidate_id
                             JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
@@ -412,12 +452,32 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
                               SELECT 1 FROM offers o WHERE o.candidate_id = a.candidate_id AND o.job_id = a.job_id)"""):
         if not offer_like(a["stage"]):
             continue
-        items.append({"key": f"offer_missing:{a['candidate_id']}:{a['job_id']}", "kind": "offer", "rank": 2,
-                      "when": a["stage_changed_at"], "candidate_id": a["candidate_id"], "job_id": a["job_id"],
-                      "href": href(a["candidate_id"], a["job_id"]), "button": "Record the offer",
-                      "title": f"{a['name']} is in {a['stage']} on {_job_name(a)} with no offer recorded",
-                      "detail": "Add the terms, the answer-by date and notes from the offer call."})
+        if (a["candidate_id"], a["job_id"]) in from_file:  # an import or a sync put them there, not a move here
+            imported.append(a)
+            continue
+        items.append(_missing_item(a))
+    if len(imported) <= MISSING_SHOWN:
+        items += [_missing_item(a) for a in imported]
+    elif imported:
+        jobs = sorted({a["job_id"] for a in imported})
+        names = ", ".join(a["name"] for a in imported[:3]) + (f" and {len(imported) - 3} more" if len(imported) > 3
+                                                               else "")
+        items.append({"key": "offer_missing_import", "kind": "offer", "rank": 3,
+                      "when": max(a["stage_changed_at"] or "" for a in imported), "job_id": jobs[0] if len(jobs) == 1
+                      else None, "href": f"/jobs/{jobs[0]}" if len(jobs) == 1 else "/jobs?status=open",
+                      "button": "See the job" if len(jobs) == 1 else "See the jobs", "count": len(imported),
+                      "title": f"{len(imported)} people from an import are in an Offer stage with no offer recorded",
+                      "detail": f"{names}, on {len(jobs)} job{'' if len(jobs) == 1 else 's'}. "
+                                "Record an offer from their card when it matters."})
     return items
+
+
+def _missing_item(a: dict[str, Any]) -> dict[str, Any]:
+    return {"key": f"offer_missing:{a['candidate_id']}:{a['job_id']}", "kind": "offer", "rank": 2,
+            "when": a["stage_changed_at"], "candidate_id": a["candidate_id"], "job_id": a["job_id"],
+            "href": href(a["candidate_id"], a["job_id"]), "button": "Record the offer",
+            "title": f"{a['name']} is in {a['stage']} on {_job_name(a)} with no offer recorded",
+            "detail": "Add the terms, the answer-by date and notes from the offer call."}
 
 
 # ------------------------------------------------------------------ AI log, undo, caps
@@ -570,7 +630,8 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         if review.cautious(store):
             waiting = queue(store, "terms", candidate_id, job_id, {"fields": changed}, session)
             return _plain(_wait_text(waiting), {"pending_review": _waiting(waiting),
-                                                "offer": public(row) if row else None})
+                                                "offer": public(row) if row else None,
+                                                **(stage_nudge(store, candidate_id, job_id) or {})})
         _check_cap(store, overwrite_count("offer_terms", snap(row) or {}, {**(snap(row) or {}), **changed}))
         res = save(store, candidate_id, job_id, by="ai", **changed)
         o = res["offer"]
@@ -578,7 +639,8 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         sentence = (f"{'Recorded the offer' if res['created'] else 'Changed the offer'} for {quoted(name)} on {job}"
                     + (f" ({what})" if what else "") + f". {status_line(o)}. The recruiter can undo it on Changes.")
         return _plain(sentence, {"offer": public(o), "note": "Keep the terms out of status updates and client "
-                                                             "messages; they are for the recruiter and the candidate."})
+                                                             "messages; they are for the recruiter and the candidate.",
+                                 **(stage_nudge(store, candidate_id, job_id) or {})})
 
     @mcp.tool(annotations=EDIT)
     def record_offer_answer(candidate_id: int, job_id: int,
@@ -710,5 +772,5 @@ def register_routes(app: Any, store: Store, page: Any, back: Any) -> None:
 __all__ = ["ANSWERS", "STATUSES", "STATUS_WORDS", "TERMS", "ai_blocker", "ai_summary", "ai_undo", "apply_review",
            "check_cap", "clean", "client_status", "get", "listed", "move", "next_move", "note", "of_candidate",
            "offer_like", "on_job", "overwrite_count", "queue", "record_answer", "recruiter_lines", "register_routes",
-           "register_tools", "review_lines", "save", "shared_lines", "snap", "status_line", "summary_text",
-           "today_items"]
+           "register_tools", "review_lines", "save", "shared_lines", "snap", "stage_nudge", "status_line",
+           "summary_text", "today_items"]

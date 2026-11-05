@@ -218,7 +218,9 @@ def test_feedback_chase_today_item_mailto_and_mcp(store):
     assert [o["name"] for o in owed] == ["Alex Ruiz"]
     interviews.give_verdict(store, iv, "yes", "alex ruiz")
     assert interviews.feedback_owed(store) == []
-    assert "Nobody owes" in text(call(build_server(store), "list_feedback_owed"))
+    # c6r H: the session under a day old is listed too, as not chased yet, so it agrees with Decide.
+    out = text(call(build_server(store), "list_feedback_owed"))
+    assert "Dana Whitfield owes feedback on Fresh one" in out and "not chased yet" in out
 
 
 def test_interviews_page_shows_needs_outcome_and_who_owes(store):

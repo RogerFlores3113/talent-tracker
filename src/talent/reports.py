@@ -818,6 +818,10 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
     current = {(p["candidate_id"], p["job_id"]): p["stage"] for j in jobs for p in store.pipeline(j["id"])}
     held = _held(store, hist, current, group, in_range)
     held_ids = {e["id"] for e in held.values()}
+    # A job closed in the period whose hire still waits for review reads as open, its people where they stood.
+    held_open = {k[1] for k, e in held.items() if group(k[1], e["body"]) == "hired"} & {
+        j["id"] for j in jobs if j["status"] == "closed" and in_range(j.get("updated_at") or "")}
+    live = live + [j for j in jobs if j["id"] in held_open]
     for k, e in held.items():  # until it's reviewed, they stand where they were before the AI's move
         prev = hist[k][-2] if len(hist[k]) > 1 else None
         if prev:
@@ -843,7 +847,7 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                     not_shown[a["stage"]] = not_shown.get(a["stage"], 0) + 1
                 continue
             g = group(j["id"], a["stage"])
-            if j["status"] == "open":
+            if j["status"] == "open" or j["id"] in held_open:
                 standing[g].add(a["candidate_id"])
             entries = [e for e in hist.get((a["candidate_id"], j["id"]), []) if e["id"] not in held_ids]
             subs = [e["at"] for e in entries if is_submittal(e["body"])]
@@ -923,6 +927,10 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                  "loop": loop_of[r["id"]][0], "loop_size": loop_of[r["id"]][1]} for r in rows]
     shown_people = {(p["candidate_id"], p["job_id"]) for p in people} | {
         (cid, jid) for jid, b in booked.items() for cid in b}
+    for j in jobs:  # a req closed in the period keeps its interview results, though nobody is in play on it now
+        if j["status"] == "closed" and in_range(j.get("updated_at") or ""):
+            shown_people |= {(a["candidate_id"], j["id"]) for a in store.pipeline(j["id"])
+                             if not hidden(j["id"], a["stage"])}
     results = [{"candidate_id": r["candidate_id"], "name": r["name"], "job_id": r["job_id"], "job": r["job_title"],
                 "verdict": r["verdict"], "line": r["line"], "at": r["outcome_at"]}
                for jid in ids for r in actions.interview_results(store, jid, now, max(1, (now - to_dt(start)).days + 1))

@@ -28,7 +28,7 @@
     <pre class="code wrap" id="{{ tid }}">{{ s.text }}</pre>
     {% if s.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ s.notes | join('; ') }}.</p>{% endif %}
     {% if s.rep.loose_interviews %}<p class="fine no-print recruiter-only">Pick the job: {% for x in s.rep.loose_interviews %}<a href="{{ x.href }}">{{ x.name }}</a>{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
-    <details class="no-print"><summary class="fine">{{ 'Edit the note to the client' if s.rep.client_note else 'Add a note to the client this week' }}</summary>
+    <details class="no-print"><summary class="fine">{% set reader = 'the hiring manager' if inhouse() else 'the client' %}{{ ('Edit the note to ' ~ reader) if s.rep.client_note else ('Add a note to ' ~ reader ~ ' this week') }}</summary>
       <form method="post" action="/clients/{{ c.slug }}/note" class="form">{% if s.rep.manager_key is not none %}<input type="hidden" name="manager" value="{{ s.rep.manager_key }}">{% endif %}
         <label class="wide">Opens the update, before the numbers. Mark as sent clears it.<textarea name="note" rows="3" maxlength="1500">{{ s.rep.client_note or '' }}</textarea></label>
         <div class="actions"><button class="btn small" type="submit">Save note</button></div></form></details>

@@ -247,7 +247,23 @@ def interview_name(t: dict[str, Any], limit: int = 60) -> str:
 
 
 def interviewer_of(t: dict[str, Any]) -> str:
-    return str(_iv_data(t).get("interviewer") or "").strip()
+    return tidy_names(str(_iv_data(t).get("interviewer") or "").strip())
+
+
+_NAME_SEP = re.compile(r"(\s*(?:,|;|&|/|\band\b|\+)\s*)")
+
+
+def tidy_names(text: str) -> str:
+    """'sam ortiz, Priya Shah' -> 'Sam Ortiz, Priya Shah': a name typed all in lowercase gets capitals, so one
+    interviewer reads the same on every session. Any other spelling, and email addresses, stay as written."""
+    def name(seg: str) -> str:
+        bare = re.sub(r"<[^>]*>", "", seg)
+        if "@" in bare or re.search(r"[A-Z]", bare) or not re.search(r"[a-z]", bare):
+            return seg
+        return "".join(p if p.startswith("<") else re.sub(r"[^\W\d_]+", lambda m: m.group(0)[0].upper()
+                                                           + m.group(0)[1:], p)
+                       for p in re.split(r"(<[^>]*>)", seg))
+    return "".join(p if i % 2 else name(p) for i, p in enumerate(_NAME_SEP.split(text or "")))
 
 
 def interview_label(t: dict[str, Any]) -> str:
@@ -741,8 +757,10 @@ def job_numbers(store: Store, job_id: int, omit: set[str] | None = None,
 
 
 def thin_target(job: dict[str, Any], cap: int = 5) -> int:
-    """How many active candidates a job should have: its own min_active, else 3 per opening up to `cap`."""
-    return job.get("min_active") or min(3 * (job.get("openings") or 1), cap)
+    """How many active candidates a job should have: its own min_active, else 3 per opening still to fill (one at
+    least) up to `cap`."""
+    left = max(1, (job.get("openings") or 1) - (job.get("hired_count") or 0))
+    return job.get("min_active") or min(3 * left, cap)
 
 
 def hired_text(hired: int, openings: int, word: str = "hired") -> str:
@@ -993,6 +1011,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                     "candidates": oldest, "href": "/candidates?sort=updated&dir=asc",
                 })
 
+    items = _drop_offer_moves(store, items)
     visible = []
     for i in items:
         if i["key"] in snoozed:
@@ -1008,6 +1027,16 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     return {"items": visible, "counts": counts, "hidden": hidden, "scheduled": scheduled,
             "scheduled_later": scheduled_later, "stale_total": shown_stale, "stale_more": 0, "next_week": next_week,
             "stuck_more": stuck_more}
+
+
+def _drop_offer_moves(store: Store, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Once a person has an offer on a job, the offer leads: an interview result's or a stuck row's Move to is
+    stale there (after a decline it would point the other way from "Move them to Withdrawn?"), so it goes."""
+    pairs = {(r["candidate_id"], r["job_id"]) for r in store._rows("SELECT candidate_id, job_id FROM offers")}
+    if not pairs:
+        return items
+    return [i for i in items if not (i["kind"] in ("interview_result", "stuck") and i.get("candidate_id")
+                                     and (i["candidate_id"], i.get("job_id")) in pairs)]
 
 
 STUCK_GROUP = 3  # a job with more people stuck than this shows them as one row
@@ -1528,6 +1557,10 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
     held = held_jobs(store, company, hiring_manager)
     if not groups and not held:
         named = " and ".join(x.strip().rstrip(".") for x in (company, hiring_manager) if x and x.strip())
+        closed = recently_closed(store, company, hiring_manager, now) if named else []
+        if closed:
+            return "\n".join([f"No open jobs for {named} right now. Closed recently:",
+                              *(f"- {closed_line(j)}" for j in closed)])
         return f"No open jobs{' for ' + named if named else ''}."
     if hiring_manager and hiring_manager.strip():
         found = sorted({g["company"] for g in groups if g["company"]}
@@ -1556,6 +1589,38 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
         lines.append("")
         lines += [f"{job_label(j['title'], j.get('company'))}: on hold." for j in held]
     return "\n".join(lines)
+
+
+CLOSED_DAYS = 30  # a status digest for a company or manager with nothing open names the reqs closed this recently
+
+
+def recently_closed(store: Store, company: str | None = None, manager: str | None = None,
+                    now: datetime | None = None, days: int = CLOSED_DAYS) -> list[dict[str, Any]]:
+    """Jobs closed in the last `days` days for this company and hiring manager (matched as in match_companies,
+    against the closed jobs' own names), newest first, each with `hired`: the names in its hired stages."""
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
+    rows = store._rows("SELECT * FROM jobs WHERE status = 'closed' AND updated_at >= ? ORDER BY updated_at DESC, id DESC",
+                       (since,))
+    cos = match_companies([r["company"] for r in rows], company) if company is not None else None
+    hms = match_companies([r["hiring_manager"] for r in rows], manager) if manager is not None else None
+    out = []
+    for j in rows:
+        if (cos is not None and (j.get("company") or "").strip().lower() not in cos) or (
+                hms is not None and (j.get("hiring_manager") or "").strip().lower() not in hms):
+            continue
+        hired = [a["candidate_name"] for g in store.pipeline_by_stage(j["id"]) if g["outcome"] == "hired"
+                 for a in g["candidates"]]
+        out.append({**j, "hired": hired, "word": hire_word(store, j["id"])})
+    return out
+
+
+def closed_line(j: dict[str, Any]) -> str:
+    """'Senior Backend Engineer, Lumen Health, closed Thu Nov 5. Hired: Tomas Okafor.'"""
+    when = local_time(j["updated_at"], "%a %b %-d") if j.get("updated_at") else ""
+    return (job_label(j["title"], j.get("company")) + (f", closed {when}" if when else ", closed") + "."
+            + (f" {j.get('word', 'hired').capitalize()}: {', '.join(j['hired'])}." if j["hired"]
+               else f" Nobody {j.get('word', 'hired')}."))
 
 
 # ----------------------------------------------------------- new jobs

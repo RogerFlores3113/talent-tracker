@@ -729,7 +729,8 @@ def today_items(store: Store) -> list[dict[str, Any]]:
         job = e["title"] + (f" ({e['company']})" if e.get("company") else "")
         out.append({"key": f"aiemail:{e['id']}", "kind": "ai_change", "rank": 0, "when": e["at"],
                     "title": f"Your AI app set where updates for {job} go: {e['email']}.",
-                    "detail": "Client updates can be emailed there. Check it on the job.",
+                    "detail": ("Hiring manager updates" if actions.inhouse(store) else "Client updates")
+                              + " can be emailed there. Check it on the job.",
                     "href": f"/jobs/{e['job_id']}", "button": "Check"})
     row = store._row("SELECT count(*) AS n, max(id) AS last, max(created_at) AS at FROM ai_review WHERE status = 'pending'")
     if not row or not row["n"]:

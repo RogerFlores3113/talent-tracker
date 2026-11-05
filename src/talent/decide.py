@@ -157,7 +157,7 @@ def finalists_text(d: dict[str, Any]) -> str:
                      + (f", {_fenced(role)}" if role else ""))
         bits = []
         if p["days_in_process"] is not None:
-            bits.append(f"{p['days_in_process']} days in process")
+            bits.append(f"{p['days_in_process']} day{'' if p['days_in_process'] == 1 else 's'} in process")
         if p.get("source"):
             bits.append(f"source: {_fenced(p['source'])}")
         if p.get("referrer"):
@@ -244,6 +244,8 @@ def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: l
         for iv in ivs:
             store.update_interview(iv["id"], cancel=True, by=by)
             cancelled.append(iv["id"])
+    todos = [store.add_suggestion(f"Let {play[cid]['candidate_name']} know", candidate_id=cid, job_id=job_id,
+                                  source="App", note="You passed on them in Decide.")["id"] for cid in pass_ids]
     rows = store._rows(f"SELECT key FROM settings WHERE key LIKE '{DECISION_PREFIX}%'")
     batch_id = 1 + max((int(r["key"][len(DECISION_PREFIX):]) for r in rows
                         if r["key"][len(DECISION_PREFIX):].isdigit()), default=0)
@@ -251,14 +253,14 @@ def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: l
         "job_id": job_id, "at": _now(), "offer": None if offer_id is None else {
             "candidate_id": offer_id, "name": play[offer_id]["candidate_name"], "stage": offer},
         "passed": [{"candidate_id": i, "name": play[i]["candidate_name"]} for i in pass_ids], "out_stage": out,
-        "reason": why, "moves": moves, "interviews": cancelled}))
+        "reason": why, "moves": moves, "interviews": cancelled, "todos": todos}))
     if offer_id is None:
         text = f"No offer yet, pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}"
     else:
         text = f"Offer to {quoted(play[offer_id]['candidate_name'])}" + (
             f", pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}" if pass_ids else "")
     return {"id": batch_id, "text": text, "offer_stage": offer, "out_stage": out, "cancelled": len(cancelled),
-            "moved": len(moves)}
+            "moved": len(moves), "todos": len(todos)}
 
 
 def decision_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]:
@@ -314,6 +316,11 @@ def undo_decision(store: Store, batch_id: int, by: str = "app") -> str:
                 store.update_interview(iv, restore=True, by=by)
                 restored += 1
         except (ValueError, NotFound):
+            continue
+    for sid in b.get("todos") or []:  # the "Let them know" to-dos it added are done with (kept in the record)
+        try:
+            store.complete_suggestion(sid)
+        except NotFound:
             continue
     b["undone_at"] = _now()
     actions._put_setting(store, key, json.dumps(b))
