@@ -15,7 +15,8 @@ def test_import_merges_and_reports_skips(store):
     text = "Name,Email,Skills\nAna Diaz,ana@x.com,go; rust\n,nobody@x.com,\nAna Diaz,ANA@x.com,python\n"
     header, rows = importers.read_csv(text)
     r = importers.import_rows(store, header, rows, importers.guess_mapping(header))
-    assert (r["added"], r["updated"], r["skipped"], r["skipped_rows"]) == (1, 1, ["Row 3: no name"], 1)
+    # The two Ana rows share an email, so they're folded into one add (cycle 2: no flip-flopping).
+    assert (r["added"], r["updated"], r["skipped"], r["skipped_rows"]) == (1, 0, ["Row 3: no name"], 1)
     ana = store.search_candidates("ana").hits[0].candidate
     assert ana["tags"] == ["go", "rust", "python"] and ana["source"] == "CSV import"
 
