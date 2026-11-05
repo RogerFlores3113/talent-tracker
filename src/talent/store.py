@@ -591,7 +591,11 @@ AI_ACTION_KINDS = {
     "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
+    "outreach_batch": "Logged outreach in one batch",
 }
+# AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
+# log_activity call for several people.
+BATCH_KINDS = frozenset({"save_batch", "outreach_batch"})
 # AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
 # outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
 INTERVIEW_PUT_BACK = ("interview_cancel", "interview_move", "interview_feedback", "interview_outcome")
@@ -1530,6 +1534,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
     if kind == "save_batch":
         return _batch_summary(new, job if r.get("job_title") else None)
+    if kind == "outreach_batch":
+        return r.get("body") or AI_ACTION_KINDS[kind]
     if kind == "client_sent":
         return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
             f" ({new['manager']})" if new.get("manager") else "")
@@ -1585,7 +1591,7 @@ def _batch_summary(new: dict[str, Any], job: str | None) -> str:
 def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """What an AI action changed, so a newer action on the same thing can be found (see Store.ai_actions)."""
     kind, cid, jid = r["kind"], r.get("candidate_id"), r.get("job_id")
-    if kind == "save_batch":
+    if kind in BATCH_KINDS:
         return (("batch", r["id"]),)
     if kind == "candidate":
         return (("person", cid),)
@@ -2283,7 +2289,7 @@ class Store:
         (undone once they all are, undoable while any is). Each of those carries `batch_id`. The batch row
         never counts as pending itself, so Undo all doesn't count its changes twice."""
         by_id = {r["id"]: r for r in rows}
-        for b in (r for r in rows if r["kind"] == "save_batch"):
+        for b in (r for r in rows if r["kind"] in BATCH_KINDS):
             ids = [i for i in ((b.get("new_data") or {}).get("action_ids") or []) if isinstance(i, int)]
             kids = []
             for i in ids:
@@ -2616,7 +2622,7 @@ class Store:
         if a["undone_at"]:
             raise ValueError("That change was already undone.")
         kind, what = a["kind"], a["summary"]
-        if kind == "save_batch":
+        if kind in BATCH_KINDS:
             return self._undo_save_batch(a, by, before_delete)
         if kind.startswith("client_"):
             from .reports import ai_client_undo  # here: reports imports this module
@@ -3318,7 +3324,9 @@ class Store:
             # Fewer than 3 people have every word: add the people who have the most of them.
             exact_ids = [r["id"] for r in self._rows(f"SELECT c.id {base}", (and_match, *params))]
             exact_ids += extra
-            segments.append(ranked(" OR ".join(t.fts() for t in terms), exact_ids, True))
+            # Whole words only: a stemmed prefix ("ros"* is "ro"*) finds unrelated words like "Rockies".
+            loose = [_Term(t.form, False, t.expansions, t.names) for t in terms]
+            segments.append(ranked(" OR ".join(t.fts() for t in loose), exact_ids, True))
         total = sum(n for n, _ in segments)
         hits: list[SearchHit] = []
         skip = max(0, offset)

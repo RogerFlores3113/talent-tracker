@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
+from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
@@ -36,6 +37,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
 from .store import as_local
+from .store import BATCH_KINDS
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -317,6 +319,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["job_label"] = actions.job_label
+    env.globals["elsewhere_badges"] = lambda job_id: outreach.board_badges(store, job_id)  # "In play at 1 other client"
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
     env.globals["interview_form_choices"] = INTERVIEW_FORM_CHOICES  # the profile's How it went menu
@@ -556,7 +559,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
                     dupes=store.possible_duplicates(candidate_id),
-                    kinds=[k for k in TIMELINE_KINDS if k != "stage"],
+                    kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
                     refresh_prompt=recipes.refresh_candidate(c))
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
@@ -640,8 +643,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         logged = False
         try:
             if body.strip() or kind != "note" or not (day or day_error):  # a follow-up date alone needs no note
-                store.log(candidate_id, kind, body, at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+                reply = kind == outreach.REPLY_KIND
+                if job_id is None and kind in (*outreach.OUTREACH_KINDS, outreach.REPLY_KIND):
+                    job_id = outreach.job_for(store, candidate_id)
+                entry = store.log(candidate_id, "message" if reply else kind, body or ("Replied" if reply else None),
+                                  at=str(form.get("at") or "") or None, job_id=job_id, source="App")
                 logged = True
+                if reply:
+                    outreach.mark_reply(store, entry["id"])
+                elif job_id is not None:
+                    moved = outreach.advance(store, candidate_id, job_id, entry["kind"], entry["at"])
+                    if moved:
+                        notice = f"Moved them from {moved['from']} to {moved['to']}."
             if day:
                 actions.schedule_followup(store, candidate_id, day, job_id=job_id, note=body.strip() or None)
                 notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
@@ -741,8 +754,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.post("/candidates/{candidate_id}/contacted")
     def mark_contacted(candidate_id: int):
         cand_or_404(candidate_id)
-        store.log(candidate_id, "message", "Marked as contacted", source="App")
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        job_id = outreach.job_for(store, candidate_id)
+        notice = ""
+        if outreach.logged_today(store, candidate_id):  # an InMail logged today already says so
+            notice = "Outreach is already logged for today."
+        else:
+            entry = store.log(candidate_id, "message", "Marked as contacted", job_id=job_id, source="App")
+            moved = outreach.advance(store, candidate_id, job_id, "message", entry["at"]) if job_id else None
+            if moved:
+                notice = f"Moved them from {moved['from']} to {moved['to']}."
+        return RedirectResponse(f"/candidates/{candidate_id}" + (f"?{urlencode({'notice': notice})}" if notice else ""),
+                                status_code=303)
 
     @app.post("/candidates/{candidate_id}/jobs")
     async def add_candidate_to_job(request: Request, candidate_id: int):
@@ -1250,7 +1272,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """add_to_pipeline (first stage), and the resubmit warning when that stage is a submittal."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         store.add_to_pipeline(candidate_id, job_id)
-        return resubmit_warning(candidate_id, job_id, before)
+        elsewhere = None if before else outreach.other_clients_text(store, candidate_id, job_id)
+        return " ".join(w for w in (resubmit_warning(candidate_id, job_id, before), elsewhere) if w)
 
     @app.post("/jobs/{job_id}/move", response_class=HTMLResponse)
     async def move(request: Request, job_id: int):
@@ -1337,12 +1360,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     kept=[r for r in decided if r["status"] == "kept"],
                     passed=[r for r in decided if r["status"] == "passed"],
                     first_stage=(store.job_stages(job_id) or [{"name": "the first stage"}])[0]["name"],
+                    keep_stages=shortlist.keep_stages(store, job_id),
                     choose=int(choose) if choose.isdigit() else None)
 
     @app.post("/jobs/{job_id}/shortlist/keep-all")
-    def shortlist_keep_all(job_id: int):
+    async def shortlist_keep_all(request: Request, job_id: int):
         job_or_404(job_id)
-        done = shortlist.keep_all(store, job_id)
+        form = await request.form()
+        try:
+            done = shortlist.keep_all(store, job_id, stage=str(form.get("stage") or "") or None)
+        except (ValueError, NotFound) as exc:
+            return to_shortlist(job_id, error=str(exc))
         n, left, held = len(done["kept"]), done["left"], done.get("held") or []
         stage = done["kept"][0]["stage"] if done["kept"] else ""
         notice = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {stage}" if n else "") + "."
@@ -1350,7 +1378,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                   + (f" {len(left)} need your choice first: {_and(left)}." if left else "")
                   + (f" Left {len(held)} whose name reads like a sentence; keep them one at a time if they are "
                      "real people." if held else ""))
-        return to_shortlist(job_id, notice=notice)
+        warn = " ".join(k["elsewhere"] for k in done["kept"] if k.get("elsewhere"))
+        return to_shortlist(job_id, notice=notice, error=warn)
 
     @app.post("/jobs/{job_id}/shortlist/pass-all")
     async def shortlist_pass_all(request: Request, job_id: int):
@@ -1367,7 +1396,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         link = str(form.get("link_id") or "")
         try:
             done = shortlist.keep(store, job_id, prospect_id, link_id=int(link) if link.isdigit() else None,
-                                  as_new=str(form.get("as_new") or "") == "1")
+                                  as_new=str(form.get("as_new") or "") == "1", stage=str(form.get("stage") or "") or None)
         except shortlist.NeedsChoice as exc:
             return RedirectResponse(f"/jobs/{job_id}/shortlist?{urlencode({'choose': prospect_id, 'flash_error': str(exc)})}"
                                     f"#p{prospect_id}", status_code=303)
@@ -1379,7 +1408,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         else:
             notice = (f"{'Saved' if done['created'] else 'Kept'} {c['name']} and added them to {done['stage']}"
                       + ("." if done["created"] else ", linked to the person you already had."))
-        return to_shortlist(job_id, notice=notice)
+        return to_shortlist(job_id, notice=notice, error=done.get("elsewhere") or "")
 
     @app.post("/jobs/{job_id}/shortlist/{prospect_id}/pass")
     async def shortlist_pass(request: Request, job_id: int, prospect_id: int):
@@ -1742,7 +1771,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undo_pending"])
                              if a["undo_pending"] else 0,
                              "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
-                if a["kind"] == "save_batch" and a.get("children"):  # "this and everything after" starts at its first save
+                if a["kind"] in BATCH_KINDS and a.get("children"):  # "this and everything after" starts at its first save
                     first = min(a["children"])
                     rows[-1].update(undo_label="Undo this batch", undo_from_url=f"/changes/ai/{first}/undo-from",
                                     from_count=sum(1 for b in ai if b["id"] >= first and b["undo_pending"]))
@@ -1873,7 +1902,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 return back(request, "/changes", error=str(exc))
             backup = lambda: None  # noqa: E731 (that copy also covers people and jobs it takes out)
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
-            if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
+            if a["undone_at"] or a.get("record") or a["kind"] in BATCH_KINDS:  # a batch's saves are undone one by one
                 continue
             try:
                 undone.append(store.undo_ai_action(a["id"], by="app", before_delete=backup))

@@ -31,6 +31,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
+from . import outreach
 from . import decide, interviews
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import as_local
@@ -112,7 +113,7 @@ NOT_FROM_VIEW = ("Nothing changed. Only the recruiter keeps or passes people, wi
 # A press on a card whose key no longer fits: the person who pressed reads this on the card.
 CARD_STALE = ("This card is from an earlier Claude session. Ask Claude to show the Shortlist again, or review it in "
               "Talent Search.")
-CARD_TOOLS = ("keep_prospect", "pass_prospect")
+CARD_TOOLS = ("keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects")
 # How an MCP Apps host says it shows in-chat views (client capabilities, under extensions).
 UI_EXTENSION = "io.modelcontextprotocol/ui"
 
@@ -928,11 +929,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
-    def log_activity(candidate_id: int, kind: str, summary: str | None = None, when: str | None = None,
-                     job_id: int | None = None, interviewer: str | None = None) -> CallToolResult:
+    def log_activity(candidate_id: int | None = None, kind: str = "", summary: str | None = None,
+                     when: str | None = None, job_id: int | None = None, interviewer: str | None = None,
+                     candidate_ids: list[int] | None = None) -> CallToolResult:
         """Add something to a candidate's timeline.
 
-        kind: note, call, email, message, meeting or interview (an InMail, LinkedIn message or DM is a message). `summary` is what happened (`body` works too;
+        kind: note, call, email, message, meeting, interview or reply (an InMail, LinkedIn message or DM is a message;
+        reply is their answer to your outreach, and ends their follow-ups). `summary` is what happened (`body` works too;
         summary is preferred); for an interview, start it with what it is, e.g. "Onsite: system design".
         `when` is the date/time, with time zone for interviews: ISO with an offset (2026-11-12T15:00:00-08:00),
         or a time with a zone name (2026-11-12 3:00 PM America/Los_Angeles, or PT, ET, CT, MT); leave empty for
@@ -941,10 +944,36 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         item twice is harmless. Several interviews on the same day for the same job are an onsite loop; log each
         session. To reschedule, cancel or record how an interview went, use update_interview with the
         interview's id (logged.id) instead of logging a new one.
+
+        A call, email or message moves someone still in the job's first stage (Sourced) to its Contacted stage.
+        Without job_id, the job is the one they're in play on, when there is just one. For the same outreach to
+        several people (20 InMails), send candidate_ids (up to 25) instead of candidate_id: one call, listed on
+        Changes as one batch the recruiter can undo.
         """
+        ids = [int(i) for i in (candidate_ids or [])]
+        if candidate_id is not None and candidate_id not in ids:
+            ids.insert(0, int(candidate_id))
+        if not ids:
+            raise ValueError("No change made. Send candidate_id, or candidate_ids for several people.")
         what_kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
-        what_kind = KIND_ALIASES.get(what_kind, what_kind)  # an InMail is a message, here as in the app
+        if not what_kind:
+            raise ValueError("No change made. Send kind: note, call, email, message, meeting, interview or reply.")
+        reply = what_kind in (outreach.REPLY_KIND, "replied", "response")
+        what_kind = "message" if reply else KIND_ALIASES.get(what_kind, what_kind)  # an InMail is a message
+        if len(ids) > 1:
+            return _log_many(ids, what_kind, reply, summary, when, job_id)
+        sentence, out, _acts = _log_one(ids[0], what_kind, reply, summary, when, job_id, interviewer)
+        return (_said if out.get("pending_review") else _plain)(sentence, out)
+
+    def _log_one(candidate_id: int, what_kind: str, reply: bool, summary: str | None, when: str | None,
+                 job_id: int | None, interviewer: str | None,
+                 quiet: bool = False) -> tuple[str, dict[str, Any], list[int]]:
+        """Log one entry for log_activity: (sentence, structured result, the AI actions it made)."""
+        if reply and not (summary or "").strip():
+            summary = "Replied"
         _check_note_cap(store, candidate_id)
+        if job_id is None and what_kind in outreach.OUTREACH_KINDS:  # the one job they're in play on
+            job_id = outreach.job_for(store, candidate_id)
         if what_kind in TIMELINE_KINDS and what_kind != "stage" and review.cautious(store):
             body = (summary or "").strip()
             if what_kind == "note" and not body:
@@ -959,20 +988,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 store.get_job(job_id)
             at = parse_when(when) if when and str(when).strip() else None
             waiting = review.queue_note(store, candidate_id, what_kind, body or None, at, job_id, session, who or None)
-            return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "logged": None,
-                                               "pending_review": _waiting(waiting)})
+            return _wait_text(waiting), {"data_note": DATA_NOTE, "logged": None,
+                                         "pending_review": _waiting(waiting)}, []
         before = {t["id"]: t for t in store.upcoming_interviews(days=365)
                   if t["candidate_id"] == candidate_id and t.get("job_id") == job_id} \
             if what_kind == "interview" else {}
-        entry = store.log(candidate_id, kind, summary, at=when, job_id=job_id, source="AI app",
+        entry = store.log(candidate_id, what_kind, summary, at=when, job_id=job_id, source="AI app",
                           interviewer=interviewer)
-        store.mark_ai_note(entry)  # on Changes, so the recruiter (or Undo all AI) can strike it out
+        if reply:
+            outreach.mark_reply(store, entry["id"])
+        acts = [store.mark_ai_note(entry)]  # on Changes, so the recruiter (or Undo all AI) can strike it out
         cand = store.get_candidate(candidate_id)
         logged = {**entry, "at_local": _local(entry["at"])}
         if entry["kind"] == "interview":
             logged = {**logged, "data": None, "interviewer": actions.interviewer_of(entry) or None}
         out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim(logged),
                                "last_contacted_at": cand["last_contacted_at"]}
+        if reply:
+            out["reply"] = True
         day = to_dt(entry["at"]).astimezone().date()
         same_day = [t for i, t in before.items() if i != entry["id"] and to_dt(t["at"]).astimezone().date() == day]
         others = [t for i, t in before.items() if i != entry["id"] and t not in same_day]
@@ -988,16 +1021,79 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
             out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
                               "Use add_to_pipeline if they should be.")
-        what = entry["kind"]
-        with_ = "on" if what == "note" else "with"
+        moved = None
+        if job_id is not None and not reply:
+            moved = outreach.advance(store, candidate_id, job_id, entry["kind"], entry["at"], by="ai")
+        if moved:
+            out["moved"] = {"job_id": job_id, "from": moved["from"], "to": moved["to"]}
+            acts.append(moved["action_id"])
+        what = "reply" if reply else entry["kind"]
+        with_ = "on" if what == "note" else "from" if reply else "with"
+        job_words = f", for {_job_name(store.get_job(job_id))}" if job_id is not None else ""
         sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {quoted(cand['name'])} "
-                    f"{_when_words(entry['at'])}" + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "")
-                    + "." + (f"\nIts interview id is {entry['id']}; update_interview takes it to move, cancel or "
-                             "record how it went." if what == "interview" else ""))
-        nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None else None
+                    f"{_when_words(entry['at'])}{job_words}."
+                    + (f" Moved them from {moved['from']} to {moved['to']}." if moved else "")
+                    + (" Their follow-ups for this job stop." if reply and job_id is not None
+                       and outreach.sequence(store, job_id) else "")
+                    + (f"\nIts interview id is {entry['id']}; update_interview takes it to move, cancel or "
+                       "record how it went." if what == "interview" else ""))
+        nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None and not moved and not quiet else None
         if nudge:
             out.update(nudge)
-        return _plain(sentence, out)
+        return sentence, out, [a for a in acts if a]
+
+    def _log_many(ids: list[int], what_kind: str, reply: bool, summary: str | None, when: str | None,
+                  job_id: int | None) -> CallToolResult:
+        """log_activity for several people: checked first (nothing is logged if one can't be), then one batch."""
+        if len(ids) > shortlist.MAX_BATCH:
+            raise ValueError(f"No change made. Send at most {shortlist.MAX_BATCH} people per call ({len(ids)} "
+                             "given); split them into several calls.")
+        if what_kind == "interview":
+            raise ValueError("No change made. Log interviews one person at a time, with candidate_id.")
+        if len(set(ids)) != len(ids):
+            raise ValueError("No change made. A candidate is listed twice in candidate_ids.")
+        if job_id is not None:
+            store.get_job(job_id)
+        for cid in ids:
+            store.get_candidate(cid)  # "No candidate with id 7", before anything is logged
+            _check_note_cap(store, cid, "No change made")
+        done, acts, moved, waiting = [], [], [], []
+        for cid in ids:
+            sentence, out, made = _log_one(cid, what_kind, reply, summary, when, job_id, None, quiet=True)
+            name = store.get_candidate(cid)["name"]
+            row = {"candidate_id": cid, "name": name, **{k: out[k] for k in ("logged", "moved", "warning",
+                                                                               "pending_review") if out.get(k)}}
+            done.append(row)
+            acts += made
+            if out.get("moved"):
+                moved.append(row)
+            if out.get("pending_review"):
+                waiting.append(row)
+        n, what = len(done), "reply" if reply else what_kind
+        names = ", ".join(quoted(r["name"]) for r in done[:3]) + (f" and {n - 3} more" if n > 3 else "")
+        if waiting:
+            sentence = (f"Nothing logged yet for {n} people ({names}): Cautious mode is on, so each {what} waits for "
+                        "the recruiter on Review.")
+            return _said(sentence, {"data_note": DATA_NOTE, "people": done, "pending_review": len(waiting)})
+        stages = sorted({r["moved"]["to"] for r in moved})
+        text = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} people "
+                f"({names}) {_when_words(done[0]['logged']['at']) if done[0].get('logged') else ''}".rstrip()
+                + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "") + "."
+                + (f" Moved {len(moved)} to {' and '.join(stages)}." if moved else ""))
+        out: dict[str, Any] = {"data_note": DATA_NOTE, "people": done, "moved": len(moved)}
+        if acts:
+            with store._write():
+                batch = store._log_ai("outreach_batch", job_id=job_id, body=(
+                    f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} people"
+                    + (f" and moved {len(moved)} to {' and '.join(stages)}" if moved else "")
+                    + (f" in {_job_name(store.get_job(job_id))}" if job_id is not None else "")),
+                    new={"action_ids": acts, "candidate_ids": ids})
+            out["batch_id"] = batch
+            text += " The recruiter can undo the whole batch on Changes."
+        warned = [r for r in done if r.get("warning")]
+        if warned:
+            out["warning"] = " ".join(f"{quoted(r['name'])}: {r['warning']}" for r in warned[:5])
+        return _plain(text, out)
 
     @mcp.tool(annotations=EDIT)
     def update_interview(interview_id: int, when: str | None = None, cancel: bool = False,
@@ -1345,6 +1441,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
         else:
             _note_submittal(out, candidate_id, job_id, None)
+            elsewhere = outreach.other_clients_text(store, candidate_id, job_id)
+            if elsewhere:
+                out["other_clients"] = outreach.other_clients(store, candidate_id, job_id)
+                out["warning"] = " ".join(w for w in (out.get("warning"), elsewhere) if w)
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         sentence = (f"{quoted(name)} is already in {_job_name(job)}, in {out['stage']}." if already
@@ -1498,9 +1598,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         res = shortlist.propose(store, job_id, [p.model_dump() for p in people])
         added = [shortlist.row_view(a) for a in res["added"]]
         job, n, k = res["job"], len(added), len(res["skipped"])
-        flagged = sum(1 for a in added if a.get("check_lines"))
+        flagged = sum(1 for a in added if (a.get("checks") or {}).get("saved") or (a.get("checks") or {}).get("same_name"))
+        no_link = sum(1 for a in added if not a.get("linkedin_url"))
         sentence = (f"Added {n} {'person' if n == 1 else 'people'} to the Shortlist for {_job_name(job)}"
                     + (f" ({flagged} already saved or with a similar name)" if flagged else "")
+                    + (f" ({no_link} with no LinkedIn link: add it so the recruiter can check them)" if no_link else "")
                     + (f" and skipped {k}" if k else "") + ". The recruiter keeps or passes them in the app.")
         lines = [sentence]
         if added:
@@ -1509,7 +1611,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines += ["Skipped:", *(f"- {x['name']}: {x['reason']}." for x in res["skipped"])]
         page = app_url(f"/jobs/{job_id}/shortlist")
         data = {"job": _slim({k2: job.get(k2) for k2 in ("id", "title", "company")}), "added": added,
-                "skipped": res["skipped"], "counts": res["counts"], "data_note": DATA_NOTE, "app_url": page}
+                "skipped": res["skipped"], "counts": res["counts"], "data_note": DATA_NOTE, "app_url": page,
+                "keep_stages": shortlist.keep_stages(store, job_id)}
         return _with_view_key(_plain("\n".join(lines), data), job_id, [a["id"] for a in added])
 
     @mcp.tool(annotations=READ, meta=tool_meta("shortlist"))
@@ -1526,7 +1629,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         text = "\n".join([head, *([DATA_NOTE, *prospect_lines(rows)] if rows else [])])
         return _with_view_key(_result(text, {"job": _slim({k: job.get(k) for k in ("id", "title", "company")}),
                                              "status": status, "prospects": rows, "counts": counts,
-                                             "data_note": DATA_NOTE, "app_url": app_url(f"/jobs/{job_id}/shortlist")}),
+                                             "data_note": DATA_NOTE, "app_url": app_url(f"/jobs/{job_id}/shortlist"),
+                                             "keep_stages": shortlist.keep_stages(store, job_id)}),
                               job_id, [p["id"] for p in rows if p.get("status") == "proposed"])
 
     # Keep and Pass on the in-chat Shortlist card. The host hides these from the model (visibility "app"), and a
@@ -1565,32 +1669,105 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         row = shortlist.get(store, job_id, prospect_id)
         if row["status"] == "proposed":
             row["checks"] = shortlist.checks(store, row)
-        data = {"prospect": shortlist.row_view(row), "counts": shortlist.counts(store, job_id), "message": sentence,
+        view = shortlist.row_view(row)
+        if row.get("candidate_id") and row["status"] == "kept":
+            view["candidate_url"] = app_url(f"/candidates/{row['candidate_id']}")
+        data = {"prospect": view, "counts": shortlist.counts(store, job_id), "message": sentence,
                 "app_url": app_url(f"/jobs/{job_id}/shortlist"), **extra}
         return _result(sentence, data)
 
+    def _kept_sentence(done: dict[str, Any], job: dict[str, Any]) -> str:
+        c, stage = done["candidate"], done["stage"]
+        if done["already"]:
+            out = f"Kept {quoted(c['name'])}. They were already in {_job_name(job)}, in {stage}."
+        else:
+            out = (f"{'Saved' if done['created'] else 'Kept'} {quoted(c['name'])} and added them to {stage} on "
+                   f"{_job_name(job)}" + ("." if done["created"] else ", linked to the person already saved."))
+        return out + (f" {done['elsewhere']}" if done.get("elsewhere") else "")
+
     @mcp.tool(annotations=WRITE, meta=APP_ONLY)
     def keep_prospect(job_id: int, prospect_id: int, view_key: str = "", candidate_id: int | None = None,
-                      as_new: bool = False) -> CallToolResult:
+                      as_new: bool = False, stage: str | None = None) -> CallToolResult:
         """Only the Shortlist card in the chat calls this, when the recruiter presses Keep. Calls from the model
-        are refused. candidate_id: keep as that saved person; as_new: keep as someone new."""
+        are refused. candidate_id: keep as that saved person; as_new: keep as someone new; stage: the stage
+        to add them to (the first stage, or Contacted)."""
         try:
             _from_view(job_id, prospect_id, view_key)
-            done = shortlist.keep(store, job_id, prospect_id, link_id=candidate_id, as_new=as_new, via="claude")
+            done = shortlist.keep(store, job_id, prospect_id, link_id=candidate_id, as_new=as_new, via="claude",
+                                  stage=stage)
         except shortlist.NeedsChoice as exc:
             return _decided(job_id, prospect_id, str(exc), needs_choice=True,
                             matches=[{**shortlist._brief(c), "pipelines": shortlist._pipelines(store, c["id"])}
                                      for c in exc.matches[:5]])
         except (ToolError, ValueError, NotFound) as exc:
             return _card_error(exc)
-        c, stage, job = done["candidate"], done["stage"], store.get_job(job_id)
-        if done["already"]:
-            sentence = f"Kept {quoted(c['name'])}. They were already in {_job_name(job)}, in {stage}."
-        else:
-            sentence = (f"{'Saved' if done['created'] else 'Kept'} {quoted(c['name'])} and added them to {stage} on "
-                        f"{_job_name(job)}" + ("." if done["created"] else ", linked to the person already saved."))
-        return _decided(job_id, prospect_id, sentence + " You can undo it in Talent Search, under Changes.",
-                        candidate_id=c["id"], candidate_url=app_url(f"/candidates/{c['id']}"))
+        c, job = done["candidate"], store.get_job(job_id)
+        return _decided(job_id, prospect_id, _kept_sentence(done, job) + " You can undo it in Talent Search, under "
+                        "Changes.", candidate_id=c["id"], candidate_url=app_url(f"/candidates/{c['id']}"),
+                        **({"warning": done["elsewhere"]} if done.get("elsewhere") else {}))
+
+    def _many(job_id: int, prospect_ids: list[int], view_key: str) -> list[int]:
+        ids = list(dict.fromkeys(int(i) for i in prospect_ids or []))
+        if not ids:
+            raise ToolError("Nobody picked. Tick the people to keep, or press Keep all.")
+        if len(ids) > shortlist.MAX_BATCH * 4:
+            raise ToolError("That's too many at once. Keep them in Talent Search.")
+        for pid in ids:
+            _from_view(job_id, pid, view_key)
+        return ids
+
+    def _rows_back(job_id: int, ids: list[int], sentence: str, **extra: Any) -> CallToolResult:
+        rows = []
+        for pid in ids:
+            try:
+                row = shortlist.get(store, job_id, pid)
+            except NotFound:
+                continue
+            if row["status"] == "proposed":
+                row["checks"] = shortlist.checks(store, row)
+            view = shortlist.row_view(row)
+            if row.get("candidate_id") and row["status"] == "kept":
+                view["candidate_url"] = app_url(f"/candidates/{row['candidate_id']}")
+            rows.append(view)
+        return _result(sentence, {"prospects": rows, "counts": shortlist.counts(store, job_id), "message": sentence,
+                                  "app_url": app_url(f"/jobs/{job_id}/shortlist"), **extra})
+
+    @mcp.tool(annotations=WRITE, meta=APP_ONLY)
+    def keep_prospects(job_id: int, prospect_ids: list[int], view_key: str = "",
+                       stage: str | None = None) -> CallToolResult:
+        """Only the Shortlist card in the chat calls this, when the recruiter presses Keep all or Keep selected.
+        Calls from the model are refused. People whose same-name match needs a choice are left waiting."""
+        try:
+            ids = _many(job_id, prospect_ids, view_key)
+            done = shortlist.keep_all(store, job_id, ids, stage=stage, via="claude")
+        except (ToolError, ValueError, NotFound) as exc:
+            return _card_error(exc)
+        job, n = store.get_job(job_id), len(done["kept"])
+        stages = sorted({k["stage"] for k in done["kept"]})
+        sentence = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {' and '.join(stages)}"
+                    if n else "") + f" on {_job_name(job)}." + (" You can undo it in Talent Search, under Changes."
+                                                               if n else ""))
+        if done["left"]:
+            sentence += f" {len(done['left'])} need your choice first: {', '.join(quoted(x) for x in done['left'])}."
+        if done["held"]:
+            sentence += f" Left {len(done['held'])} whose name reads like a sentence; keep them one at a time."
+        warn = [k["elsewhere"] for k in done["kept"] if k.get("elsewhere")]
+        if warn:
+            sentence += " " + " ".join(warn)
+        return _rows_back(job_id, ids, sentence, **({"warning": " ".join(warn)} if warn else {}))
+
+    @mcp.tool(annotations=WRITE, meta=APP_ONLY)
+    def pass_prospects(job_id: int, prospect_ids: list[int], view_key: str = "",
+                       reason: str | None = None) -> CallToolResult:
+        """Only the Shortlist card in the chat calls this, when the recruiter presses Pass all (one reason for
+        all of them). Calls from the model are refused."""
+        try:
+            ids = _many(job_id, prospect_ids, view_key)
+            n = shortlist.pass_all(store, job_id, reason, ids)
+        except (ToolError, ValueError, NotFound) as exc:
+            return _card_error(exc)
+        return _rows_back(job_id, ids, f"Passed on {n} {'person' if n == 1 else 'people'}. They won't be proposed "
+                          f"for {_job_name(store.get_job(job_id))} again. You can put them back in Talent Search.")
 
     @mcp.tool(annotations=WRITE, meta=APP_ONLY)
     def pass_prospect(job_id: int, prospect_id: int, view_key: str = "", reason: str | None = None) -> CallToolResult:
@@ -2115,7 +2292,8 @@ ARG_ALIASES = {
     "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags"},
     "move_stage": {"note": "notes"},
     "add_to_pipeline": {"note": "notes"},
-    "log_activity": {"body": "summary"},
+    "log_activity": {"body": "summary", "candidates": "candidate_ids", "people": "candidate_ids"},
+    "propose_candidates": {"prospects": "people", "candidates": "people"},
     "client_report": {"company": "client"},
 }
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one

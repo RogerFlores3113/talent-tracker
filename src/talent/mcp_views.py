@@ -162,25 +162,52 @@ const KEY="talent-search/shortlist";
 function viewKey(){const k=META&&META[KEY];return k&&k.key?k:null}
 function canAct(){return !!(HOST&&HOST.serverTools&&viewKey())}
 function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ").replace(/^Error executing tool [\w-]+: /,"")}
-let countsLine=null;
+let countsLine=null,stageSel=null,bulkBox=null;const CARDS={};
 function countText(c){c=c||{};return(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"}
+function stageArg(){return stageSel&&stageSel.value&&stageSel.selectedIndex>0?{stage:stageSel.value}:{}}
+function call(tool,args){const k=viewKey();return req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,view_key:k.key},args)})}
+function swap(p,extra,msg){const old=CARDS[p.id];const next=prospect(Object.assign({},p,extra||{}));if(msg)next.querySelector(".status").textContent=msg;if(old)old.replaceWith(next);return next}
 function act(card,p,tool,args){
- const k=viewKey();const status=card.querySelector(".status");
- card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=true);
+ const status=card.querySelector(".status");
+ card.querySelectorAll("button.btn,input").forEach(b=>b.disabled=true);
  status.textContent="Working on it…";
- req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,prospect_id:p.id,view_key:k.key},args)}).then(r=>{
+ call(tool,Object.assign({prospect_id:p.id},tool==="keep_prospect"?stageArg():{},args)).then(r=>{
   const d=(r&&r.structuredContent)||null;
-  if(r&&r.isError||!d){status.textContent=said(r)||"That didn't work. Try again in Talent Search.";card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=false);return}
+  if(r&&r.isError||!d){status.textContent=said(r)||"That didn't work. Try again in Talent Search.";card.querySelectorAll("button.btn,input").forEach(b=>b.disabled=false);return}
   if(d.counts&&countsLine)countsLine.textContent=countText(d.counts);
-  const next=prospect(Object.assign({},d.prospect,d.needs_choice?{choices:d.matches||[]}:{}));
-  next.querySelector(".status").textContent=d.message||said(r);
-  card.replaceWith(next)});
+  swap(Object.assign({},d.prospect,d.candidate_url?{candidate_url:d.candidate_url}:{}),d.needs_choice?{choices:d.matches||[]}:{},d.message||said(r));refreshBulk()});
 }
+function waitingIds(only){return Object.values(CARDS).filter(c=>c.dataset.waiting==="1"&&(!only||(c.querySelector("input.pick")||{}).checked)).map(c=>+c.dataset.id)}
+function bulk(tool,ids,args,status){
+ if(!ids.length){status.textContent="Nobody picked yet.";return}
+ bulkBox.querySelectorAll("button.btn,input,select").forEach(b=>b.disabled=true);status.textContent="Working on it…";
+ call(tool,Object.assign({prospect_ids:ids},args)).then(r=>{
+  const d=(r&&r.structuredContent)||null;bulkBox.querySelectorAll("button.btn,input,select").forEach(b=>b.disabled=false);
+  if(r&&r.isError||!d){status.textContent=said(r)||"That didn't work. Try again in Talent Search.";return}
+  if(d.counts&&countsLine)countsLine.textContent=countText(d.counts);
+  for(const p of d.prospects||[])swap(p);status.textContent=d.message||said(r);refreshBulk()});
+}
+function refreshBulk(){if(!bulkBox)return;const n=waitingIds(false).length,k=waitingIds(true).length;
+ bulkBox.style.display=n>1?"":"none";const sel=bulkBox.querySelector(".keep-sel");if(sel){sel.textContent=k?"Keep selected ("+k+")":"Keep selected";sel.disabled=!k}}
+function bulkBar(d){
+ const status=el("div",{class:"status muted",role:"status"});
+ const box=el("div",{class:"card"});
+ const why=el("input",{class:"reason",type:"text",maxlength:"300",placeholder:"Reason for passing on all (optional)","aria-label":"Why you're passing on all"});
+ const row=el("div",{class:"acts"},
+  el("button",{class:"btn primary",onclick:()=>bulk("keep_prospects",waitingIds(false),stageArg(),status)},"Keep all"),
+  el("button",{class:"btn keep-sel",onclick:()=>bulk("keep_prospects",waitingIds(true),stageArg(),status)},"Keep selected"),
+  el("button",{class:"btn",onclick:()=>{row.replaceWith(passRow);why.focus()}},"Pass all"));
+ const passRow=el("div",{class:"acts"},why,
+  el("button",{class:"btn",onclick:()=>{bulk("pass_prospects",waitingIds(false),{reason:why.value},status);passRow.replaceWith(row)}},"Pass on all"),
+  el("button",{class:"btn",onclick:()=>passRow.replaceWith(row)},"Cancel"));
+ why.addEventListener("keydown",e=>{if(e.key==="Enter")passRow.querySelector("button.btn").click()});
+ box.append(row,status);return box}
+function sameLabel(m){return"Same as "+m.name+(m.current_company?", "+m.current_company:m.current_title?", "+m.current_title:"")}
 function buttons(card,p){
  const box=el("div",{class:"acts"});
  const same=(p.choices&&p.choices.length?p.choices:(p.checks&&p.checks.same_name)||[]);
  const keep=(label,args,primary)=>el("button",{class:"btn"+(primary?" primary":""),onclick:()=>act(card,p,"keep_prospect",args)},label);
- if(same.length){for(const m of same)box.append(keep("Keep as #"+m.id,{candidate_id:m.id},false));box.append(keep("Keep as someone new",{as_new:true},false))}
+ if(same.length){for(const m of same)box.append(keep(sameLabel(m),{candidate_id:m.id},false));box.append(keep("Someone new",{as_new:true},false))}
  else box.append(keep("Keep",{},true));
  const pass=el("button",{class:"btn",onclick:()=>{
   const why=el("input",{class:"reason",type:"text",maxlength:"300",placeholder:"Reason (optional)","aria-label":"Why you're passing"});
@@ -190,24 +217,41 @@ function buttons(card,p){
   const form=el("div",{class:"acts"},why,go,back);box.replaceWith(form);why.focus()}},"Pass");
  box.append(pass);return box}
 function prospect(p){const sub=[p.title,p.company&&("at "+p.company)].filter(Boolean).join(" ")+(p.location?" · "+p.location:"");
- const badge=p.status==="passed"?"Passed":p.status==="kept"?"Kept":null;
- const card=el("div",{class:"card"},el("div",{class:"row"},el("b",{},p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
+ const waiting=(p.status||"proposed")==="proposed";
+ const badge=p.status==="passed"?"Passed":p.status==="kept"?("Kept"+(p.stage?", in "+p.stage:"")):null;
+ const lines=p.check_lines||[];const top=lines.filter(x=>/^Passed on for /.test(x)),rest=lines.filter(x=>!/^Passed on for /.test(x));
+ const pick=waiting&&canAct()?el("input",{type:"checkbox",class:"pick","aria-label":"Select "+p.name}):null;
+ if(pick)pick.addEventListener("change",refreshBulk);
+ const hist=(p.work_history||[]);
+ const card=el("div",{class:"card"},
+  top.length?el("div",{class:"small"},el("b",{},top.join(". "))):null,
+  el("div",{class:"row"},el("b",{},pick,pick?" ":null,p.name,badge?el("span",{class:"badge"},badge):null),profileLink(p.linkedin_url)),
   sub?el("div",{class:"muted small"},sub):null,p.fit?el("div",{class:"small"},p.fit):null,
   (p.tags&&p.tags.length)?el("div",{class:"chips"},p.tags.slice(0,8).map(t=>el("span",{class:"chip"},t))):null,
+  (p.about||hist.length)?el("details",{class:"small"},el("summary",{},"About and work history"),p.about?el("p",{},p.about):null,
+   hist.length?el("ul",{},hist.map(w=>el("li",{},[w.title,w.company&&("at "+w.company)].filter(Boolean).join(" ")+((w.start||w.end)?" ("+(w.start||"")+" to "+(w.end||"now")+")":"")))):null):null,
   p.pass_reason?el("div",{class:"small muted"},"Reason: "+p.pass_reason):null,
-  (p.check_lines&&p.check_lines.length)?el("ul",{class:"small"},p.check_lines.map(x=>el("li",{},x))):null,
-  p.choices&&p.choices.length?el("ul",{class:"small"},p.choices.map(m=>el("li",{},"#"+m.id+" "+m.name+(m.current_title?", "+m.current_title:"")+(m.current_company?" at "+m.current_company:"")+((m.pipelines||[]).length?". In "+m.pipelines.map(x=>x.job+": "+x.stage).join("; "):"")))):null);
- if((p.status||"proposed")==="proposed"&&canAct())card.append(buttons(card,p));
+  rest.length?el("ul",{class:"small"},rest.map(x=>el("li",{},x))):null,
+  p.choices&&p.choices.length?el("ul",{class:"small"},p.choices.map(m=>el("li",{},m.name+(m.current_title?", "+m.current_title:"")+(m.current_company?" at "+m.current_company:"")+((m.pipelines||[]).length?". In "+m.pipelines.map(x=>x.job+": "+x.stage).join("; "):"")))):null,
+  p.status==="kept"&&p.candidate_url?el("div",{class:"small"},appLink(p.candidate_url,"Open "+p.name+" in Talent Search")):null);
+ card.dataset.id=p.id;card.dataset.waiting=waiting?"1":"0";
+ if(waiting&&canAct())card.append(buttons(card,p));
  card.append(el("div",{class:"status muted",role:"status"}));
- return card}
+ CARDS[p.id]=card;return card}
 function render(d){
  const wrap=el("div",{});const rows=d.added||d.prospects||[];const c=d.counts||{};
  wrap.append(el("div",{class:"row"},el("h1",{},"Shortlist"+(d.job?": "+d.job.title+(d.job.company?" · "+d.job.company:""):"")),appLink(d.app_url,"Review in Talent Search")));
  countsLine=el("div",{class:"small muted"},countText(c));wrap.append(countsLine);
+ const waiting=rows.some(p=>(p.status||"proposed")==="proposed");
+ const ks=d.keep_stages||[];
+ if(waiting&&canAct()&&ks.length>1){stageSel=el("select",{"aria-label":"Keep into"},ks.map(s=>el("option",{value:s},s)));
+  wrap.append(el("div",{class:"small acts"},el("span",{},"Keep into"),stageSel,el("span",{class:"muted"},"(pick "+ks[1]+" if you already messaged them)")))}
+ if(waiting&&canAct()){bulkBox=bulkBar(d);wrap.append(bulkBox)}
  if(d.added)wrap.append(el("h2",{},"Added now"));
  if(!rows.length)wrap.append(el("p",{class:"empty"},"Nobody here."));
  for(const p of rows)wrap.append(prospect(p));
- if(rows.some(p=>(p.status||"proposed")==="proposed"))wrap.append(el("p",{class:"small muted"},canAct()?"Keep saves them and adds them to the job. You can undo a keep in Talent Search, under Changes.":"Keep or pass each one in Talent Search."));
+ refreshBulk();
+ if(waiting)wrap.append(el("p",{class:"small muted"},canAct()?"Keep saves them and adds them to the job. You can undo a keep in Talent Search, under Changes.":"Keep or pass each one in Talent Search."));
  if(d.skipped&&d.skipped.length){wrap.append(el("h2",{},"Skipped"),el("ul",{class:"small"},d.skipped.map(x=>el("li",{},x.name+": "+x.reason))))}
  return wrap}""",
     "saved": r"""

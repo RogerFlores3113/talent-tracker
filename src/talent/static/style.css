@@ -196,6 +196,7 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 /* Sample data, status update, follow-ups */
 .badge.sample { background: #fff3cd; color: #7a5a00; text-transform: none; }
 .badge.overdue { background: #fde2e1; color: #9b1c1c; text-transform: none; }
+.badge.warn { background: #fff3cd; color: #7a5a00; text-transform: none; }
 .badge.iv-cancelled { text-decoration: line-through; }
 .t-interview.cancelled .when { text-decoration: line-through; color: var(--muted); }
 .timeline li.struck > div:not(.fine) { text-decoration: line-through; color: var(--muted); }
