@@ -1660,6 +1660,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         count as hired and Rejected, Passed or Client passed as out. Check stage_outcomes in the result.
         openings is the headcount (default 1); min_active is how many active candidates this job should have
         before the dashboard asks for more."""
+        if ai_caps.jobs_left(store) < 1:
+            raise ValueError(ai_caps.limit_text(f"create {ai_caps.JOB_CAP} jobs", 0))
         twins = store.similar_open_jobs(title, company)
         if not stages and stage_set in (None, "") and stages_from_job_id in (None, ""):
             stage_set = actions.default_stage_set(store)  # in-house mode: the in-house stages
@@ -2045,6 +2047,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         job, or already in its pipeline, are skipped and named in the reply. People already saved are flagged
         with their candidate id and the jobs they're in. Undo in the app takes back the ones still waiting."""
         ignored = sorted({k for p in people for k in (p.model_extra or {})})
+        if len(people) > ai_caps.proposed_left(store):
+            raise ValueError(ai_caps.limit_text(f"propose {ai_caps.PROPOSE_CAP} people for Shortlists",
+                                                ai_caps.proposed_left(store)))
         res = shortlist.propose(store, job_id, [p.model_dump(exclude=set(p.model_extra or {})) for p in people])
         added = [shortlist.row_view(a) for a in res["added"]]
         job, n, k = res["job"], len(added), len(res["skipped"])
@@ -2808,6 +2813,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         update_day (Monday to Sunday, "fri" works), time_zone (America/New_York, or ET, CT, MT, PT), notes. A name
         that matches an existing client ("Acme" and "Acme, Inc." are one) changes nothing. Jobs join it by their
         company. The recruiter can undo it on Changes while no job names it."""
+        if ai_caps.clients_left(store) < 1:
+            raise ValueError(ai_caps.limit_text(f"create {ai_caps.CLIENT_CAP} clients", 0))
         if update_day is not None and update_day.strip():
             update_day = reports.normalize_day(update_day)
         if time_zone is not None and time_zone.strip():
@@ -3235,6 +3242,8 @@ def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> No
     the session's first write the app takes a backup (sessions.before_write)."""
     manager = mcp._tool_manager
     original = manager.call_tool
+    bound: dict[str, Any] = {}  # this process's app: the first name it says binds, a later name can't escape its level
+    presses = [0]  # Keep and Pass presses a Suggest only app has made in this session
 
     async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
         tool = manager.get_tool(name)
@@ -3242,14 +3251,25 @@ def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> No
         token = AI_SESSION.set(trust.REPLAY_SESSION.get() or session)
         try:
             writes = tool is not None and not getattr(tool.annotations, "readOnlyHint", False)
-            app = None if replay else trust.touch(store, _client_name(mcp))
-            if writes and app and name not in trust.CARD_TOOLS:  # how far this AI app is trusted (Settings)
+            app = None if replay else trust.touch(store, _client_name(mcp), bound)
+            if app and name in trust.CARD_TOOLS:  # the card's presses: Read only is refused, Suggest only is capped
+                if app["trust"] == "read_only":
+                    raise ToolError(trust.READ_ONLY_TEXT)
+                if app["trust"] == "suggest" and name != "shortlist_card_key":
+                    if presses[0] >= trust.SUGGEST_PRESS_CAP:
+                        raise ToolError(f"Nothing changed. This AI app is set to Suggest only, so it can press Keep or "
+                                        f"Pass {trust.SUGGEST_PRESS_CAP} times a session. Do the rest in Talent Search.")
+                    presses[0] += 1
+            elif writes and app:  # how far this AI app is trusted (Settings)
                 if app["trust"] == "read_only":
                     raise ToolError(trust.READ_ONLY_TEXT)
                 if app["trust"] == "suggest" and name not in trust.SUGGEST_OK:
-                    held = trust.hold(store, name, dict(arguments or {}), session)
+                    held = trust.hold(store, name, dict(arguments or {}), session, app["name"])
+                    trust.count_write(store, app["id"])
                     return _plain(_wait_text(held) + " Your AI app is set to Suggest only in Settings, so every "
                                   "change waits for the recruiter.", {"pending_review": _waiting(held)})
+            if writes and app:
+                trust.count_write(store, app["id"])
             if writes and not replay:
                 sessions.before_write(store, session, started, _client_name(mcp))
             return await original(name, arguments, context=context, convert_result=convert_result)

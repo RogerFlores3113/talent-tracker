@@ -241,7 +241,7 @@ def test_settings_can_change_an_apps_trust_and_new_apps(store, named):
     assert "1 AI app changed" in flash_of(r) and "New AI apps start at Suggest only" in flash_of(r)
     assert trust.apps(store)[0]["trust"] == "suggest" and trust.new_apps_level(store) == "suggest"
     named["name"] = "Other App"
-    call(server, "search_candidates", query="x")
+    call(build_server(store), "search_candidates", query="x")  # another process, another app
     assert {a["name"]: a["trust"] for a in trust.apps(store)} == {"Acme Chat": "suggest", "Other App": "suggest"}
     c.post("/settings/ai-apps", data={f"trust_{app['id']}": "trusted"})
     assert trust.new_apps_level(store) == "trusted"

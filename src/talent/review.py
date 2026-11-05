@@ -142,7 +142,7 @@ def _dedupe_key(payload: dict[str, Any]) -> str:
 
 
 def _queue(store: Store, kind: str, summary: str, payload: dict[str, Any], *, candidate_id: int | None = None,
-           job_id: int | None = None, session: str | None = None) -> dict[str, Any]:
+           job_id: int | None = None, session: str | None = None, app: str | None = None) -> dict[str, Any]:
     if candidate_id is not None:
         store.get_candidate(candidate_id)  # a plain "not found", never a database error
     if job_id is not None:
@@ -159,7 +159,9 @@ def _queue(store: Store, kind: str, summary: str, payload: dict[str, Any], *, ca
                 same = False
             if same:  # sent twice: one row
                 return get(store, r["id"])
-        n = store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending'")["n"]
+        # the cap is per app: held requests carry their app's name, everything else counts together
+        n = store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending' AND coalesce("
+                       "json_extract(payload, '$.app'), '') = ?", (app or "",))["n"]
         if n >= QUEUE_CAP:
             raise ValueError(f"No change made. {n} changes from your AI app already wait for the recruiter's review. "
                              "Ask them to review those in the app (Review) first.")
@@ -731,7 +733,12 @@ def keep(store: Store, review_id: int) -> str:
         what = _apply(store, r)
     except (ValueError, NotFound) as exc:
         reason = str(exc).rstrip(".")
-        _result(store, review_id, f"Couldn't keep it: {reason}", "passed")  # decided: it won't wait again
+        if r["kind"] == "tool_call":  # a held request whose replay failed keeps waiting, with the reason shown
+            with store._write():
+                store._conn.execute("UPDATE ai_review SET status = 'pending', decided_at = NULL, result = ?"
+                                    " WHERE id = ?", (f"Couldn't keep it: {reason}", review_id))
+        else:
+            _result(store, review_id, f"Couldn't keep it: {reason}", "passed")  # decided: it won't wait again
         raise ValueError(f"Couldn't keep it: {reason}.") from None
     finally:
         AI_KEPT.reset(token)
