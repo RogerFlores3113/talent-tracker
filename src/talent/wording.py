@@ -33,6 +33,7 @@ _VERBS = {"can": "can", "has": "have", "hasn't": "haven't", "keeps": "keep", "pa
 _IMPERATIVE = re.compile(r"\b(Ask|ask|Tell|tell|Show|show|Check with|check with|Confirm with|confirm with) "
                          r"the recruiter\b")
 _VERB = re.compile(r"\b(T|t)he recruiter (" + "|".join(sorted(map(re.escape, _VERBS), key=len, reverse=True)) + r")\b")
+_OR_VERB = re.compile(r"\b([Yy]ou \w+ or )(" + "|".join(sorted(map(re.escape, _VERBS), key=len, reverse=True)) + r")\b")
 _FENCE = re.compile(r"(<(data-[0-9a-f]+)>.*?</\2>)", re.S)
 
 
@@ -40,6 +41,7 @@ def _plain(text: str) -> str:
     text = text.replace("for the recruiter only", "private to you").replace("For the recruiter only", "Private to you")
     text = _IMPERATIVE.sub(lambda m: f"{m.group(1)} the user", text)
     text = _VERB.sub(lambda m: ("Y" if m.group(1) == "T" else "y") + "ou " + _VERBS[m.group(2)], text)
+    text = _OR_VERB.sub(lambda m: m.group(1) + _VERBS[m.group(2)], text)  # "keeps or passes" -> "keep or pass"
     text = text.replace("the recruiter's", "your").replace("The recruiter's", "Your")
     text = text.replace("the recruiter", "you").replace("The recruiter", "You")
     return text
@@ -76,6 +78,9 @@ def install(mcp: Any, store: Store) -> None:
                 for k in ("warning", "note", "nudge", "close_out_hint", "summary"):
                     if isinstance(data.get(k), str) and "recruiter" in data[k].lower():
                         data[k] = rewrite(data[k])
+                for row in data.get("skipped") or []:  # propose_candidates: why each person was skipped
+                    if isinstance(row, dict) and isinstance(row.get("reason"), str) and "recruiter" in row["reason"].lower():
+                        row["reason"] = rewrite(row["reason"])
         return res
 
     manager.call_tool = call_tool  # type: ignore[method-assign]

@@ -12,6 +12,8 @@
     <label class="check"><input type="checkbox" name="{{ key }}" value="1" {{ 'checked' if s[key] == '1' }}>
       <span><strong>{{ label }}</strong> <span class="fine">{{ help }}</span></span></label>
     {% endfor %}
+    <label class="check"><input type="checkbox" name="chase_from_import" value="1" {{ 'checked' if chase_import }}>
+      <span><strong>Count waits from my import day for imported people</strong> <span class="fine">A stage date from before the import counts as the day you imported, so a big import doesn't fill the chase list.</span></span></label>
     <div class="form three">
       {% for key, label in thresholds %}
       <label>{{ label }}<input type="number" name="{{ key }}" min="1" max="9999" value="{{ s[key] }}"{% if errors[key] %} aria-invalid="true" aria-describedby="err-{{ key }}"{% endif %}>

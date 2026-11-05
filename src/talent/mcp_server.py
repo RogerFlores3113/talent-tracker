@@ -1003,8 +1003,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes.append(out["linkedin_note"])
         if created and someone_else:
             n_else = len(someone_else)
+            n_bare = sum(1 for c in someone_else if c.get("_no_ids"))
             line = (f"Same name, different LinkedIn: saved as someone new. {n_else} other saved "
                     f"{'person has' if n_else == 1 else 'people have'} the name {quoted(cand['name'])}.")
+            if n_bare:
+                line = (f"Same name as {n_bare} saved {'person' if n_bare == 1 else 'people'} with no email or "
+                        "LinkedIn to compare: saved as someone new. Merge them if they're the same person.")
             out["same_name_saved_as_new"] = [c["id"] for c in someone_else][:10]
             notes.append(line)
         if not created:

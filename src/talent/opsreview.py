@@ -20,6 +20,8 @@ from .store import Store, to_dt
 WEEK_DAYS = 7
 STUCK_DAYS = 14
 INTERVIEW_DAYS = 30  # booked interviews counted from two hours ago to this many days ahead
+UPDATE_WARN_DAYS = 7  # a client update older than this reads amber, older than UPDATE_LATE_DAYS red
+UPDATE_LATE_DAYS = 14
 PIPES = ("process", "new", "moved", "stuck", "interviews", "offers")
 LABELS = {"process": "In process", "new": "New this week", "moved": "Moved this week", "stuck": "Stuck",
           "interviews": "Interviews booked", "offers": "Offers out"}
@@ -123,6 +125,8 @@ def review(store: Store, stuck_days: int = STUCK_DAYS, client: str | None = None
             "links": {p: link(j["id"], p, stuck_days) for p in PIPES},
             "last_update_sent_at": last,
             "days_since_update": max(0, actions.local_days(dt, now)) if dt else None})
+        d = rows[-1]["days_since_update"]
+        rows[-1]["update_tone"] = "" if d is None or d <= UPDATE_WARN_DAYS else "overdue" if d > UPDATE_LATE_DAYS else "warn"
     totals = {p: sum(r["counts"][p] for r in rows) for p in PIPES}
     return {"rows": rows, "totals": totals, "stuck_days": stuck_days, "week_days": WEEK_DAYS,
             "interview_days": INTERVIEW_DAYS, "client": client or None}
