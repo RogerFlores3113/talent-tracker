@@ -135,13 +135,15 @@ def test_log_activity_warns_when_not_in_that_pipeline(store):
 
 
 # 7. tag casing --------------------------------------------------------------
-def test_tags_reuse_the_existing_spelling(store):
+def test_tags_keep_the_spelling_given(store):
+    # Changed in the cycle 5 re-review: each person keeps the case given; the tag list shows the most used one.
     store.add_candidate(name="A", tags="React, Python")
     b = store.add_candidate(name="B", tags="react, GO")
-    assert b["tags"] == ["React", "GO"]
-    c = store.update_candidate(store.add_candidate(name="C")["id"], tags=["python", "go"])
-    assert c["tags"] == ["Python", "GO"]
-    assert {t["tag"]: t["count"] for t in store.list_tags()} == {"React": 2, "Python": 2, "GO": 2}
+    assert b["tags"] == ["react", "GO"]
+    c = store.update_candidate(store.add_candidate(name="C")["id"], tags=["Python", "go"])
+    assert c["tags"] == ["Python", "go"]
+    store.add_candidate(name="D", tags="go")
+    assert {t["tag"]: t["count"] for t in store.list_tags()} == {"React": 2, "Python": 2, "go": 3}
     assert store.search_candidates(tag="react").total == 2
 
 

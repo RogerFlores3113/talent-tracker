@@ -1799,17 +1799,9 @@ class Store:
             out["last_contacted_at"] = parse_when(out["last_contacted_at"])
         return out
 
-    def _canonical_tag(self, tag: str, candidate_id: int) -> str:
-        """The spelling other candidates already use for this tag ("React" beats a new "react")."""
-        row = self._conn.execute(
-            "SELECT tag FROM candidate_tags WHERE tag = ? AND candidate_id <> ?"
-            " GROUP BY tag COLLATE BINARY ORDER BY count(*) DESC, min(rowid) LIMIT 1",
-            (tag, candidate_id),
-        ).fetchone()
-        return row[0] if row else tag
-
     def _sync_tags(self, candidate_id: int, tags_text: str | None) -> None:
-        tags = [self._canonical_tag(t, candidate_id) for t in stored_tags(tags_text)]
+        """Skills keep the spelling they were given ("Go" stays "Go"); filters and search ignore case."""
+        tags = stored_tags(tags_text)
         text = join_tags(tags)
         if text != tags_text:  # keep the search copy in the same spelling
             self._conn.execute("UPDATE candidates SET tags = ? WHERE id = ?", (text, candidate_id))
@@ -1967,9 +1959,10 @@ class Store:
     def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
                               merged: dict[str, Any]) -> list[dict[str, Any]] | None:
         """When a save changes the title or company, the saved work history follows, so it doesn't
-        still show the old role "to now". Same company: the current role is updated in place.
-        New company: the current role gets an end year and the new role goes on top. None when
-        nothing needs to change (or there is no saved history to keep in step)."""
+        still show the old role "to now". A new title (same company or not) or a new company: the
+        current role gets an end year and the new role goes on top. Filling a blank title or company
+        on the current role updates it in place. None when nothing needs to change (or there is no
+        saved history to keep in step)."""
         def same(a: Any, b: Any) -> bool:
             return (a or "").strip().casefold() == (b or "").strip().casefold()
 
@@ -1984,8 +1977,14 @@ class Store:
         current = (top.get("end") or "").strip().lower() in ("", "present", "now", "current", "today")
         if current and same(top.get("title"), title) and same(top.get("company"), company):
             return None
-        if current and (same(top.get("company"), company) or not top.get("company")):
+        fills = (not top.get("title") or not title or same(top.get("title"), title)) and \
+            (not top.get("company") or not company or same(top.get("company"), company))
+        if current and fills:
             return [{**top, "title": title or top.get("title"), "company": company or top.get("company")}, *history[1:]]
+        if current and same(top.get("company"), company):  # a new title there: the old one ends, the new starts
+            year = str(datetime.now().year)
+            return [{"title": title, "company": top.get("company"), "start": year, "end": None, "summary": None},
+                    {**top, "end": year}, *history[1:]]
         rest = [{**top, "end": str(datetime.now().year)} if current else top, *history[1:]]
         return [{"title": title, "company": company, "start": None, "end": None, "summary": None}, *rest]
 
@@ -2004,19 +2003,21 @@ class Store:
         return c
 
     def update_candidate(self, candidate_id: int, work_history: list[dict[str, Any]] | None = None, *,
-                         by: str = "app", **data: Any) -> dict[str, Any]:
+                         by: str = "app", via: str | None = None, **data: Any) -> dict[str, Any]:
         """Change fields (a blank clears one). Only real changes are written, and each call that
         changes something leaves a "change" entry on the timeline with the old values, so it can
         be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
-        carries "_changed", the fields that actually changed."""
+        carries "_changed", the fields that actually changed. via="claude": the recruiter did it with a button in
+        Claude (Changes says so)."""
         fields = self._prepare(data)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
-        return self._update(candidate_id, fields, work_history, by=by)
+        return self._update(candidate_id, fields, work_history, by=by, via=via)
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
-                *, by: str, merge: bool = False, derived: tuple[str, ...] = ()) -> dict[str, Any]:
+                *, by: str, merge: bool = False, derived: tuple[str, ...] = (),
+                via: str | None = None) -> dict[str, Any]:
         with self._lock, self._conn:
             old, new = self._diff(candidate_id, fields, work_history)
             clash = self._clash(candidate_id, new)
@@ -2026,7 +2027,7 @@ class Store:
                 self._apply(candidate_id, new)
                 body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
                 self._record_change(candidate_id, old, new, by, body,
-                                    derived=tuple(k for k in derived if k in new))
+                                    derived=tuple(k for k in derived if k in new), via=via)
         cand = self.get_candidate(candidate_id)
         cand["_changed"] = list(new)
         return cand
@@ -2060,7 +2061,8 @@ class Store:
             self._write_history(candidate_id, new["work_history"] or [])
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
-                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = ()) -> int:
+                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = (),
+                       via: str | None = None) -> int:
         by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
         data: dict[str, Any] = {"by": by, "old": old, "new": new}
@@ -2068,6 +2070,8 @@ class Store:
             data["undo_of"] = undo_of
         if derived:  # changed only because another field did (work history following a new title)
             data["derived"] = list(derived)
+        if via:  # where the recruiter did it, when not in the app window ("claude": a card's button)
+            data["via"] = via
         tid = self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by], json.dumps(data)),
@@ -2844,8 +2848,9 @@ class Store:
 
     def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._rows(
-            "SELECT tag, count(*) AS count FROM candidate_tags GROUP BY tag COLLATE NOCASE"
-            " ORDER BY count DESC, tag COLLATE NOCASE LIMIT ?",
+            "SELECT (SELECT t2.tag FROM candidate_tags t2 WHERE t2.tag = t.tag COLLATE NOCASE GROUP BY t2.tag"
+            " COLLATE BINARY ORDER BY count(*) DESC, min(t2.rowid) LIMIT 1) AS tag, count(*) AS count"
+            " FROM candidate_tags t GROUP BY t.tag COLLATE NOCASE ORDER BY count DESC, tag COLLATE NOCASE LIMIT ?",
             (limit,),
         )
 
