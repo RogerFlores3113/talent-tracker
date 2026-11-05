@@ -265,7 +265,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     key = key or paths.app_key()
     cookie_name = key_cookie_name(key)
     flash_name = flash_cookie_name(key)
-    locked_logged = [0.0]
+    locked_logged = [float("-inf")]  # monotonic time can be under 60s on a just-booted computer
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     res = resource_dir()
     templates = Jinja2Templates(directory=str(res / "templates"))
