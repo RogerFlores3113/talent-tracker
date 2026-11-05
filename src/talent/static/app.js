@@ -9,6 +9,9 @@
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
 //                             (a submit button's own data-busy wins when that button sent it)
+//   data-decide="Out stage"   on the Decide form: before sending, confirm naming who gets the offer and who is
+//                             passed on (radio offer and ticked pass boxes, each with data-name; data-ahead counts
+//                             their interviews still to come, which get cancelled)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -66,8 +69,26 @@
     if (e.target.closest && e.target.closest("button[data-print]")) window.print();
   });
 
+  // The Decide form: say exactly who gets the offer and who is passed on before anything moves.
+  function decideQuestion(form) {
+    const offer = form.querySelector("input[name=offer]:checked");
+    const passed = Array.from(form.querySelectorAll("input[name=pass]:checked"))
+      .filter(b => !offer || b.value !== offer.value);
+    let q = "Record this decision?\n\nOffer to " + (offer ? offer.dataset.name : "nobody yet") + ".";
+    if (!passed.length) q += "\nNobody is passed on.";
+    else {
+      q += "\nPass on " + passed.length + ", moving to " + form.dataset.decide + ":";
+      passed.forEach(b => {
+        const n = parseInt(b.dataset.ahead || "0", 10);
+        q += "\n  " + b.dataset.name + (n ? " (cancels " + n + " interview" + (n === 1 ? "" : "s") + " still to come)" : "");
+      });
+    }
+    return q + "\n\nYou can undo it all under Changes.";
+  }
+
   document.addEventListener("submit", e => {
     const form = e.target;
+    if (form.dataset && form.dataset.decide !== undefined && !window.confirm(decideQuestion(form))) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.busy) {
       // A big import takes a while: say so, and don't let a second click send it again.

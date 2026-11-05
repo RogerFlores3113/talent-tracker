@@ -34,7 +34,7 @@
         {% if lp.split %}<div class="fine">Some sessions of this loop are on another day.</div>{% endif %}
         <ul class="sessions">
         {% for x in lp.sessions %}
-          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ interview_outcomes[x.status] }}</span>{% endif %}
+          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% endif %}
             <a class="link small" href="{{ x.href }}">Change</a></li>
         {% endfor %}
         </ul>

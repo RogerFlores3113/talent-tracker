@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 
 from .store import LIVE_INTERVIEW, NotFound, Store, _stage_key, _stage_plan, parse_when, to_dt
+from .store import interview_label as result_label, interview_result, interview_verdict
 
 FLAGS: tuple[tuple[str, str, str], ...] = (
     # (setting key, label, help)
@@ -297,9 +298,10 @@ def group_loops(rows: list[dict[str, Any]], key: Callable[[dict[str, Any]], Any]
 def _session(t: dict[str, Any], now_iso: str) -> dict[str, Any]:
     """One session of a loop, as a Today card lists it."""
     status = t.get("status") or ("cancelled" if _iv_data(t).get("status") == "cancelled"
-                                 else _iv_data(t).get("outcome") or "scheduled")
+                                 else interview_result(_iv_data(t)) or "scheduled")
     return {"interview_id": t["id"], "at": t["at"], "name": interview_name(t) or "Interview",
-            "interviewer": interviewer_of(t) or None, "status": status, "started": t["at"] <= now_iso,
+            "interviewer": interviewer_of(t) or None, "status": status, "result": result_label(_iv_data(t)),
+            "started": t["at"] <= now_iso,
             "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}"}
 
 
@@ -371,7 +373,8 @@ def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], 
 
 
 RESULT_DAYS = 14  # how long a recorded outcome offers its next step on Today
-RESULT_WORDS = {"passed": "passed", "not_passed": "did not pass", "no_show": "did not show for"}
+RESULT_WORDS = {"passed": "passed", "not_passed": "did not pass", "no_show": "did not show for",
+                "mixed": "got mixed feedback on"}
 
 
 def pass_stage(store: Store, job_id: int) -> tuple[str, str | None]:
@@ -408,11 +411,11 @@ def interview_results(store: Store, job_id: int | None = None, now: datetime | N
             continue
         counts: dict[str, int] = {}
         for t in done:
-            o = _iv_data(t)["outcome"]
+            o = interview_result(_iv_data(t)) or "passed"
             counts[o] = counts.get(o, 0) + 1
         pending = len(g) - len(done)
         verdict = ("not_passed" if counts.get("not_passed") else "pending" if pending
-                   else "passed" if counts.get("passed") else "no_show")
+                   else "mixed" if counts.get("mixed") else "passed" if counts.get("passed") else "no_show")
         first = g[0]
         day = local_time(first["at"], "%a %b %-d")
         name = first["candidate_name"]
@@ -428,11 +431,13 @@ def interview_results(store: Store, job_id: int | None = None, now: datetime | N
                     "job_title": first["job_title"], "job_company": first.get("job_company"),
                     "sessions": [_session(t, now.replace(microsecond=0).isoformat()) for t in g], "counts": counts,
                     "pending": pending, "verdict": verdict, "day": day, "what": what, "line": line,
+                    "label": (result_label(_iv_data(first)) if len(g) == 1 and interview_verdict(_iv_data(first))
+                              else None),  # the interviewer's word: Strong yes
                     "outcome_at": max(str(_iv_data(t).get("outcome_at") or "") for t in done)})
     return out
 
 
-INTERVIEW_WORDS_LOWER = {"passed": "passed", "not_passed": "not passed", "no_show": "no show"}
+INTERVIEW_WORDS_LOWER = {"passed": "passed", "not_passed": "not passed", "no_show": "no show", "mixed": "mixed"}
 
 
 def _result_items(store: Store, now: datetime, jobs: dict[int, dict[str, Any]],
@@ -440,7 +445,7 @@ def _result_items(store: Store, now: datetime, jobs: dict[int, dict[str, Any]],
     """After an outcome: 'Tomas Weber did not pass HM screen' with Move to Rejected, or 'Mei Lin passed Tech
     screen' with Move to the next stage. Only while they're still in that stage of an open job, with no
     interview booked there since."""
-    results = [r for r in interview_results(store, now=now) if r["verdict"] in ("passed", "not_passed")]
+    results = [r for r in interview_results(store, now=now) if r["verdict"] in ("passed", "not_passed", "mixed")]
     if not results:
         return []
     apps = {(a["candidate_id"], a["job_id"]): a for a in store.open_applications()}
@@ -456,15 +461,19 @@ def _result_items(store: Store, now: datetime, jobs: dict[int, dict[str, Any]],
             to, notes = store.next_stage(r["job_id"], app["stage"]), None
             if not to:
                 continue
+        elif r["verdict"] == "mixed":  # neither on nor out: the recruiter weighs it on Decide
+            to, notes = None, None
         else:
             to, notes = pass_stage(store, r["job_id"])
         out.append({
             "key": f"interview_result:{r['candidate_id']}:{r['job_id']}:{r['outcome_at']}", "kind": "interview_result",
             "rank": 1, "when": r["outcome_at"], "verdict": r["verdict"],
-            "title": f"{r['name']} {RESULT_WORDS[r['verdict']]} {r['what']}",
+            "title": f"{r['name']} {RESULT_WORDS[r['verdict']]} {r['what']}" + (
+                f" ({r['label']})" if r.get("label") and r["verdict"] != "mixed" else ""),
             "detail": " · ".join(x for x in (label(r["job_id"], r["job_title"]), f"now in {app['stage']}") if x),
             "candidate_id": r["candidate_id"], "job_id": r["job_id"], "stage": app["stage"], "next_stage": to,
-            "notes": notes, "href": f"/candidates/{r['candidate_id']}#timeline",
+            "notes": notes, "href": (f"/jobs/{r['job_id']}/decide" if r["verdict"] == "mixed"
+                                     else f"/candidates/{r['candidate_id']}#timeline"),
         })
     return out
 
@@ -1557,6 +1566,26 @@ def stage_set(key: str | None) -> list[str] | None:
     return list(found[1]) if found and found[1] else None
 
 
+# What a built-in set's stage counts as in reports where its name says otherwise: in-house, the hiring manager's
+# screen is still screening (an agency's client HM screen is an interview, so this goes by set, not by name).
+SET_GROUPS: dict[str, dict[str, str]] = {"inhouse": {"Hiring manager screen": "screening"}}
+
+
+def default_stage_set(store: Store) -> str:
+    """The stage set a new job starts with when none is picked: in-house for someone hiring for their own company."""
+    return "inhouse" if inhouse(store) else "default"
+
+
+def apply_set_groups(store: Store, job_id: int, set_name: str | None) -> None:
+    """After a job is made from a built-in set, save what its stages count as (SET_GROUPS), as Edit job shows."""
+    from . import reports  # reports imports this module
+    for stage, group in SET_GROUPS.get(re.sub(r"[\s_-]+", "", (set_name or "").strip().lower()), {}).items():
+        try:
+            reports.set_stage_group(store, job_id, stage, group)
+        except (NotFound, ValueError):
+            continue  # renamed or not there: nothing to set
+
+
 def copied_stages(store: Store, job_id: int) -> list[dict[str, str]]:
     """Another job's stages, with what each counts as, for a new job that copies them."""
     store.get_job(job_id)  # NotFound when there's no such job
@@ -1913,4 +1942,4 @@ __all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "c
            "close_out_hint", "close_out_plan", "company_key", "undo_close_out", "company_rollup", "complete_followup", "due_text", "exit_interviews", "headline",
            "job_label", "job_numbers", "job_status_text", "local_time", "match_companies", "next_interviews",
            "exit_prompts", "interview_label", "interview_line", "local_days", "manager_rollup", "next_interview_days",
-           "parse_day", "recent_changes", "interview_results", "interview_result_lines", "group_loops", "pass_stage", "schedule_followup", "status_digest", "twin_hints", "with_out_stages"]
+           "parse_day", "recent_changes", "interview_results", "interview_result_lines", "group_loops", "pass_stage", "default_stage_set", "apply_set_groups", "schedule_followup", "status_digest", "twin_hints", "with_out_stages"]
