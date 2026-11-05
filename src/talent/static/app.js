@@ -6,6 +6,7 @@
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
+//   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -57,6 +58,10 @@
     const text = from ? from.innerText : (btn.dataset.copyText || "");
     const note = btn.dataset.copyNote === "next" ? btn.nextElementSibling : btn;
     copyText(text, note, btn.dataset.copyMsg || "Copied");
+  });
+
+  document.addEventListener("click", e => {
+    if (e.target.closest && e.target.closest("button[data-print]")) window.print();
   });
 
   document.addEventListener("submit", e => {

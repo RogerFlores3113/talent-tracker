@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist
+from . import __version__, actions, backups, importers, integrations, paths, recipes, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -1007,21 +1007,26 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         job = job_or_404(job_id)
         form = await request.form()
         cid = str(form.get("candidate_id") or "")
-        error, ask = None, None
+        error, ask, resubmit = None, None, ""
         try:
+            before = next((p["stage"] for p in store.candidate_pipelines(int(cid)) if p["job_id"] == job_id), None)
             store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None,
                              by="app")
             ask = actions.exit_interviews(store, int(cid), job_id) or None
+            sub = reports.submittal_note(store, int(cid), job_id)
+            if sub and sub["stage"] != before:  # a submittal: it's on the client's list; warn about a second one
+                resubmit = sub["warning"] or ""
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
             view = str(form.get("view") or store.setting("pipeline_view"))
             return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
-                        stages=store.job_stages(job_id), view=view, error=error, ask=ask,
+                        stages=store.job_stages(job_id), view=view, error=error, ask=ask, resubmit=resubmit,
                         next_iv=actions.next_interviews(store, job_id))
         if ask:
-            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': cid})}#pipeline", status_code=303)
-        return back(request, f"/jobs/{job_id}", error=error or "")
+            q = {"ask_cancel": cid, **({"flash_error": resubmit} if resubmit else {})}
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}#pipeline", status_code=303)
+        return back(request, f"/jobs/{job_id}", error=error or resubmit)
 
     @app.post("/jobs/{job_id}/delete")
     def delete_job_form(job_id: int):
@@ -1142,6 +1147,78 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except (ValueError, NotFound) as exc:
             return to_shortlist(job_id, error=str(exc))
         return to_shortlist(job_id, notice=f"Put {p['name']} back on the Shortlist.")
+
+    # ------------------------------------------------------------ clients
+    @app.get("/clients", response_class=HTMLResponse)
+    def clients_page(request: Request):
+        return page(request, "clients.html", rows=reports.overview(store), no_company=reports.no_company_jobs(store))
+
+    def client_or_404(slug: str) -> dict[str, Any]:
+        try:
+            return reports.client(store, reports.unslug(slug))
+        except NotFound:
+            raise HTTPException(404, "Client not found")
+
+    def client_report_or_error(c: dict[str, Any], since: str, until: str) -> tuple[dict[str, Any], str]:
+        try:
+            return reports.report(store, c["key"], since or None, until or None), ""
+        except ValueError as exc:
+            return reports.report(store, c["key"]), str(exc)
+
+    @app.get("/clients/{slug}", response_class=HTMLResponse)
+    def client_page(request: Request, slug: str, since: str = "", until: str = ""):
+        c = client_or_404(slug)
+        rep, error = client_report_or_error(c, since, until)
+        text = reports.report_text(rep)
+        return page(request, "client.html", c=c, rep=rep, text=text, error=error, since=since, until=until,
+                    mailto=reports.mailto(rep, text), submittals=reports.submittals(store, c["key"]),
+                    updates=reports.updates(store, c["key"]), groups=reports.GROUPS, labels=reports.GROUP_LABELS, days=reports.UPDATE_DAYS,
+                    zones=reports.COMMON_ZONES, in_zone=reports.in_zone, due=reports.update_due(c),
+                    since_day=_local(rep["since"], "%Y-%m-%d"),
+                    until_day=_local(rep["until"], "%Y-%m-%d"))
+
+    @app.post("/clients/{slug}", response_class=HTMLResponse)
+    async def save_client(request: Request, slug: str):
+        c = client_or_404(slug)
+        form = await request.form()
+        fields = {k: str(form.get(k) or "") for k in ("name", "contacts", "notes", "update_day", "time_zone") if k in form}
+        try:
+            reports.save_client(store, c["key"], **fields)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}#details",
+                                    status_code=303)
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': 'Saved.'})}#details", status_code=303)
+
+    @app.post("/clients/{slug}/sent")
+    async def client_sent(request: Request, slug: str):
+        """Mark this update as sent: keep a copy, and start the next one from now."""
+        c = client_or_404(slug)
+        form = await request.form()
+        try:
+            reports.mark_sent(store, c["key"], str(form.get("since") or "") or None, str(form.get("until") or "") or None)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = "Marked as sent. A copy is kept below, and the next update starts from now."
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/clients/{slug}/updates/{update_id}/undo")
+    def client_sent_undo(slug: str, update_id: int):
+        c = client_or_404(slug)
+        try:
+            reports.undo_sent(store, c["key"], update_id)
+        except ValueError as exc:
+            return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        notice = "Took back that Mark as sent. The update starts where it did before."
+        return RedirectResponse(f"/clients/{c['slug']}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.get("/clients/{slug}/pipeline.csv")
+    def client_csv(slug: str, since: str = "", until: str = ""):
+        c = client_or_404(slug)
+        rep, _ = client_report_or_error(c, since, until)
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
+        return Response(reports.pipeline_csv(rep), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
     # ------------------------------------------------------- dashboard acts
     @app.post("/actions/snooze")
