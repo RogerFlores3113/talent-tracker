@@ -212,8 +212,12 @@ def roll_back(store: Store, session: str) -> dict[str, Any]:
     from .importers import backup_before_import
     every = _actions(store, rec)
     later = later_moves(store, [a for a in every if _will_undo(a)])
+    queued = waiting(store, session)
+    if not queued and not any(_will_undo(a) for a in every):  # nothing to undo: no backup, and the first result stays
+        old = rec.get("rolled_back") or {}
+        return {"undone": [], "left": [], "kept": old.get("kept", 0), "passed": 0, "later": later, "backup": None}
     saved: Path = backup_before_import(store, reason=ROLLBACK_REASON)  # ValueError: nothing changed
-    passed = review.decide_many(store, waiting(store, session), False)["done"]
+    passed = review.decide_many(store, queued, False)["done"]
     kids: dict[int, list[dict[str, Any]]] = {}
     for a in every:
         if a.get("batch_id"):

@@ -129,7 +129,9 @@ def test_a_card_key_works_once_and_only_in_its_own_session(store, apps):
 def test_a_card_key_runs_out_and_fits_only_its_job(store, apps, monkeypatch):
     server, job, (ana,) = _card(store, "Ana Ruiz")
     other = store.add_job("Platform")
-    wrong = call(server, "keep_prospect", job_id=job["id"], prospect_id=ana, view_key=key(server, other["id"], []))
+    shown = call(server, "propose_candidates", job_id=other["id"], people=[{"name": "Dee Fox"}])  # F: keys need a shown batch
+    wrong = call(server, "keep_prospect", job_id=job["id"], prospect_id=ana,
+                 view_key=key(server, other["id"], [shown.structuredContent["added"][0]["id"]]))
     assert wrong.isError and text(wrong) == CARD_STALE
     k = key(server, job["id"], [ana])
     now = mcp_server.time.monotonic()

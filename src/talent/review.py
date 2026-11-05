@@ -37,14 +37,15 @@ CANDIDATE_CONTACT_FIELDS = ("email", "phone")
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
-         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done"}
+         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done", "tool_call": "AI request"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
 
 
 def cautious(store: Store) -> bool:
-    return store.setting(SETTING) == "1"
+    from .trust import REPLAY  # here: trust imports this module
+    return store.setting(SETTING) == "1" and not REPLAY.get()  # a request the recruiter just kept doesn't wait again
 
 
 def set_cautious(store: Store, on: bool) -> None:
@@ -688,6 +689,9 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("That to-do is already done.")
         store.complete_suggestion(p["suggestion_id"], by="ai")
         return r["summary"]
+    if kind == "tool_call":  # a write from an AI app set to Suggest only: run it once now
+        from .trust import replay  # here: trust imports this module
+        return replay(store, r)
     raise ValueError("That change can't be made here.")
 
 
@@ -749,6 +753,9 @@ def _more_lines(r: dict[str, Any]) -> list[dict[str, str]]:
     if r["kind"] == "offer":
         from .offers import review_lines  # here: offers imports this module
         return review_lines(r)
+    if r["kind"] == "tool_call":
+        from .trust import lines  # here: trust imports this module
+        return lines(r)
     if r["kind"] == "client_edit":
         return [{"label": CLIENT_LABELS.get(k, k), "old": _short((p.get("old") or {}).get(k)) or "(empty)",
                  "new": _short(v) or "(cleared)"} for k, v in (p.get("fields") or {}).items()]

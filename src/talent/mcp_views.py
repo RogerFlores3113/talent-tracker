@@ -167,7 +167,7 @@ let countsLine=null,stageSel=null,bulkBox=null;const CARDS={};
 function countText(c){c=c||{};return(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"}
 function stageArg(){return stageSel&&stageSel.value&&stageSel.selectedIndex>0?{stage:stageSel.value}:{}}
 function call(tool,ids,args){const k=viewKey();return cardKey(ids).then(kr=>{const key=kr&&!kr.isError&&kr.structuredContent&&kr.structuredContent.key;if(!key)return kr;
- return req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,view_key:key},args)})})}
+ return new Promise(go=>setTimeout(go,450)).then(()=>req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,view_key:key},args)}))})}
 function swap(p,extra,msg){const old=CARDS[p.id];const next=prospect(Object.assign({},p,extra||{}));if(msg)next.querySelector(".status").textContent=msg;if(old)old.replaceWith(next);return next}
 function act(card,p,tool,args){
  const status=card.querySelector(".status");

@@ -124,7 +124,7 @@ def test_one_undo_from_changes_and_a_hand_built_post(store):
     lee = store.add_candidate(name="Lee")
     jid = store.add_job("Backend")["id"]
     store.add_to_pipeline(lee["id"], jid)
-    call(server, "move_stage", candidate_id=lee["id"], job_id=jid, stage="Rejected")
+    call(server, "move_stage", candidate_id=lee["id"], job_id=jid, stage="Rejected", notes="Not a fit")
     move = store.ai_actions()[0]
     c = local_client(store)
     r = c.post(f"/changes/ai/{move['id']}/undo", follow_redirects=False)
@@ -204,7 +204,7 @@ def test_today_says_what_the_ai_did_to_pipelines(store):
     for n in ("Ana", "Bo", "Cy"):
         cid = store.add_candidate(name=n)["id"]
         store.add_to_pipeline(cid, jid, "Screening")
-        call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Rejected")
+        call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Rejected", notes="Not a fit")
     call(server, "update_job", job_id=staff, status="closed")
     titles = [i["title"] for i in actions.action_items(store)["items"] if i["kind"] == "ai_change"]
     assert "Your AI app moved 3 people out of Senior Backend Engineer. Review or undo." in titles

@@ -31,7 +31,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase
-from . import decide, interviews, offers, sessions
+from . import ai_caps, decide, interviews, offers, sessions, trust
 from . import outreach
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
@@ -129,6 +129,12 @@ CARD_OTHER_SESSION = ("Nothing changed: that card key came from another AI sessi
 CARD_CAP = ("Nothing changed: the AI app's hourly limit on changes is used up. Keep them in Talent Search, on the "
             "Shortlist, or try again later.")
 CARD_KEY_SECONDS = 120  # how long a key the card asked for stays good
+CARD_MIN_GAP = 0.3  # seconds a key must wait before it works (the card waits a moment; a script's instant use fails)
+CARD_TOO_FAST = "Nothing changed: that press came too fast. Press the button again."
+CARD_NOT_SHOWN = ("Nothing changed: this server hasn't shown that Shortlist yet. Ask your AI app to show the "
+                  "Shortlist again, or review it in Talent Search.")
+CARD_LIMIT = ("Nothing changed: the AI app has used its hourly limit on Keep and Pass presses. Do it in Talent "
+              "Search, on the Shortlist, or try again later.")
 CARD_KEYS_KEPT = 500  # keys waiting at once, per session; the oldest go first
 CARD_TOOLS = ("keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects", "shortlist_card_key")
 # A press on a card in a chat app that didn't say it shows Talent Search cards.
@@ -159,7 +165,8 @@ class CardKeys:
         while len(self._keys) >= CARD_KEYS_KEPT:
             del self._keys[next(iter(self._keys))]
         nonce = secrets.token_hex(16)
-        self._keys[nonce] = {"job_id": job_id, "scope": scope, "client": client, "until": now + CARD_KEY_SECONDS}
+        self._keys[nonce] = {"job_id": job_id, "scope": scope, "client": client, "until": now + CARD_KEY_SECONDS,
+                             "at": now}
         return f"{self.session}:{nonce}"
 
     def take(self, key: str, job_id: int, client: Any = None) -> str:
@@ -167,6 +174,9 @@ class CardKeys:
         tag, _, nonce = str(key or "").rpartition(":")
         if tag != self.session:
             raise ToolError(CARD_OTHER_SESSION if re.fullmatch(r"[0-9a-f]{12}", tag) else CARD_STALE)
+        rec = self._keys.get(nonce)
+        if rec is not None and time.monotonic() - rec["at"] < CARD_MIN_GAP:  # too soon: the key stays good
+            raise ToolError(CARD_TOO_FAST)
         rec = self._keys.pop(nonce, None)
         if rec is None:
             raise ToolError(CARD_USED if nonce in self._spent else CARD_STALE)
@@ -888,6 +898,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         over_held: list[str] = []
         over_why, waiting = "", None
         match = store.find_duplicate(data.get("email"), data.get("linkedin_url"))
+        if match is None and ai_caps.people_left(store) < 1:  # a new person, past the hourly limit on new people
+            raise ValueError(ai_caps.people_text(0, ai_caps.people_cap(store)))
         if match is not None:  # a merge may replace the title, company, location and work history it has
             replace = {k: data[k] for k in MERGE_OVERWRITES if not _blank(data.get(k))}
             over = store.ai_overwrites(match["id"], replace, history)
@@ -1688,7 +1700,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def move_stage(candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> CallToolResult:
         """Move a candidate to another of the job's stages, optionally with a note in `notes` (or `note`;
         notes is preferred). The start of a stage name is enough when it's unambiguous ("tech" for
-        "Technical interview")."""
+        "Technical interview"). A move into a stage that counts as out (Rejected, Withdrawn and the like) needs the
+        reason in `notes`. A move out of a hired or out stage is flagged, and waits on Review in Cautious mode."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         if before is None:
             store.get_job(job_id)  # "No job with id 7", never a database error
@@ -1696,8 +1709,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             _check_note_cap(store, candidate_id, "Nothing moved")
         target = store.resolve_stage(job_id, stage) if before is not None else None
         ends = target is not None and target["outcome"] in ("hired", "lost") and target["name"] != before
+        if ends and target["outcome"] == "lost" and not (notes or "").strip():  # a lost stage needs its reason
+            raise ValueError(f"Nothing moved. {target['name']} counts as out on {_job_name(store.get_job(job_id))}. "
+                             "Ask the recruiter why, then call move_stage again with the reason in `notes`.")
+        closed = None  # moving someone out of a stage that counts as hired or out
+        if target is not None and target["name"] != before:
+            try:
+                was = store.resolve_stage(job_id, before)
+            except (NotFound, ValueError):
+                was = None
+            if was is not None and was["outcome"] in ("hired", "lost"):
+                closed = was
         every = target is not None and target["name"] != before and review.hold_moves(store)
-        if (ends or every) and review.cautious(store):  # into Hired or Out (or any move, by Settings): waits
+        if (ends or every or closed) and review.cautious(store):  # into Hired or Out, out of one (or any move): waits
             waiting = review.queue_move(store, candidate_id, job_id, target["name"], before, notes, session)
             return _said(_wait_text(waiting), {"candidate_id": candidate_id, "job_id": job_id, "stage": before,
                                                "pending_review": {"id": waiting["id"], "summary": waiting["summary"]}})
@@ -1713,6 +1737,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["note"] = _wait_text(held_note)
         if ends and target["outcome"] == "hired":
             out["note"] = " ".join(x for x in (out.get("note"), "The recruiter is asked on Today to confirm this hire.") if x)
+        if closed is not None:
+            out["warning"] = " ".join(x for x in (out.get("warning"), (
+                f"They were in {closed['name']}, which counts as {'hired' if closed['outcome'] == 'hired' else 'out'}. "
+                "Moving them back into play is a big step: check with the recruiter that this is right.")) if x)
         if before:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
         out.update({k: v for k, v in actions.exit_interviews(store, candidate_id, job_id).items()
@@ -1912,9 +1940,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     # so it acts on nobody proposed later. After a restart the card simply asks the new session for a key.
     card_keys = CardKeys(session)
 
+    shown: dict[int, set[int]] = {}  # per job, the waiting people the last propose_candidates / list_prospects showed
+
     def _with_view_key(res: CallToolResult, job_id: int, prospect_ids: list[int]) -> CallToolResult:
-        """Tell the view which job it shows. No key: the model may see _meta, so the view asks for the key itself."""
+        """Tell the view which job it shows. No key: the model may see _meta, so the view asks for the key itself.
+        The server remembers which waiting people were shown, and issues keys only for those."""
         res.meta = {**(res.meta or {}), VIEW_KEY: {"job_id": job_id}}
+        shown[job_id] = shown.get(job_id, set()) | set(prospect_ids)
+        while len(shown) > 50:
+            del shown[next(iter(shown))]
         return res
 
     def _scope(prospect_ids: list[int]) -> str:
@@ -1935,6 +1969,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if row and (f"b{row['batch_id']}" if row["batch_id"] else f"p{row['id']}") not in scope:
                 raise ToolError(CARD_STALE)
 
+    def _card_limits(n: int, passing: bool = False) -> None:
+        """The hourly limits on presses: how many presses, and how many people (kept: new people, passed: passes)."""
+        if ai_caps.presses_this_hour(store) >= ai_caps.PRESS_CAP:
+            raise ToolError(CARD_LIMIT)
+        if passing and n > ai_caps.passes_left(store):
+            raise ToolError(f"Nothing changed: the AI app can pass on {ai_caps.PASS_CAP} people an hour and has "
+                            f"{ai_caps.passes_left(store)} left. Pass the rest in Talent Search, or try again later.")
+        if not passing and n > ai_caps.people_left(store):
+            raise ToolError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store), "changed"))
+
     def _decided(job_id: int, prospect_id: int, sentence: str, **extra: Any) -> CallToolResult:
         row = shortlist.get(store, job_id, prospect_id)
         if row["status"] == "proposed":
@@ -1953,9 +1997,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if _client_apps(mcp) is not True:
             return _card_error(ToolError(CARD_NO_APPS))
         store.get_job(job_id)
+        # A key covers the batch the server showed for this job, never ids the caller names: the caller may only
+        # pick among them, and anyone it names that wasn't shown is left out.
+        held = shown.get(job_id)
+        if not held:  # after a restart: the newest proposal batch still waiting on this job's Shortlist
+            held = {r["id"] for r in store._rows(
+                "SELECT id FROM prospects WHERE job_id = ? AND status = 'proposed' AND batch_id = ("
+                "SELECT max(batch_id) FROM prospects WHERE job_id = ? AND status = 'proposed')", (job_id, job_id))}
+        ids = [i for i in dict.fromkeys(prospect_ids or []) if isinstance(i, int) and i in held]
+        if not ids:
+            return _card_error(ToolError(CARD_NOT_SHOWN))
         return CallToolResult(content=[TextContent(type="text", text="Ready.")],
                               structuredContent={"job_id": job_id, "key": card_keys.issue(
-                                  job_id, _scope(prospect_ids), _mcp_session(mcp))})
+                                  job_id, _scope(ids), _mcp_session(mcp))})
 
     def _kept_sentence(done: dict[str, Any], job: dict[str, Any]) -> str:
         c, stage = done["candidate"], done["stage"]
@@ -1974,6 +2028,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         to add them to (the first stage, or Contacted)."""
         try:
             _from_view(job_id, prospect_id, view_key)
+            _card_limits(1)
             if not store.ai_overwrites_left(1):
                 raise ToolError(CARD_CAP)
             done = shortlist.keep(store, job_id, prospect_id, link_id=candidate_id, as_new=as_new, via="claude",
@@ -2025,6 +2080,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Calls from the model are refused. People whose same-name match needs a choice are left waiting."""
         try:
             ids = _many(job_id, prospect_ids, view_key)
+            _card_limits(len(ids))
             if not store.ai_overwrites_left(1):
                 raise ToolError(CARD_CAP)
             done = shortlist.keep_all(store, job_id, ids, stage=stage, via="claude")
@@ -2058,6 +2114,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         all of them). Calls from the model are refused."""
         try:
             ids = _many(job_id, prospect_ids, view_key)
+            _card_limits(len(ids), passing=True)
             passed = shortlist.pass_waiting(store, job_id, reason, ids)
             with store._write():
                 for p in passed:
@@ -2074,6 +2131,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         are refused."""
         try:
             _from_view(job_id, prospect_id, view_key)
+            _card_limits(1, passing=True)
             p = shortlist.pass_on(store, job_id, prospect_id, reason)
             with store._write():
                 store._log_ai("card_pass", job_id=job_id, target_id=prospect_id, new={"name": p["name"]})
@@ -2121,6 +2179,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     f"{', '.join(in_play) or 'none'}. Save them there (or leave out stage), and ask the recruiter "
                     "before anyone moves further.")
             stage_name = s["name"]
+        new_people = sum(1 for x in people if store.find_duplicate(x.email, x.linkedin_url) is None)
+        if new_people > ai_caps.people_left(store):  # counted by size, before anyone is saved
+            raise ValueError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store)))
         groups: dict[str, list[dict[str, Any]]] = {"saved": [], "updated": [], "unchanged": [], "needs_answer": [],
                                                     "not_saved": []}
         added = 0
@@ -2674,23 +2735,29 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     # --------------------------------------------------------------- support
     @mcp.tool(annotations=READ)
-    def report_problem(summary: str, details: str = "") -> dict[str, Any]:
+    def report_problem(summary: str, area: Annotated[str, Field(description=(
+            "Where it happened, one of: " + ", ".join(recipes.REPORT_AREAS)))] = "other") -> dict[str, Any]:
         """Make a link that opens a prefilled GitHub issue about a problem with Talent Search.
 
         Opening it sends nothing; the recruiter reviews and submits it on GitHub (they need a GitHub account).
-        Describe the problem only: never include candidate names, clients, job titles, emails or notes. Anything
-        that looks like an email, phone number or link, a saved candidate's name, a job title, a client or company
-        name, or text copied from a note is taken out before the link is made. Show the recruiter `preview`: it is
-        exactly what the link carries.
+        Give a short summary (200 characters at most) and the area. There is no free-text details field: describe
+        the problem only, never candidate names, clients, job titles, emails or notes. Anything that looks like an
+        email, phone number, link, street address or person's name, a saved candidate's name, a job title, a
+        client or company name, or text copied from a note is taken out before the link is made. Show the
+        recruiter `preview`: it is exactly what the link carries.
         """
+        area = (area or "other").strip().lower()
+        area = area if area in recipes.REPORT_AREAS else "other"
+        text = " ".join((summary or "").split())[:recipes.REPORT_SUMMARY_LIMIT]
         private = recipes.report_private(store)
-        title, body = recipes.issue_text(summary, details, where="MCP / AI app", private=private)
-        return {"url": recipes.issue_url(summary, details, where="MCP / AI app", private=private),
+        details = f"{text}\n\nArea: {area}"
+        title, body = recipes.issue_text(text, details, where="MCP / AI app", private=private, strict=True)
+        return {"url": recipes.issue_url(text, details, where="MCP / AI app", private=private, strict=True),
                 "preview": {"title": title, "body": body},
                 "tell_the_user": "Here is exactly what the report says (preview). Open the link to review and submit "
-                                 "it on GitHub; nothing is sent until you do. Emails, phone numbers, links, saved "
-                                 "names, job titles, client and company names, and note text were taken out; check "
-                                 "for anything else private."}
+                                 "it on GitHub; nothing is sent until you do. Emails, phone numbers, links, street "
+                                 "addresses, names, job titles, client and company names, and note text were taken "
+                                 "out; check for anything else private."}
 
     # --------------------------------------------------------------- prompts
     @mcp.prompt(title="Plan my day")
@@ -2817,9 +2884,19 @@ def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> No
 
     async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
         tool = manager.get_tool(name)
-        token = AI_SESSION.set(session)
+        replay = trust.REPLAY.get()  # a request the recruiter kept on Review: already allowed, in its own session
+        token = AI_SESSION.set(trust.REPLAY_SESSION.get() or session)
         try:
-            if tool is not None and not getattr(tool.annotations, "readOnlyHint", False):
+            writes = tool is not None and not getattr(tool.annotations, "readOnlyHint", False)
+            app = None if replay else trust.touch(store, _client_name(mcp))
+            if writes and app and name not in trust.CARD_TOOLS:  # how far this AI app is trusted (Settings)
+                if app["trust"] == "read_only":
+                    raise ToolError(trust.READ_ONLY_TEXT)
+                if app["trust"] == "suggest" and name not in trust.SUGGEST_OK:
+                    held = trust.hold(store, name, dict(arguments or {}), session)
+                    return _plain(_wait_text(held) + " Your AI app is set to Suggest only in Settings, so every "
+                                  "change waits for the recruiter.", {"pending_review": _waiting(held)})
+            if writes and not replay:
                 sessions.before_write(store, session, started, _client_name(mcp))
             return await original(name, arguments, context=context, convert_result=convert_result)
         finally:

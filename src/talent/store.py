@@ -605,6 +605,17 @@ _MIGRATIONS: tuple[Any, ...] = (
     );
     CREATE INDEX offers_job_idx ON offers(job_id, status);
     """,
+    # v12: the AI apps that have connected (trust.py): the name each gave in its hello, when it was first and last
+    # seen, and how far the recruiter trusts it: read_only, suggest (every write waits on Review) or trusted.
+    """
+    CREATE TABLE ai_apps (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL UNIQUE,
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL,
+        trust      TEXT NOT NULL DEFAULT 'trusted' CHECK (trust IN ('read_only', 'suggest', 'trusted'))
+    );
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1157,7 +1168,7 @@ def _linkedin_rule() -> str:
 def _linkedin_parts(url: str) -> tuple[str, str] | None:
     """(host, path) of a linkedin.com address (any subdomain), else None. A bare "linkedin.com/in/x" works."""
     text = url.strip()
-    if not re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+    if not re.match(r"^[a-z][a-z0-9+.-]*:(?!\d)", text, re.I):
         text = "https://" + text.lstrip("/")
     try:
         parts = urlsplit(text)
@@ -1180,6 +1191,21 @@ def linkedin_lead_tool(url: str | None) -> str | None:
         return None
     path = got[1].lower()
     return next((tool for prefix, tool in LINKEDIN_LEAD_PATHS.items() if path.startswith(prefix)), None)
+
+
+_BARE_SITE = re.compile(r"^(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?::\d+)?(?:[/?#]\S*)?$", re.I)
+
+
+def web_link(url: str) -> str:
+    """A website or link as it may be saved: http(s) only. A bare address ("maya.dev") gets https://. Raises
+    ValueError for javascript:, data:, //host and anything else that is not a web address."""
+    text = (url or "").strip()
+    if re.fullmatch(r"https?://[^\s/?#]+\S*", text, re.I):
+        return text
+    if not re.match(r"^[a-z][a-z0-9+.-]*:(?!\d)", text, re.I) and not text.startswith(("/", "\\")) and _BARE_SITE.match(text):
+        return "https://" + text
+    raise ValueError("That Website isn't a web address, so nothing was saved. Use a link that starts with "
+                     "https:// or http://, like https://maya.dev.")
 
 
 def linkedin_problem(url: str | None) -> str | None:
@@ -1909,6 +1935,8 @@ class Store:
                 label = {"tags": "the skills list"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
                 raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
                                  f"The limit is {limit:,}, so nothing was saved.")
+        if out.get("website"):
+            out["website"] = web_link(out["website"])
         if "linkedin_url" in out:
             problem = linkedin_problem(out["linkedin_url"])
             if problem:

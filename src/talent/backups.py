@@ -105,11 +105,34 @@ def restore(store: Store, name: str) -> dict[str, Any]:
     if not info["ok"]:
         raise ValueError("That backup file can't be read, so nothing was changed. Pick another one.")
     saved = backup_before_import(store, reason="restore")
+    mine = _ai_options(store)  # how the recruiter wants the AI app held now, not as it was in the old backup
     try:
         store.restore_from(path)
     except sqlite3.Error as exc:
         raise ValueError(f"Couldn't restore that backup, so your data wasn't changed ({exc}).") from exc
+    _put_ai_options(store, mine)
     return {"restored": info, "saved": saved}
+
+
+# Settings rows that say how far the AI app is held: kept as they are now when an older backup comes back.
+AI_OPTION_KEYS = ("ai_cautious", "ai_hold_contacts", "ai_hold_moves", "ai_new_apps_trust")
+
+
+def _ai_options(store: Store) -> dict[str, Any]:
+    keys = {k: r["value"] for k in AI_OPTION_KEYS if (r := store._row("SELECT value FROM settings WHERE key = ?", (k,)))}
+    apps = store._rows("SELECT name, first_seen, last_seen, trust FROM ai_apps")
+    return {"keys": keys, "apps": apps}
+
+
+def _put_ai_options(store: Store, mine: dict[str, Any]) -> None:
+    with store._write():
+        for k, v in mine["keys"].items():
+            store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
+                                " value = excluded.value", (k, v))
+        for a in mine["apps"]:  # the AI apps and the trust set for them
+            store._conn.execute(
+                "INSERT INTO ai_apps(name, first_seen, last_seen, trust) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE"
+                " SET trust = excluded.trust", (a["name"], a["first_seen"], a["last_seen"], a["trust"]))
 
 
 # ------------------------------------------------------------ undo an import
