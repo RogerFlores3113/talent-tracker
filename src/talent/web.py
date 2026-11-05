@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -20,8 +21,8 @@ from starlette.background import BackgroundTask
 from . import __version__, actions, importers, integrations, recipes
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
-from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    Store, snippet_html, split_tags, to_dt)
+from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, FIELD_LABELS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS,
+                    NotFound, Store, _labels, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -81,6 +82,43 @@ def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt.replace("%-", "%#"))
 
 
+def _shown(field: str, value: Any) -> str:
+    if value in (None, "", []):
+        return ""
+    if field == "work_history":
+        n = len(value) if isinstance(value, list) else 0
+        return f"{n} role{'' if n == 1 else 's'}"
+    if field == "last_contacted_at":
+        return str(value)[:10]
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text if len(text) <= 60 else text[:57].rstrip() + "..."
+
+
+def change_lines(data: Any) -> list[str]:
+    """A change entry's old and new values: ['Company: Acme to Initech', 'Cleared email (was ana@x.com)']."""
+    if not isinstance(data, dict) or not isinstance(data.get("new"), dict):
+        return []
+    old = data.get("old") if isinstance(data.get("old"), dict) else {}
+    out = []
+    for k, v in data["new"].items():
+        label = FIELD_LABELS.get(k, k.replace("_", " "))
+        cap = label[:1].upper() + label[1:]
+        was, now = _shown(k, old.get(k)), _shown(k, v)
+        if not now:
+            out.append(f"Cleared {label}" + (f" (was {was})" if was else ""))
+        elif not was:
+            out.append(f"{cap}: {now} (was empty)")
+        else:
+            out.append(f"{cap}: {was} to {now}")
+    return out
+
+
+def profile_label(url: str | None) -> str:
+    """'LinkedIn' only for a linkedin.com address (or a subdomain of it), else 'Profile'."""
+    host = (urlsplit(url or "").hostname or "").lower()
+    return "LinkedIn" if host == "linkedin.com" or host.endswith(".linkedin.com") else "Profile"
+
+
 def _history_from_text(text: str) -> list[dict[str, Any]]:
     """One role per line: Title | Company | Start | End."""
     out = []
@@ -108,6 +146,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     env.filters["ago"] = _ago
     env.filters["local"] = _local
     env.filters["claude_link"] = recipes.claude_link
+    env.filters["change_lines"] = change_lines
+    env.filters["profile_label"] = profile_label
     env.globals["version"] = __version__
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["job_label"] = actions.job_label
@@ -244,7 +284,9 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
                         error=None, job_id=None)
         in_jobs = {p["job_id"] for p in c["pipelines"]}
-        other_jobs = [j for j in store.list_jobs("open") if j["id"] not in in_jobs]
+        open_jobs = store.list_jobs("open")
+        hints = actions.twin_hints(open_jobs)
+        other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
                     kinds=[k for k in TIMELINE_KINDS if k != "stage"],
@@ -297,13 +339,17 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     def undo_change_form(candidate_id: int, timeline_id: int):
         cand_or_404(candidate_id)
         try:
-            store.undo_change(timeline_id, candidate_id=candidate_id, by="app")
+            cand = store.undo_change(timeline_id, candidate_id=candidate_id, by="app")
         except NotFound:
             raise HTTPException(404, "That change isn't on this profile.")
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
                                     status_code=303)
-        return RedirectResponse(f"/candidates/{candidate_id}#timeline", status_code=303)
+        notice = f"Undid the change to {_labels(cand['_restored'])}."
+        if cand["_skipped"]:
+            notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#timeline",
+                                status_code=303)
 
     @app.post("/candidates/{candidate_id}/contacted")
     def mark_contacted(candidate_id: int):
@@ -431,7 +477,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs_page(request: Request, status: str = ""):
         jobs = store.list_jobs(status if status in JOB_STATUSES else None)
-        return page(request, "jobs.html", jobs=jobs, status=status)
+        hints = actions.twin_hints(jobs)
+        return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
@@ -442,10 +489,16 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         form = await request.form()
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description")}
         stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
+        twins = store.similar_open_jobs(data["title"], data["company"])
         try:
             job = store.add_job(**data, stages=stages or None)
         except ValueError as exc:
             return page(request, "job_form.html", j=data, error=str(exc))
+        if twins:
+            ids = ", ".join(f"#{j['id']}" for j in twins)
+            notice = (f"Created. Heads up: open job {ids} has the same title and company. "
+                      "If it's a duplicate, close one of them.")
+            return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': notice})}", status_code=303)
         return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)

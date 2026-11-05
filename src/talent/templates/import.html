@@ -32,10 +32,11 @@
   <div><button class="btn primary" type="submit">Import {{ total }} row{{ '' if total == 1 else 's' }}</button> <a class="btn" href="/import">Start over</a></div>
 </form>
 {% else %}
-<p class="flash">Added {{ result.added }}, updated {{ result.updated }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
+<p class="flash">Added {{ result.added }}, updated {{ result.updated }}, unchanged {{ result.unchanged }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
 {% if result.backup %}<p class="fine">We backed up everything from before this import first. To undo it, that backup is here:</p>
 <pre class="code">{{ result.backup }}</pre>{% endif %}
-{% if result.skipped %}<details class="panel"><summary>Skipped rows and cells ({{ result.skipped | length }})</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
+{% if result.skipped %}<details class="panel"><summary>Skipped rows ({{ result.skipped | length }})</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
+{% if result.warnings %}<details class="panel"><summary>Imported, with a cell left blank ({{ result.warnings | length }})</summary><ul class="plain">{% for s in result.warnings[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 <p class="actions-inline"><a class="btn primary" href="/candidates">See candidates</a> <a class="btn" href="/import">Import another</a></p>
 {% endif %}
 {% endblock %}

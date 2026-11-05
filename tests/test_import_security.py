@@ -95,8 +95,8 @@ def test_parse_when_reads_spreadsheet_dates():
 def test_bad_date_skips_the_cell_not_the_row(store):
     header, rows = importers.read_csv("Name,Last contacted\nAna,3/5/2026\nBo,someday\n")
     r = importers.import_rows(store, header, rows, importers.guess_mapping(header))
-    assert r["added"] == 2 and r["skipped_rows"] == 0
-    assert r["skipped"] == ["Row 3: left Last contacted blank, couldn't read the date 'someday'"]
+    assert r["added"] == 2 and r["skipped_rows"] == 0 and r["skipped"] == []
+    assert r["warnings"] == ["Row 3: left Last contacted blank, couldn't read the date 'someday'"]
     bo = store.find_by_name("Bo")[0]
     assert bo["last_contacted_at"] is None
 
@@ -131,7 +131,8 @@ def test_import_page_survives_a_bad_row(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name,Email,LinkedIn\nX,ana@x.com,linkedin.com/in/bob\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "linkedin_url"})
-    assert r.status_code == 200 and "skipped 1 row" in r.text and "two different people" in r.text
+    assert r.status_code == 200 and "skipped 1 row" in r.text
+    assert "ana@x.com belongs to Ana but this row says X, so it was left alone" in r.text
 
 
 def test_export_then_import_keeps_phone_and_formula_text(store, tmp_path):
@@ -148,10 +149,11 @@ def test_export_then_import_keeps_phone_and_formula_text(store, tmp_path):
     fresh.close()
 
 
-def test_tags_split_on_pipes_and_slashes(store):
-    header, rows = importers.read_csv("Name,Skills\nAna,Go | Rust/Python; SQL\n")
+def test_tags_split_on_pipes_not_slashes(store):
+    header, rows = importers.read_csv("Name,Skills\nAna,\"Go | ci/cd; SQL, Rust\"\n")
     importers.import_rows(store, header, rows, importers.guess_mapping(header))
-    assert store.find_by_name("Ana")[0]["tags"] == ["Go", "Rust", "Python", "SQL"]
+    assert store.find_by_name("Ana")[0]["tags"] == ["Go", "ci/cd", "SQL", "Rust"]
+    assert store.add_candidate(name="Bo", tags="TCP/IP|Go")["tags"] == ["TCP/IP", "Go"]
 
 
 def test_notes_column_goes_on_the_timeline(store):
