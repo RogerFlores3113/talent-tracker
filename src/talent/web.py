@@ -180,6 +180,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
+    env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
+    env.globals["move_reasons"] = lambda: actions.reasons(store)
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
     @app.middleware("http")
@@ -691,33 +693,51 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         hints = actions.twin_hints(jobs)
         rollup = actions.company_rollup(store)
         companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
+        held = actions.held_jobs(store)
         return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status,
-                    rollup=rollup, companies=companies,
-                    digest_text=actions.status_digest(store) if rollup else "")
+                    rollup=rollup, companies=companies, held=held,
+                    digest_text=actions.status_digest(store) if rollup or held else "")
+
+    @app.post("/jobs/wording")
+    async def save_wording(request: Request):
+        """'I hire for my own company': in-house wording (Hiring team passed, Where each team stands)."""
+        form = await request.form()
+        on = str(form.get("inhouse") or "") == "1"
+        actions.set_inhouse(store, on)
+        notice = "Using in-house wording." if on else "Using agency wording."
+        return RedirectResponse("/jobs?" + urlencode({"notice": notice}), status_code=303)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
     def new_job(request: Request):
-        return page(request, "job_form.html", j={}, error=None)
+        return page(request, "job_form.html", j={}, error=None, stage_sets=actions.STAGE_SETS)
 
     @app.post("/jobs", response_class=HTMLResponse)
     async def create_job(request: Request):
         form = await request.form()
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", *JOB_EXTRA_FIELDS)}
         stages = [s for s in str(form.get("stages") or "").splitlines() if s.strip()]
+        picked = str(form.get("stage_set") or "default")
         twins = store.similar_open_jobs(data["title"], data["company"])
         try:
+            stages, out_note = actions.with_out_stages(stages or actions.stage_set(picked))
             job = store.add_job(**data, stages=stages or None)
         except ValueError as exc:
-            return page(request, "job_form.html", j=data, error=str(exc))
+            return page(request, "job_form.html", j={**data, "stages": str(form.get("stages") or ""),
+                                                     "stage_set": picked}, error=str(exc),
+                        stage_sets=actions.STAGE_SETS)
+        notes = ["Created."] if twins or out_note else []
         if twins:
             ids = ", ".join(f"#{j['id']}" for j in twins)
-            notice = (f"Created. Heads up: open job {ids} has the same title and company. "
-                      "If it's a duplicate, close one of them.")
-            return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': notice})}", status_code=303)
+            notes.append(f"Heads up: open job {ids} has the same title and company. If it's a duplicate, close one "
+                         "of them.")
+        if out_note:
+            notes.append(out_note)
+        if notes:
+            return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': ' '.join(notes)})}", status_code=303)
         return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-    def job_detail(request: Request, job_id: int, view: str = "", q: str = ""):
+    def job_detail(request: Request, job_id: int, view: str = "", q: str = "", show: str = "", ask_cancel: str = ""):
         job = job_or_404(job_id)
         # ?omit= previews a choice without saving it; otherwise the job's remembered Leave out choice applies.
         omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.saved_omit(store, job_id)
@@ -732,7 +752,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),
-                   nums=actions.job_numbers(store, job_id), todos=_todos(job_id))
+                   nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
+                   omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
+                   close=actions.close_out_plan(store, job_id),
+                   ask=actions.exit_interviews(store, int(ask_cancel), job_id) if ask_cancel.isdigit() else None)
         if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
             return page(request, "_add_results.html", **ctx)
         return page(request, "job.html", **ctx)
@@ -748,10 +771,46 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return page(request, "job_form.html", j={**store.get_job(job_id), **data}, error=str(exc),
                         stages=store.job_stages(job_id), outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
+        plan = actions.close_out_plan(store, job_id) if data.get("status") == "closed" else None
+        if plan:
+            n = plan["count"]
+            notice = (f"Job closed. Its pipeline is kept. {n} {'person is' if n == 1 else 'people are'} still in "
+                      "play; you can move them out below.")
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#close-out", status_code=303)
         if set(data) == {"status"} and data["status"] == "closed":
             return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': 'Job closed. Its pipeline is kept.'})}",
                                     status_code=303)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    @app.post("/jobs/{job_id}/close-out")
+    def close_out_form(job_id: int):
+        """Move everyone still in play to Rejected (Position filled) and cancel their upcoming interviews."""
+        job_or_404(job_id)
+        try:
+            done = actions.close_out(store, job_id, by="app")
+        except ValueError as exc:
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        n, m = done["moved"], done["cancelled"]
+        notice = (f"Moved {n} {'person' if n == 1 else 'people'} to {done['stage']} (Position filled)"
+                  + (f" and cancelled {m} upcoming interview{'' if m == 1 else 's'}." if m else ".")
+                  + " Each move can be undone from the person's timeline.")
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
+
+    @app.post("/jobs/{job_id}/cancel-interviews")
+    async def cancel_interviews_form(request: Request, job_id: int):
+        """The "Cancel it?" question after moving someone out or to hired."""
+        job_or_404(job_id)
+        form = await request.form()
+        cid = str(form.get("candidate_id") or "")
+        if not cid.isdigit():
+            return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+        keep = {i["id"] for i in actions.upcoming_for(store, int(cid), job_id)}
+        ids = [int(v) for v in form.getlist("interview_id") if str(v).isdigit() and int(v) in keep]
+        for iv in ids:
+            store.update_interview(iv, cancel=True, candidate_id=int(cid), by="app")
+        notice = (f"Cancelled {'the interview' if len(ids) == 1 else f'{len(ids)} interviews'}. It stays on the "
+                  "timeline, marked cancelled." if ids else "Nothing to cancel. It may already be cancelled.")
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/jobs/{job_id}/omit")
     async def save_omit(request: Request, job_id: int):
@@ -804,17 +863,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         job = job_or_404(job_id)
         form = await request.form()
         cid = str(form.get("candidate_id") or "")
-        error = None
+        error, ask = None, None
         try:
             store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None,
                              by="app")
+            ask = actions.exit_interviews(store, int(cid), job_id) or None
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
             view = str(form.get("view") or store.setting("pipeline_view"))
             return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
-                        stages=store.job_stages(job_id), view=view, error=error,
+                        stages=store.job_stages(job_id), view=view, error=error, ask=ask,
                         next_iv=actions.next_interviews(store, job_id))
+        if ask:
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'ask_cancel': cid})}#pipeline", status_code=303)
         return back(request, f"/jobs/{job_id}", error=error or "")
 
     @app.post("/jobs/{job_id}/delete")

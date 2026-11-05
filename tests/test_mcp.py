@@ -95,7 +95,7 @@ def test_custom_stages_logging_and_today(store):
                           work_history=[{"title": "Engineer", "company": "Stripe", "start": "2020"}]))["candidate"]["id"]
     assert structured(call(server, "search_candidates", query="stripe"))["total"] == 1  # past roles are searchable
     job = structured(call(server, "create_job", title="Data Lead", stages=["Applied", "Phone screen", "Onsite", "Hired"]))
-    assert job["stages"] == ["Applied", "Phone screen", "Onsite", "Hired"]
+    assert job["stages"] == ["Applied", "Phone screen", "Onsite", "Hired", "Rejected", "Withdrawn"]  # Out added
     edited = structured(call(server, "edit_job_stages", job_id=job["id"], rename={"Onsite": "Final round"},
                              add=["Take-home"]))
     assert "Final round" in edited["stages"] and "Take-home" in edited["stages"]

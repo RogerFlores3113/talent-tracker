@@ -83,6 +83,7 @@ def test_custom_stages(store):
 
 def test_action_items_and_toggles(store):
     load_sample_data(store)
+    store.update_job(store.list_jobs()[0]["id"], openings=2)  # 3 per opening: 2 openings aim for 5
     items = actions.action_items(store)
     kinds = {i["kind"] for i in items["items"]}
     assert kinds == {"interview", "suggestion", "stuck", "thin", "stale"}

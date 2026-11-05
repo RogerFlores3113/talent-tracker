@@ -27,7 +27,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
     rows = [i for i in actions.action_items(store)["items"] if i["kind"] == "thin"]
     assert len(rows) == 1
     assert rows[0]["title"] == "3 jobs have thin pipelines"
-    assert "Backend (Acme Payments) has no active candidates. Aim for at least 4." in rows[0]["detail"]
+    assert "Backend (Acme Payments) has no active candidates. Aim for at least 3." in rows[0]["detail"]
     html = client(store).get("/").text
     assert "3 jobs have thin pipelines" in html and "Needs more candidates" in html
 
@@ -35,7 +35,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
 def test_single_thin_job_detail_copy(store):
     store.add_job("Senior Backend Engineer", company="Acme Payments")
     row = next(i for i in actions.action_items(store)["items"] if i["kind"] == "thin")
-    assert row["title"] == "Senior Backend Engineer (Acme Payments) has no active candidates. Aim for at least 5."
+    assert row["title"] == "Senior Backend Engineer (Acme Payments) has no active candidates. Aim for at least 3."
 
 
 def test_stale_profiles_fold_into_one_row_with_real_count(store):
@@ -71,6 +71,7 @@ def test_interviews_hidden_for_closed_jobs_and_closed_applications(store):
 
 def test_today_order_interviews_then_followups(store):
     load_sample_data(store)
+    store.update_job(store.list_jobs()[0]["id"], openings=2)  # 3 per opening: 2 openings aim for 5
     kinds = [i["kind"] for i in actions.action_items(store)["items"]]
     assert kinds[:2] == ["interview", "suggestion"]
     assert kinds.count("thin") == 1 and kinds.count("stale") == 1
@@ -183,8 +184,9 @@ def test_status_update_text_and_board_next_interview(store):
     when = _soon(3)
     store.log(maya["id"], "interview", "Systems design", at=when, job_id=job["id"])
     text = actions.job_status_text(store, job["id"])
-    assert text.splitlines()[0] == "Senior Backend Engineer, Acme Payments (Austin, TX)"
-    assert "Interviewing (1): Maya Okafor (today)" in text and "Sourced (1): Kenji Watanabe (today)" in text
+    assert text.splitlines()[0] == "Senior Backend Engineer, Acme Payments · Austin, TX"
+    assert "Interviewing (1): Maya Okafor (today)" in text and "Kenji Watanabe" not in text  # Sourced is internal
+    assert "Sourced (1): Kenji Watanabe (today)" in actions.job_status_text(store, job["id"], omit_stages=[])
     assert "Offer" not in text  # empty stages left out
     assert "Next interviews:" in text and actions.local_time(when.isoformat(), "%a %b %-d") in text
     assert "id" not in text.replace("Kenji", "").lower().split()  # no ids
