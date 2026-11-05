@@ -4,7 +4,7 @@
 {% block body %}
 {% set tz = c.time_zone %}
 <div class="sec-head"><h1>{{ c.name }}{% if due %} <span class="badge overdue">Update due</span>{% endif %}</h1>
-  <a class="btn small no-print" href="/clients">All {{ 'reports' if inhouse() else 'clients' }}</a></div>
+  <span class="no-print"><a class="btn small" href="/clients/{{ c.slug }}/desk">Desk</a> <a class="btn small" href="/clients">All {{ 'reports' if inhouse() else 'clients' }}</a></span></div>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 
 <form class="tablebar no-print" method="get" action="/clients/{{ c.slug }}">

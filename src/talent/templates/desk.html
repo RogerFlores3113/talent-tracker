@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ d.client }} desk · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>{{ d.client }} desk</h1>
+  <span class="no-print"><a class="btn small" href="/clients/{{ c.slug }}">{{ 'Report' if d.own else 'Client' }} page</a> <a class="btn small" href="/clients">All {{ 'reports' if d.own else 'clients' }}</a></span></div>
+<p class="lead">{% if d.count %}{{ d.count }} {{ 'thing' if d.count == 1 else 'things' }} to do, in the order to do them. Nothing is sent from here: copy or email each message, then mark it done.{% else %}Nothing to do for {{ d.client }} right now.{% endif %}</p>
+
+{% for s in d.sections %}
+<section class="panel report" id="desk-{{ s.kind }}">
+  <div class="sec-head"><h2>{{ s.label }}{% if s.count %} <span class="badge">{{ s.count }}</span>{% endif %}</h2></div>
+  {% if not s['items'] %}<p class="fine">Nothing here.</p>{% endif %}
+  {% for i in s['items'] %}{% set tid = 'desk-text-' ~ s.kind ~ '-' ~ loop.index %}
+  <div class="report-part">
+    <p><strong>{{ i.title }}</strong>{% if i.overdue %} <span class="badge overdue">Overdue</span>{% endif %}{% if i.due %} <span class="badge overdue">Due</span>{% endif %}<br><span class="fine">{{ i.detail }}</span></p>
+    {% if i.ai_moves %}<p class="fine recruiter-only">{{ i.ai_moves }} AI move{{ 's' if i.ai_moves != 1 }} in it, not reviewed yet. Check them on the client page before you send.</p>{% endif %}
+    {% if i.text %}<div class="sec-head"><span></span><span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span></span></div>
+    <pre class="code wrap" id="{{ tid }}">{{ i.text }}</pre>{% endif %}
+    <div class="actions-inline no-print">
+      {% if i.email %}<a class="btn small" href="{{ i.email.href }}">Email {{ i.email.to }}</a>{% endif %}
+      {% for o in i.owed or [] %}{% if o.mailto %}<a class="btn small" href="{{ o.mailto }}">Ask {{ o.name }}</a>{% endif %}{% endfor %}
+      {% if i.done.post %}<form method="post" action="{{ i.done.post }}" class="inline">{% for k, v in i.done.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}<button class="btn small primary" type="submit">{{ i.done.label }}</button></form>
+      {% else %}<a class="btn small primary" href="{{ i.done.href }}">{{ i.done.label }}</a>{% endif %}
+      {% if i.replied %}<form method="post" action="{{ i.replied.post }}" class="inline">{% for k, v in i.replied.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}<button class="btn small" type="submit">{{ i.replied.label }}</button></form>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% if s.more %}<p class="fine">and {{ s.more }} more. Open the {{ s.label | lower }} pages to see them all.</p>{% endif %}
+</section>
+{% endfor %}
+{% endblock %}

@@ -1579,7 +1579,7 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
             f" ({new['manager']})" if new.get("manager") else "")
     if kind == "client_edit":
-        return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
+        return f"Changed {quoted(new.get('_client'))}'s client details: {(r.get('body') or 'details').replace('_', ' ')}"
     if kind == "client_create":
         return f"Added the client {quoted(new.get('_client'))}"
     what = f": {new['summary']}" if new.get("summary") else ""
@@ -1605,6 +1605,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
         body = body[:80] + ("..." if len(body) > 80 else "")
+        if new.get("reply"):
+            return f"Logged a reply from {name}" + (f": {body}" if body else "")
         return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
                 + (f": {body}" if body else ""))
     if kind == "card_keep":
@@ -2575,6 +2577,12 @@ class Store:
             if self._row("SELECT 1 FROM ai_actions WHERE kind = 'note_logged' AND target_id = ?", (entry["id"],)):
                 return None
             new = {"kind": entry["kind"], "body": (entry.get("body") or "")[:300], "at": entry["at"]}
+            fresh = self._row("SELECT data FROM timeline WHERE id = ?", (entry["id"],)) or {}
+            try:
+                if (json.loads(fresh.get("data") or "{}") or {}).get("reply"):
+                    new["reply"] = True  # a reply, so Changes says so
+            except (ValueError, AttributeError):
+                pass
             if entry["kind"] == "interview":  # as logged, so Undo can tell when it was changed since
                 raw = entry.get("data")
                 new["data"] = (json.loads(raw) if isinstance(raw, str) else raw) or {}

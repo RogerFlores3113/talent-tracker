@@ -1652,8 +1652,11 @@ SET_GROUPS: dict[str, dict[str, str]] = {"inhouse": {"Hiring manager screen": "s
 
 
 def default_stage_set(store: Store) -> str:
-    """The stage set a new job starts with when none is picked: in-house for someone hiring for their own company."""
-    return "inhouse" if inhouse(store) else "default"
+    """The stage set a new job starts with when none is picked: in-house for someone hiring for their own company,
+    agency (with a Submitted stage) for someone who said they hire for clients."""
+    if inhouse(store):
+        return "inhouse"
+    return "agency" if store.setting(HIRING_FOR_ANSWERED_KEY) == "1" else "default"
 
 
 def apply_set_groups(store: Store, job_id: int, set_name: str | None) -> None:
