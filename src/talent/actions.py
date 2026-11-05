@@ -644,6 +644,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now) + ai_clear_cap(store)
     from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
     items += shortlist_items(store)
+    from .reports import today_items as update_items  # here: reports imports this module
+    items += update_items(store, now)  # client (or hiring manager) updates due today or earlier this week
     if on("flag_stuck"):
         limit = _int(cfg, "stuck_days", 7)
         for a in store.open_applications():
@@ -758,13 +760,12 @@ def late_like(name: str | None) -> bool:
 
 
 def default_omit(store: Store, job_id: int) -> list[str]:
-    """The job's in-play stages named like internal ones, and every in-play stage before its first Submitted-like
-    stage (Screened, in the agency set), left out of status updates until the recruiter chooses. A stage named
-    like an interview or an offer is never left out for its place: imported stages can land after Offer."""
-    stages = store.job_stages(job_id)
-    first = next((i for i, s in enumerate(stages) if s["outcome"] == "open" and submit_like(s["name"])), 0)
-    return [s["name"] for i, s in enumerate(stages) if s["outcome"] == "open" and (
-        internal_like(s["name"]) or (i < first and not late_like(s["name"]) and not submit_like(s["name"])))]
+    """The job's in-play stages named like internal ones, and its screening stages when it has a Submitted-like
+    stage (Screened, in the agency set), left out of status updates until the recruiter chooses. Decided by what
+    each stage counts as, never by where it sits: imported stages can land anywhere (reports.name_hidden)."""
+    from .reports import name_hidden  # here: reports imports this module
+
+    return name_hidden(store, job_id)
 
 
 def has_saved_omit(store: Store, job_id: int) -> bool:

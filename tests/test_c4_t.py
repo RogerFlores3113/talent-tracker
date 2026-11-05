@@ -140,7 +140,8 @@ def test_report_funnel_moves_medians_and_imports_left_out(store):
     assert rep["period"]["submitted"] == 1 and rep["period"]["offer"] == 1 and rep["period"]["hired"] == 0
     assert rep["period"]["interview"] == 0 and rep["imported_moves"] == 1
     assert [m["name"] for m in rep["moves"]] == ["Cy Park", "Ana Ruiz"]
-    assert rep["reached"] == {"submitted": 3, "interview": 2, "offer": 2, "hired": 1}
+    # Each step counts only people who entered it (cycle 5): Cy went straight to Interviewing, Dee to Placed.
+    assert rep["reached"] == {"submitted": 1, "interview": 1, "offer": 1, "hired": 1}
     assert rep["median_days"]["interview"] == pytest.approx(29, abs=0.1)
     assert rep["median_days"]["submitted"] == pytest.approx(3, abs=0.1)
     out = reports.report_text(rep)
@@ -198,7 +199,7 @@ def test_mark_as_sent_keeps_a_copy_and_the_next_update_starts_from_then(store):
     rep = reports.report(store, "acme")
     assert rep["range_from"] == "last_update" and rep["moves"] == []
     out = reports.report_text(rep)
-    assert "Changes since the last update on" in out and "Moves this period: none." in out
+    assert "Changes since the last update." in out and "Moves this period: none." in out
     body = c.get("/clients/acme").text
     assert "Starts when you last marked an update as sent" in body and "Take back Mark as sent" in body
     assert "never" not in c.get("/clients").text.split("acme")[1].split("</tr>")[0]

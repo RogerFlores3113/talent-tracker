@@ -145,7 +145,7 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
+const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist",update_due:"Update due"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));

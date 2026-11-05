@@ -2,7 +2,7 @@
 {% set word = 'Reports' if inhouse() else 'Clients' %}
 {% block title %}{{ word }} · Talent Search{% endblock %}
 {% block body %}
-<div class="sec-head"><h1>{{ word }}</h1></div>
+<div class="sec-head"><h1>{{ word }}</h1>{% if rows %}<a class="btn small{{ ' primary' if rows | selectattr('due') | list }}" href="/clients/due">Updates due this week</a>{% endif %}</div>
 <p class="lead">{% if inhouse() %}One row per company your jobs name. Open one for a hiring update to share: where people stand, who moved, how long each stage takes and the interviews coming up.{% else %}One row per client, from the company on each job. Open one for its update: where people stand, who moved since your last update, how long each stage takes and the interviews coming up.{% endif %}</p>
 {% if rows %}
 <div class="table-wrap"><table class="dense clients-table">
@@ -13,7 +13,7 @@
     <td>{{ r.open_jobs }}{% if r.jobs > r.open_jobs %} <span class="muted">of {{ r.jobs }}</span>{% endif %}</td>
     <td>{{ r.in_play }}</td>
     <td>{{ r.interviews }}</td>
-    <td class="nowrap">{{ r.last_update_sent_at | ago if r.last_update_sent_at else 'never' }}{% if r.update_day %} <span class="muted">· {{ r.update_day }}s</span>{% endif %}</td>
+    <td class="nowrap">{{ r.last_sent | ago if r.last_sent else 'never' }}{% if r.update_day %} <span class="muted">· {{ r.update_day }}s</span>{% endif %}</td>
   </tr>{% endfor %}</tbody>
 </table></div>
 <p class="fine">"Acme" and "Acme, Inc." count as one. Interviews this week are the next 7 days. People in play are on open jobs and not yet hired or out.</p>
