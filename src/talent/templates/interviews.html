@@ -49,7 +49,15 @@
 {% if w.owed %}
 <section class="panel" id="owed">
   <h2>Still open</h2>
-  <ul>{% for o in w.owed %}<li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a>, {{ o.session }} ({{ o.at | local('%a %b %-d') }}): {% if o.outcome %}needs an outcome{% endif %}{% if o.outcome and o.feedback %}; {% endif %}{% if o.feedback %}feedback owed by {{ o.feedback | join(', ') }}{% endif %}</li>{% endfor %}</ul>
+  {% set needs = w.owed | selectattr('outcome') | list %}
+  {% if needs %}<ul>{% for o in needs %}<li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a>, {{ o.session }} ({{ o.at | local('%a %b %-d') }}): needs an outcome</li>{% endfor %}</ul>{% endif %}
+  {% if w.owed_people %}
+  <h3>Feedback owed, by interviewer</h3>
+  <ul>{% for p in w.owed_people %}
+    <li>{{ p.name }} owes {{ p.count }}: {% for i in p['items'] %}<a href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">{{ i.name }}</a> <span class="fine">({{ i.session }}, {{ i.day }})</span>{{ ', ' if not loop.last }}{% endfor %}
+      <a class="link small" href="{{ p.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ p.name }}</a>
+      <button type="button" class="link small" data-copy-text="{{ p.subject }}&#10;&#10;{{ p.body }}">Copy request</button></li>{% endfor %}</ul>
+  {% endif %}
 </section>
 {% endif %}
 

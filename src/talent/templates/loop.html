@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Loop planner · {{ job.title }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %}</h1>
+    <p class="sub">{{ job.company or '' }}{% if job.company and job.location %} · {% endif %}{{ job.location or '' }}</p>
+  </div>
+  {% include "_job_tabs.html" %}
+</div>
+
+<section class="panel" id="template">
+  <div class="sec-head"><h2>Loop template</h2></div>
+  <p class="fine">One session per line: name, minutes, then who may run it. Example: <code>System design | 60 | Priya Nair, Sam Okoye</code>. The first name listed is tried first.</p>
+  <form method="post" action="/jobs/{{ job.id }}/loop/template" class="stack">
+    <textarea name="sessions" rows="5" maxlength="2000" aria-label="Loop sessions" placeholder="System design | 60 | Priya Nair, Sam Okoye&#10;Pairing | 45 | Omar Ali&#10;Behavioral | 30 | Tia Brandt">{{ tpl_text }}</textarea>
+    <label>Working hours (24-hour clock) <input type="text" name="hours" value="{{ hours }}" maxlength="9" size="8"></label>
+    <button class="btn small" type="submit">Save template</button>
+    <p class="fine">Times use your time zone from Settings. Clear the box and save to remove the template.</p>
+  </form>
+</section>
+
+{% if tpl %}
+<section class="panel" id="plan">
+  <div class="sec-head"><h2>Plan a loop</h2></div>
+  <form method="get" action="/jobs/{{ job.id }}/loop" class="stack">
+    <label>Candidate <select name="candidate" required><option value="">Pick someone</option>{% for a in people %}<option value="{{ a.candidate_id }}"{{ ' selected' if a.candidate_id == cand_id }}>{{ a.candidate_name }}</option>{% endfor %}</select></label>
+    <label>First day to try (optional) <input type="date" name="start" value="{{ start }}"></label>
+    <label>Who is out (optional, names separated by commas) <input type="text" name="out" value="{{ out }}" maxlength="200"></label>
+    <button class="btn primary" type="submit">Propose slots</button>
+  </form>
+  {% if plan_error %}<p class="none">{{ plan_error }}</p>{% endif %}
+  {% if plan %}
+  <h3>Proposed loop for {{ plan.candidate.name }}</h3>
+  <p class="fine">Nothing is booked yet and no calendar is touched.</p>
+  <ul class="sessions">
+  {% for x in plan.sessions %}
+    <li>
+      <strong>{{ x.name }}</strong> <span class="fine">({{ x.minutes }} min)</span>:
+      {% if x.placed %}{{ x.at_local }}{% if x.interviewer %}, with {{ x.interviewer }}{% else %}, interviewer not set{% endif %}
+      {% if x.others %}<span class="fine">Free to swap in: {{ x.others | join(', ') }}</span>{% endif %}
+      {% elif x.already %}already booked{% else %}no slot found{% endif %}
+      {% for w in x.warnings %}<div class="fine"><span class="badge warn">Heads up</span> {{ w }}</div>{% endfor %}
+    </li>
+  {% endfor %}
+  </ul>
+  {% for w in plan.warnings %}<p class="fine"><span class="badge warn">Heads up</span> {{ w }}</p>{% endfor %}
+  {% set placed = plan.sessions | selectattr('placed') | list %}
+  {% if placed %}
+  <form method="post" action="/jobs/{{ job.id }}/loop/book" class="stack" data-confirm="Log these {{ placed | length }} interviews on {{ plan.candidate.name }}'s timeline? Nothing is sent and no calendar is changed.">
+    <input type="hidden" name="candidate_id" value="{{ plan.candidate.id }}">
+    {% for x in placed %}<input type="hidden" name="s_name" value="{{ x.name }}"><input type="hidden" name="s_at" value="{{ x.at }}"><input type="hidden" name="s_min" value="{{ x.minutes }}"><input type="hidden" name="s_who" value="{{ x.interviewer or '' }}">{% endfor %}
+    <button class="btn primary" type="submit">Log these interviews</button>
+  </form>
+  {% endif %}
+  {% if plan.invites or plan.candidate_invite %}
+  <h3>Invite text</h3>
+  <p class="fine">Paste into your own mail or calendar. Talent Search sends nothing.</p>
+  <ul>
+    {% for v in plan.invites %}
+    <li>{{ v.interviewer }}, {{ v.session }}
+      <a class="link small" href="{{ v.mailto }}">Open in your mail</a>
+      <button type="button" class="link small" data-copy-text="{{ v.subject }}&#10;&#10;{{ v.body }}">Copy invite</button></li>
+    {% endfor %}
+    {% if plan.candidate_invite %}
+    <li>{{ plan.candidate.name }}, the whole schedule
+      <a class="link small" href="{{ plan.candidate_invite.mailto }}">Open in your mail</a>
+      <button type="button" class="link small" data-copy-text="{{ plan.candidate_invite.subject }}&#10;&#10;{{ plan.candidate_invite.body }}">Copy schedule</button></li>
+    {% endif %}
+  </ul>
+  {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

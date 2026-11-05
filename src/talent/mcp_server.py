@@ -31,7 +31,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, opsreview
-from . import ai_caps, decide, interviews, offers, sessions, trust
+from . import ai_caps, decide, interviews, loops, offers, sessions, trust
 from . import outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
@@ -1453,11 +1453,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         same = len(notes) == len(before["data"].get("feedback") or []) and iv["data"] == before["data"]
         whose = f"{quoted(iv['candidate_name'])}'s interview" + (
             f" ({actions.interview_name(iv)})" if actions.interview_name(iv) else "")
-        who = f" from {quoted(interviewer)}" if interviewer and interviewer.strip() else ""
+        said_by = interviews.pick_interviewer(iv, interviewer) if interviewer and interviewer.strip() else None
+        who = f" from {quoted(said_by)}" if said_by else ""
         sentence = (f"That feedback{who} was already saved on {whose}." if same
                     else f"Saved feedback{who} on {whose} {_when_words(iv['at'])}.")
         if verdict is not None and not same:
             sentence += f" The session now reads {interview_label(iv['data']) or iv['status']}."
+        sentence += interviews.owed_after(iv)
         return _said(sentence, {"data_note": DATA_NOTE, "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
             "job_id": iv.get("job_id"), "at_local": _local(iv["at"]), "summary": iv.get("body"), "status": iv["status"],
@@ -1486,18 +1488,99 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result(DATA_NOTE + "\n" + interviews.week_text(w), data)
 
     @mcp.tool(annotations=READ)
+    def plan_loop(job_id: int, candidate_id: int, start: str | None = None,
+                  unavailable: list[str] | None = None) -> CallToolResult:
+        """Propose an interview loop for a candidate: a slot for each session in the job's loop template (set on the
+        job's Loop page in the app), over the next working days, inside the recruiter's working hours and clear
+        of the interviewers' and the candidate's booked sessions. Warns about heavy days and busy interviewers,
+        names who else is free to swap in, and returns paste-ready invite text for each interviewer and for the
+        candidate (in the structured result: show it to the recruiter). Nothing is booked and no calendar is
+        written. `start` is the first day to try (2026-11-09; default tomorrow). `unavailable` names interviewers
+        who are out; others are swapped in. After the recruiter agrees, book_loop logs the sessions."""
+        p = loops.plan(store, job_id, candidate_id, start, unavailable)
+        data = {"data_note": DATA_NOTE, "candidate_id": candidate_id, "job_id": job_id,
+                "sessions": [_slim({"session": x["name"], "minutes": x["minutes"], "at": x["at"], "at_local": x["at_local"],
+                                    "interviewer": x["interviewer"], "swap_in": x["others"], "warnings": x["warnings"],
+                                    "already_booked": x["already"] or None}) for x in p["sessions"]],
+                "warnings": p["warnings"],
+                "interviewer_invites": [{k: v[k] for k in ("session", "interviewer", "subject", "body")}
+                                        for v in p["invites"]],
+                "candidate_invite": ({k: p["candidate_invite"][k] for k in ("subject", "body")}
+                                     if p["candidate_invite"] else None),
+                "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
+        return _result(DATA_NOTE + "\n" + loops.plan_text(p) + "\nInvite text for each interviewer and the "
+                       "candidate is in the structured result. The recruiter sends it from their own mail.", data)
+
+    @mcp.tool(annotations=WRITE)
+    def book_loop(job_id: int, candidate_id: int, start: str | None = None, unavailable: list[str] | None = None,
+                  slots: list[dict[str, str]] | None = None) -> CallToolResult:
+        """Log a candidate's interview loop as interviews, once the recruiter has agreed to a plan_loop plan. With
+        no `slots` it books exactly what plan_loop (same start and unavailable) proposes. To change a time or
+        interviewer, send slots: a list of {session, at, interviewer}, session being a name from the template and
+        at an ISO time with offset. Each session is logged like log_activity does (summary "System design (60
+        min)", so the length counts for clashes), listed on Changes where the recruiter can undo each one, and
+        held for review in Cautious mode. No calendar is written and nothing is sent."""
+        p = loops.plan(store, job_id, candidate_id, start, unavailable)
+        tpl = {x["name"].casefold(): x for x in loops.get_template(store, job_id)["sessions"]}
+        warn: list[str] = []
+        if slots:
+            chosen = []
+            for sl in slots[:loops.MAX_SESSIONS]:
+                spec = tpl.get(str(sl.get("session") or "").strip().casefold())
+                if not spec:
+                    raise ValueError("Nothing booked. session must be one of: "
+                                     + ", ".join(x["name"] for x in tpl.values()) + ".")
+                at = parse_when(str(sl.get("at") or ""))
+                who = (sl.get("interviewer") or "").strip() or None
+                warn += [f"{spec['name']}: {w}" for w in loops.check_slot(store, candidate_id, at, spec["minutes"], who)]
+                chosen.append({"session": spec["name"], "at": at, "minutes": spec["minutes"], "interviewer": who})
+        else:
+            chosen = loops.slots_from(p)
+        if not chosen:
+            raise ValueError("Nothing booked: " + ("; ".join(w for x in p["sessions"] for w in x["warnings"])
+                                                  or "the plan has no sessions to book") + ".")
+        if store.ai_notes_this_hour(candidate_id) + len(chosen) > AI_NOTE_CAP:
+            raise ValueError(f"Nothing booked. That would be more than {AI_NOTE_CAP} entries your AI app may log on "
+                             "this person in an hour. Book fewer sessions, or ask the recruiter to do it in the app.")
+        done, waiting = [], []
+        for sl in chosen:
+            _s, out, _a = _log_one(candidate_id, "interview", False, loops.session_summary(sl["session"], sl["minutes"]),
+                                   sl["at"], job_id, sl["interviewer"])
+            (waiting if out.get("pending_review") else done).append((sl, out))
+        name = quoted(p["candidate"]["name"])
+        listing = "; ".join(f"{sl['session']} {_local(sl['at'])}" for sl, _ in done or waiting)
+        if waiting:
+            sentence = (f"Waiting for the recruiter's review: log {len(waiting)} interview{'' if len(waiting) == 1 else 's'} "
+                        f"for {name}: {listing}. {review.WAIT_NOTE}")
+        else:
+            sentence = (f"Logged {len(done)} interview{'' if len(done) == 1 else 's'} for {name} on "
+                        f"{_job_name(p['job'])}: {listing}. The recruiter can undo each under Changes. Nothing was "
+                        "sent and no calendar was changed.")
+        data = {"data_note": DATA_NOTE, "booked": [_slim({"interview_id": (o.get("logged") or {}).get("id"),
+                                                          "session": sl["session"], "at_local": _local(sl["at"]),
+                                                          "interviewer": sl["interviewer"]}) for sl, o in done],
+                "pending_review": [o["pending_review"] for _, o in waiting] or None,
+                "warning": " ".join(warn) or None, "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
+        return (_said if waiting else _plain)(sentence, _slim(data))
+
+    @mcp.tool(annotations=READ)
     def list_feedback_owed(job_id: int | None = None) -> CallToolResult:
         """Interviewers who still owe feedback on sessions that have taken place (up to two weeks back), for
         people still in play on an open job, the same people Decide and compare_finalists name. A session under a
         day old is listed with chased false: Today doesn't ask for it yet, so a nudge can wait. One entry per loop,
         each owed interviewer with a short request (subject and body) the recruiter can send from their own mail.
-        Draft the nudges for the recruiter; Talent Search sends nothing. Feedback saved with add_interview_feedback
-        clears the entry."""
+        Draft the nudges for the recruiter; Talent Search sends nothing. The reply also groups the same requests by
+        interviewer (people): send ONE nudge per person covering all their candidates, not one per candidate.
+        Feedback saved with add_interview_feedback clears the entry. A first name ("Priya", "Tia B.") is matched
+        to the named interviewer when only one fits."""
         rows = interviews.feedback_owed(store, job_id=job_id, recent=True)
         data = {"data_note": DATA_NOTE, "loops": [{
             **{k: r[k] for k in ("candidate_id", "name", "job_id", "job", "day")},
             "owed": [_slim({k: o[k] for k in ("name", "email", "session", "interview_id", "subject", "body",
                                               "chased")}) for o in r["owed"]]} for r in rows],
+            "people": [{"name": p["name"], "email": p["email"], "owes": p["count"], "candidates": p["candidates"],
+                        "interview_ids": [i["interview_id"] for i in p["items"]], "subject": p["subject"],
+                        "body": p["body"]} for p in interviews.owed_people(rows)],
             "app_url": app_url("/interviews")}
         return _result(DATA_NOTE + "\n" + interviews.feedback_owed_text(rows), data)
 
