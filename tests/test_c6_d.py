@@ -7,7 +7,7 @@ import anyio
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from talent import actions, outreach, shortlist
+from talent import actions, mcp_server, outreach, shortlist
 from talent.mcp_server import VIEW_KEY, build_server
 from talent.mcp_views import view_html
 from talent.sample_data import load_sample_data
@@ -19,6 +19,20 @@ def call(server, tool, **args):
     async def go():
         return await server.call_tool(tool, args)
     return anyio.run(go)
+
+
+@pytest.fixture(autouse=True)
+def _apps_host(monkeypatch):
+    """These tests play a host that says it shows MCP Apps views (only those get the card tools)."""
+    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: True)
+
+
+def key_of(server, res):
+    """The key the Shortlist card asks for with its app-only tool (never in a result the model sees)."""
+    d = res.structuredContent or {}
+    ids = [p["id"] for p in d.get("added") or d.get("prospects") or [] if p.get("status", "proposed") == "proposed"]
+    out = call(server, "shortlist_card_key", job_id=res.meta[VIEW_KEY]["job_id"], prospect_ids=ids)
+    return out.structuredContent["key"]
 
 
 def text(res):
@@ -76,7 +90,8 @@ def test_one_call_logs_outreach_for_many_as_one_undoable_batch(store):
     assert len(batches) == 1 and len(batches[0]["children"]) == 6 and batches[0]["undoable"]
     c = local_client(store)
     page = c.get("/changes").text
-    assert page.count("Logged a message with 3 people and moved 3 to Contacted") == 1
+    # once in the AI session ledger, once in the list: the six moves and notes never show one by one
+    assert page.count("Logged a message with 3 people and moved 3 to Contacted") == 2
     r = c.post(f"/changes/ai/{batches[0]['id']}/undo", follow_redirects=False)
     assert r.status_code == 303
     assert all(stage_of(store, cid, job["id"]) == "Sourced" for cid in ids)
@@ -106,7 +121,7 @@ def test_card_keeps_all_keeps_selected_and_passes_all(store):
     job = store.add_job("ML Engineer", company="Northwind")
     server = build_server(store)
     res = call(server, "propose_candidates", job_id=job["id"], people=_people("Ana Ruiz", "Bo Li", "Cy Park", "Di Wu"))
-    key = res.meta[VIEW_KEY]["key"]
+    key = key_of(server, res)
     assert res.structuredContent["keep_stages"] == ["Sourced", "Contacted"]
     pids = {p["name"]: p["id"] for p in res.structuredContent["added"]}
     refused = call(server, "keep_prospects", job_id=job["id"], prospect_ids=list(pids.values()))
@@ -141,7 +156,7 @@ def test_same_name_buttons_say_who_and_keep_returns_the_record_link(store):
     assert "1 with no LinkedIn link" in text(res).splitlines()[0]
     row = res.structuredContent["added"][0]
     assert any("No LinkedIn link" in x for x in row["check_lines"])
-    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=row["id"], view_key=res.meta[VIEW_KEY]["key"],
+    out = call(server, "keep_prospect", job_id=job["id"], prospect_id=row["id"], view_key=key_of(server, res),
                candidate_id=maya["id"])
     assert out.structuredContent["prospect"]["candidate_url"].endswith(f"/candidates/{maya['id']}")
     store.add_candidate(name="Lee Chan", current_company="Globex")
@@ -285,3 +300,23 @@ def test_paste_profile_with_link_is_linkedin_and_about_is_only_about(store):
     r = local_client(store).post("/paste", data={"text": "https://www.linkedin.com/in/dev-raman/?utm_source=share"},
                                  follow_redirects=False)
     assert r.headers["location"].startswith(f"/candidates/{dev['id']}") and "Already saved: Dev Raman" in flash_of(r)
+
+
+def test_card_keep_all_and_pass_all_are_ai_actions_undo_covers():
+    """Merge of cycle 6 A and D: Keep all and Pass all on the card are logged as AI actions, so Undo covers them."""
+    from talent.store import Store
+    import tempfile, os
+    store = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+    job = store.add_job("ML Engineer", company="Northwind")
+    server = build_server(store)
+    res = call(server, "propose_candidates", job_id=job["id"], people=_people("Ana Ruiz", "Bo Li", "Cy Park"))
+    pids = {p["name"]: p["id"] for p in res.structuredContent["added"]}
+    key = key_of(server, res)
+    call(server, "keep_prospects", job_id=job["id"], prospect_ids=[pids["Ana Ruiz"], pids["Bo Li"]], view_key=key)
+    call(server, "pass_prospects", job_id=job["id"], prospect_ids=[pids["Cy Park"]], view_key=key)
+    acts = {a["kind"]: a for a in store.ai_actions() if a["kind"] in ("card_keep", "card_pass")}
+    assert set(acts) == {"card_keep", "card_pass"}
+    assert "Kept 2 people from the Shortlist card" in local_client(store).get("/changes").text
+    store.undo_ai_action(acts["card_keep"]["id"])
+    store.undo_ai_action(acts["card_pass"]["id"])
+    assert shortlist.counts(store, job["id"]) == {**shortlist.counts(store, job["id"]), "kept": 0, "passed": 0}
