@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
+from .importers import backup_before_import
 from .store import NotFound, Store
+
+SAMPLE_SOURCE = "Sample data"  # the source on sample people, notes and to-dos
 
 SAMPLES = [
     ("Maya Okafor", "Senior Backend Engineer", "Ledgerline", "Austin, TX",
@@ -78,7 +82,7 @@ def load_sample_data(store: Store) -> int:
         history = [{"title": t, "company": c, "start": a, "end": b} for t, c, a, b in HISTORY.get(name, [])]
         cand, created = store.upsert_candidate(
             work_history=history or None, name=name, current_title=title, current_company=company,
-            location=location, about=about, tags=tags, email=f"{slug}@example.com", source="Sample data",
+            location=location, about=about, tags=tags, email=f"{slug}@example.com", source=SAMPLE_SOURCE,
         )
         ids[name] = cand["id"]
         added += created
@@ -110,11 +114,11 @@ def load_sample_data(store: Store) -> int:
         if title == "Senior Backend Engineer":
             when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=17, minute=0, second=0, microsecond=0)
             store.log(ids["Maya Okafor"], "interview", "Systems design round with the payments team",
-                      at=when, job_id=job["id"], source="Sample data")
+                      at=when, job_id=job["id"], source=SAMPLE_SOURCE)
             store.log(ids["Kenji Watanabe"], "call", "Intro call. Open to Austin, wants to stay hands-on.",
-                      at=_ago(12), job_id=job["id"], source="Sample data")
+                      at=_ago(12), job_id=job["id"], source=SAMPLE_SOURCE)
             store.add_suggestion("Follow up with Noah Williams about the backend role", candidate_id=ids["Noah Williams"],
-                                 job_id=job["id"], source="Sample data")
+                                 job_id=job["id"], source=SAMPLE_SOURCE)
     db.commit()
     people, jobs = sample_ids(store)
     _save_ids(store, people | set(new_people), jobs | set(new_jobs))
@@ -157,18 +161,92 @@ def sample_ids(store: Store) -> tuple[set[int], set[int]]:
     return people, jobs
 
 
-def remove_sample_data(store: Store) -> tuple[int, int]:
-    """Delete exactly the sample candidates and jobs. Returns (candidates, jobs) removed."""
-    people, jobs = sample_ids(store)
+def _sample_path(name: str, job_title: str) -> set[str] | None:
+    """The stages the sample put this person through in this job (lowercase), or None if it didn't."""
+    for title, _, _, _, people in JOBS:
+        if title == job_title:
+            for who, stage, _ in people:
+                if who == name:
+                    return {"sourced", stage.lower()}
+    return None
+
+
+def _touched_people(store: Store, people: set[int], jobs: set[int]) -> dict[int, str]:
+    """Sample people the recruiter (or their AI app, or an import) has worked with: id -> name."""
+    touched: dict[int, str] = {}
     for cid in people:
+        c = store.get_candidate(cid)
+        sample_jobs = {a["job_id"]: a for a in store.candidate_pipelines(cid) if a["job_id"] in jobs}
+        if len(sample_jobs) < len(store.candidate_pipelines(cid)):
+            touched[cid] = c["name"]  # added to one of the recruiter's own jobs
+            continue
+        for a in sample_jobs.values():
+            path = _sample_path(c["name"], a["job_title"])
+            if path is None or a["stage"].lower() not in path or a.get("notes"):
+                touched[cid] = c["name"]  # moved to another stage, or a note was added
+        for t in store._rows("SELECT * FROM timeline WHERE candidate_id = ?", (cid,)):
+            if t["source"] == SAMPLE_SOURCE:
+                continue
+            if t["kind"] == "stage" and t["job_id"] in sample_jobs:
+                path = _sample_path(c["name"], sample_jobs[t["job_id"]]["job_title"]) or set()
+                if (t["body"] or "").lower() in path:
+                    continue
+            touched[cid] = c["name"]  # a note, call, edit, merge or import of their own
+        if store._row("SELECT 1 AS x FROM suggestions WHERE candidate_id = ? AND coalesce(source, '') <> ?",
+                      (cid, SAMPLE_SOURCE)):
+            touched[cid] = c["name"]
+    return touched
+
+
+def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
+    """Remove the sample people and jobs the recruiter never worked with, after a backup.
+
+    A sample person with anything of the recruiter's own (a note or call, an edit, a merge, an
+    import, a stage move, a to-do, a place in one of their own jobs) is kept and stops being marked
+    Sample, and so is a sample job that was edited or has any real or kept person in its pipeline.
+    Returns {"people", "jobs"} removed, {"kept_people", "kept_jobs"} names, and "backup" (a path).
+    """
+    people, jobs = sample_ids(store)
+    out: dict[str, Any] = {"people": 0, "jobs": 0, "kept_people": [], "kept_jobs": [], "backup": None}
+    if not people and not jobs:
+        _save_ids(store, set(), set())
+        return out
+    if backup:
+        out["backup"] = str(backup_before_import(store, reason="sample removal"))
+    kept = _touched_people(store, people, jobs)
+    kept_jobs: dict[int, str] = {}
+    for jid in jobs:
+        job = store.get_job(jid)
+        label = job["title"] + (f" ({job['company']})" if job.get("company") else "")
+        in_pipeline = {a["candidate_id"] for a in store.pipeline(jid)}
+        own_todo = store._row("SELECT 1 AS x FROM suggestions WHERE job_id = ? AND coalesce(source, '') <> ?",
+                              (jid, SAMPLE_SOURCE))
+        if (in_pipeline - (people - set(kept))) or job["updated_at"] != job["created_at"] or own_todo:
+            kept_jobs[jid] = label
+    for cid in people - set(kept):
         try:
             store.delete_candidate(cid)
+            out["people"] += 1
         except NotFound:
             pass
-    for jid in jobs:
+    for jid in jobs - set(kept_jobs):
         try:
             store.delete_job(jid)
+            out["jobs"] += 1
         except NotFound:
             pass
-    _save_ids(store, set(), set())
-    return len(people), len(jobs)
+    if kept:
+        # Kept people lose what the sample made up for them (the fake interview, call and to-do), so Today
+        # doesn't show it as real, and stop saying they were found via the sample.
+        marks = ",".join("?" * len(kept))
+        ids = sorted(kept)
+        with store._lock, store._conn:
+            store._conn.execute(f"DELETE FROM timeline WHERE source = ? AND candidate_id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
+            store._conn.execute(f"DELETE FROM suggestions WHERE source = ? AND candidate_id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
+            store._conn.execute(f"UPDATE candidates SET source = NULL WHERE source = ? AND id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
+    _save_ids(store, set(), set())  # whatever is left is the recruiter's own now
+    out["kept_people"], out["kept_jobs"] = sorted(kept.values()), sorted(kept_jobs.values())
+    return out

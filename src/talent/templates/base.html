@@ -6,6 +6,7 @@
   <title>{% block title %}Talent Search{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
 </head>
 {% set path = request.url.path %}
 <body class="{% block bodyclass %}{% endblock %}">
@@ -29,37 +30,8 @@
   </main>
   <footer class="foot">
     Everything stays on this computer. Talent Search uses none of your data and has no telemetry.
-    <a href="/privacy">Privacy</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a> · v{{ version }}
+    <a href="/changes?who=ai">AI changes</a> · <a href="/privacy">Privacy</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a> · v{{ version }}
   </footer>
-  <script>
-  // AI recipes: copy the prompt, then try to open Claude with it filled in.
-  function copyText(text, note, msg) {
-    const done = () => { if (note) note.textContent = msg; };
-    if (navigator.clipboard && window.isSecureContext !== false) {
-      navigator.clipboard.writeText(text).then(done, () => { fallbackCopy(text); done(); });
-    } else { fallbackCopy(text); done(); }
-  }
-  function fallbackCopy(text) {
-    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t);
-    t.select(); try { document.execCommand("copy"); } catch (e) {} t.remove();
-  }
-  function promptFor(btn) {
-    let p = btn.dataset.prompt || "";
-    const src = btn.dataset.fill && document.getElementById(btn.dataset.fill);
-    if (src && src.value.trim()) p = p.replace("[paste the resume or profile here]", src.value.trim());
-    return p;
-  }
-  function runRecipe(btn) {
-    const p = promptFor(btn);
-    copyText(p, btn.closest(".recipe-actions").querySelector(".recipe-note"),
-      "Prompt copied. If Claude didn't open, open it and paste (Ctrl+V or Cmd+V).");
-    window.location.href = "claude://claude.ai/new?q=" + encodeURIComponent(p);
-  }
-  function copyRecipe(btn) {
-    copyText(promptFor(btn), btn.closest(".recipe-actions").querySelector(".recipe-note"),
-      "Copied. Paste it into Claude, Codex, ChatGPT or LM Studio.");
-  }
-  </script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

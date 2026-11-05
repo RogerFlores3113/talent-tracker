@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "_macros.html" import chips, sub %}
+{% block title %}Merge {{ other.name }} into {{ keep.name }} · Talent Search{% endblock %}
+{% block body %}
+{% macro person(c, heading) -%}
+<section class="panel">
+  <p class="fine">{{ heading }} (id {{ c.id }})</p>
+  <h2><a href="/candidates/{{ c.id }}">{{ c.name }}</a></h2>
+  <p class="sub">{{ sub(c) }}</p>
+  {{ chips(c.tags) }}
+  <dl class="facts">
+    {% for key, label in [('email', 'Email'), ('phone', 'Phone'), ('linkedin_url', 'LinkedIn'), ('website', 'Website'), ('location', 'Location'), ('source', 'Found via')] %}
+    <dt>{{ label }}</dt><dd>{{ c[key] or '' }}{% if not c[key] %}<span class="muted">empty</span>{% endif %}</dd>
+    {% endfor %}
+    <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
+    <dt>Jobs</dt><dd>{% if c.pipelines %}{% for p in c.pipelines %}{{ p.job_title }} ({{ p.stage }}){{ ', ' if not loop.last }}{% endfor %}{% else %}<span class="muted">none</span>{% endif %}</dd>
+    <dt>Timeline</dt><dd>{{ c.timeline | length }}{{ '+' if c.timeline | length >= 5 }} entr{{ 'y' if c.timeline | length == 1 else 'ies' }}</dd>
+  </dl>
+</section>
+{%- endmacro %}
+<h1>Merge these two?</h1>
+<p class="lead">Talent Search keeps {{ keep.name }} (id {{ keep.id }}), fills in anything that profile is missing from {{ other.name }} (id {{ other.id }}), adds their skills, and moves their timeline, work history and jobs over. Where both have a different value, id {{ keep.id }}'s value is kept and id {{ other.id }}'s is written on the timeline. Then {{ other.name }} (id {{ other.id }}) is deleted. If both are in the same job, the further stage is kept. A backup is saved first.</p>
+<div class="connect-grid">
+  {{ person(keep, 'Keep this one') }}
+  {{ person(other, 'Merge in and delete this one') }}
+</div>
+<form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="actions-inline">
+  <button class="btn primary" type="submit">Merge into {{ keep.name }} (id {{ keep.id }})</button>
+  <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ other.name }} (id {{ other.id }}) instead</a>
+  <a class="btn" href="/candidates/{{ keep.id }}">Cancel</a>
+</form>
+{% endblock %}

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import anyio
 import pytest
 
-from talent import recipes
+from talent import actions, recipes
 from talent.mcp_server import build_server
 from talent.mcp_views import view_html
 from talent.store import _stage_plan, fts_query
@@ -57,12 +57,12 @@ def test_stopwords_aliases_and_closest_matches(store):
     assert ids("js") == {a["id"]} and ids("kubernetes") == {b["id"]}
     assert ids("back end new york") == {b["id"]} and ids("san francisco") == {a["id"]}
 
-    res = store.search_candidates("react golang")
+    res = store.search_candidates("react cobol")  # golang now also means go, which Ben has
     assert res.closest and {h.candidate["id"] for h in res.hits} == {a["id"]}
     assert not store.search_candidates("react").closest
     assert store.search_candidates("zzz yyy").total == 0 and not store.search_candidates("zzz yyy").closest
 
-    out = call(build_server(store), "search_candidates", query="react golang")
+    out = call(build_server(store), "search_candidates", query="react cobol")
     assert text(out).startswith("No exact matches. Closest matches:") and structured(out)["closest"] is True
 
 
@@ -156,14 +156,15 @@ def test_job_pipeline_text_reads_like_a_status_update(store, pst):
     when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=23, minute=0, second=0, microsecond=0)
     store.log(maya, "interview", "Onsite", at=when, job_id=job["id"])
     res = call(server, "job_pipeline", job_id=job["id"])
-    out = text(res)
-    assert out.splitlines()[0] == "Payments Lead at Acme Pay (Remote)"
-    assert "2 candidates, 1 still in the running" in out
+    out = res.content[0].text  # the paste-ready update is the first block, the same text as the app's
+    assert out == actions.job_status_text(store, job["id"])
+    assert out.splitlines()[0] == "Payments Lead, Acme Pay (Remote)"
+    assert "1 candidate in process, none hired yet. 1 out." in out
     local = when.astimezone()
-    assert f"- Interviewing (1): Maya Chen (Staff Engineer, 0 days in stage, next interview " in out
-    assert f"{local.day}, 3:00 PM P" in out  # 23:00 UTC is 3 PM Pacific
+    assert "Interviewing (1): Maya Chen (today)" in out
+    assert f"- Maya Chen: {local:%a %b} {local.day}, 3:00 PM P" in out  # 23:00 UTC is 3 PM Pacific
     assert "(id" not in out and "job " not in out  # no database ids in a hiring-manager update
-    assert "No one in: Sourced" in out
+    assert "Candidate-provided" not in out and "Candidate-provided" in res.content[1].text
     data = structured(res)
     card = next(s for s in data["stages"] if s["name"] == "Interviewing")["candidates"][0]
     assert card["candidate_id"] == maya and card["app_url"].endswith(f"/candidates/{maya}")

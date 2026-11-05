@@ -91,6 +91,19 @@ def save_from_linkedin(url: str = "") -> str:
     )
 
 
+def refresh_candidate(c: dict) -> str:
+    """The candidate page's "Refresh with Claude": update someone already saved, never save them again."""
+    where = c.get("linkedin_url") or c.get("website") or "their public profile"
+    return (
+        f"Refresh {c.get('name') or 'this person'} (candidate {c.get('id')}) in Talent Search.\n\n"
+        f"Call get_candidate with candidate_id {c.get('id')}, then look up their current profile ({where}). "
+        f"Call update_candidate on candidate {c.get('id')} with only what changed: current title, company, "
+        "location, a fresh 2 to 4 sentence `about`, skills as tags (the full list, since it replaces the saved "
+        "one), and work history. Don't use save_candidate, because it never changes the saved `about`. "
+        "If you can't open the profile, ask me to paste it. Tell me what you changed. " + GUARD
+    )
+
+
 def save_from_text(text: str = "") -> str:
     body = text.strip() or "[paste the resume or profile here]"
     return (
@@ -161,11 +174,8 @@ def _scrub(text: str) -> str:
     return text
 
 
-def issue_url(summary: str, details: str = "", where: str = "app") -> str:
-    """A prefilled GitHub 'new issue' link. Opening it sends nothing; the user reviews and submits on GitHub.
-
-    Never put candidate data in here.
-    """
+def issue_text(summary: str, details: str = "", where: str = "app") -> tuple[str, str]:
+    """The (title, body) a problem report would have, with emails, phones and links taken out."""
     title = _scrub((summary or "Problem report").strip())[:120]
     details = _scrub(details or "")
     body = (
@@ -174,4 +184,14 @@ def issue_url(summary: str, details: str = "", where: str = "app") -> str:
         f"**Version**\n{environment_line()}\n\n"
         "_Please remove anything private (names, emails, notes) before submitting._"
     )
+    return title, body
+
+
+def issue_url(summary: str, details: str = "", where: str = "app") -> str:
+    """A prefilled GitHub 'new issue' link. Opening it shows GitHub the text (it's in the address);
+    it is posted only when the user presses Submit on GitHub.
+
+    Never put candidate data in here.
+    """
+    title, body = issue_text(summary, details, where)
     return ISSUES_URL + "?" + urlencode({"title": title, "body": body}, quote_via=quote)

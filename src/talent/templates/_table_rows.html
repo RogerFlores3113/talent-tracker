@@ -1,0 +1,16 @@
+{% from "_macros.html" import chips %}
+{% for c in rows %}
+    <tr>
+      <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a></td>
+      <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td><td>{{ c.location or '' }}</td>
+      <td class="nowrap">{{ c.last_contacted_at | date if c.last_contacted_at else '' }}</td>
+      <td class="nowrap">{{ c.updated_at | date }}</td>
+      <td>{{ chips(c.tags[:4]) }}</td>
+    </tr>
+{% else %}
+    {% if page_no == 1 %}<tr><td colspan="7" class="none">No candidates{{ ' match that' if q or tag or location or source }}.</td></tr>{% endif %}
+{% endfor %}
+{% if page_no < pages %}
+    {% set next_q = {'q': q, 'tag': tag, 'location': location, 'source': source, 'sort': sort, 'dir': dir, 'page_no': page_no + 1} %}
+    <tr class="more"><td colspan="7"><a class="btn" href="/candidates?{{ next_q | urlencode }}" hx-get="/candidates?{{ dict(next_q, more=1) | urlencode }}" hx-target="closest tr" hx-swap="outerHTML">Show more</a> <span class="fine">Showing {{ shown }} of {{ total }}</span></td></tr>
+{% endif %}

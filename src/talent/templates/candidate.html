@@ -4,6 +4,15 @@
 {% block body %}
 {% set qp = request.query_params %}
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
+{% if dupes %}
+<section class="panel" id="duplicates">
+  <h2>Same person?</h2>
+  <p class="fine">These look like they could be {{ c.name }} too. Merging keeps this profile, adds anything it's missing, moves the timeline and jobs over, then deletes the other one.</p>
+  <ul class="items">
+    {% for d in dupes %}<li><a href="/candidates/{{ d.id }}">{{ d.name }}</a> <span class="muted">{{ sub(d) }}</span> <a class="btn small" href="/candidates/{{ c.id }}/merge/{{ d.id }}">Merge</a></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
 <article class="profile">
   <div class="head">
     <div>
@@ -45,7 +54,7 @@
       <a href="/jobs/{{ p.job_id }}">{{ p.job_title }}</a>{% if p.job_company %} <span class="muted">{{ p.job_company }}</span>{% endif %}
       <form method="post" action="/jobs/{{ p.job_id }}/move" class="inline">
         <input type="hidden" name="candidate_id" value="{{ c.id }}">
-        <select name="stage" aria-label="Stage for {{ p.job_title }}" onchange="this.form.submit()">
+        <select name="stage" aria-label="Stage for {{ p.job_title }}" data-autosubmit>
           {% for s in stages[p.job_id] %}<option {{ 'selected' if s.name | lower == p.stage | lower }}>{{ s.name }}</option>{% endfor %}
         </select>
       </form>
@@ -74,10 +83,35 @@
   {% if c.timeline %}
   <ul class="timeline">
     {% for t in c.timeline %}
-    <li class="t-{{ t.kind }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+      {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}{% if t.status == 'cancelled' %} <span class="badge">Cancelled</span>{% elif t.status in interview_outcomes %} <span class="badge">{{ interview_outcomes[t.status] }}</span>{% endif %}{% if ivd.rescheduled_from %} <span class="fine">moved from {{ ivd.rescheduled_from[-1] | local }}</span>{% endif %}{% endif %}
       {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
-      {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
-      {% if t.kind == 'change' and t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.kind == 'change' and t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
+      {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}
+      {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body and not (t.data and t.data.merged) %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
+      {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}
+      {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
+      {% if ivd.outcome_note %}<div class="fine">How it went: {{ ivd.outcome_note }}</div>{% endif %}
+      <details class="iv-edit"><summary class="small">Reschedule, cancel or record how it went</summary>
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
+          <input type="hidden" name="op" value="reschedule">
+          <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time" required>
+          <input type="text" name="reason" value="" placeholder="Reason (optional)" aria-label="Reason for the new time" maxlength="500">
+          <button class="btn small" type="submit">Reschedule</button>
+        </form>
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
+          <input type="hidden" name="op" value="outcome">
+          <select name="outcome" aria-label="How it went">{% for k, label in interview_outcomes.items() %}<option value="{{ k }}" {{ 'selected' if t.status == k }}>{{ label }}</option>{% endfor %}</select>
+          <input type="text" name="note" value="{{ ivd.outcome_note or '' }}" placeholder="Note (optional)" aria-label="Outcome note">
+          <button class="btn small" type="submit">Save outcome</button>
+        </form>
+        {% if t.status == 'cancelled' %}
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline"><input type="hidden" name="op" value="restore"><button class="btn small" type="submit">Put back on the schedule</button></form>
+        {% else %}
+        <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline"><input type="hidden" name="op" value="cancel"><button class="link small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview</button></form>
+        {% endif %}
+      </details>
+      {% endif %}
+      {% if t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
     {% endfor %}
   </ul>
   {% else %}<p class="none">Nothing logged yet. Notes, calls, emails and stage changes show up here.</p>{% endif %}
@@ -86,7 +120,7 @@
   <p class="fine">Ask Claude to look up their current role and update this profile.</p>
   {{ recipe_buttons(refresh_prompt, "Refresh with Claude") }}
 
-  <form method="post" action="/candidates/{{ c.id }}/delete" data-msg="Delete {{ c.name }} for good? This also removes their timeline and job stages." onsubmit="return confirm(this.dataset.msg)">
+  <form method="post" action="/candidates/{{ c.id }}/delete" data-confirm="Delete {{ c.name }}? This also removes their timeline and job stages, and can't be undone. Copies stay in automatic backups until they roll off.">
     <button class="link danger" type="submit">Delete candidate</button>
   </form>
 </article>

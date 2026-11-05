@@ -27,7 +27,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
     rows = [i for i in actions.action_items(store)["items"] if i["kind"] == "thin"]
     assert len(rows) == 1
     assert rows[0]["title"] == "3 jobs have thin pipelines"
-    assert "Backend, Acme Payments" in rows[0]["detail"] and "Aim for at least 4 active candidates." in rows[0]["detail"]
+    assert "Backend (Acme Payments) has no active candidates. Aim for at least 4." in rows[0]["detail"]
     html = client(store).get("/").text
     assert "3 jobs have thin pipelines" in html and "Needs more candidates" in html
 
@@ -35,8 +35,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
 def test_single_thin_job_detail_copy(store):
     store.add_job("Senior Backend Engineer", company="Acme Payments")
     row = next(i for i in actions.action_items(store)["items"] if i["kind"] == "thin")
-    assert row["title"] == "Senior Backend Engineer has no active candidates"
-    assert row["detail"] == "Acme Payments. Aim for at least 5 active candidates."
+    assert row["title"] == "Senior Backend Engineer (Acme Payments) has no active candidates. Aim for at least 5."
 
 
 def test_stale_profiles_fold_into_one_row_with_real_count(store):
@@ -88,7 +87,8 @@ def test_follow_up_date_on_log_form_shows_from_that_day(store):
     assert store.timeline(cand["id"])[0]["body"] == "Intro call"
     res = actions.action_items(store)
     assert not [i for i in res["items"] if i["kind"] == "suggestion"] and res["scheduled"] == 1
-    assert "scheduled for later" in c.get("/").text
+    home = c.get("/").text  # listed under Next week with its day (tests/test_c2_f.py)
+    assert "Next week" in home and "Due " in home
     on_day = datetime.now(timezone.utc) + timedelta(days=6)
     items = [i for i in actions.action_items(store, now=on_day)["items"] if i["kind"] == "suggestion"]
     assert [i["title"] for i in items] == ["Follow up with Ana Ruiz"]
@@ -131,7 +131,8 @@ def test_sample_data_badges_and_remove(store):
     assert store.count_candidates() == 1 and [j["id"] for j in store.list_jobs()] == [real_job["id"]]
     assert sample_ids(store) == (set(), set())
     assert "Removed the sample data" in c.get(r.headers["location"]).text
-    assert remove_sample_data(store) == (0, 0)
+    again = remove_sample_data(store)
+    assert (again["people"], again["jobs"], again["kept_people"]) == (0, 0, [])
 
 
 def test_welcome_stays_until_a_real_candidate_and_search_hidden_when_empty(store):

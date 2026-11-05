@@ -33,10 +33,7 @@ def test_post_needs_our_own_origin(store):
 
 
 def test_post_without_origin_uses_fetch_metadata(store):
-    from fastapi.testclient import TestClient
-    from talent.web import create_app
-
-    bare = TestClient(create_app(store), base_url=LOCAL_URL)  # sends no Origin
+    bare = local_client(store, origin=False)  # sends no Origin
     for site in ("cross-site", "same-site"):
         assert bare.post("/sample-data", headers={"sec-fetch-site": site}).status_code == 403
     for site in ("same-origin", "none"):

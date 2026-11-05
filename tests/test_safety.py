@@ -169,10 +169,12 @@ def test_save_candidate_warns_about_same_name(store):
     server = build_server(store)
     store.add_candidate(name="Pat Lee", current_title="Designer", current_company="Acme", location="Austin")
     out = structured(call(server, "save_candidate", name="pat lee", email="pat@new.com"))
-    assert out["created"] is True
+    assert out["created"] is False and out["needs_confirmation"] is True and store.count_candidates() == 1
     dup = out["possible_duplicates"][0]
     assert dup["current_title"] == "Designer" and dup["current_company"] == "Acme" and dup["location"] == "Austin"
-    assert "merge" not in out["warning"] and "delete the extra one" in out["warning"]
+    assert "merge" not in out["warning"] and "create_anyway=true" in out["warning"]
+    out = structured(call(server, "save_candidate", name="pat lee", email="pat@new.com", create_anyway=True))
+    assert out["created"] is True and out["saved_status"] == "Saved"
     again = structured(call(server, "save_candidate", name="Patrick Lee", email="pat@new.com", source="Web"))
     assert again["created"] is False and "possible_duplicates" not in again
     assert again["candidate"]["name"] == "pat lee" and "name" in again["kept"]
@@ -210,7 +212,7 @@ def test_migrates_v2_to_v3(tmp_path, monkeypatch):
     s.close()
     monkeypatch.setattr(store_mod, "_MIGRATIONS", all_steps)
     s = Store(path)
-    assert s.schema_version == 3
+    assert s.schema_version == len(all_steps)
     note = [t for t in s.timeline(cid) if t["kind"] == "note"][0]
     assert note["data"] is None and not note["undoable"]
     s.update_candidate(cid, location="Reno")
@@ -223,7 +225,7 @@ def test_fresh_and_v1_databases_reach_v3(tmp_path):
     path = tmp_path / "old.db"
     shutil.copy(FIXTURES / "v1.db", path)
     s = Store(path)
-    assert s.schema_version == 3
+    assert s.schema_version == len(store_mod._MIGRATIONS)
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(timeline)")}
     assert "data" in cols
     s.close()

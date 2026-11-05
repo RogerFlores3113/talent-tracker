@@ -35,11 +35,34 @@
   <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
 </section>
 
+<section class="panel" id="backups">
+  <h2>Automatic backups</h2>
+  <p>Before every import, delete, merge or sample data removal, a full copy of your data is saved here. The newest 10 of each kind are kept and older ones roll off.</p>
+  <pre class="code">{{ backup_folder }}</pre>
+  {% if backup_count %}
+  <p class="fine">There {{ 'is' if backup_count == 1 else 'are' }} {{ backup_count }} backup{{ '' if backup_count == 1 else 's' }} now. People you deleted are still in the ones taken before the delete. Delete old backups to remove those copies too.</p>
+  <form method="post" action="/settings/backups/delete" data-confirm="Delete all {{ backup_count }} automatic backup{{ '' if backup_count == 1 else 's' }}? Your current data stays. This can't be undone."><button class="btn" type="submit">Delete old backups</button></form>
+  {% else %}<p class="fine">No backups yet.</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Changes to profiles</h2>
+  <p>See every edit to a candidate's details and who made it: you, an import or your AI app. Undo any of them, or undo everything your AI app changed since a given time.</p>
+  <p class="actions-inline"><a class="btn" href="/changes?who=ai">Review AI changes</a> <a class="btn ghost" href="/changes">All changes</a></p>
+</section>
+
+{% if typesense %}
+<section class="panel">
+  <h2>Typesense search</h2>
+  {% include "_typesense_note.html" %}
+</section>
+{% endif %}
+
 {% if sample_people or sample_jobs %}
 <section class="panel">
   <h2>Sample data</h2>
-  <p>You have {{ sample_people }} sample candidate{{ '' if sample_people == 1 else 's' }} and {{ sample_jobs }} sample job{{ '' if sample_jobs == 1 else 's' }}, marked Sample. Removing them leaves everything you added yourself.</p>
-  <form method="post" action="/sample-data/remove" onsubmit="return confirm('Remove the sample candidates and jobs? Your own data stays.')"><button class="btn" type="submit">Remove sample data</button></form>
+  <p>You have {{ sample_people }} sample candidate{{ '' if sample_people == 1 else 's' }} and {{ sample_jobs }} sample job{{ '' if sample_jobs == 1 else 's' }}, marked Sample. Removing them takes a backup first. Sample people and jobs you worked with (a note, an edit, a stage move, one of your own candidates in the pipeline) are kept as your own data.</p>
+  <form method="post" action="/sample-data/remove" data-confirm="Remove the sample candidates and jobs you haven't worked with? A backup is saved first, and anything you added or changed is kept."><button class="btn" type="submit">Remove sample data</button></form>
 </section>
 {% endif %}
 {% endblock %}

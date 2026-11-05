@@ -5,9 +5,12 @@
 <section class="panel prose">
   <p><strong>Talent Search uses none of your data.</strong> There is no account, no cloud and no telemetry. The app never sends anything about you or your candidates anywhere.</p>
   <p>Your candidates live in one database file on this computer, in <code>{{ data_folder }}</code>. The app window only answers requests from this computer.</p>
+  <p><strong>Your files are full, unencrypted copies.</strong> The database, the automatic backups made before each import (in the backups folder there) and any backup or CSV you download all hold every candidate in plain form. Only your user account can open the data folder, but anyone who can sign in as you, or who gets hold of a downloaded file, can read them. Keep downloads somewhere safe and delete the ones you don't need.</p>
+  <p><strong>The app window is locked with a key</strong>, so other programs and other people's accounts on this computer can't read it. The key is made for this computer when the app first runs. Opening Talent Search from its app icon (or with <code>talent open</code>) unlocks the window in your browser.</p>
   <p><strong>Your AI app is separate.</strong> When you connect Claude, Codex, ChatGPT or LM Studio, that app can read and change candidates through Talent Search, and whatever it reads goes to that app's provider under their terms. A local model in LM Studio keeps everything on your computer.</p>
   <p><strong>The AI can't delete anything.</strong> It can search, add, update and move stages. Only you can delete, from this window.</p>
   <p><strong>Talent Search never talks to Google, LinkedIn or email.</strong> If your AI app has those connected, it reads them itself and only sends Talent Search the short summary it logs.</p>
-  <p><strong>Problem reports are opt-in.</strong> “Report a problem” opens a pre-filled page on GitHub. Nothing is sent until you press Submit there, and you can edit it first.</p>
+  <p><strong>Problem reports are opt-in.</strong> “Report a problem” shows you the text first, then opens a pre-filled page on GitHub. Opening it shows GitHub your text. It is posted only when you press Submit on GitHub, and you can edit it first.</p>
+  {% if typesense %}{% include "_typesense_note.html" %}{% endif %}
 </section>
 {% endblock %}

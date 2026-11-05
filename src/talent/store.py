@@ -17,6 +17,7 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,7 +45,11 @@ WON_STAGE_NAMES = frozenset({"hired", "placed", "started", "offer accepted", "ac
 LOST_STAGE_NAMES = frozenset({
     "rejected", "not a fit", "declined", "withdrew", "withdrawn", "lost", "closed", "offer declined",
     "not interested", "no hire", "dropped out", "turned down", "archived",
+    "passed", "pass", "no go", "ghosted", "not moving forward", "rejected by client", "client rejected",
+    "declined offer", "not selected", "did not proceed",
 })
+_OUTCOME_ALIASES = {"in play": "open", "active": "open", "won": "hired", "hire": "hired", "placed": "hired",
+                    "out": "lost", "no": "lost", "rejected": "lost", "closed": "lost"}
 
 
 def normalize_job_status(value: str | None) -> str:
@@ -60,6 +65,17 @@ def stage_outcome(name: str) -> str:
     """Guess a stage's outcome from its name: 'hired' for wins, 'lost' for exits, else 'open'."""
     key = re.sub(r"[\W_]+", " ", name or "").strip().lower()
     return "hired" if key in WON_STAGE_NAMES else "lost" if key in LOST_STAGE_NAMES else "open"
+
+
+def normalize_outcome(value: str | None) -> str | None:
+    """'Out', 'lost', 'in play', 'hired' -> a stage outcome. None or blank stays None. Raises on anything else."""
+    v = re.sub(r"[\s_-]+", " ", (value or "").strip().lower())
+    if not v:
+        return None
+    v = _OUTCOME_ALIASES.get(v, v)
+    if v not in STAGE_OUTCOMES:
+        raise ValueError("A stage's outcome must be open (still in play), hired or lost (out).")
+    return v
 
 # Things that can go on a candidate's timeline. Contact kinds also move
 # "last contacted" when they happened in the past.
@@ -79,6 +95,15 @@ CHANGE_SOURCES = {"app": "App", "ai": "AI app", "import": "CSV import"}
 # On a merge (same email or LinkedIn saved again) these take the newer value;
 # name, source and about are never overwritten, other fields are only filled when empty.
 MERGE_OVERWRITES = ("current_title", "current_company", "location")
+# Longest value each field takes, so a pasted 2 MB blob can't land in a profile.
+FIELD_LIMITS = {
+    "name": 200, "email": 320, "phone": 50, "linkedin_url": 500, "website": 500, "current_title": 200,
+    "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
+    "tags": 3000,  # all skills joined into one text
+}
+# Where the next new candidate and job id must start, so a deleted id is never handed out again
+# (an old AI chat that says "candidate 3" must not reach someone new). Kept in the settings table.
+ID_MARKS = {"candidates": "last_candidate_id", "jobs": "last_job_id"}
 
 CANDIDATE_FIELDS: tuple[str, ...] = (
     "name",
@@ -118,6 +143,40 @@ def _fts_triggers() -> str:
     """
 
 
+def _words_index() -> str:
+    """Unstemmed copy of the index, kept only for its word list (candidates_words_vocab).
+
+    Its own triggers, so a later migration that recreates the main ones leaves it alone."""
+    new = ", ".join(f"new.{c.strip()}" for c in _FTS_COLS.split(","))
+    old = ", ".join(f"old.{c.strip()}" for c in _FTS_COLS.split(","))
+    return f"""
+    DROP TRIGGER IF EXISTS candidates_words_ai;
+    DROP TRIGGER IF EXISTS candidates_words_ad;
+    DROP TRIGGER IF EXISTS candidates_words_au;
+    DROP TABLE IF EXISTS candidates_words_vocab;
+    DROP TABLE IF EXISTS candidates_words;
+    CREATE VIRTUAL TABLE candidates_words USING fts5(
+        {_FTS_COLS}, content='candidates', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE VIRTUAL TABLE candidates_words_vocab USING fts5vocab(candidates_words, 'row');
+    CREATE TRIGGER candidates_words_ai AFTER INSERT ON candidates BEGIN
+        INSERT INTO candidates_words(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+    END;
+    CREATE TRIGGER candidates_words_ad AFTER DELETE ON candidates BEGIN
+        INSERT INTO candidates_words(candidates_words, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+    END;
+    CREATE TRIGGER candidates_words_au AFTER UPDATE ON candidates BEGIN
+        INSERT INTO candidates_words(candidates_words, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO candidates_words(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+    END;
+    """
+
+
+def _migrate_v5_data(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
+    conn.execute("INSERT INTO candidates_words(candidates_words) VALUES('rebuild')")
+
+
 def _migrate_v2_data(conn: sqlite3.Connection) -> None:
     # Fill the new index first: the update trigger below expects it to match the rows.
     conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
@@ -143,6 +202,25 @@ def _migrate_v2_data(conn: sqlite3.Connection) -> None:
                   ac.at, ac.at
            FROM activity ac JOIN applications a ON a.id = ac.application_id"""
     )
+
+
+def _migrate_v4_data(conn: sqlite3.Connection) -> None:
+    # Follow-up days move from settings rows (followup:<id>) onto the to-do itself.
+    for key, value in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'followup:%'").fetchall():
+        sid = key.split(":", 1)[1]
+        if sid.isdigit():
+            conn.execute("UPDATE suggestions SET due_on = ? WHERE id = ?", (value[:10], int(sid)))
+    conn.execute("DELETE FROM settings WHERE key LIKE 'followup:%'")
+    # Exit names that are new to the list ("Passed", "Not moving forward") count as out when they sit
+    # after every in-play stage, as they would have if the job were made today.
+    for (job_id,) in conn.execute("SELECT id FROM jobs").fetchall():
+        stages = conn.execute("SELECT id, name, outcome FROM job_stages WHERE job_id = ? ORDER BY position",
+                              (job_id,)).fetchall()
+        for sid, name, outcome in reversed(stages):
+            if outcome == "open" and stage_outcome(name) == "lost":
+                conn.execute("UPDATE job_stages SET outcome = 'lost' WHERE id = ?", (sid,))
+            elif outcome == "open":
+                break
 
 
 _MIGRATIONS: tuple[Any, ...] = (
@@ -306,6 +384,37 @@ _MIGRATIONS: tuple[Any, ...] = (
     """
     ALTER TABLE timeline ADD COLUMN data TEXT;
     """,
+    # v4: jobs get a hiring manager, headcount, target date and their own thin-pipeline target;
+    # to-dos keep their due day and the note they were logged with (due days used to live in settings).
+    (
+        """
+        ALTER TABLE jobs ADD COLUMN hiring_manager TEXT;
+        ALTER TABLE jobs ADD COLUMN hiring_manager_email TEXT;
+        ALTER TABLE jobs ADD COLUMN openings INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE jobs ADD COLUMN target_date TEXT;
+        ALTER TABLE jobs ADD COLUMN min_active INTEGER;
+        ALTER TABLE suggestions ADD COLUMN due_on TEXT;
+        ALTER TABLE suggestions ADD COLUMN note TEXT;
+        """,
+        _migrate_v4_data,
+    ),
+    # v5: search finds word forms ("engineers" finds "engineer") with the porter stemmer, and a second,
+    # unstemmed index gives the list of real words used for "Did you mean". Needs only the candidates
+    # columns from v2, so it runs the same whether or not v4 came first.
+    (
+        """
+        DROP TRIGGER IF EXISTS candidates_ai;
+        DROP TRIGGER IF EXISTS candidates_ad;
+        DROP TRIGGER IF EXISTS candidates_au;
+        DROP TABLE IF EXISTS candidates_fts;
+        CREATE VIRTUAL TABLE candidates_fts USING fts5(
+            """ + _FTS_COLS + """,
+            content='candidates', content_rowid='id',
+            tokenize='porter unicode61 remove_diacritics 2'
+        );
+        """ + _fts_triggers() + _words_index(),
+        _migrate_v5_data,
+    ),
 )
 
 
@@ -408,18 +517,53 @@ class NotFound(LookupError):
     pass
 
 
+def fold_text(text: str | None) -> str:
+    """Lowercase with accents removed, so 'José Álvarez' compares equal to 'jose alvarez'."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def _name_tokens(name: str | None) -> list[str]:
-    return re.sub(r"[^\w\s]|_", " ", (name or "").casefold()).split()
+    return re.sub(r"[^\w\s]|_", " ", fold_text(name)).split()
+
+
+def fold_name(name: str | None) -> str:
+    """A name's comparison key: 'José  Álvarez-Ruiz' -> 'jose alvarez ruiz'."""
+    return " ".join(_name_tokens(name))
+
+
+def phone_key(phone: str | None) -> str | None:
+    """The last 10 digits of a phone number, so '+1 (415) 555-0100' and '415.555.0100' match."""
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[-10:] if len(digits) >= 7 else None
+
+
+def _compatible(x: str, y: str) -> bool:
+    """Same word, or one is an initial or a start of the other ('R' and 'Raman', 'Dan' and 'Daniel')."""
+    return x.startswith(y) or y.startswith(x)
+
+
+def _names_line_up(ta: list[str], tb: list[str]) -> bool:
+    if not _compatible(ta[0], tb[0]):
+        return False
+    if len(ta) == 1 or len(tb) == 1:  # only a first name on one side
+        return True
+    # Both have a last name: it must be compatible, or appear among the other's later names
+    # ('Ana Ruiz' and 'Ana Ruiz-Lopez'). A shared first name alone is not enough.
+    return _compatible(ta[-1], tb[-1]) or ta[-1] in tb[1:] or tb[-1] in ta[1:]
 
 
 def same_person_name(a: str | None, b: str | None) -> bool:
     """Could these two names be the same person? 'Priya R.' and 'Priya Raman', 'P. Raman' and
-    'Priya Raman', 'ANA D.' and 'Ana Diaz' can; 'Ana Ruiz' and 'Ben Cole' can't."""
+    'Priya Raman', 'ANA D.' and 'Ana Diaz', 'Raman, Priya' and 'Priya Raman' can; 'Ana Ruiz' and
+    'Ben Cole' can't, and neither can 'Maya Smith' and 'Maya Okafor' (same first name, different last)."""
     ta, tb = _name_tokens(a), _name_tokens(b)
-    if not ta or not tb or ta == tb or ta[0] == tb[0] or sorted(ta) == sorted(tb):
+    if not ta or not tb or ta == tb or sorted(ta) == sorted(tb):
         return True
-    short, long = sorted((ta, tb), key=len)
-    return all(x.startswith(y) or y.startswith(x) for x, y in zip(short, long))
+    if _names_line_up(ta, tb):
+        return True
+    # Written last name first ('Raman, P.'): try one side the other way round.
+    return len(ta) == 2 and _names_line_up(ta[::-1], tb)
 
 
 class IdentityConflict(ValueError):
@@ -461,6 +605,8 @@ class SearchHit:
     candidate: dict[str, Any]
     snippet: str | None = None
     score: float | None = None
+    closest: bool = False  # matches some of the words, not all of them
+    reason: str | None = None  # why it matched when it wasn't the profile text ("In pipeline: ...")
 
 
 @dataclass
@@ -472,6 +618,13 @@ class SearchResult:
     filters: dict[str, str] = field(default_factory=dict)
     closest: bool = False  # no hit had every word, so these match some of them
     exact: bool = False  # the query was an email or LinkedIn URL that matched one person
+    exact_total: int | None = None  # hits with every word; the rest of total are closest matches
+    suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
+    corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
+
+    def __post_init__(self) -> None:
+        if self.exact_total is None:
+            self.exact_total = 0 if self.closest else self.total
 
 
 def _clean(value: Any) -> Any:
@@ -510,12 +663,15 @@ def normalize_linkedin(url: str | None) -> str | None:
 
 
 # Shorthand recruiters type for places and titles. Each expands to an OR group.
+BAY_AREA = ("san francisco", "oakland", "san jose", "palo alto", "berkeley", "mountain view", "sunnyvale",
+            "menlo park", "redwood city", "santa clara", "fremont")
 ALIASES: dict[str, tuple[str, ...]] = {
     "sfo": ("san francisco",),
     "ny": ("new york",),
     "la": ("los angeles",),
     "dc": ("washington",),
-    "bay": ("bay area",),
+    "bay": ("bay area", *BAY_AREA),
+    "bay area": BAY_AREA,
     "swe": ("software engineer",),
     "sde": ("software engineer",),
     "pm": ("product manager",),
@@ -534,6 +690,10 @@ ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("k8s", "kubernetes"),
     ("sf", "san francisco"),
     ("nyc", "new york"),
+    ("golang", "go"),
+    ("postgres", "postgresql"),
+    ("node", "nodejs"),
+    ("react", "reactjs"),
 )
 for _group in ALIAS_GROUPS:
     for _form in _group:
@@ -547,13 +707,31 @@ STOPWORDS = frozenset(
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _LINKEDIN_RE = re.compile(r"^(https?://)?([a-z]{2,3}\.)?linkedin\.com/", re.I)
+# Timeline kinds whose text search reads ("Dana", "140k"). Stage moves and change entries are left out.
+_SEARCHED_KINDS = ("note", "call", "email", "message", "meeting", "interview")
 
 
-def _query_groups(text: str) -> list[str]:
-    """Free text -> one FTS5 group per meaningful word (or alias phrase), all syntax quoted."""
+@dataclass(frozen=True)
+class _Term:
+    form: str  # one word, or an alias phrase like "san francisco"
+    prefix: bool  # the last word while typing: "pyth" finds "Python"
+    expansions: tuple[str, ...] = ()
+
+    @property
+    def forms(self) -> tuple[str, ...]:
+        return (self.form, *self.expansions)
+
+    def fts(self) -> str:
+        term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
+        if self.expansions:
+            term = "(" + " OR ".join([term, *(f'"{e}"' for e in self.expansions)]) + ")"
+        return term
+
+
+def _query_terms(text: str) -> list[_Term]:
     words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
     kept = [w for w in words if w not in STOPWORDS] or words
-    groups: list[str] = []
+    terms: list[_Term] = []
     i = 0
     while i < len(kept):
         pair = " ".join(kept[i:i + 2]) if i + 1 < len(kept) else ""
@@ -562,13 +740,14 @@ def _query_groups(text: str) -> list[str]:
         else:
             form, step = kept[i], 1
         last = i + step >= len(kept)
-        term = f'"{form}"*' if last and step == 1 else f'"{form}"'
-        expansions = ALIASES.get(form)
-        if expansions:
-            term = "(" + " OR ".join([term, *(f'"{e}"' for e in expansions)]) + ")"
-        groups.append(term)
+        terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
         i += step
-    return groups
+    return terms
+
+
+def _query_groups(text: str) -> list[str]:
+    """Free text -> one FTS5 group per meaningful word (or alias phrase), all syntax quoted."""
+    return [t.fts() for t in _query_terms(text)]
 
 
 def fts_query(text: str, *, any_word: bool = False) -> str | None:
@@ -579,11 +758,79 @@ def fts_query(text: str, *, any_word: bool = False) -> str | None:
     words (the, who, people...) are dropped, and known shorthand (sf, nyc,
     frontend / front end...) also matches its other forms. any_word=True
     joins the words with OR instead, for a "closest matches" fallback.
+    The index stems words, so "engineers" also finds "engineer".
     """
     groups = _query_groups(text)
     if not groups:
         return None
     return (" OR " if any_word else " AND ").join(groups)
+
+
+def fold(text: str | None) -> str:
+    """Lowercase with accents removed, so 'José' and 'jose' compare equal."""
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch)).casefold()
+
+
+def _has(text: str | None, needle: str | None, whole: int) -> int:
+    """SQL function tt_has: does text contain needle (ignoring case and accents)? whole=1 needs a whole word,
+    so the filter "la" finds "LA" but not "Atlanta"."""
+    if not text or not needle:
+        return 0
+    t, n = fold(text), fold(needle)
+    if not whole:
+        return int(n in t)
+    return int(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", t) is not None)
+
+
+def _filter_forms(value: str, *, singular: bool = False) -> list[str]:
+    """A filter value plus its shorthand forms: 'sf' -> sf, san francisco; 'Bay Area' -> the cities."""
+    v = re.sub(r"\s+", " ", value.strip().lower())
+    forms = [v, *ALIASES.get(v, ())]
+    if singular and len(v) > 3 and v.endswith("s"):
+        forms.append(v[:-1])  # "engineers" finds "Engineer"
+    return list(dict.fromkeys(forms))
+
+
+def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
+    """Regex for a query word inside free text (notes, job titles), on whole words."""
+    base = form[:-1] if not prefix and len(form) > 3 and form.endswith("s") else form
+    body = r"\s+".join(re.escape(p) for p in base.split())
+    tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
+    return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _excerpt(body: str, pattern: re.Pattern[str], width: int = 60) -> str:
+    text = re.sub(r"\s+", " ", body).strip()
+    m = pattern.search(text)
+    if not m:
+        return text[:width * 2]
+    start, end = max(0, m.start() - width), min(len(text), m.end() + width)
+    return (("…" if start else "") + text[start:m.start()] + HL_START + text[m.start():m.end()] + HL_END
+            + text[m.end():end] + ("…" if end < len(text) else ""))
+
+
+def _distance(a: str, b: str, cap: int) -> int:
+    """Edit distance with swaps counted as one ("pyhton" -> "python" is 1). Stops early past cap."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _typo_cap(word: str) -> int:
+    """How many edits a spelling fix may make: none for short words, 1 up to 5 letters, then 2."""
+    return 0 if len(word) < 4 else 1 if len(word) <= 5 else 2
 
 
 def _history_text(entries: list[dict[str, Any]]) -> str | None:
@@ -608,6 +855,14 @@ def _clean_history(entries: list[dict[str, Any]] | None) -> list[dict[str, Any]]
 
 def _labels(fields: Iterable[str]) -> str:
     return ", ".join(FIELD_LABELS.get(f, f) for f in fields)
+
+
+def dropped_text(dropped: dict[str, Any], width: int = 200) -> str:
+    """'title: Senior Analytics Engineer; LinkedIn: ...' for the values a merge didn't keep."""
+    def short(v: Any) -> str:
+        v = " ".join(str(v).split())
+        return v if len(v) <= width else v[:width - 3].rstrip() + "..."
+    return "; ".join(f"{FIELD_LABELS.get(k, k.replace('_', ' '))}: {short(v)}" for k, v in dropped.items())
 
 
 def _change_body(old: dict[str, Any], new: dict[str, Any]) -> str:
@@ -646,6 +901,12 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 10000")
+        # Deleted rows are overwritten with zeros, so a deleted person can't be read back out of
+        # the file. Some builds (macOS, Windows Python) default to off.
+        self._conn.execute("PRAGMA secure_delete = ON")
+        self._conn.create_function("fold_name", 1, fold_name, deterministic=True)
+        self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
+        self._conn.create_function("tt_has", 3, _has, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -671,8 +932,34 @@ class Store:
     def schema_version(self) -> int:
         return self._conn.execute("PRAGMA user_version").fetchone()[0]
 
+    def erase_traces(self) -> None:
+        """After a delete or merge: rebuild the search indexes so a deleted person's words leave them
+        (full-text search keeps old entries until its segments merge), then empty the write-ahead log."""
+        with self._lock:
+            try:
+                with self._conn:
+                    for (name,) in self._conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE '%USING fts5(%'").fetchall():
+                        self._conn.execute(f"INSERT INTO {name}({name}) VALUES ('optimize')")
+            except sqlite3.Error:
+                pass
+        self.checkpoint()
+
+    def checkpoint(self) -> None:
+        """Copy the write-ahead log into the main file and empty it, so a deleted person's text
+        doesn't linger in talent.db-wal. Best effort: another process reading at the same moment
+        can keep part of the log until the next checkpoint."""
+        if self.path == ":memory:":
+            return
+        with self._lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            except sqlite3.Error:
+                pass
+
     def close(self) -> None:
         with self._lock:
+            self.checkpoint()
             self._conn.close()
 
     def _rows(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
@@ -691,6 +978,19 @@ class Store:
                 self._conn.backup(target)
             finally:
                 target.close()
+
+    def _next_id(self, table: str) -> int:
+        """A fresh id for a new candidate or job, above every id ever used (deleted ones too).
+
+        Call inside a write transaction. The first statement takes the write lock, so the app
+        window and the MCP server can't pick the same id at once."""
+        key = ID_MARKS[table]
+        self._conn.execute("INSERT INTO settings(key, value) VALUES (?, '0') ON CONFLICT(key) DO NOTHING", (key,))
+        mark = self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()[0]
+        top = self._conn.execute(f"SELECT coalesce(max(id), 0) FROM {table}").fetchone()[0]
+        new_id = max(int(mark) if str(mark).isdigit() else 0, top) + 1
+        self._conn.execute("UPDATE settings SET value = ? WHERE key = ?", (str(new_id), key))
+        return new_id
 
     # --------------------------------------------------------------- settings
     def settings(self) -> dict[str, str]:
@@ -729,6 +1029,12 @@ class Store:
             out["tags"] = ", ".join(split_tags(out["tags"])) or None
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
+        for k, v in out.items():
+            limit = FIELD_LIMITS.get(k)
+            if limit and isinstance(v, str) and len(v) > limit:
+                label = {"tags": "the skills list"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
+                raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
+                                 f"The limit is {limit:,}, so nothing was saved.")
         if "linkedin_url" in out:
             out["linkedin_url"] = normalize_linkedin(out["linkedin_url"])
         if "last_contacted_at" in out and out["last_contacted_at"]:
@@ -767,10 +1073,10 @@ class Store:
             clash = self._clash(None, fields)
             if clash:
                 raise clash
-            cur = self._conn.execute(
-                f"INSERT INTO candidates ({cols}) VALUES ({marks})", tuple(fields.values())
+            new_id = self._next_id("candidates")
+            self._conn.execute(
+                f"INSERT INTO candidates (id, {cols}) VALUES (?, {marks})", (new_id, *fields.values())
             )
-            new_id = cur.lastrowid
             self._sync_tags(new_id, fields.get("tags"))
             if work_history:
                 self._write_history(new_id, work_history)
@@ -798,8 +1104,31 @@ class Store:
         return None
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
+        """Everyone saved under this name, ignoring case, accents and punctuation ('Jose Alvarez'
+        finds 'José Álvarez')."""
+        key = fold_name(name)
+        if not key:
+            return [self._hydrate(r) for r in self._rows(
+                "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC",
+                (_clean(name) or "",))]
         return [self._hydrate(r) for r in self._rows(
-            "SELECT * FROM candidates WHERE lower(name) = lower(?) ORDER BY updated_at DESC", (_clean(name) or "",))]
+            "SELECT * FROM candidates WHERE fold_name(name) = ? ORDER BY updated_at DESC", (key,))]
+
+    def possible_duplicates(self, candidate_id: int) -> list[dict[str, Any]]:
+        """Other people who may be this same person: the same name (ignoring case and accents),
+        or the same email, LinkedIn URL or phone number."""
+        c = self.get_candidate(candidate_id)
+        key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
+        rows = self._rows(
+            """SELECT * FROM candidates WHERE id <> ? AND (
+                   (? <> '' AND fold_name(name) = ?)
+                   OR (? IS NOT NULL AND lower(email) = lower(?))
+                   OR (? IS NOT NULL AND linkedin_url = ?)
+                   OR (? IS NOT NULL AND phone_key(phone) = ?))
+               ORDER BY updated_at DESC LIMIT 10""",
+            (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
+             phone, phone))
+        return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
                          **data: Any) -> tuple[dict[str, Any], bool]:
@@ -844,9 +1173,35 @@ class Store:
                 merged[k] = v
             elif cur != v:
                 kept.append(k)
-        cand = self._update(existing["id"], merged, work_history or None, by=by, merge=True)
+        history = work_history or self._history_for_new_role(existing["id"], row, merged)
+        cand = self._update(existing["id"], merged, history, by=by, merge=True)
         cand["_kept"] = kept
         return cand, False
+
+    def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
+                              merged: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """When a save changes the title or company, the saved work history follows, so it doesn't
+        still show the old role "to now". Same company: the current role is updated in place.
+        New company: the current role gets an end year and the new role goes on top. None when
+        nothing needs to change (or there is no saved history to keep in step)."""
+        def same(a: Any, b: Any) -> bool:
+            return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+        title = merged.get("current_title", row.get("current_title"))
+        company = merged.get("current_company", row.get("current_company"))
+        if same(title, row.get("current_title")) and same(company, row.get("current_company")):
+            return None
+        history = self.work_history(candidate_id)
+        if not history:
+            return None
+        top = history[0]
+        current = (top.get("end") or "").strip().lower() in ("", "present", "now", "current", "today")
+        if current and same(top.get("title"), title) and same(top.get("company"), company):
+            return None
+        if current and (same(top.get("company"), company) or not top.get("company")):
+            return [{**top, "title": title or top.get("title"), "company": company or top.get("company")}, *history[1:]]
+        rest = [{**top, "end": str(datetime.now().year)} if current else top, *history[1:]]
+        return [{"title": title, "company": company, "start": None, "end": None, "summary": None}, *rest]
 
     def get_candidate(self, candidate_id: int) -> dict[str, Any]:
         row = self._row("SELECT * FROM candidates WHERE id = ?", (candidate_id,))
@@ -938,10 +1293,16 @@ class Store:
             if entry is None or (candidate_id is not None and entry["candidate_id"] != candidate_id):
                 raise NotFound(f"No timeline entry with id {timeline_id}")
             data = json.loads(entry["data"]) if entry.get("data") else None
+            if entry["kind"] == "stage" and data and data.get("pipeline"):
+                if data.get("undone_at"):
+                    raise ValueError("That change was already undone.")
+                return self._undo_stage(entry, data, by)
             if entry["kind"] != CHANGE_KIND or not data or not data.get("old"):
                 raise ValueError("Only a change to a profile can be undone.")
             if data.get("undone_at"):
                 raise ValueError("That change was already undone.")
+            if data.get("merged"):
+                raise ValueError("A merge can't be undone here. The backup taken just before it has both people.")
             cid = entry["candidate_id"]
             row = self._row("SELECT * FROM candidates WHERE id = ?", (cid,)) or {}
             history = self.work_history(cid)
@@ -971,12 +1332,135 @@ class Store:
         cand["_restored"], cand["_skipped"] = list(restore), skipped
         return cand
 
+    def mark_ai_stage(self, candidate_id: int, job_id: int, old_stage: str | None) -> None:
+        """Mark the newest stage entry for this candidate and job as the AI's, with what it replaced,
+        so the recruiter can undo it (an add takes them back out, a move puts them back)."""
+        with self._lock, self._conn:
+            entry = self._row("SELECT * FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'"
+                              " ORDER BY id DESC LIMIT 1", (candidate_id, job_id))
+            if entry is None or entry.get("data") or (old_stage or "").lower() == (entry["body"] or "").lower():
+                return
+            data = {"by": "ai", "pipeline": {"job_id": job_id, "old": old_stage, "new": entry["body"]}}
+            self._conn.execute("UPDATE timeline SET source = ?, data = ? WHERE id = ?",
+                               (CHANGE_SOURCES["ai"], json.dumps(data), entry["id"]))
+
+    def _undo_stage(self, entry: dict[str, Any], data: dict[str, Any], by: str) -> dict[str, Any]:
+        """Undo an AI stage move or pipeline add (see mark_ai_stage). Call inside a transaction."""
+        cid, move = entry["candidate_id"], data["pipeline"]
+        app = self._row("SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, move["job_id"]))
+        if app is None or app["stage"].lower() != (move["new"] or "").lower():
+            raise ValueError("They were moved again since, so there is nothing to undo.")
+        ts = now_iso()
+        if move.get("old"):
+            self._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
+                               (move["old"], ts, app["id"]))
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
+                " VALUES (?, ?, 'stage', ?, ?, ?, ?)", (cid, move["job_id"], move["old"], ts, ts,
+                                                        CHANGE_SOURCES.get(by, "App")))
+        else:
+            self._conn.execute("DELETE FROM applications WHERE id = ?", (app["id"],))
+        data["undone_at"] = ts
+        self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), entry["id"]))
+        cand = self.get_candidate(cid)
+        cand["_restored"], cand["_skipped"] = ["job stage" if move.get("old") else "job pipeline"], []
+        return cand
+
     def delete_candidate(self, candidate_id: int) -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
         if cur.rowcount == 0:
             raise NotFound(f"No candidate with id {candidate_id}")
+        self.erase_traces()
+
+    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
+        """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
+
+        keep's empty fields are filled from other (last contacted takes the later date), skills are
+        combined, and other's timeline, to-dos, work history and jobs move to keep. When both are in
+        the same job, keep ends up in the further stage. A "change" entry on keep records what came
+        from where (it can't be undone with Undo; the backup taken before merging can). The
+        returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
+        """
+        if keep_id == other_id:
+            raise ValueError("Pick two different people to merge.")
+        self.get_candidate(keep_id)
+        other = self.get_candidate(other_id)
+        with self._lock, self._conn:
+            krow = self._row("SELECT * FROM candidates WHERE id = ?", (keep_id,))
+            orow = self._row("SELECT * FROM candidates WHERE id = ?", (other_id,))
+            fields: dict[str, Any] = {}
+            dropped: dict[str, Any] = {}
+            for k in CANDIDATE_FIELDS:
+                kv, ov = krow.get(k), orow.get(k)
+                if k == "tags":
+                    tags = ", ".join(split_tags(split_tags(kv) + split_tags(ov))) or None
+                    if tags != kv:
+                        fields[k] = tags
+                elif k == "last_contacted_at":
+                    if ov and (not kv or ov > kv):
+                        fields[k] = ov
+                elif ov and not kv:
+                    fields[k] = ov
+                elif k != "name" and ov and kv and str(ov).strip() != str(kv).strip():
+                    dropped[k] = ov
+            mine = self.work_history(keep_id)
+            seen = {((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) for e in mine}
+            extra = [e for e in self.work_history(other_id)
+                     if ((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) not in seen]
+            if extra:
+                fields["work_history"] = mine + extra
+            moved = self._conn.execute("UPDATE timeline SET candidate_id = ? WHERE candidate_id = ?",
+                                       (keep_id, other_id)).rowcount
+            self._conn.execute("UPDATE suggestions SET candidate_id = ? WHERE candidate_id = ?", (keep_id, other_id))
+            jobs: list[str] = []
+            for app in self._rows("SELECT a.*, j.title FROM applications a JOIN jobs j ON j.id = a.job_id"
+                                  " WHERE a.candidate_id = ?", (other_id,)):
+                ours = self._row("SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?",
+                                 (keep_id, app["job_id"]))
+                jobs.append(app["title"])
+                if ours is None:
+                    self._conn.execute("UPDATE applications SET candidate_id = ? WHERE id = ?", (keep_id, app["id"]))
+                    continue
+                pos = {s["name"].lower(): s["position"] for s in self.job_stages(app["job_id"])}
+                if pos.get(app["stage"].lower(), -1) > pos.get(ours["stage"].lower(), -1):
+                    self._conn.execute(
+                        "UPDATE applications SET stage = ?, stage_changed_at = ?, notes = coalesce(notes, ?)"
+                        " WHERE id = ?", (app["stage"], app["stage_changed_at"], app["notes"], ours["id"]))
+            # other's email and LinkedIn URL are unique, so other goes before keep takes them.
+            self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
+            created = min(krow["created_at"], orow["created_at"])
+            if created != krow["created_at"]:
+                self._conn.execute("UPDATE candidates SET created_at = ? WHERE id = ?", (created, keep_id))
+            old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields}
+            if fields:
+                self._apply(keep_id, fields)
+            filled = [k for k in fields if k not in ("tags", "work_history")]
+            bits = [f"filled {_labels(filled)}"] if filled else []
+            if "tags" in fields:
+                bits.append("added skills")
+            if moved:
+                bits.append(f"moved {moved} timeline entr{'y' if moved == 1 else 'ies'}")
+            if jobs:
+                bits.append(f"{len(jobs)} job{'' if len(jobs) == 1 else 's'}")
+            body = f"Merged in {other['name']} (id {other_id})" + (": " + ", ".join(bits) if bits else "") + "."
+            if dropped:
+                body += " Kept this profile's values. Theirs were: " + dropped_text(dropped) + "."
+            ts = now_iso()
+            by = by if by in CHANGE_SOURCES else "app"
+            info = {"id": other_id, "name": other["name"], "email": orow.get("email"),
+                    "linkedin_url": orow.get("linkedin_url"), "phone": orow.get("phone"), "timeline": moved,
+                    "jobs": jobs, "dropped": dropped}
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (keep_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
+                 json.dumps({"by": by, "old": old, "new": fields, "merged": info})))
+        cand = self.get_candidate(keep_id)
+        cand["_merged"] = {"name": other["name"], "filled": filled, "timeline": moved, "jobs": jobs,
+                           "dropped": dropped}
+        self.erase_traces()
+        return cand
 
     def recent_candidates(self, limit: int = 25, offset: int = 0) -> list[dict[str, Any]]:
         return [self._hydrate(r) for r in self._rows(
@@ -1074,20 +1558,89 @@ class Store:
         )
         for r in rows:
             r["data"] = json.loads(r["data"]) if r.get("data") else None
-            r["undoable"] = bool(r["kind"] == CHANGE_KIND and r["data"] and r["data"].get("old")
-                                 and not r["data"].get("undone_at"))
+            r["undoable"] = bool(r["kind"] in (CHANGE_KIND, "stage") and r["data"]
+                                 and (r["data"].get("old") or r["data"].get("pipeline"))
+                                 and not r["data"].get("undone_at") and not r["data"].get("merged"))
+            if r["kind"] == "interview":
+                r["status"] = interview_status(r["data"])
         return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Scheduled interviews from two hours ago to `days` ahead. Cancelled ones, and ones with an outcome
+        already recorded, are left out."""
         now = now or datetime.now(timezone.utc)
         start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
         end = (now + timedelta(days=days)).replace(microsecond=0).isoformat()
         return self._rows(
-            """SELECT t.*, c.name AS candidate_name, j.title AS job_title
+            f"""SELECT t.*, c.name AS candidate_name, j.title AS job_title
                FROM timeline t JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
-               WHERE t.kind = 'interview' AND t.at >= ? AND t.at <= ? ORDER BY t.at""",
+               WHERE t.kind = 'interview' AND t.at >= ? AND t.at <= ? AND {LIVE_INTERVIEW} ORDER BY t.at""",
             (start, end),
         )
+
+    def get_interview(self, entry_id: int, candidate_id: int | None = None) -> dict[str, Any]:
+        row = self._row("SELECT t.*, c.name AS candidate_name FROM timeline t JOIN candidates c ON c.id = t.candidate_id"
+                        " WHERE t.id = ? AND t.kind = 'interview'", (entry_id,))
+        if row is None or (candidate_id is not None and row["candidate_id"] != candidate_id):
+            raise NotFound(f"No interview with id {entry_id}" + (" on this profile" if candidate_id else ""))
+        row["data"] = json.loads(row["data"]) if row.get("data") else {}
+        row["status"] = interview_status(row["data"])
+        return row
+
+    def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
+                         restore: bool = False, outcome: str | None = None, note: str | None = None,
+                         reason: str | None = None, candidate_id: int | None = None,
+                         by: str = "app") -> dict[str, Any]:
+        """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
+        restore, or record how it went.
+
+        outcome: passed, not passed or no show, with an optional note, only once the interview's time
+        has come. Nothing is ever deleted; the old time is kept in the entry's data as `rescheduled_from`
+        and the reason as `reschedule_note`.
+        """
+        iv = self.get_interview(entry_id, candidate_id)
+        data = dict(iv["data"])
+        ts = now_iso()
+        new_at = iv["at"]
+        if at is not None and str(at).strip():
+            new_at = parse_when(at)
+            if new_at != iv["at"]:
+                data["rescheduled_from"] = [*data.get("rescheduled_from", []), iv["at"]]
+                data["rescheduled_at"] = ts
+            data.pop("cancelled_at", None)
+            if data.get("status") == "cancelled":
+                data["status"] = "scheduled"
+        if cancel:
+            data["status"], data["cancelled_at"] = "cancelled", ts
+        elif restore:
+            data["status"] = "scheduled"
+            data.pop("cancelled_at", None)
+        if outcome is not None:
+            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower())
+            value = INTERVIEW_OUTCOMES.get(key)
+            if value is None:
+                raise ValueError("The outcome must be passed, not passed or no show.")
+            if new_at > ts:
+                raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
+                                 "went after it takes place, or change its time first.")
+            data["outcome"], data["outcome_at"] = value, ts
+            if data.get("status") == "cancelled":
+                data["status"] = "scheduled"
+        if note is not None:
+            data["outcome_note"] = _clean(note)
+        if reason is not None:
+            data["reschedule_note"] = _clean(reason)
+        if not (at or cancel or restore or outcome is not None or note is not None or reason is not None):
+            raise ValueError("Say what to change: a new time, cancel, or an outcome.")
+        data["updated_by"] = CHANGE_SOURCES.get(by, by)
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
+                               (new_at, json.dumps(data), entry_id))
+            if outcome is not None and data["outcome"] != "no_show" and new_at <= ts:
+                self._conn.execute(
+                    "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
+                    " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
+        return self.get_interview(entry_id)
 
     # ---------------------------------------------------------------- search
     def lookup_exact(self, query: str | None) -> tuple[bool, dict[str, Any] | None]:
@@ -1099,6 +1652,36 @@ class Store:
             return True, self.find_duplicate(linkedin_url=q)
         return False, None
 
+    def candidate_filters(self, *, location: str | None = None, title: str | None = None,
+                          tag: str | None = None, source: str | None = None) -> tuple[list[str], list[Any], dict]:
+        """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
+        bay area, swe) and ignore case and accents; tag and source ignore case."""
+        where: list[str] = []
+        params: list[Any] = []
+        filters: dict[str, str] = {}
+        for col, value, singular in (("location", location, False), ("current_title", title, True)):
+            if value and value.strip():
+                forms = _filter_forms(value, singular=singular)
+                where.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
+                for f in forms:
+                    params += [f, int(len(f) <= 3)]
+                filters["title" if col == "current_title" else col] = value
+        if tag and tag.strip():
+            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
+            params.append(tag.strip())
+            filters["tag"] = tag
+        if source and source.strip():
+            where.append("lower(trim(c.source)) = lower(?)")
+            params.append(source.strip())
+            filters["source"] = source
+        return where, params, filters
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        """Where people came from ("LinkedIn", "Referral"), most common first, for the Candidates filter."""
+        return self._rows("SELECT trim(source) AS source, count(*) AS count FROM candidates"
+                          " WHERE source IS NOT NULL AND trim(source) <> ''"
+                          " GROUP BY lower(trim(source)) ORDER BY count DESC, source LIMIT 50")
+
     def search_candidates(
         self,
         query: str = "",
@@ -1106,33 +1689,25 @@ class Store:
         location: str | None = None,
         title: str | None = None,
         tag: str | None = None,
+        source: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        fix_typos: bool = True,
     ) -> SearchResult:
-        """Ranked full-text search, best matches first; empty query lists most recent."""
-        where: list[str] = []
-        params: list[Any] = []
-        filters = {}
-        if location:
-            where.append("c.location LIKE ?")
-            params.append(f"%{location.strip()}%")
-            filters["location"] = location
-        if title:
-            where.append("c.current_title LIKE ?")
-            params.append(f"%{title.strip()}%")
-            filters["title"] = title
-        if tag:
-            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ?)")
-            params.append(tag.strip())
-            filters["tag"] = tag
+        """Ranked search, best matches first; empty query lists most recent.
 
+        Order: people with every word in their profile (ranked), then people who have every word once
+        their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
+        matches with some of the words. A word nobody has gets a spelling fix from the saved words.
+        """
+        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
             return SearchResult(hits=hits, total=len(hits), query=query, filters=filters, exact=bool(person))
 
-        match = fts_query(query or "")
-        if match is None:
+        terms = _query_terms(query or "")
+        if not terms:
             clause = ("WHERE " + " AND ".join(where)) if where else ""
             total = self._row(f"SELECT count(*) AS n FROM candidates c {clause}", params)["n"]
             rows = self._rows(
@@ -1142,55 +1717,206 @@ class Store:
             hits = [SearchHit(candidate=self._hydrate(r)) for r in rows]
             return SearchResult(hits=hits, total=total, query=query, filters=filters)
 
-        clause = " AND ".join(["candidates_fts MATCH ?", *where])
-        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {clause}"
-        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
-        closest = False
-        if total == 0 and len(_query_groups(query)) > 1:
-            # Nobody has every word: show the people who have the most of them.
-            match, closest = fts_query(query, any_word=True), True
-            total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
-        rows = self._rows(
-            # column weights: name, title, company, location, about, tags, past roles
-            f"""SELECT c.*,
-                       snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
-                       snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
-                       bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
-                {base}
-                ORDER BY _score LIMIT ? OFFSET ?""",
-            (match, *params, limit, offset),
-        )
-        hits = []
-        for r in rows:
-            about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
-            if HL_START in (about_snip or ""):
-                snippet = about_snip  # the About text is the most useful context to show
-            score = r.pop("_score")
-            hits.append(SearchHit(candidate=self._hydrate(r), snippet=snippet if HL_START in (snippet or "") else None,
-                                  score=score))
-        return SearchResult(hits=hits, total=total, query=query, filters=filters, closest=closest and total > 0)
+        extras_by_term = [self._extra_matches(t) for t in terms]
+        if fix_typos:
+            fixes = self._spelling_fixes(terms, extras_by_term)
+            if fixes:
+                fixed = query
+                for word, fix in fixes.items():
+                    fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+                res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
+                                             limit=limit, offset=offset, fix_typos=False)
+                if res.exact_total:
+                    res.query, res.suggestion, res.corrected = query, fixed, True
+                    return res
+                res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
+                                             limit=limit, offset=offset, fix_typos=False)
+                res.suggestion = fixed
+                return res
+
+        and_match = " AND ".join(t.fts() for t in terms)
+        cond = " AND ".join(["candidates_fts MATCH ?", *where])
+        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
+        fts_total = self._row(f"SELECT count(*) AS n {base}", (and_match, *params))["n"]
+        extra = self._extra_ids(terms, extras_by_term, where, params)
+
+        def extra_hits(off: int, k: int) -> list[SearchHit]:
+            out = []
+            for cid in extra[off:off + k]:
+                reason, body, pattern = next(e[cid] for e in extras_by_term if cid in e)
+                out.append(SearchHit(candidate=self.get_candidate(cid), reason=reason,
+                                     snippet=_excerpt(body, pattern) if body else None))
+            return out
+
+        def ranked(match: str, exclude: list[int], closest: bool) -> tuple[int, Callable[[int, int], list]]:
+            ex = " AND c.id NOT IN (SELECT value FROM json_each(?))" if exclude else ""
+            args = (match, *params, *([json.dumps(exclude)] if exclude else []))
+            n = self._row(f"SELECT count(*) AS n {base}{ex}", args)["n"]
+
+            def fetch(off: int, k: int) -> list[SearchHit]:
+                rows = self._rows(
+                    # column weights: name, title, company, location, about, tags, past roles
+                    f"""SELECT c.*,
+                               snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
+                               snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
+                               bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                        {base}{ex}
+                        ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+                    (*args, k, off),
+                )
+                out = []
+                for r in rows:
+                    about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
+                    if HL_START in (about_snip or ""):
+                        snippet = about_snip  # the About text is the most useful context to show
+                    score = r.pop("_score")
+                    out.append(SearchHit(candidate=self._hydrate(r), score=score, closest=closest,
+                                         snippet=snippet if HL_START in (snippet or "") else None))
+                return out
+            return n, fetch
+
+        segments: list[tuple[int, Callable[[int, int], list[SearchHit]]]] = [
+            ranked(and_match, [], False),
+            (len(extra), extra_hits),
+        ]
+        exact_total = fts_total + len(extra)
+        if exact_total < 3 and len(terms) > 1:
+            # Fewer than 3 people have every word: add the people who have the most of them.
+            exact_ids = [r["id"] for r in self._rows(f"SELECT c.id {base}", (and_match, *params))]
+            exact_ids += extra
+            segments.append(ranked(" OR ".join(t.fts() for t in terms), exact_ids, True))
+        total = sum(n for n, _ in segments)
+        hits: list[SearchHit] = []
+        skip = max(0, offset)
+        for n, fetch in segments:
+            if skip >= n:
+                skip -= n
+                continue
+            hits += fetch(skip, min(limit - len(hits), n - skip))
+            skip = 0
+            if len(hits) >= limit:
+                break
+        return SearchResult(hits=hits, total=total, query=query, filters=filters,
+                            closest=exact_total == 0 and total > 0, exact_total=exact_total)
+
+    def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
+
+        A job they're in whose title or company has the word, or a note, call, email or interview
+        on their timeline that mentions it. Read at query time, so nothing extra is stored."""
+        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
+        patterns = [_word_pattern(f, term.prefix) for f in term.forms]
+        likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
+        any_like = " OR ".join("{col} LIKE ? ESCAPE '\\'" for _ in likes)
+
+        def first(text: str) -> re.Pattern[str] | None:
+            folded = None if text.isascii() else fold(text)
+            return next((p for p in patterns if p.search(text) or (folded and p.search(folded))), None)
+
+        for r in self._rows(
+                "SELECT a.candidate_id, j.title, j.company FROM applications a JOIN jobs j ON j.id = a.job_id"
+                f" WHERE {any_like.format(col='j.title')} OR {any_like.format(col='j.company')} ORDER BY a.id",
+                (*likes, *likes)):
+            if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
+                job = r["title"] + (f" ({r['company']})" if r["company"] else "")
+                found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+        marks = ", ".join("?" for _ in _SEARCHED_KINDS)
+        for r in self._rows(
+                f"SELECT candidate_id, body FROM timeline WHERE kind IN ({marks}) AND ({any_like.format(col='body')})"
+                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes)):
+            if r["candidate_id"] not in found:
+                hit = first(r["body"])
+                if hit:
+                    found[r["candidate_id"]] = ("Matched a note", r["body"], hit)
+        return found
+
+    def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
+                   where: list[str], params: list[Any]) -> list[int]:
+        """People who have every word once pipeline jobs and notes count, but not in their profile alone,
+        most recently updated first."""
+        pool = set().union(*extras_by_term)
+        if not pool:
+            return []
+        # Whole-index rowid lists are fast; an IN filter inside MATCH re-runs the match per id.
+        in_profile = [pool & {r["rowid"] for r in self._rows(
+            "SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?", (t.fts(),))} for t in terms]
+        keep = [cid for cid in pool
+                if all(cid in extras or cid in prof for extras, prof in zip(extras_by_term, in_profile))
+                and not all(cid in prof for prof in in_profile)]
+        if not keep:
+            return []
+        clause = " AND ".join(["c.id IN (SELECT value FROM json_each(?))", *where])
+        return [r["id"] for r in self._rows(
+            f"SELECT c.id FROM candidates c WHERE {clause} ORDER BY c.updated_at DESC, c.id DESC",
+            (json.dumps(keep), *params))]
+
+    def _spelling_fixes(self, terms: list[_Term], extras_by_term: list[dict]) -> dict[str, str]:
+        """Query words nobody has -> the closest saved word, when one is close enough."""
+        fixes: dict[str, str] = {}
+        vocab: list[tuple[str, int]] | None = None
+        for t, extras in zip(terms, extras_by_term):
+            word = t.form
+            cap = _typo_cap(word)
+            if not cap or t.expansions or not word.isalpha() or extras:
+                continue
+            if self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1", (t.fts(),)):
+                continue
+            if vocab is None:
+                vocab = self._vocabulary()
+            best: tuple[int, int, str] | None = None
+            for known, docs in vocab:
+                if abs(len(known) - len(word)) > cap or known == word:
+                    continue
+                d = _distance(word, known, cap)
+                if d <= cap and (best is None or (d, -docs, known) < best):
+                    best = (d, -docs, known)
+            if best:
+                fixes[word] = best[2]
+        return fixes
+
+    def _vocabulary(self) -> list[tuple[str, int]]:
+        """Every word in saved profiles and job titles/companies, with how many records use it."""
+        try:
+            rows = self._rows("SELECT term, doc FROM candidates_words_vocab WHERE length(term) >= 4")
+        except sqlite3.OperationalError:
+            rows = []
+        counts = {r["term"]: r["doc"] for r in rows if r["term"].isalpha() and r["term"] not in STOPWORDS}
+        for r in self._rows("SELECT title, company FROM jobs"):
+            for w in re.findall(r"\w+", fold(f"{r['title']} {r['company'] or ''}")):
+                if len(w) >= 4 and w.isalpha():
+                    counts[w] = counts.get(w, 0) + 1
+        return list(counts.items())
 
     # ------------------------------------------------------------------ jobs
     def add_job(self, title: str, company: str | None = None, location: str | None = None,
                 description: str | None = None, status: str = "open",
-                stages: list[str] | None = None) -> dict[str, Any]:
+                stages: list[str | dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
+        """extra: hiring_manager, hiring_manager_email, openings, target_date, min_active."""
         if not _clean(title):
             raise ValueError("A job needs a title.")
         if status not in JOB_STATUSES:
             raise ValueError(f"status must be one of {', '.join(JOB_STATUSES)}")
+        unknown = set(extra) - set(JOB_EXTRA_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown job field(s): {', '.join(sorted(unknown))}")
+        more = _job_extras(extra)
+        if more.get("openings") is None:
+            more["openings"] = 1
         plan = _stage_plan(stages) if stages else list(DEFAULT_STAGES)
         ts = now_iso()
+        cols = ["title", "company", "location", "description", "status", "created_at", "updated_at", *more]
         with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO jobs (title, company, location, description, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (_clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts),
+            job_id = self._next_id("jobs")
+            self._conn.execute(
+                f"INSERT INTO jobs (id, {', '.join(cols)}) VALUES (?, {', '.join('?' * len(cols))})",
+                (job_id, _clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts,
+                 *more.values()),
             )
             self._conn.executemany(
                 "INSERT INTO job_stages(job_id, name, position, outcome) VALUES (?, ?, ?, ?)",
-                [(cur.lastrowid, n, i, o) for i, (n, o) in enumerate(plan)],
+                [(job_id, n, i, o) for i, (n, o) in enumerate(plan)],
             )
-        return self.get_job(cur.lastrowid)
+        return self.get_job(job_id)
 
     def similar_open_jobs(self, title: str | None, company: str | None,
                           exclude: int | None = None) -> list[dict[str, Any]]:
@@ -1207,7 +1933,7 @@ class Store:
         return row
 
     def update_job(self, job_id: int, **data: Any) -> dict[str, Any]:
-        allowed = {"title", "company", "location", "description", "status"}
+        allowed = {"title", "company", "location", "description", "status", *JOB_EXTRA_FIELDS}
         unknown = set(data) - allowed
         if unknown:
             raise ValueError(f"Unknown job field(s): {', '.join(sorted(unknown))}")
@@ -1216,7 +1942,10 @@ class Store:
         if "title" in data and not _clean(data["title"]):
             raise ValueError("A job needs a title.")
         self.get_job(job_id)
-        fields = {k: _clean(v) for k, v in data.items()}
+        extras = _job_extras({k: v for k, v in data.items() if k in JOB_EXTRA_FIELDS})
+        if "openings" in extras and extras["openings"] is None:
+            extras["openings"] = 1
+        fields = {**{k: _clean(v) for k, v in data.items() if k not in JOB_EXTRA_FIELDS}, **extras}
         if fields:
             fields["updated_at"] = now_iso()
             sets = ", ".join(f"{k} = ?" for k in fields)
@@ -1236,6 +1965,7 @@ class Store:
             cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         if cur.rowcount == 0:
             raise NotFound(f"No job with id {job_id}")
+        self.erase_traces()
 
     def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
         sql = """SELECT j.*,
@@ -1293,10 +2023,8 @@ class Store:
     def add_stage(self, job_id: int, name: str, *, after: str | None = None,
                   outcome: str | None = None) -> list[dict[str, Any]]:
         """Add a stage after the named one, or before the closing stages. Outcome defaults from the name."""
-        name = _clean(name)
-        if not name:
-            raise ValueError("A stage needs a name.")
-        outcome = outcome or stage_outcome(name)
+        name = _stage_name(name)
+        outcome = normalize_outcome(outcome) or stage_outcome(name)
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         self.get_job(job_id)
@@ -1318,16 +2046,27 @@ class Store:
         self._touch_job(job_id)
         return self.job_stages(job_id)
 
-    def rename_stage(self, job_id: int, old: str, new: str) -> list[dict[str, Any]]:
+    def rename_stage(self, job_id: int, old: str, new: str, outcome: str | None = None) -> list[dict[str, Any]]:
+        """Rename a stage (its candidates move with it). An in-play stage with in-play stages after it
+        can't take a closing name like "Passed" unless `outcome` says what it should count as."""
         stage = self.resolve_stage(job_id, old)
-        new = _clean(new)
-        if not new:
-            raise ValueError("A stage needs a name.")
-        if new.lower() != stage["name"].lower() and any(
-                s["name"].lower() == new.lower() for s in self.job_stages(job_id)):
+        new = _stage_name(new)
+        outcome = normalize_outcome(outcome)
+        stages = self.job_stages(job_id)
+        if new.lower() != stage["name"].lower() and any(s["name"].lower() == new.lower() for s in stages):
             raise ValueError(f"This job already has a stage called {new}.")
+        implied = stage_outcome(new)
+        if outcome is None and stage["outcome"] == "open" and implied != "open":
+            if any(s["position"] > stage["position"] and s["outcome"] == "open" for s in stages):
+                word = "a hire" if implied == "hired" else "out"
+                raise ValueError(
+                    f"{new} sounds like {word}, but {stage['name']} is a working stage with more stages after it. "
+                    f"Say what {new} should count as (open, hired or lost; in the app, change Counts as first), "
+                    "or pick another name.")
+            outcome = implied  # the last working stage can become a closing one, as its new name says
         with self._lock, self._conn:
-            self._conn.execute("UPDATE job_stages SET name = ? WHERE id = ?", (new, stage["id"]))
+            self._conn.execute("UPDATE job_stages SET name = ?, outcome = ? WHERE id = ?",
+                               (new, outcome or stage["outcome"], stage["id"]))
             self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND lower(stage) = lower(?)",
                                (new, job_id, stage["name"]))
         self._touch_job(job_id)
@@ -1346,6 +2085,7 @@ class Store:
         return self.job_stages(job_id)
 
     def set_stage_outcome(self, job_id: int, name: str, outcome: str) -> list[dict[str, Any]]:
+        outcome = normalize_outcome(outcome) or ""
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         stage = self.resolve_stage(job_id, name)
@@ -1401,7 +2141,10 @@ class Store:
                     )
         return self.get_application(app_id)
 
-    def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None) -> dict[str, Any]:
+    def move_stage(self, candidate_id: int, job_id: int, stage: str, notes: str | None = None, *,
+                   by: str | None = None) -> dict[str, Any]:
+        """Move someone to another stage of a job. With `by` ("app" or "ai") the stage entry records the
+        old and new stage, so the move can be undone from the timeline."""
         app = self._row(
             "SELECT * FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id)
         )
@@ -1414,9 +2157,14 @@ class Store:
                 self._conn.execute(
                     "UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?", (s["name"], ts, app["id"])
                 )
+                source = data = None
+                if by in CHANGE_SOURCES:
+                    source = CHANGE_SOURCES[by]
+                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"],
+                                                              "new": s["name"]}})
                 self._conn.execute(
-                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at) VALUES (?, ?, 'stage', ?, ?, ?)",
-                    (candidate_id, job_id, s["name"], ts, ts),
+                    "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
+                    " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),
                 )
                 if s["name"].lower() == "contacted":
                     self._conn.execute(
@@ -1490,7 +2238,9 @@ class Store:
 
     # ----------------------------------------------------------- suggestions
     def add_suggestion(self, text: str, candidate_id: int | None = None, job_id: int | None = None,
-                       source: str | None = None) -> dict[str, Any]:
+                       source: str | None = None, due_on: str | None = None,
+                       note: str | None = None) -> dict[str, Any]:
+        """A to-do on Today. due_on (YYYY-MM-DD) hides it until that day; note is what was logged with it."""
         text = _clean(text)
         if not text:
             raise ValueError("A suggestion needs some text.")
@@ -1498,17 +2248,31 @@ class Store:
             self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)
+        due_on = parse_day_text(due_on)
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM suggestions WHERE done_at IS NULL AND text = ? AND coalesce(candidate_id, 0) = ?"
                 " AND coalesce(job_id, 0) = ?", (text, candidate_id or 0, job_id or 0)).fetchone()
-            sid = dupe["id"] if dupe else self._conn.execute(
-                "INSERT INTO suggestions(candidate_id, job_id, text, created_at, source) VALUES (?, ?, ?, ?, ?)",
-                (candidate_id, job_id, text, now_iso(), _clean(source)),
-            ).lastrowid
+            if dupe:
+                sid = dupe["id"]
+                if due_on or _clean(note):
+                    self._conn.execute(
+                        "UPDATE suggestions SET due_on = coalesce(?, due_on), note = coalesce(?, note) WHERE id = ?",
+                        (due_on, _clean(note), sid))
+            else:
+                sid = self._conn.execute(
+                    "INSERT INTO suggestions(candidate_id, job_id, text, created_at, source, due_on, note)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (candidate_id, job_id, text, now_iso(), _clean(source), due_on, _clean(note)),
+                ).lastrowid
         return self._row("SELECT * FROM suggestions WHERE id = ?", (sid,))
 
-    def open_suggestions(self) -> list[dict[str, Any]]:
+    def open_suggestions(self, job_id: int | None = None) -> list[dict[str, Any]]:
+        if job_id is not None:
+            return self._rows(
+                """SELECT s.*, c.name AS candidate_name, j.title AS job_title FROM suggestions s
+                   LEFT JOIN candidates c ON c.id = s.candidate_id LEFT JOIN jobs j ON j.id = s.job_id
+                   WHERE s.done_at IS NULL AND s.job_id = ? ORDER BY coalesce(s.due_on, s.created_at)""", (job_id,))
         return self._rows(
             """SELECT s.*, c.name AS candidate_name, j.title AS job_title FROM suggestions s
                LEFT JOIN candidates c ON c.id = s.candidate_id LEFT JOIN jobs j ON j.id = s.job_id
@@ -1559,20 +2323,104 @@ class Store:
             self._conn.execute("DELETE FROM search_outbox")
 
 
+JOB_EXTRA_FIELDS = ("hiring_manager", "hiring_manager_email", "openings", "target_date", "min_active")
+
+
+def _count(value: Any, label: str) -> int | None:
+    """A whole number of 1 or more; blank is None."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        raise ValueError(f"{label} must be a whole number, like 2.") from None
+    if n < 1:
+        raise ValueError(f"{label} must be 1 or more.")
+    return n
+
+
+def parse_day_text(value: Any) -> str | None:
+    """'2026-12-01', '12/1/2026' or 'Dec 1, 2026' -> '2026-12-01'. Blank is None."""
+    v = _clean(value) if isinstance(value, str) else value
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    try:
+        return datetime.fromisoformat(str(v)[:10]).date().isoformat()
+    except ValueError:
+        loose = _parse_loose(re.sub(r"\s+", " ", str(v)))
+        if loose is None:
+            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01 or Dec 1, 2026.") from None
+        return loose.date().isoformat()
+
+
+def _job_extras(data: dict[str, Any]) -> dict[str, Any]:
+    """Check and tidy the hiring manager, openings, target date and thin-pipeline target of a job."""
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if k == "openings":
+            out[k] = _count(v, "Openings")
+        elif k == "min_active":
+            out[k] = _count(v, "The active candidate target")
+        elif k == "target_date":
+            out[k] = parse_day_text(v)
+        elif k == "hiring_manager_email":
+            v = _clean(v)
+            if v and not _EMAIL_RE.match(v):
+                raise ValueError(f"{v!r} doesn't look like an email address.")
+            out[k] = v
+        else:
+            out[k] = _clean(v)
+    return out
+
+
+# Interviews are timeline entries; their state lives in timeline.data. One with no data is scheduled.
+INTERVIEW_OUTCOMES = {"passed": "passed", "pass": "passed", "not passed": "not_passed", "failed": "not_passed",
+                      "did not pass": "not_passed", "no show": "no_show", "noshow": "no_show"}
+INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show"}
+LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
+                  " AND json_extract(t.data, '$.outcome') IS NULL")
+
+
+def interview_status(data: dict[str, Any] | None) -> str:
+    """'scheduled', 'cancelled', or the recorded outcome ('passed', 'not_passed', 'no_show')."""
+    data = data or {}
+    if data.get("status") == "cancelled":
+        return "cancelled"
+    return data.get("outcome") or "scheduled"
+
+
+STAGE_NAME_LIMIT = 60
+
+
+def _stage_name(name: Any) -> str:
+    """A cleaned stage name, or ValueError when it's missing or too long."""
+    n = _clean(str(name or ""))
+    if not n:
+        raise ValueError("A stage needs a name.")
+    if len(n) > STAGE_NAME_LIMIT:
+        raise ValueError(f"Stage names can be up to {STAGE_NAME_LIMIT} characters, and this one has {len(n):,}. "
+                         "Pick a shorter name; nothing was changed.")
+    return n
+
+
 def _stage_key(name: str | None) -> str:
     """'Phone-screen ' and 'phone screen' compare equal."""
     return re.sub(r"[\W_]+", " ", name or "").strip().lower()
 
 
-def _stage_plan(names: list[str]) -> list[tuple[str, str]]:
-    """Custom stage list for a new job. Closing names (Hired, Placed, Not a fit, Withdrew...) close the application."""
+def _stage_plan(names: list[str | dict[str, Any]]) -> list[tuple[str, str]]:
+    """Custom stage list for a new job. Closing names (Hired, Placed, Not a fit, Passed...) close the application.
+    A stage can also be {"name": "Passed", "outcome": "lost"} to say so outright."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for n in names:
-        n = _clean(n)
+    for item in names:
+        n, outcome = (item.get("name"), item.get("outcome")) if isinstance(item, dict) else (item, None)
+        n = _stage_name(n) if _clean(str(n or "")) else None
         if n and n.lower() not in seen:
             seen.add(n.lower())
-            out.append((n, stage_outcome(n)))
+            out.append((n, normalize_outcome(outcome) or stage_outcome(n)))
     if not out:
         raise ValueError("Give at least one stage name.")
     return out

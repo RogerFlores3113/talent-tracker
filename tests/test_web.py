@@ -52,8 +52,8 @@ def test_json_api(store):
     cid = r.json()["candidate"]["id"]
     assert c.patch(f"/api/candidates/{cid}", json={"current_title": "CTO"}).json()["current_title"] == "CTO"
     assert c.get("/api/candidates?q=cto").json()["total"] == 1
-    assert c.delete(f"/api/candidates/{cid}").status_code == 204
-    assert c.get(f"/api/candidates/{cid}").status_code == 404
+    assert c.delete(f"/api/candidates/{cid}").status_code == 405  # deleting is only in the app window
+    assert c.get(f"/api/candidates/{cid}").status_code == 200
     assert c.get("/api/health").json()["search"] == "built-in"
 
 

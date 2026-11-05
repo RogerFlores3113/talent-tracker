@@ -2,7 +2,7 @@
 
 The app writes its own entry into Claude Desktop's and Codex's MCP config so a
 recruiter never edits JSON or TOML. Existing config is kept, one backup is saved
-next to it first (name.bak, replaced each time), the file keeps its permissions,
+next to it first (name.bak, kept from before the first connect), the file keeps its permissions,
 and we only ever touch our own `talent-search` entry. If the app isn't installed
 (its settings folder doesn't exist) we create nothing and say so.
 """
@@ -73,11 +73,14 @@ def _not_installed(path: Path, app_name: str) -> dict[str, Any] | None:
                        "then try again."}
 
 
-def _backup(path: Path) -> Path | None:
-    """One backup next to the file (config.json.bak), replaced each time."""
+def _backup(path: Path, ours_already: bool = False) -> Path | None:
+    """One backup next to the file (config.json.bak). When the file already has our entry, the
+    backup from before we first connected is kept, so pressing Connect again never loses it."""
     if not path.exists():
         return None
     dest = path.with_name(f"{path.name}.bak")
+    if ours_already and dest.exists():
+        return dest
     shutil.copy2(path, dest)  # copy2 keeps the original permissions
     return dest
 
@@ -113,7 +116,7 @@ def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]
             ) from exc
         if not isinstance(config, dict):
             raise ValueError(f"{app_name}'s settings file has an unexpected shape, so we left it alone.")
-    backup = _backup(path)
+    backup = _backup(path, ours_already=SERVER_KEY in (config.get("mcpServers") or {}))
     servers = config.setdefault("mcpServers", {})
     already = servers.get(SERVER_KEY) == spec.as_json_entry()
     servers[SERVER_KEY] = spec.as_json_entry()
@@ -198,7 +201,7 @@ def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> d
             tomllib.loads(original)
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"Codex's settings file isn't valid TOML, so we left it alone ({exc}).") from exc
-    backup = _backup(path)
+    backup = _backup(path, ours_already=_strip_our_section(original) != original)
     base = _strip_our_section(original).rstrip()
     text = (base + "\n\n" if base else "") + codex_snippet(spec)
     tomllib.loads(text)  # never write something Codex can't read
