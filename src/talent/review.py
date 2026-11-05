@@ -38,7 +38,7 @@ QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told t
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
          "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done",
-         "sequence": "Follow-up steps", "plan": "Hiring plan change", "tool_call": "AI request"}
+         "sequence": "Follow-up steps", "plan": "Hiring plan change", "loop_template": "Loop template", "tool_call": "AI request"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
@@ -451,6 +451,19 @@ def queue_sequence(store: Store, job_id: int, steps: list[dict[str, Any]], enrol
                   job_id=job_id, session=session)
 
 
+def queue_loop_template(store: Store, job_id: int, sessions: Any, hours: str | None,
+                        session: str | None) -> dict[str, Any]:
+    """Hold the AI app's loop template for a job."""
+    from . import loops
+    j = store.get_job(job_id)
+    clean = loops.clean_sessions(sessions)
+    job = j["title"] + (f" ({j['company']})" if j.get("company") else "")
+    return _queue(store, "loop_template", f"Set the interview loop template of {job}: {len(clean)} session"
+                  f"{'' if len(clean) == 1 else 's'}",
+                  {"sessions": clean, "hours": hours, "before": loops.get_template(store, job_id)},
+                  job_id=job_id, session=session)
+
+
 def queue_todo(store: Store, row: dict[str, Any], session: str | None) -> dict[str, Any]:
     """Hold the AI app's Mark done of one of the recruiter's own to-dos."""
     return _queue(store, "todo", f"Mark the to-do {quoted(row.get('text'))} done",
@@ -709,6 +722,15 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
     if kind == "plan":
         from .plan import apply_review as apply_seat  # here: plan imports this module
         return apply_seat(store, r)
+    if kind == "loop_template":
+        from . import loops
+        jid = r.get("job_id")
+        if jid is None:
+            raise ValueError("That job is gone.")
+        if loops.get_template(store, jid) != p.get("before"):
+            raise ValueError("The job's loop template was changed since, so nothing was changed.")
+        loops.ai_set_template(store, jid, p["sessions"], p.get("hours"))
+        return r["summary"]
     if kind == "todo":
         s = store._row("SELECT done_at FROM suggestions WHERE id = ?", (p.get("suggestion_id"),))
         if s is None:
@@ -857,5 +879,5 @@ __all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOL
            "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
-           "queue_interview", "queue_job", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_sequence", "queue_stages",
+           "queue_interview", "queue_job", "queue_loop_template", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_sequence", "queue_stages",
            "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]

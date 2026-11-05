@@ -35,7 +35,7 @@
         <ul class="sessions">
         {% for x in lp.sessions %}
           <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% elif x.needs_outcome %} <span class="badge overdue">Needs outcome</span>{% endif %}
-            {% if x.owed %}<span class="fine">Owed: {{ x.owed | join(', ') }}</span>{% endif %}
+            {% if x.owed %}<span class="fine">Owed: {{ x.owed | join(', ') }}, due by {{ x.feedback_due | local('%a %-I:%M %p') }}</span>{% if x.feedback_overdue %} <span class="badge overdue">Feedback overdue</span>{% endif %}{% endif %}
             <a class="link small" href="{{ x.href }}">Change</a></li>
         {% endfor %}
         </ul>

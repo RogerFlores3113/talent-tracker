@@ -1942,6 +1942,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             res = decide.record_decision(store, job_id, offer_id, passed, reason=reason, note=note, by="app",
                                          nudge=bool(form.get("nudge")))
         except (ValueError, NotFound) as exc:
+            if "in play" in str(exc):  # someone moved since the form was opened: a fresh form, not a bare error
+                return RedirectResponse(f"/jobs/{job_id}/decide?" + urlencode(
+                    {"notice": "Things changed since you opened this. Here's the latest."}), status_code=303)
             return _decide_back(job_id, str(exc))
         lets = res.get("todos", 0) - res.get("nudged", 0)
         notice = f"Recorded: {res['text']}." + (

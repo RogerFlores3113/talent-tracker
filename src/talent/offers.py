@@ -39,7 +39,11 @@ STATUS_WORDS = {"drafted": "Drafted", "out": "Out with the candidate", "accepted
 _ALIASES = {"draft": "drafted", "drafting": "drafted", "sent": "out", "extended": "out", "made": "out", "open": "out",
             "accept": "accepted", "yes": "accepted", "signed": "accepted", "decline": "declined", "no": "declined",
             "turned down": "declined", "rejected": "declined", "withdraw": "withdrawn", "pulled": "withdrawn",
-            "rescinded": "withdrawn"}
+            "rescinded": "withdrawn", "verbal": "out", "written": "out", "verbal offer": "out",
+            "written offer": "out", "extended offer": "out"}
+OUT_WORDS = {"verbal": "verbal", "verbal offer": "verbal", "written": "written", "written offer": "written",
+             "extended": "extended", "sent": "sent"}  # ways to say "out"; record_offer keeps which one was said
+WORD_KEY = "offer_word:"  # settings key per offer id: which of those was said
 TERMS = ("salary", "equity", "bonus", "start_date", "answer_by", "notes")
 LABELS = {"salary": "salary", "equity": "equity", "bonus": "bonus", "start_date": "start date",
           "answer_by": "answer-by date", "notes": "notes", "status": "status", "reason": "reason",
@@ -88,7 +92,8 @@ def _status(value: Any, allowed: tuple[str, ...]) -> str:
         if allowed == ("drafted", "out"):
             raise ValueError(
                 f"No change made. {str(value)[:40]!r} isn't a status record_offer takes. Use drafted (terms still "
-                "being worked out) or out (the candidate has the offer). To record their answer, call "
+                "being worked out) or out (the candidate has the offer; verbal, written, extended and sent count as "
+                "out). To record their answer, call "
                 "record_offer_answer with accepted, declined or withdrawn.")
         raise ValueError(f"Status must be one of: {', '.join(allowed)}. accepted means they said yes, declined "
                          "that they said no, and withdrawn that the company pulled the offer.")
@@ -123,7 +128,8 @@ def status_line(offer: dict[str, Any], now: datetime | None = None) -> str:
     """'Offer out 3 days, answer due Fri', 'Offer drafted, not out yet', 'Offer accepted Nov 5, starts Mon Dec 1'."""
     today, st = _today(now), offer.get("status")
     if st == "drafted":
-        return "Offer drafted, not out yet"
+        due = _as_day(offer.get("answer_by"))
+        return "Offer drafted, not out yet" + (f", answer by {actions.day_text(due, '%a %b %-d')}" if due else "")
     if st == "out":
         sent = to_dt(offer.get("out_at"))
         days = (today - as_local(sent).date()).days if sent else None
@@ -643,9 +649,16 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
     from .mcp_server import DATA_NOTE, EDIT, READ, _check_cap, _plain, _wait_text, _waiting
     from .paths import app_url
 
+    def _put_word(st: Store, offer_id: int, word: str) -> None:
+        actions._put_setting(st, WORD_KEY + str(offer_id), word)
+
     def public(o: dict[str, Any]) -> dict[str, Any]:
+        said = store.setting(WORD_KEY + str(o["id"])) if o.get("status") == "out" else None
         return {"id": o["id"], "candidate_id": o["candidate_id"], "job_id": o["job_id"], "status": o["status"],
+                **({"offer_form": said} if said else {}),
                 **{k: o.get(k) for k in TERMS if o.get(k)}, "reason": o.get("reason"),
+                **({"answer_by_text": actions.day_text(_as_day(o["answer_by"]), "%a %b %-d")}
+                   if _as_day(o.get("answer_by")) else {}),
                 "status_line": status_line(o), "app_url": app_url(href(o["candidate_id"], o["job_id"]))}
 
     def _read_days(days: dict[str, str]) -> str:
@@ -659,17 +672,22 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
                      start_date: str | None = None, answer_by: str | None = None,
                      notes: str | None = None,
                      status: Annotated[str | None, WithJsonSchema({
-                         "anyOf": [{"type": "string", "enum": ["drafted", "out"]}, {"type": "null"}],
+                         "anyOf": [{"type": "string", "enum": ["drafted", "out", "verbal", "written", "extended",
+                                                                "sent"]}, {"type": "null"}],
+                         "description": "drafted, or out. verbal, written, extended and sent also mean out; "
+                                        "which one you send is kept.",
                          "default": None})] = None) -> CallToolResult:
         """Create or change the offer for one person on one job. salary, equity and bonus are free text ("$185,000
         base", "0.4% over 4 years") or a plain number (180000, or "180k"); start_date and answer_by are days
         (2026-12-01, Nov 13, friday, next fri) and the reply says which day it read; notes are what
-        was said on the offer call. status is drafted while the terms are worked out, out once the candidate has
-        the offer. Also accepted: base_salary, comp, start, deadline and note. Leave a field out to keep it; "" clears it (one per call). Offer terms are private: never put
+        was said on the offer call (also accepted as terms). status is drafted while the terms are worked out, out
+        once the candidate has the offer; verbal, written, extended and sent all mean out, and the reply says
+        which. Also accepted: base_salary, comp, start, deadline and note. Leave a field out to keep it; "" clears it (one per call). Offer terms are private: never put
         them in a status update, a client message or anything pasted to others. Record the answer with
         record_offer_answer. The recruiter sees every change on Changes and can undo it."""
         given = {k: v for k, v in {"salary": salary, "equity": equity, "bonus": bonus, "start_date": start_date,
                                    "answer_by": answer_by, "notes": notes, "status": status}.items() if v is not None}
+        word = OUT_WORDS.get(" ".join(str(status or "").strip().lower().replace("_", " ").split()).strip(" .!"))
         row = get(store, candidate_id, job_id)
         pair = _pair(store, candidate_id, job_id) if row is None else None
         name = (pair["candidate"] if pair else store.get_candidate(candidate_id))["name"]
@@ -693,9 +711,14 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         _check_cap(store, overwrite_count("offer_terms", snap(row) or {}, {**(snap(row) or {}), **changed}))
         res = save(store, candidate_id, job_id, by="ai", **changed)
         o = res["offer"]
+        if word and o["status"] == "out":
+            _put_word(store, o["id"], word)
+        elif "status" in changed:
+            actions._drop_setting(store, WORD_KEY + str(o["id"]))
         what = ", ".join(LABELS[k] for k in res["changed"])
         sentence = (f"{'Recorded the offer' if res['created'] else 'Changed the offer'} for {quoted(name)} on {job}"
-                    + (f" ({what})" if what else "") + f". {status_line(o)}.{_read_days(days)} "
+                    + (f" ({what})" if what else "") + f". {status_line(o)}."
+                    + (f" Noted as a {word} offer." if word and o["status"] == "out" else "") + f"{_read_days(days)} "
                     f"{who(store, cap=True)} can undo it on Changes.")
         return _plain(sentence, {"offer": public(o), "note": "Keep the terms out of status updates and client "
                                                              f"messages; they are for {who(store)} and the candidate.",
@@ -750,6 +773,9 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         lines = [f"{len(rows)} offer{'' if len(rows) == 1 else 's'} (terms are private, for the recruiter only):"]
         for o in rows:
             terms = "; ".join(f"{LABELS[k]} {o[k]}" for k in ("salary", "equity", "bonus") if o.get(k))
+            due = _as_day(o.get("answer_by"))
+            if due and o["status"] in ("drafted", "out"):
+                terms = "; ".join(x for x in (terms, f"answer by {actions.day_text(due, '%a %b %-d')}") if x)
             lines.append(f"- {quoted(o['candidate_name'])} (candidate id {o['candidate_id']}) on {_job_name(o)} "
                          f"(job id {o['job_id']}): {status_line(o)}" + (f". {terms}" if terms else ""))
         return _plain("\n".join(lines), {"offers": [public(o) for o in rows], "data_note": DATA_NOTE})

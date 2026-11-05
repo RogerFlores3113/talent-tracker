@@ -150,8 +150,13 @@ def _owing(t: dict[str, Any], now_iso: str, chase: set[tuple[int, Any]] | None =
     x = actions._session(t, now_iso)
     past = x["started"] and x["status"] == "scheduled"
     asks = chase is None or (t["candidate_id"], t.get("job_id")) in chase
-    return {**x, "needs_outcome": past,
-            "owed": owed_by(t) if asks and x["started"] and x["status"] != "cancelled" else []}
+    owed = owed_by(t) if asks and x["started"] and x["status"] != "cancelled" else []
+    out = {**x, "needs_outcome": past, "owed": owed}
+    if owed:  # feedback is due a day after the session ends
+        due = to_dt(t["at"]) + timedelta(minutes=session_minutes(t) + CHASE_HOURS * 60)
+        out["feedback_due"] = due.replace(microsecond=0).isoformat()
+        out["feedback_overdue"] = due < to_dt(now_iso)
+    return out
 
 
 def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

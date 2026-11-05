@@ -169,7 +169,7 @@ def test_a_stale_decide_resubmit_returns_to_a_fresh_decide_form(store):
     r = client.post(f"/jobs/{jid}/decide", data=form, headers={"referer": f"http://127.0.0.1:8765/jobs/{jid}"},
                     follow_redirects=False)
     assert r.headers["location"].startswith(f"/jobs/{jid}/decide")
-    assert "isn't in play" in flash_of(r, "flash_error")
+    assert "Things changed since you opened this" in flash_of(r, "notice")  # c7r H: a notice, not a bare error
 
 
 # ------------------------------------------------------------ S: session length
