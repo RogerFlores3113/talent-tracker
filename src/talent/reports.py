@@ -974,6 +974,7 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
             "in_play": in_play, "stand": now_counts, "not_shown": not_shown,
             "reached": reached, "period": {g: len(v) for g, v in period.items()}, "moves": moves,
             "imported_moves": imported, "median_days": medians, "upcoming": upcoming, "people": people,
+            "offers": _shared_offers(store, ids, start),  # status words, and only what the recruiter shares
             "openings": openings, "filled": filled,
             # with no contact email saved yet, a client update goes to a job's hiring manager email
             "email": None if hm_email == "" else hm_email or _contact_email(c.get("contacts")) or (
@@ -1265,7 +1266,15 @@ def report_text(rep: dict[str, Any], trim: int = 0) -> str:
             f"{labels[g]} {_num(v)}" for g, v in rep["median_days"].items())]
     if rep["upcoming"]:
         lines += ["", "Upcoming interviews:", *upcoming_lines(rep)]
+    if rep.get("offers"):
+        lines += ["", "Offers:", *rep["offers"]]
     return "\n".join(lines)
+
+
+def _shared_offers(store: Store, job_ids: list[int], since: str | None) -> list[str]:
+    from .offers import shared_lines  # here: offers imports actions, which imports this module
+
+    return shared_lines(store, job_ids, since)
 
 
 def _plain_day(iso: str) -> str:

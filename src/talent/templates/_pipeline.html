@@ -36,6 +36,7 @@
 {% else %}
 <div class="board" role="list">
   {% set show = show or '' %}
+  {% set job_offers = offers_on(job.id) %}
   {% for g in groups %}
   {% set n = g.candidates | length %}
   {% set wide = show | lower == g.name | lower %}
@@ -49,6 +50,7 @@
       {% if a.current_title %}<div class="fine">{{ a.current_title }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</div>{% endif %}
       <div class="fine">{{ a.stage_changed_at | ago }} in stage</div>
       {% if a.candidate_id in next_iv %}<div class="next-iv">Interview {{ next_iv[a.candidate_id] | local }}</div>{% endif %}
+      {% with on = job_offers.get(a.candidate_id) %}{% include "_offer_note.html" %}{% endwith %}
       {% include "_stage_select.html" %}
       {% if job.company and g.outcome == 'open' and not inhouse() %}<a class="link small" href="/jobs/{{ job.id }}/submit/{{ a.candidate_id }}">{{ 'Write-up' if 'submit' in g.name | lower or 'present' in g.name | lower else 'Submit to client' }}</a>{% endif %}
     </div>

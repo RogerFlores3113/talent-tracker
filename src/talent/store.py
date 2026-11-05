@@ -579,6 +579,31 @@ _MIGRATIONS: tuple[Any, ...] = (
     CREATE INDEX ai_review_candidate_idx ON ai_review(candidate_id, status);
     ALTER TABLE ai_actions ADD COLUMN confirmed_at TEXT;
     """,
+    # v11: one offer per person and job (offers.py): its terms, the answer-by and start dates, notes from the offer
+    # call, where it stands and whether its status (never its numbers) may go in client updates.
+    """
+    CREATE TABLE offers (
+        id           INTEGER PRIMARY KEY,
+        candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+        job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        status       TEXT NOT NULL DEFAULT 'drafted'
+                     CHECK (status IN ('drafted', 'out', 'accepted', 'declined', 'withdrawn')),
+        salary       TEXT,
+        equity       TEXT,
+        bonus        TEXT,
+        start_date   TEXT,
+        answer_by    TEXT,
+        notes        TEXT,
+        reason       TEXT,
+        share_status INTEGER NOT NULL DEFAULT 0,
+        out_at       TEXT,
+        answered_at  TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE (candidate_id, job_id)
+    );
+    CREATE INDEX offers_job_idx ON offers(job_id, status);
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -592,6 +617,7 @@ AI_ACTION_KINDS = {
     "client_create": "Added a client",
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
+    "offer_terms": "Recorded an offer", "offer_answer": "Recorded an answer to an offer",
 }
 # AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
 # outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
@@ -622,6 +648,9 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
     new time or outcome."""
     if kind in ("job_edit", "client_edit"):
         return sum(1 for k, v in old.items() if not k.startswith("_") and v not in (None, "", []))
+    if kind.startswith("offer_"):
+        from .offers import overwrite_count  # here: offers imports this module
+        return overwrite_count(kind, old, new)
     if kind == "stages_edit":
         was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
         now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
@@ -1549,6 +1578,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "interview_feedback":
         who = r.get("body") or ""
         return f"Added interview feedback on {name}" + (f" from {who}" if who else "") + what
+    if kind.startswith("offer_"):
+        from .offers import ai_summary  # here: offers imports this module
+        return ai_summary(r)
     if kind == "note_logged":
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
@@ -1604,6 +1636,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("interview", r.get("target_id")))
     if kind.startswith("client_"):
         return (("client", (r.get("new_data") or {}).get("_key")),)
+    if kind.startswith("offer_"):
+        return (("person", cid), ("offer", r.get("target_id")))
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
@@ -2350,6 +2384,9 @@ class Store:
             if kind.startswith("client_"):
                 from .reports import ai_client_blocker  # here: reports imports this module
                 return ai_client_blocker(self, a)
+            if kind.startswith("offer_"):
+                from .offers import ai_blocker  # here: offers imports this module
+                return ai_blocker(self, a)
             if kind == "note_logged":
                 t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
                 if t is None:
@@ -2433,7 +2470,7 @@ class Store:
                 people.add(r["candidate_id"])
         for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
                             " AND kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
-                            " 'interview_move', 'interview_outcome')", (since,)):
+                            " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer')", (since,)):
             try:
                 old = json.loads(r["old_data"] or "{}") or {}
                 new = json.loads(r["new_data"] or "{}") or {}
@@ -2624,6 +2661,9 @@ class Store:
         if kind.startswith("client_"):
             from .reports import ai_client_undo  # here: reports imports this module
             return ai_client_undo(self, a, by)
+        if kind.startswith("offer_"):
+            from .offers import ai_undo  # here: offers imports this module
+            return ai_undo(self, a)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
@@ -2872,6 +2912,9 @@ class Store:
                     self._conn.execute(
                         "UPDATE applications SET stage = ?, stage_changed_at = ?, notes = coalesce(notes, ?)"
                         " WHERE id = ?", (app["stage"], app["stage_changed_at"], app["notes"], ours["id"]))
+            # Offers come along, unless the kept profile has its own on that job (offers.py, v11).
+            self._conn.execute("UPDATE offers SET candidate_id = ? WHERE candidate_id = ? AND job_id NOT IN"
+                               " (SELECT job_id FROM offers WHERE candidate_id = ?)", (keep_id, other_id, keep_id))
             # other's email and LinkedIn URL are unique, so other goes before keep takes them.
             self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
             created = min(krow["created_at"], orow["created_at"])

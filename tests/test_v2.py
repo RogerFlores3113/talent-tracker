@@ -86,7 +86,7 @@ def test_action_items_and_toggles(store):
     store.update_job(store.list_jobs()[0]["id"], openings=2)  # 3 per opening: 2 openings aim for 5
     items = actions.action_items(store)
     kinds = {i["kind"] for i in items["items"]}
-    assert kinds == {"interview", "suggestion", "stuck", "thin", "stale"}
+    assert kinds == {"interview", "suggestion", "stuck", "thin", "stale", "offer"}  # the sample Offer stage has no offer yet
     assert items["items"][0]["kind"] == "interview"  # most urgent first
     store.set_settings(flag_stale="0", flag_thin="0")
     kinds = {i["kind"] for i in actions.action_items(store)["items"]}

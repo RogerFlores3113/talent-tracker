@@ -63,6 +63,7 @@
       </div>
       {% endfor %}
       {% for t in p.todos %}<div class="fine">To-do: {{ t.text }}</div>{% endfor %}
+      {% with on = offers_of(p.candidate_id).get(job.id), offer_href = '/jobs/' ~ job.id ~ '/offers/' ~ p.candidate_id %}{% include "_offer_note.html" %}{% endwith %}
     </article>
   {% endfor %}
   </div>

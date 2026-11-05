@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
-from . import decide, interviews
+from . import decide, interviews, offers
 from . import chase
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -328,6 +328,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
     env.globals["shortlist_waiting"] = lambda job_id: shortlist.waiting(store, job_id)
+    env.globals["offers_on"] = lambda job_id: offers.on_job(store, job_id)  # board cards: "Offer out 3 days"
+    env.globals["offers_of"] = lambda candidate_id: offers.of_candidate(store, candidate_id)
     env.globals["stage_groups_of"] = lambda job_id: {  # each stage's funnel step (in-house has no Submitted)
         k: ("screening" if g == "submitted" and actions.inhouse(store) else g)
         for k, g in reports.stage_groups(store, job_id).items()}
@@ -1814,6 +1816,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         notice = f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#iv-{new['id']}",
                                 status_code=303)
+
+    offers.register_routes(app, store, page, back)  # the offer page, its answer and its one-click move
 
     @app.post("/changes/decision/{batch_id}/undo")
     def undo_decision_form(request: Request, batch_id: int):

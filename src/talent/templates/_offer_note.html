@@ -1,0 +1,4 @@
+{# One person's offer on one job, for the profile, the board card and Decide. `on` is offers.note (or a "missing" one). #}
+{% if on and on.missing %}<div class="fine offer-note"><a href="{{ on.href }}">Make an offer</a></div>
+{% elif on %}<div class="fine offer-note"><a href="{{ on.href }}">{{ on.line }}</a>{% if on.overdue %} <span class="badge overdue">Overdue</span>{% endif %}</div>
+{% elif offer_href %}<div class="fine offer-note"><a href="{{ offer_href }}">Make an offer</a></div>{% endif %}

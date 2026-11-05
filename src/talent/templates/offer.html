@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Offer · {{ c.name }} · Talent Search{% endblock %}
+{% block body %}
+{% set who = 'the hiring team' if inhouse() else 'the client' %}
+<div class="sec-head">
+  <div>
+    <h1>Offer for <a href="/candidates/{{ c.id }}">{{ c.name }}</a></h1>
+    <p class="sub"><a href="/jobs/{{ job.id }}">{{ job.title }}</a>{% if job.company %} · {{ job.company }}{% endif %}{% if stage %} · in {{ stage }}{% else %} · not in this job's pipeline now{% endif %}</p>
+  </div>
+</div>
+
+{% if line %}<p class="lead"><strong>{{ line }}</strong>{% if late %} <span class="badge overdue">Answer overdue</span>{% endif %}</p>
+{% else %}<p class="lead">No offer recorded yet. Add what you know; you can change it any time.</p>{% endif %}
+
+{% if waiting %}
+<p class="fine">Your AI app sent {{ waiting | length }} change{{ '' if waiting | length == 1 else 's' }} to this offer that wait{{ 's' if waiting | length == 1 }} for you on <a href="/review">Review</a>.</p>
+{% endif %}
+
+{% if nxt %}
+<section class="panel" id="next">
+  <div class="sec-head"><h2>Next step</h2></div>
+  <form method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}/move" class="inline">
+    <input type="hidden" name="to" value="{{ nxt.kind }}">
+    <button class="btn primary" type="submit">Move {{ c.name }} to {{ nxt.to }}</button>
+  </form>
+  <p class="fine">{% if nxt.notes %}With the note "{{ nxt.notes }}". {% endif %}You can undo the move on their timeline.</p>
+</section>
+{% endif %}
+
+<section class="panel" id="terms">
+  <div class="sec-head"><h2>Terms</h2></div>
+  <form class="form" method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}">
+    {% if not o or o.status in ('drafted', 'out') %}
+    <label>Where it stands<select name="status">{% for s in ('drafted', 'out') %}<option value="{{ s }}" {{ 'selected' if (o.status if o else 'drafted') == s }}>{{ statuses[s] }}</option>{% endfor %}</select></label>
+    {% else %}
+    <label>Where it stands<select name="status"><option value="">{{ statuses[o.status] }}</option>{% for s in ('drafted', 'out') %}<option value="{{ s }}">Back to {{ statuses[s] | lower }}</option>{% endfor %}</select></label>
+    {% endif %}
+    <label>Salary<input type="text" name="salary" maxlength="200" value="{{ o.salary or '' if o else '' }}" placeholder="$185,000 base"></label>
+    <label>Equity<input type="text" name="equity" maxlength="200" value="{{ o.equity or '' if o else '' }}" placeholder="0.4% over 4 years"></label>
+    <label>Bonus<input type="text" name="bonus" maxlength="200" value="{{ o.bonus or '' if o else '' }}" placeholder="$20,000 signing"></label>
+    <label>Start date<input type="date" name="start_date" value="{{ o.start_date or '' if o else '' }}"></label>
+    <label>Answer by<input type="date" name="answer_by" value="{{ o.answer_by or '' if o else '' }}" title="Today reminds you the day before"></label>
+    <label class="wide">Notes from the offer call<textarea name="notes" rows="4" maxlength="4000" placeholder="What they asked about, what matters to them">{{ o.notes or '' if o else '' }}</textarea></label>
+    <label class="wide inline-label"><input type="checkbox" name="share_status" value="1" {{ 'checked' if o and o.share_status }}> Share offer status with {{ who }}</label>
+    <p class="fine wide">When ticked, status updates and client updates say where it stands, like "offer out, answer due Fri Nov 13". Salary, equity, bonus and your notes are never shared.</p>
+    <button class="btn primary" type="submit">{{ 'Save changes' if o else 'Save the offer' }}</button>
+  </form>
+</section>
+
+{% if o %}
+<section class="panel" id="answer">
+  <div class="sec-head"><h2>Their answer</h2></div>
+  {% if o.status in ('accepted', 'declined', 'withdrawn') %}<p class="fine">Recorded: {{ statuses[o.status] | lower }}{% if o.reason %} ({{ o.reason }}){% endif %}. You can record a different answer below.</p>{% endif %}
+  <div class="actions-inline">
+    <form method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}/answer" class="inline">
+      <input type="hidden" name="answer" value="accepted"><button class="btn" type="submit">Accepted</button>
+    </form>
+  </div>
+  <form method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}/answer" class="inline">
+    <input type="hidden" name="answer" value="declined">
+    <label>Declined, because <select name="reason"><option value="">No reason given</option>{% for label in ('Took another offer', 'Compensation', 'Counteroffer', 'Start date', 'Location', 'Other') %}<option>{{ label }}</option>{% endfor %}</select></label>
+    <input type="text" name="why" maxlength="300" placeholder="In their words (optional)" aria-label="Why they declined">
+    <button class="btn" type="submit">Declined</button>
+  </form>
+  <form method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}/answer" class="inline">
+    <input type="hidden" name="answer" value="withdrawn">
+    <input type="text" name="why" maxlength="300" placeholder="Why it was withdrawn (optional)" aria-label="Why the offer was withdrawn">
+    <button class="btn" type="submit">We withdrew it</button>
+  </form>
+</section>
+
+<section class="panel" id="summary">
+  <div class="sec-head"><h2>Offer summary to paste</h2>
+    <span class="copy-status"><button type="button" class="btn small" data-copy-from="offer-summary" data-copy-note="next" data-copy-msg="Copied. Paste it into your own email.">Copy</button><span class="fine" role="status"></span></span></div>
+  <pre class="code wrap" id="offer-summary">{{ summary }}</pre>
+  <p class="fine">For your own email to {{ c.name }}. The app sends nothing. Your notes from the offer call stay out of it.</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -27,7 +27,7 @@ SETTING = "ai_cautious"
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
-         "feedback": "Interview feedback", "job_stages": "Stage change"}
+         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
@@ -513,6 +513,9 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("The job's stages were changed since, so nothing was changed.")
         store.edit_job_stages(jid, by="ai", **(p.get("args") or {}))
         return r["summary"]
+    if kind == "offer":
+        from .offers import apply_review  # here: offers imports this module
+        return apply_review(store, r)
     raise ValueError("That change can't be made here.")
 
 
@@ -562,6 +565,9 @@ def sessions(store: Store) -> list[dict[str, Any]]:
 def _more_lines(r: dict[str, Any]) -> list[dict[str, str]]:
     """What a client or interview change would do, one line per field: {"label", "old", "new"}."""
     p = r["payload"]
+    if r["kind"] == "offer":
+        from .offers import review_lines  # here: offers imports this module
+        return review_lines(r)
     if r["kind"] == "client_edit":
         return [{"label": CLIENT_LABELS.get(k, k), "old": _short((p.get("old") or {}).get(k)) or "(empty)",
                  "new": _short(v) or "(cleared)"} for k, v in (p.get("fields") or {}).items()]
