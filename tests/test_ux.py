@@ -87,7 +87,8 @@ def test_follow_up_date_on_log_form_shows_from_that_day(store):
     assert store.timeline(cand["id"])[0]["body"] == "Intro call"
     res = actions.action_items(store)
     assert not [i for i in res["items"] if i["kind"] == "suggestion"] and res["scheduled"] == 1
-    assert "scheduled for later" in c.get("/").text
+    home = c.get("/").text  # listed under Next week with its day (tests/test_c2_f.py)
+    assert "Next week" in home and "Due " in home
     on_day = datetime.now(timezone.utc) + timedelta(days=6)
     items = [i for i in actions.action_items(store, now=on_day)["items"] if i["kind"] == "suggestion"]
     assert [i["title"] for i in items] == ["Follow up with Ana Ruiz"]

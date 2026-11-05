@@ -89,11 +89,13 @@
       {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}
       {% if lines %}<div>{{ 'Undo: ' if (t.body or '').startswith('Undid') }}{{ lines | join('; ') }}</div>{% elif t.body and not (t.data and t.data.merged) %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
       {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}
+      {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% if ivd.outcome_note %}<div class="fine">How it went: {{ ivd.outcome_note }}</div>{% endif %}
       <details class="iv-edit"><summary class="small">Reschedule, cancel or record how it went</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">
           <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time" required>
+          <input type="text" name="reason" value="" placeholder="Reason (optional)" aria-label="Reason for the new time" maxlength="500">
           <button class="btn small" type="submit">Reschedule</button>
         </form>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">

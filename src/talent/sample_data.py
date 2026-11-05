@@ -235,6 +235,18 @@ def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
             out["jobs"] += 1
         except NotFound:
             pass
+    if kept:
+        # Kept people lose what the sample made up for them (the fake interview, call and to-do), so Today
+        # doesn't show it as real, and stop saying they were found via the sample.
+        marks = ",".join("?" * len(kept))
+        ids = sorted(kept)
+        with store._lock, store._conn:
+            store._conn.execute(f"DELETE FROM timeline WHERE source = ? AND candidate_id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
+            store._conn.execute(f"DELETE FROM suggestions WHERE source = ? AND candidate_id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
+            store._conn.execute(f"UPDATE candidates SET source = NULL WHERE source = ? AND id IN ({marks})",
+                                (SAMPLE_SOURCE, *ids))
     _save_ids(store, set(), set())  # whatever is left is the recruiter's own now
     out["kept_people"], out["kept_jobs"] = sorted(kept.values()), sorted(kept_jobs.values())
     return out

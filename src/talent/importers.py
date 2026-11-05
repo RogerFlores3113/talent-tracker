@@ -426,8 +426,27 @@ def _is_conflict(exc: Exception) -> bool:
     return isinstance(exc, (IdentityConflict, DuplicateValue, sqlite3.IntegrityError))
 
 
+# Timeline kinds the export's Notes column carries. Notes go in as they are; the others get their kind
+# in front ("call: Left a voicemail"), and come back in as notes with that text.
+EXPORT_NOTE_KINDS = ("note", "call", "email", "message", "meeting", "interview")
+
+
+def _export_note(t: dict[str, Any]) -> str | None:
+    body = t.get("body") or ""
+    if t["kind"] not in EXPORT_NOTE_KINDS or not body.strip():
+        return None
+    return body if t["kind"] == "note" else f"{t['kind']}: {body.strip()}"
+
+
 def _note_bodies(store: Store, candidate_id: int) -> set[str]:
-    return {t.get("body") or "" for t in store.timeline(candidate_id, limit=1000) if t["kind"] == "note"}
+    """Every text a re-imported Notes cell could match: notes as they are, and the "call: ..." forms."""
+    out: set[str] = set()
+    for t in store.timeline(candidate_id, limit=1000):
+        if t["kind"] == "note":
+            out.add(t.get("body") or "")
+        elif (text := _export_note(t)) is not None:
+            out.add(text)
+    return out
 
 
 def _has_note(store: Store, candidate_id: int, body: str) -> bool:
@@ -657,8 +676,7 @@ def preview_import(store: Store, header: list[str], rows: list[list[str]], mappi
             scratch.close()
         except sqlite3.Error:
             pass
-    result["dry_run"] = True
-    return result
+    return _will(result)
 
 
 def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
@@ -678,8 +696,29 @@ def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], map
         for f in folder.glob("*"):
             f.unlink(missing_ok=True)
         folder.rmdir()
+    return _will(result)
+
+
+def _will(result: dict[str, Any]) -> dict[str, Any]:
+    """A dry run speaks about what will happen: "so it will be left alone"."""
+    for key in ("skipped", "warnings"):
+        if result.get(key):
+            result[key] = [x.replace("so it was left alone", "so it will be left alone") for x in result[key]]
     result["dry_run"] = True
     return result
+
+
+def button_label(result: dict[str, Any] | None, total: int) -> str:
+    """The import button says what it does: 'Import 3 new people and update 2'."""
+    if result:
+        added, updated = result.get("added", 0), result.get("updated", 0)
+        if added and updated:
+            return f"Import {_plural(added, 'new person', 'new people')} and update {updated}"
+        if added:
+            return f"Import {_plural(added, 'new person', 'new people')}"
+        if updated:
+            return f"Update {_plural(updated, 'person', 'people')}"
+    return f"Import {_plural(total, 'row')}"
 
 
 def _plural(n: int, word: str, many: str | None = None) -> str:
@@ -723,9 +762,10 @@ def _notes_text(store: Store, candidate_id: int) -> str:
     out: list[str] = []
     size = 0
     for t in store.timeline(candidate_id, limit=200):  # newest first
-        if t["kind"] != "note" or not t.get("body"):
+        text = _export_note(t)
+        if text is None:
             continue
-        body = t["body"].replace("|", "\\|")
+        body = text.replace("|", "\\|")
         if len(out) >= EXPORT_NOTES_KEPT or size + len(body) > EXPORT_NOTES_CHARS:
             break
         out.append(body)

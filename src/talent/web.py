@@ -27,7 +27,7 @@ from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS,
                     INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    Store, _labels, snippet_html, split_tags, to_dt)
+                    Store, _labels, dropped_text, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -428,8 +428,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             bits.append(f"moved {m['timeline']} timeline entr{'y' if m['timeline'] == 1 else 'ies'}")
         if m["jobs"]:
             bits.append("moved " + ", ".join(m["jobs"]))
-        notice = (f"Merged {other['name']} into {cand['name']}" + (": " + "; ".join(bits) if bits else "")
-                  + ". A backup was saved first.")
+        notice = (f"Merged {other['name']} (id {other_id}) into {cand['name']} (id {candidate_id})"
+                  + (": " + "; ".join(bits) if bits else "") + ".")
+        if m.get("dropped"):
+            notice += (" Kept this profile's values where both had one. The other profile had "
+                       + dropped_text(m["dropped"], 120) + ". This is noted on the timeline.")
+        notice += " A backup was saved first."
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/candidates/{candidate_id}/log", response_class=HTMLResponse)
@@ -475,7 +479,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 at = str(form.get("at") or "").strip()
                 if not at:
                     raise ValueError("Pick the new date and time.")
-                iv = store.update_interview(entry_id, at=at, candidate_id=candidate_id)
+                reason = str(form.get("reason") or "").strip()
+                iv = store.update_interview(entry_id, at=at, reason=reason or None, candidate_id=candidate_id)
                 notice = f"Moved the interview to {_local(iv['at'])}."
             elif op == "cancel":
                 store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
@@ -587,7 +592,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
-                    preview_lines=importers.preview_lines(preview) if preview else [])
+                    preview_lines=importers.preview_lines(preview) if preview else [],
+                    button_label=importers.button_label(preview, len(rows)))
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -713,7 +719,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_detail(request: Request, job_id: int, view: str = "", q: str = ""):
         job = job_or_404(job_id)
-        omit = [o for o in request.query_params.getlist("omit") if o.strip()]
+        # ?omit= previews a choice without saving it; otherwise the job's remembered Leave out choice applies.
+        omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.saved_omit(store, job_id)
         if view in ("board", "table"):
             store.set_settings(pipeline_view=view)
         view = view if view in ("board", "table") else store.setting("pipeline_view")
@@ -745,6 +752,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': 'Job closed. Its pipeline is kept.'})}",
                                     status_code=303)
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    @app.post("/jobs/{job_id}/omit")
+    async def save_omit(request: Request, job_id: int):
+        """Remember which stages to leave out of this job's status update, here, on /jobs and for the AI."""
+        job_or_404(job_id)
+        form = await request.form()
+        names = [str(v) for v in form.getlist("omit")]
+        stages = {s["name"].lower(): s["name"] for s in store.job_stages(job_id)}
+        kept = actions.save_omit(store, job_id, [stages[n.lower()] for n in names if n.lower() in stages])
+        notice = ("Status updates for this job now leave out " + ", ".join(kept) + "." if kept
+                  else "Status updates for this job now include every stage.")
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice, 'status': 'open'})}#status",
+                                status_code=303)
 
     @app.get("/jobs/{job_id}/edit", response_class=HTMLResponse)
     def edit_job(request: Request, job_id: int):
@@ -786,7 +806,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         cid = str(form.get("candidate_id") or "")
         error = None
         try:
-            store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None)
+            store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None,
+                             by="app")
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
@@ -863,7 +884,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not (cid.isdigit() and jid.isdigit() and stage):
             return back(request, error="Couldn't move that candidate. Reload the page and try again.")
         try:
-            app_row = store.move_stage(int(cid), int(jid), stage)
+            app_row = store.move_stage(int(cid), int(jid), stage, by="app")
         except (ValueError, NotFound) as exc:
             return back(request, error=str(exc))
         return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
@@ -972,6 +993,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 removed += 1
             except OSError:
                 pass
+        store.checkpoint()
         left = len(_backup_files())
         msg = (f"Deleted {removed} backup{'' if removed == 1 else 's'}." if removed else "There were no backups to delete.")
         if left:
