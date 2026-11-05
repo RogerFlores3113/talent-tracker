@@ -32,7 +32,8 @@ STALE_NAMES = 3
 NAMES_PER_STAGE = 10  # a status update lists this many people per stage, then "and 233 more"
 BOARD_CARDS = 50  # cards per board column before "Show more"
 # Stages a client or hiring manager shouldn't see by default (people not presented yet).
-INTERNAL_STAGE_WORDS = frozenset({"sourced", "contacted", "new", "lead", "leads", "applied", "prospect", "prospects"})
+# Applied is not here: applicants are real pipeline the client expects to hear about.
+INTERNAL_STAGE_WORDS = frozenset({"sourced", "contacted", "new", "lead", "leads", "prospect", "prospects"})
 OUT_STAGES = ("Rejected", "Withdrawn")
 CLOSE_REASON = "Reason: Position filled"
 INHOUSE_KEY = "inhouse_wording"
@@ -332,15 +333,20 @@ def filled_text(filled: int, openings: int) -> str:
 
 
 def headline(nums: dict[str, Any], status: str = "open") -> str:
-    """'2 candidates in process, none placed yet. 1 out.' or '1 candidate in process, 1 hired, 2 openings.'"""
-    a, h, word = nums["active"], nums["hired"], nums["word"]
-    parts = [f"{a} candidate{'' if a == 1 else 's'} in process" if a else "No one in process",
-             hired_text(h, nums["openings"], word)]
-    text = ", ".join(parts) + "."
+    """'2 candidates in process, none placed yet. 1 out.', '1 candidate in process, 1 hired, 2 openings.' or,
+    once every opening is taken, '3 candidates in process, 1 of 1 opening filled.' / '1 of 1 opening filled.'"""
+    a, h, word, o = nums["active"], nums["hired"], nums["word"], nums["openings"]
+    if nums["filled"]:
+        seats = filled_text(nums["filled_seats"], o)
+        hires = f"{h} {word}, {seats}" if h > nums["filled_seats"] else seats
+    else:
+        hires = hired_text(h, o, word)
+    if a:
+        text = f"{a} candidate{'' if a == 1 else 's'} in process, {hires}."
+    else:
+        text = f"{hires}." if nums["filled"] else f"No one in process, {hires}."
     if nums["out"]:
         text += f" {nums['out']} out."
-    if nums["filled"] and status == "open":
-        text += " The role is filled."
     prefix = {"on_hold": "On hold. ", "closed": "Closed. "}.get(status, "")
     return prefix + text
 
@@ -599,7 +605,7 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
     rows = store._rows(
-        """SELECT t.candidate_id, max(t.at) AS at, c.name, a.stage, a.created_at, s.outcome
+        """SELECT t.candidate_id, max(t.at) AS at, c.name, a.stage, a.created_at, a.notes, s.outcome
            FROM timeline t JOIN candidates c ON c.id = t.candidate_id
            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = t.job_id
            LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
@@ -614,13 +620,19 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
         if outcome == "hired":
             kinds["hired"].append(r["name"])
         elif outcome == "lost":
-            kinds["out"].append(f"{r['name']} ({r['stage']})")
+            kinds["out"].append(f"{r['name']} ({_out_reason(r)})")
         elif r["created_at"] >= cutoff:
             kinds["new"].append(f"{r['name']} in {r['stage']}")
         else:
             kinds["moved"].append(f"{r['name']} to {r['stage']}")
     labels = {"hired": word.capitalize(), "out": "Out", "moved": "Moved", "new": "New"}
     return [f"- {labels[k]}: {_capped(v)}" for k, v in kinds.items() if v]
+
+
+def _out_reason(app: dict[str, Any]) -> str:
+    """Why someone is out, as a status update says it: 'position filled' after a close-out (the client never
+    turned them down), else their Out stage."""
+    return "position filled" if (app.get("notes") or "").strip() == CLOSE_REASON else app["stage"]
 
 
 def _capped(names: list[str], limit: int = NAMES_PER_STAGE) -> str:
@@ -658,11 +670,17 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
         if not g["candidates"] or _stage_key(g["name"]) in omit:
             continue
         shown += len(g["candidates"])
-        people = [f"{a['candidate_name']} ({_in_stage(_days_ago(a['stage_changed_at'], now))})"
+        lost = g["outcome"] == "lost"
+        people = [f"{a['candidate_name']} ("
+                  + ("position filled, " if lost and _out_reason(a) == "position filled" else "")
+                  + f"{_in_stage(_days_ago(a['stage_changed_at'], now))})"
                   for a in sorted(g["candidates"], key=lambda a: a["stage_changed_at"])]
         lines.append(f"{g['name']} ({len(g['candidates'])}): {_capped(people)}")
     if not shown:
         lines.append("No one to share yet." if total else "No one in the pipeline yet.")
+    hidden = [f"{g['name']} ({len(g['candidates'])})" for g in groups if g["candidates"] and _stage_key(g["name"]) in omit]
+    if hidden:
+        lines.append("Not shown: " + ", ".join(hidden))
     changes = recent_changes(store, job_id, now, omit=omit)
     lines += ["", "Changes since last week:", *changes] if changes else ["", "Changes since last week: none."]
     names = {a["candidate_id"]: a["candidate_name"] for g in groups
@@ -674,24 +692,46 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     return "\n".join(lines)
 
 
+_CO_SUFFIXES = frozenset({"inc", "incorporated", "llc", "llp", "ltd", "limited", "corp", "corporation", "co", "company",
+                          "technologies", "technology", "plc", "gmbh", "sa", "ag", "bv", "pty", "holdings", "group"})
+
+
+def company_key(name: str | None) -> str:
+    """A company name for matching: lowercase, no punctuation, no trailing Inc, LLC, Ltd, Corp, Co or
+    Technologies ('Plaid, Inc.' and 'plaid' are both 'plaid'). Never strips a name down to nothing."""
+    words = re.sub(r"[^\w\s]|_", " ", (name or "").lower()).split()
+    while len(words) > 1 and words[-1] in _CO_SUFFIXES:
+        words.pop()
+    return " ".join(words)
+
+
 def match_companies(names: list[str | None], query: str | None) -> set[str]:
-    """The lowercased company names a status_digest company filter means: the exact name (any case), else
-    every name starting with it ('lumen' for Lumen Health), else the closest spelling ('Acme Fintek')."""
-    q = re.sub(r"\s+", " ", (query or "").strip().lower())
-    known = sorted({n.strip().lower() for n in names if n and n.strip()})
+    """The lowercased company names a status_digest company filter means. Case, punctuation and suffixes like
+    Inc or LLC don't count. The same name, else every name starting with it ('lumen' for Lumen Health), else
+    the closest spelling ('Acme Fintek')."""
+    q = company_key(query)
+    by_key: dict[str, set[str]] = {}
+    for n in names:
+        if n and n.strip():
+            by_key.setdefault(company_key(n), set()).add(n.strip().lower())
     if not q:
         return set()
-    if q in known:
-        return {q}
-    starts = {n for n in known if n.startswith(q)} or {n for n in known if any(w.startswith(q) for w in n.split())}
+
+    def names_of(keys: Any) -> set[str]:
+        return {n for k in keys for n in by_key[k]}
+
+    if q in by_key:
+        return names_of([q])
+    starts = ([k for k in by_key if k.startswith(q)]
+              or [k for k in by_key if any(w.startswith(q) for w in k.split())])
     if starts:
-        return starts
-    close = difflib.get_close_matches(q, known, n=1, cutoff=0.75)
+        return names_of(starts)
+    close = difflib.get_close_matches(q, list(by_key), n=1, cutoff=0.75)
     if close:
-        return set(close)
-    firsts = {n.split()[0]: n for n in known}
+        return names_of(close)
+    firsts = {k.split()[0]: k for k in sorted(by_key)}
     close = difflib.get_close_matches(q, list(firsts), n=1, cutoff=0.75)
-    return {firsts[close[0]]} if close else set()
+    return names_of([firsts[close[0]]]) if close else set()
 
 
 def _company_names(store: Store) -> list[str | None]:
@@ -706,11 +746,11 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
     rows: dict[str, dict[str, Any]] = {}
     for j in store.list_jobs("open"):
         co = j.get("company") or ""
-        if wanted is not None and co.lower() not in wanted:
+        if wanted is not None and co.strip().lower() not in wanted:
             continue
         nums = job_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
-        r = rows.setdefault(co.lower(), {"company": co or None, "jobs": [], "active": 0, "hired": 0, "openings": 0,
-                                         "filled": 0})
+        r = rows.setdefault(company_key(co), {"company": co or None, "jobs": [], "active": 0, "hired": 0,
+                                              "openings": 0, "filled": 0})
         r["jobs"].append(j)
         r["active"] += nums["active"]
         r["hired"] += nums["hired"]
@@ -726,7 +766,7 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
 def held_jobs(store: Store, company: str | None = None) -> list[dict[str, Any]]:
     """On-hold jobs, for one company (matched as in match_companies) or all."""
     wanted = match_companies(_company_names(store), company) if company is not None else None
-    return [j for j in store.list_jobs("on_hold") if wanted is None or (j.get("company") or "").lower() in wanted]
+    return [j for j in store.list_jobs("on_hold") if wanted is None or (j.get("company") or "").strip().lower() in wanted]
 
 
 def status_digest(store: Store, company: str | None = None, now: datetime | None = None, *,
@@ -739,7 +779,8 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
     groups = company_rollup(store, company, omit_stages)
     held = held_jobs(store, company)
     if not groups and not held:
-        return f"No open jobs{' for ' + company.strip() if company and company.strip() else ''}."
+        named = (company or "").strip().rstrip(".")
+        return f"No open jobs{' for ' + named if named else ''}."
     found = sorted({g["company"] for g in groups if g["company"]} | {j["company"] for j in held if j.get("company")},
                    key=str.lower)
     who = " and ".join(found) if company and company.strip() and found else "all open jobs"
@@ -861,21 +902,123 @@ def close_out_plan(store: Store, job_id: int) -> dict[str, Any] | None:
             "names": _capped([a["candidate_name"] for a in people]), "closed": job["status"] == "closed"}
 
 
-def close_out(store: Store, job_id: int, by: str = "app") -> dict[str, Any]:
-    """Move everyone still in play to Rejected (Position filled) and cancel their upcoming interviews.
-    The app asks first; the AI never runs this (close_out_hint tells it to ask the recruiter)."""
+CLOSE_OUT_PREFIX = "close_out:"  # settings key of one web close-out, so Changes can undo it as one
+
+
+def close_out(store: Store, job_id: int, by: str = "app", close_job: bool = False) -> dict[str, Any]:
+    """Move everyone still in play to Rejected (Position filled) and cancel their upcoming interviews, and with
+    close_job also close the job. The app asks first; the AI never runs this (close_out_hint tells it to ask
+    the recruiter). The whole close-out is recorded as one batch (a setting), so undo_close_out puts it back."""
+    import json
+
+    job = store.get_job(job_id)
     stage = out_stage_name(store, job_id)
     if not any(s["outcome"] == "lost" for s in store.job_stages(job_id)):
         store.add_stage(job_id, stage, outcome="lost")
-    moved = cancelled = 0
+    moves: list[dict[str, Any]] = []
+    interviews: list[int] = []
     for a in in_play(store, job_id):
         ivs = upcoming_for(store, a["candidate_id"], job_id)
         store.move_stage(a["candidate_id"], job_id, stage, notes=CLOSE_REASON, by=by)
+        entry = store._row("SELECT id FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage'"
+                           " ORDER BY id DESC LIMIT 1", (a["candidate_id"], job_id))
+        moves.append({"candidate_id": a["candidate_id"], "from": a["stage"], "notes": a.get("notes"),
+                      "timeline_id": entry["id"] if entry else None})
         for iv in ivs:
             store.update_interview(iv["id"], cancel=True, by=by)
-        moved += 1
-        cancelled += len(ivs)
-    return {"moved": moved, "cancelled": cancelled, "stage": stage}
+            interviews.append(iv["id"])
+    closed = close_job and job["status"] != "closed"
+    if closed:
+        store.update_job(job_id, status="closed", by=by)
+    batch_id = None
+    if moves or closed:
+        rows = store._rows(f"SELECT key FROM settings WHERE key LIKE '{CLOSE_OUT_PREFIX}%'")
+        batch_id = 1 + max((int(r["key"][len(CLOSE_OUT_PREFIX):]) for r in rows
+                            if r["key"][len(CLOSE_OUT_PREFIX):].isdigit()), default=0)
+        _put_setting(store, f"{CLOSE_OUT_PREFIX}{batch_id}", json.dumps({
+            "job_id": job_id, "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "stage": stage,
+            "moves": moves, "interviews": interviews, "closed_job": closed, "old_status": job["status"]}))
+    return {"moved": len(moves), "cancelled": len(interviews), "stage": stage, "closed_job": closed,
+            "batch_id": batch_id}
+
+
+def close_out_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]:
+    """Web close-outs, newest first, each with a Changes line ('Closed out Backend (Acme): moved 3 people to
+    Rejected'), whether it can still be undone, and its id. Ones whose job is gone are left out."""
+    import json
+
+    out = []
+    for r in store._rows(f"SELECT key, value FROM settings WHERE key LIKE '{CLOSE_OUT_PREFIX}%'"):
+        bid = r["key"][len(CLOSE_OUT_PREFIX):]
+        try:
+            b = json.loads(r["value"])
+        except ValueError:
+            continue
+        if not bid.isdigit() or not isinstance(b, dict) or (since and (b.get("at") or "") < since):
+            continue
+        job = store._row("SELECT title, company FROM jobs WHERE id = ?", (b.get("job_id"),))
+        if not job:
+            continue
+        n, m = len(b.get("moves") or []), len(b.get("interviews") or [])
+        did = [f"moved {n} {'person' if n == 1 else 'people'} to {b.get('stage')}",
+               *([f"cancelled {m} interview{'' if m == 1 else 's'}"] if m else []),
+               *(["closed the job"] if b.get("closed_job") else [])]
+        text = f"Closed out {_job_name(job)}: " + (
+            ", ".join(did[:-1]) + " and " + did[-1] if len(did) > 1 else did[0])
+        out.append({**b, "id": int(bid), "job_title": job["title"], "job_company": job["company"], "text": text,
+                    "undoable": not b.get("undone_at")})
+    return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)
+
+
+def undo_close_out(store: Store, batch_id: int, by: str = "app") -> str:
+    """Put a web close-out back: everyone it moved goes back to the stage they were in (unless they were moved
+    again since), their cancelled interviews are scheduled again, and a job it closed is reopened.
+    Returns the notice. Raises NotFound or ValueError (already undone)."""
+    import json
+
+    key = f"{CLOSE_OUT_PREFIX}{batch_id}"
+    raw = store.setting(key)
+    if not raw:
+        raise NotFound("That close-out is gone. Reload the page.")
+    b = json.loads(raw)
+    if b.get("undone_at"):
+        raise ValueError("That close-out was already undone.")
+    back = stayed = restored = 0
+    for m in b.get("moves") or []:
+        try:
+            if not m.get("timeline_id"):
+                raise ValueError("no entry")
+            store.undo_change(m["timeline_id"], by=by)
+        except (ValueError, NotFound):
+            stayed += 1
+            continue
+        back += 1
+        with store._lock, store._conn:  # the close-out's reason goes with it, so a later move isn't "position filled"
+            store._conn.execute("UPDATE applications SET notes = ? WHERE candidate_id = ? AND job_id = ? AND notes = ?",
+                                (m.get("notes"), m["candidate_id"], b["job_id"], CLOSE_REASON))
+    for iv in b.get("interviews") or []:
+        try:
+            if store.get_interview(iv)["data"].get("status") == "cancelled":
+                store.update_interview(iv, restore=True, by=by)
+                restored += 1
+        except (ValueError, NotFound):
+            continue
+    reopened = False
+    job = store._row("SELECT status FROM jobs WHERE id = ?", (b["job_id"],))
+    if b.get("closed_job") and job and job["status"] == "closed":
+        store.update_job(b["job_id"], status=b.get("old_status") or "open", by=by)
+        reopened = True
+    b["undone_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    _put_setting(store, key, json.dumps(b))
+    notice = f"Undid the close-out. Moved {back} {'person' if back == 1 else 'people'} back to the stage they were in"
+    if restored:
+        notice += f" and put back {restored} interview{'' if restored == 1 else 's'}"
+    notice += "."
+    if reopened:
+        notice += " The job is open again."
+    if stayed:
+        notice += f" {stayed} {'person was' if stayed == 1 else 'people were'} moved again since, so they stay put."
+    return notice
 
 
 def close_out_hint(store: Store, job_id: int) -> dict[str, Any]:
@@ -917,7 +1060,7 @@ def reasons(store: Store) -> list[tuple[str, str]]:
             (passed, "client passed|hiring team passed|rejected by client|client rejected"), ("Other", "other")]
 
 
-__all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "close_out", "close_out_hint",
-           "close_out_plan", "company_rollup", "complete_followup", "due_text", "exit_interviews", "headline",
+__all__ = ["FLAGS", "THRESHOLDS", "NotFound", "action_items", "add_followup", "close_out", "close_out_batches",
+           "close_out_hint", "close_out_plan", "company_key", "undo_close_out", "company_rollup", "complete_followup", "due_text", "exit_interviews", "headline",
            "job_label", "job_numbers", "job_status_text", "local_time", "match_companies", "next_interviews",
            "parse_day", "recent_changes", "schedule_followup", "status_digest", "twin_hints", "with_out_stages"]

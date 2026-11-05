@@ -35,7 +35,7 @@
     <span class="when" title="{{ r.at | local }}">{{ r.at | local('%b %-d, %Y, %-I:%M %p') }}</span>
     <span class="muted">· {{ who_options[r.who] }}</span>
     <div>{{ r.text }}</div>
-    {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"><button class="btn small" type="submit">Undo</button></form>
+    {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
     {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>{% endif %}
   </li>
   {% endfor %}

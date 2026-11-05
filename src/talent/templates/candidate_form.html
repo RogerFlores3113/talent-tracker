@@ -25,12 +25,13 @@
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if same_name %}<section class="panel" id="same-name" role="alert">
   <h2>Already saved?</h2>
-  <p>{{ same_name | length }} saved candidate{{ '' if same_name | length == 1 else 's' }} {{ 'has' if same_name | length == 1 else 'have' }} a name like {{ c.name }}. Nothing is saved yet.</p>
+  <p>{{ same_name | length }} saved candidate{{ '' if same_name | length == 1 else 's' }} {{ 'has' if same_name | length == 1 else 'have' }} {{ 'the same name as' if same_exact else 'a similar name to' }} {{ c.name }}. Nothing is saved yet.</p>
   <ul class="items">
     {% for d in same_name %}<li><a href="/candidates/{{ d.id }}">Open {{ d.name }}</a>
       <span class="muted">{{ [d.current_title, d.current_company] | select | join(' at ') }}{{ ' · ' ~ d.location if d.location }}{{ ' · ' ~ d.email if d.email }}</span>
-      {% if job_id %}{% if d.id in in_job %}<span class="fine">Already in this job</span>{% else %}<form method="post" action="/jobs/{{ job_id }}/add" class="inline"><input type="hidden" name="candidate_id" value="{{ d.id }}"><button class="btn small" type="submit">Add them to this job</button></form>{% endif %}{% endif %}</li>{% endfor %}
+      {% if job_id %}{% if d.id in in_job %}<span class="fine">Already in this job</span>{% else %}<form method="post" action="/jobs/{{ job_id }}/add" class="inline"><input type="hidden" name="candidate_id" value="{{ d.id }}">{% for f in fill_fields if c[f] and not d[f] %}<input type="hidden" name="fill_{{ f }}" value="{{ c[f] }}">{% endfor %}<button class="btn small" type="submit">Add them to this job</button></form>{% endif %}{% endif %}</li>{% endfor %}
   </ul>
+  {% if job_id %}<p class="fine">Add them to this job also fills in their empty details from what you typed. Nothing they have is replaced.</p>{% endif %}
   <p class="fine">Someone new with the same name? Use Create anyway below.</p>
 </section>{% endif %}
 <form class="form" method="post" action="{{ '/candidates/' ~ c.id if c.id else '/candidates' }}">

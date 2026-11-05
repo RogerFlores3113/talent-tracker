@@ -71,9 +71,9 @@ def test_names_capped_and_hired_wording_and_header(store):
     assert out.splitlines()[0] == "Backend Engineer, Acme · San Francisco (hybrid)"
     line = next(x for x in out.splitlines() if x.startswith("Screening (15): "))
     assert line.endswith(", and 5 more") and line.count("Person") == 10
-    assert "15 candidates in process, 2 hired, 1 opening. The role is filled." in out
+    assert "15 candidates in process, 2 hired, 1 of 1 opening filled." in out and "role is filled" not in out
     assert "2 of 1" not in out
-    assert "opening filled" not in actions.status_digest(store, "acme")  # one company, one job: no roll-up line
+    assert "1 open job," not in actions.status_digest(store, "acme")  # one company, one job: no roll-up line
     store.add_job("Second", company="Acme", openings=2)
     assert "2 open jobs, 15 in process, 1 of 3 openings filled." in actions.status_digest(store, "acme")
 

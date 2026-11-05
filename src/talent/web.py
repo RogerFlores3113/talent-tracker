@@ -29,9 +29,9 @@ from starlette.background import BackgroundTask
 from . import __version__, actions, backups, importers, integrations, paths, recipes
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
-from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS,
+from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    HL_END, HL_START, Store, _labels, dropped_text, snippet_html, split_tags, to_dt)
+                    HL_END, HL_START, Store, _labels, dropped_text, fold_name, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -454,8 +454,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if same_name:
                 in_job = ({p["candidate_id"] for p in store.pipeline(int(job_id))}
                           if job_id.isdigit() and store._row("SELECT id FROM jobs WHERE id = ?", (int(job_id),)) else set())
+                same_exact = all(fold_name(d["name"]) == fold_name(str(data["name"])) for d in same_name)
                 return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
-                            error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job)
+                            error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job,
+                            same_exact=same_exact, fill_fields=FILL_FIELDS)
         try:
             cand, created = store.upsert_candidate(work_history=history or None, **data)
             if job_id.isdigit():
@@ -921,17 +923,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
     @app.post("/jobs/{job_id}/close-out")
-    def close_out_form(job_id: int):
-        """Move everyone still in play to Rejected (Position filled) and cancel their upcoming interviews."""
+    async def close_out_form(request: Request, job_id: int):
+        """Move everyone still in play to Rejected (Position filled), cancel their upcoming interviews and,
+        when "Also close the job" is ticked, close it. Changes lists it as one change with its own undo."""
         job_or_404(job_id)
+        form = await request.form()
         try:
-            done = actions.close_out(store, job_id, by="app")
+            done = actions.close_out(store, job_id, by="app", close_job=str(form.get("close_job") or "") == "1")
         except ValueError as exc:
             return RedirectResponse(f"/jobs/{job_id}?{urlencode({'flash_error': str(exc)})}", status_code=303)
         n, m = done["moved"], done["cancelled"]
         notice = (f"Moved {n} {'person' if n == 1 else 'people'} to {done['stage']} (Position filled)"
                   + (f" and cancelled {m} upcoming interview{'' if m == 1 else 's'}." if m else ".")
-                  + " Each move can be undone from the person's timeline.")
+                  + (" The job is closed." if done["closed_job"] else "")
+                  + " You can undo this close-out from Changes.")
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/jobs/{job_id}/cancel-interviews")
@@ -1034,9 +1039,30 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         job_or_404(job_id)
         form = await request.form()
         cid = str(form.get("candidate_id") or "")
-        if cid.isdigit():
-            store.add_to_pipeline(int(cid), job_id)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+        if not cid.isdigit():
+            return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+        cand = cand_or_404(int(cid))
+        store.add_to_pipeline(cand["id"], job_id)
+        # From the same-name box on Add: fill the details they have empty with what was typed. Never replace one.
+        fill = {f: str(form.get("fill_" + f)).strip() for f in FILL_FIELDS
+                if str(form.get("fill_" + f) or "").strip() and not (cand.get(f) or "").strip()}
+        skipped = []
+        while fill:
+            try:
+                store.update_candidate(cand["id"], by="app", **fill)
+                break
+            except DuplicateValue as exc:
+                skipped.append(exc.label)
+                fill.pop(exc.field, None)
+            except ValueError:
+                fill = {}
+        notice = f"Added {cand['name']} to this job"
+        if fill:
+            notice += " and filled in their " + _and([FIELD_LABELS.get(f, f).lower() for f in fill])
+        notice += "."
+        if skipped:
+            notice += f" Didn't fill the {_and(skipped)}: another saved candidate has it."
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
 
     # ------------------------------------------------------- dashboard acts
     @app.post("/actions/snooze")
@@ -1127,6 +1153,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "text": "; ".join(lines) if lines else a["summary"], "undoable": a["undoable"],
                              "undone": bool(a["undone_at"]), "note": a.get("undo_note"),
                              "undo_url": f"/changes/ai/{a['id']}/undo"})
+        if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
+            for b in actions.close_out_batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
 
@@ -1168,6 +1199,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         notice = f"Undid the change to {cand['name']}'s {_labels(cand['_restored'])}."
         if cand["_skipped"]:
             notice += " Couldn't put back the " + " or the ".join(cand["_skipped"]) + "."
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/changes/close-out/{batch_id}/undo")
+    def undo_close_out(request: Request, batch_id: int):
+        try:
+            notice = actions.undo_close_out(store, batch_id, by="app")
+        except NotFound:
+            return back(request, "/changes", error="That close-out is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
         return back(request, "/changes", notice=notice)
 
     @app.post("/changes/ai/{action_id}/undo")
@@ -1436,6 +1477,13 @@ def _json_or_none(text: str | None) -> Any:
         return json.loads(text) if text else None
     except ValueError:
         return None
+
+
+FILL_FIELDS = ("email", "phone", "current_company", "current_title", "location")  # same-name "Add them" fills these
+
+
+def _and(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:
