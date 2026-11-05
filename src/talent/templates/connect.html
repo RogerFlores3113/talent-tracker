@@ -12,7 +12,7 @@
   <section class="panel">
     <h2>{{ name }}</h2>
     <p>{% if on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
-    <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result">{{ 'Reconnect' if on else 'Connect' }} {{ name.split(' ')[0] }}</button>
+    <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result">{{ 'Reconnect' if on else 'Connect' }} {{ name }}</button>
     <div id="{{ key }}-result" aria-live="polite"></div>
   </section>
   {% endfor %}

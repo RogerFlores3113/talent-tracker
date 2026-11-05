@@ -2,18 +2,17 @@
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from fastapi.testclient import TestClient
 
 from talent import actions
 from talent.sample_data import load_sample_data, remove_sample_data, sample_ids
 from talent.store import NotFound
-from talent.web import create_app
+from conftest import local_client
 
 ORIGIN = {"origin": "http://127.0.0.1:8765"}
 
 
 def client(store):
-    return TestClient(create_app(store), headers=ORIGIN)
+    return local_client(store)
 
 
 def _soon(days=2):

@@ -6,12 +6,11 @@ from pathlib import Path
 
 import anyio
 import pytest
-from fastapi.testclient import TestClient
 
 from talent import importers, store as store_mod
 from talent.mcp_server import INSTRUCTIONS, build_server
 from talent.store import Store
-from talent.web import create_app
+from conftest import local_client
 
 from test_mcp import call, structured, text
 
@@ -132,7 +131,7 @@ def test_web_undo_route(store):
     c = store.add_candidate(name="Lou", location="Reno")
     store.update_candidate(c["id"], location="Oslo", by="ai")
     entry = changes(store, c["id"])[0]
-    client = TestClient(create_app(store))
+    client = local_client(store)
     page = client.get(f"/candidates/{c['id']}").text
     assert f"/candidates/{c['id']}/undo/{entry['id']}" in page and "Undo" in page
     r = client.post(f"/candidates/{c['id']}/undo/{entry['id']}", headers=LOCAL, follow_redirects=False)
@@ -146,7 +145,7 @@ def test_web_undo_route(store):
 
 def test_web_edit_is_recorded_as_app(store):
     c = store.add_candidate(name="Mo", location="Reno")
-    TestClient(create_app(store)).post(f"/candidates/{c['id']}", headers=LOCAL,
+    local_client(store).post(f"/candidates/{c['id']}", headers=LOCAL,
                                        data={"name": "Mo", "location": "Oslo"})
     entry = changes(store, c["id"])[0]
     assert entry["data"]["by"] == "app" and entry["body"] == "Updated location"

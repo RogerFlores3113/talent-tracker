@@ -140,4 +140,6 @@ def main(argv: list[str] | None = None) -> None:
         fn = {"connect-claude": integrations.connect_claude, "connect-codex": integrations.connect_codex,
               "connect-lmstudio": integrations.connect_lmstudio}[cmd]
         result = fn()
-        print(f"Updated {result['path']}. Restart the app to load Talent Search.")
+        if not result.get("installed", True):
+            sys.exit(result["message"])
+        print(f"Updated {result['path']}. {result.get('next_step') or 'Restart the app to load Talent Search.'}")

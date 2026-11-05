@@ -7,6 +7,7 @@ prompts the AI app can list on its own.
 from __future__ import annotations
 
 import platform
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -140,7 +141,24 @@ def claude_link(prompt: str) -> str:
 
 # ----------------------------------------------------------- problem reports
 def environment_line() -> str:
-    return f"Talent Search {__version__} · {platform.system()} {platform.release()} · Python {sys.version.split()[0]}"
+    """App version, OS name and Python version. No kernel release or machine name."""
+    return f"Talent Search {__version__} · {platform.system() or 'Unknown OS'} · Python {sys.version.split()[0]}"
+
+
+_PRIVATE = (
+    (re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+"), "[email removed]"),
+    (re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|dev|co|ai|app|me|in)(?:/\S*)?\b",
+                re.I), "[link removed]"),
+    # Phone-like digit runs, but not dates such as 2026-11-05.
+    (re.compile(r"(?<![\w.])(?!\d{4}-\d{2}-\d{2})\+?\(?\d[\d\s().-]{7,}\d(?![\w.])"), "[phone removed]"),
+)
+
+
+def _scrub(text: str) -> str:
+    """Take out anything that looks like an email, phone number or link before it goes in a public issue."""
+    for pattern, label in _PRIVATE:
+        text = pattern.sub(label, text)
+    return text
 
 
 def issue_url(summary: str, details: str = "", where: str = "app") -> str:
@@ -148,7 +166,8 @@ def issue_url(summary: str, details: str = "", where: str = "app") -> str:
 
     Never put candidate data in here.
     """
-    title = (summary or "Problem report").strip()[:120]
+    title = _scrub((summary or "Problem report").strip())[:120]
+    details = _scrub(details or "")
     body = (
         f"**What happened**\n{details.strip() or title}\n\n"
         f"**Where**\n{where}\n\n"

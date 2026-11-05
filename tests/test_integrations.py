@@ -11,6 +11,7 @@ SPEC = LaunchSpec(r"C:\Program Files\Talent Search\talent-search-mcp.exe", ["mcp
 
 def test_claude_creates_file(tmp_path):
     p = tmp_path / "Claude" / "claude_desktop_config.json"
+    p.parent.mkdir()  # Claude Desktop is installed: its settings folder exists
     res = integrations.connect_claude(p, SPEC)
     cfg = json.loads(p.read_text())
     assert cfg["mcpServers"]["talent-search"]["command"].endswith("talent-search-mcp.exe")

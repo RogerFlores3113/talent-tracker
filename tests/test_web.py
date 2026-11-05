@@ -1,10 +1,8 @@
-from fastapi.testclient import TestClient
-
-from talent.web import create_app
+from conftest import local_client
 
 
 def client(store):
-    return TestClient(create_app(store))
+    return local_client(store)
 
 
 def test_empty_state_then_sample_data(store):
@@ -70,13 +68,14 @@ def test_blocks_foreign_host_and_cross_site_posts(store):
 def test_connect_page_and_button(store, tmp_path, monkeypatch):
     monkeypatch.setattr("talent.integrations.claude_config_path", lambda: tmp_path / "claude.json")
     monkeypatch.setattr("talent.integrations.codex_config_path", lambda: tmp_path / "codex" / "config.toml")
+    (tmp_path / "codex").mkdir()
     c = client(store)
-    assert "Connect Claude" in c.get("/connect").text
+    assert "Connect Claude Desktop" in c.get("/connect").text
     r = c.post("/connect/claude")
-    assert "Quit and reopen Claude" in r.text
+    assert "Restart Claude Desktop, then click + and Connectors" in r.text
     assert (tmp_path / "claude.json").exists()
     assert "Connected." in c.get("/connect").text
-    assert "Quit and reopen Codex" in c.post("/connect/codex").text
+    assert "Restart Codex" in c.post("/connect/codex").text
     assert c.post("/connect/nope").status_code == 404
 
 

@@ -311,22 +311,85 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+_FULL_MONTHS = ("january", "february", "march", "april", "may", "june", "july", "august", "september",
+                "october", "november", "december", "sept")
+_TIME = r"(?:[ T,]+(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?)?"
+_DATE_FORMS = (
+    # 11/5/2026, 11/5/26, 5.11.2026 (day first only when the first number can't be a month)
+    re.compile(r"(?P<a>\d{1,2})[/.-](?P<b>\d{1,2})[/.-](?P<y>\d{4}|\d{2})" + _TIME + r"$", re.I),
+    # 2026/11/05
+    re.compile(r"(?P<y>\d{4})[/.](?P<m>\d{1,2})[/.](?P<d>\d{1,2})" + _TIME + r"$", re.I),
+    # Mar 3, 2026 / March 3rd 2026
+    re.compile(r"(?P<mon>[a-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
+    # 3 Mar 2026 / 3 March, 2026
+    re.compile(r"(?P<d>\d{1,2})(?:st|nd|rd|th)?\s+(?P<mon>[a-z]{3,9})\.?,?\s+(?P<y>\d{4})" + _TIME + r"$", re.I),
+)
+
+
+def _parse_loose(s: str) -> datetime | None:
+    """The date shapes people type in spreadsheets. None if it isn't one of them."""
+    low = s.lower()
+    if low in ("today", "now", "yesterday"):
+        today = datetime.now().astimezone()
+        if low == "now":
+            return today
+        day = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        return day - timedelta(days=1) if low == "yesterday" else day
+    for form in _DATE_FORMS:
+        m = form.match(s)
+        if not m:
+            continue
+        g = m.groupdict()
+        year = int(g["y"])
+        if year < 100:
+            year += 2000 if year < 70 else 1900
+        if g.get("mon"):
+            month = _MONTHS.get(g["mon"][:3].lower())
+            if month is None or (len(g["mon"]) > 3 and not any(
+                    full.startswith(g["mon"].lower()) for full in _FULL_MONTHS)):
+                return None
+            day = int(g["d"])
+        elif g.get("a"):
+            a, b = int(g["a"]), int(g["b"])
+            month, day = (b, a) if a > 12 >= b else (a, b)  # US order unless that can't be right
+        else:
+            month, day = int(g["m"]), int(g["d"])
+        hour, minute, sec = int(g["h"] or 0), int(g["mi"] or 0), int(g["s"] or 0)
+        if g.get("ap"):
+            if not 1 <= hour <= 12:
+                return None
+            hour = hour % 12 + (12 if g["ap"].lower().startswith("p") else 0)
+        try:
+            return datetime(year, month, day, hour, minute, sec)
+        except ValueError:
+            return None
+    return None
+
+
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
-    """Accept '2026-11-05', '2026-11-05 14:30', ISO with offset, or a datetime. Returns UTC ISO.
+    """Accept '2026-11-05', '2026-11-05 14:30', ISO with offset, '11/5/2026', '11/5/26',
+    '2026/11/05', 'Nov 5, 2026', '5 Nov 2026', 'today', 'yesterday', or a datetime. Returns UTC ISO.
 
     A time with no zone is taken as this computer's local time, which is what
-    a recruiter means when they type one.
+    a recruiter means when they type one. Slash dates read month first (US),
+    unless the first number can't be a month.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return now_iso() if default_now else None
     if isinstance(value, datetime):
         dt = value
     else:
-        s = value.strip().replace("Z", "+00:00")
+        s = re.sub(r"\s+", " ", value.strip())
         try:
-            dt = datetime.fromisoformat(s)
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
-            raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-05 or 2026-11-05 14:30.")
+            loose = _parse_loose(s)
+            if loose is None:
+                raise ValueError(f"Couldn't read the date {value!r}. Use a form like 2026-11-05, 11/5/2026 "
+                                 "or Nov 5, 2026.") from None
+            dt = loose
     if dt.tzinfo is None:
         dt = dt.astimezone()  # local time
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()

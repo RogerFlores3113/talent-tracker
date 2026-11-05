@@ -4,7 +4,7 @@
 <h1>Import candidates from a CSV</h1>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if step == 'upload' %}
-<p class="lead">Save your spreadsheet as CSV (in Excel: File, Save As, CSV). People who are already here, matched by email or LinkedIn, get updated instead of duplicated.</p>
+<p class="lead">Save your spreadsheet as CSV (in Excel: File, Save As, CSV). People who are already here, matched by email or LinkedIn, get updated instead of duplicated. We back up everything first. Files up to 10 MB.</p>
 <form method="post" action="/import" enctype="multipart/form-data" class="stack">
   <input type="file" name="file" accept=".csv,text/csv" required aria-label="CSV file">
   <div><button class="btn primary" type="submit">Next: match the columns</button></div>
@@ -20,7 +20,7 @@
       <tr>
         <td><strong>{{ h or '(no header)' }}</strong></td>
         <td><select name="col{{ i }}" aria-label="Field for {{ h }}">
-          {% for t in targets %}<option value="{{ t }}" {{ 'selected' if mapping[i] == t }}>{{ {'':'Skip this column','name':'Full name','first_name':'First name','last_name':'Last name','email':'Email','phone':'Phone','linkedin_url':'LinkedIn URL','website':'Website','current_title':'Title','current_company':'Company','location':'Location','about':'About / notes','tags':'Skills','source':'Source','last_contacted_at':'Last contacted'}.get(t, t) }}</option>{% endfor %}
+          {% for t in targets %}<option value="{{ t }}" {{ 'selected' if mapping[i] == t }}>{{ {'':'Skip this column','name':'Full name','first_name':'First name','last_name':'Last name','email':'Email','phone':'Phone','linkedin_url':'LinkedIn URL','website':'Website','current_title':'Title','current_company':'Company','location':'Location','about':'About','note':'Note on their timeline','tags':'Skills','source':'Source','last_contacted_at':'Last contacted'}.get(t, t) }}</option>{% endfor %}
         </select></td>
         <td class="fine">{% for r in rows[:3] %}{{ r[i][:40] }}{{ ', ' if not loop.last and r[i] }}{% endfor %}</td>
       </tr>
@@ -32,8 +32,10 @@
   <div><button class="btn primary" type="submit">Import {{ total }} row{{ '' if total == 1 else 's' }}</button> <a class="btn" href="/import">Start over</a></div>
 </form>
 {% else %}
-<p class="flash">Added {{ result.added }}, updated {{ result.updated }}{% if result.skipped %}, skipped {{ result.skipped | length }}{% endif %}.</p>
-{% if result.skipped %}<details class="panel"><summary>Skipped rows</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
+<p class="flash">Added {{ result.added }}, updated {{ result.updated }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
+{% if result.backup %}<p class="fine">We backed up everything from before this import first. To undo it, that backup is here:</p>
+<pre class="code">{{ result.backup }}</pre>{% endif %}
+{% if result.skipped %}<details class="panel"><summary>Skipped rows and cells ({{ result.skipped | length }})</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 <p class="actions-inline"><a class="btn primary" href="/candidates">See candidates</a> <a class="btn" href="/import">Import another</a></p>
 {% endif %}
 {% endblock %}
