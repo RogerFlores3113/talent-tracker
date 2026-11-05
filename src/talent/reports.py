@@ -705,9 +705,11 @@ def submittal_note(store: Store, candidate_id: int, job_id: int, now: datetime |
     if earlier:
         titles = {j["id"]: j["title"] for j in _all_jobs(store)[key]}
         last = earlier[-1]
-        when = in_zone(last["at"], None, "%b %-d, %Y")
+        # An undated import's entry carries the import day, not the day they were submitted.
+        imported = last.get("imported") or _data(last.get("data")).get("imported")
+        when = "(imported, date unknown)" if imported else "on " + in_zone(last["at"], None, "%b %-d, %Y")
         more = f" ({_plural(len(earlier), 'earlier submittal')} in the last 12 months)" if len(earlier) > 1 else ""
-        note["warning"] = (f"Heads up: {name} was already submitted to {note['client']} on {when}, for "
+        note["warning"] = (f"Heads up: {name} was already submitted to {note['client']} {when}, for "
                            f"{titles[last['job_id']]}{more}. Check before you send them again.")
     return note
 

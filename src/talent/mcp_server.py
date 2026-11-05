@@ -971,18 +971,40 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _said(sentence, out)
 
     # -------------------------------------------------------------- pipeline
+    def _note_submittal(out: dict[str, Any], candidate_id: int, job_id: int, before: str | None) -> None:
+        """After an add or a move into a Submitted or Presented stage: name the client, and warn when the person
+        was submitted to them in the last 12 months."""
+        sub = reports.submittal_note(store, candidate_id, job_id)
+        if sub and sub["stage"] != before:
+            out["submitted_to"] = sub["client"]
+            if sub["warning"]:
+                out["submitted_before"] = sub["earlier"]
+                out["warning"] = " ".join(w for w in (out.get("warning"), sub["warning"]) if w)
+
     @mcp.tool(annotations=WRITE)
     def add_to_pipeline(candidate_id: int, job_id: int, stage: str | None = None,
                         notes: str | None = None) -> CallToolResult:
         """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there).
         A stage can be given by the start of its name ("tech" for "Technical interview").
-        `notes` (or `note`; notes is preferred) is logged on their timeline."""
+        `notes` (or `note`; notes is preferred) is logged on their timeline. Only a stage still in play works (not
+        one that counts as hired or out): ask the recruiter before anyone goes further."""
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
+        if not already:
+            s = store.resolve_stage(job_id, stage)
+            if s["outcome"] != "open":
+                in_play = [x["name"] for x in store.job_stages(job_id) if x["outcome"] == "open"]
+                raise ValueError(
+                    f"Nothing saved. {s['name']} counts as {'hired' if s['outcome'] == 'hired' else 'out'} on "
+                    f"{_job_name(store.get_job(job_id))}, and add_to_pipeline can only add people to a stage still in "
+                    f"play: {', '.join(in_play) or 'none'}. Add them there (or leave out stage), and ask the recruiter "
+                    "before anyone moves further.")
         out = _slim(store.add_to_pipeline(candidate_id, job_id, stage, notes, by="ai"))
         if not already:
             store.mark_ai_stage(candidate_id, job_id, None)  # so the recruiter can undo it
         if already:
             out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
+        else:
+            _note_submittal(out, candidate_id, job_id, None)
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         sentence = (f"{quoted(name)} is already in {_job_name(job)}, in {out['stage']}." if already
@@ -1001,12 +1023,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             store.mark_ai_stage(candidate_id, job_id, before)  # so the recruiter can undo it
         out.update({k: v for k, v in actions.exit_interviews(store, candidate_id, job_id).items()
                     if k in ("upcoming_interviews", "warning")})
-        sub = reports.submittal_note(store, candidate_id, job_id)
-        if sub and sub["stage"] != before:  # a submittal: warn when they went to this client in the last 12 months
-            out["submitted_to"] = sub["client"]
-            if sub["warning"]:
-                out["submitted_before"] = sub["earlier"]
-                out["warning"] = " ".join(w for w in (out.get("warning"), sub["warning"]) if w)
+        _note_submittal(out, candidate_id, job_id, before)
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         if not was_filled and job["status"] == "open" and actions.job_numbers(store, job_id)["filled"]:
