@@ -49,7 +49,8 @@
         <ul class="timeline changes">{% for a in g['items'][:50] %}<li>{{ a.summary }}{% if a.undone_at %} <span class="fine">Undone</span>{% elif a.confirmed_at %} <span class="fine">You kept it</span>{% elif a.blocked %} <span class="fine">Can't undo: {{ a.blocked }}</span>{% endif %}</li>{% endfor %}</ul>
         {% if g['items'] | length > 50 %}<p class="fine">And {{ g['items'] | length - 50 }} more.</p>{% endif %}
       </details>{% endif %}
-      {% if g.can_roll_back %}<form method="post" action="/changes/session/roll-back" class="inline" data-confirm="Roll back this AI session? {{ g.undoable }} change{{ '' if g.undoable == 1 else 's' }} {{ 'is' if g.undoable == 1 else 'are' }} undone, newest first{% if g.waiting %}, and {{ g.waiting }} waiting on Review {{ 'is' if g.waiting == 1 else 'are' }} passed{% endif %}. Changes you kept stay. A backup is saved first.">
+      {% if g.can_roll_back and g.later %}<div class="fine">{{ g.later | join('; ') }}. Roll back leaves {{ 'that move' if g.later | length == 1 else 'those moves' }} as {{ 'it is' if g.later | length == 1 else 'they are' }}.</div>{% endif %}
+      {% if g.can_roll_back %}<form method="post" action="/changes/session/roll-back" class="inline" data-confirm="{{ g.confirm }}">
         <input type="hidden" name="session" value="{{ g.id }}"><button class="btn small" type="submit">Roll back this session</button></form>
       {% elif g.rolled_back %}<div class="fine">Rolled back {{ g.rolled_back.at | local('%b %-d, %-I:%M %p') }}.{% if g.rolled_back.left %} Couldn't undo {{ g.rolled_back.left | length }}: {{ g.rolled_back.left | join('; ') }}.{% endif %}</div>{% endif %}
       {% if g.backup %}<div class="fine">Its backup from before its first change is under <a href="/settings#backups">Automatic backups</a>.</div>{% elif g.backup_error %}<div class="fine">No backup was saved before its first change.</div>{% endif %}

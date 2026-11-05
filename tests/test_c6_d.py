@@ -134,7 +134,7 @@ def test_card_keeps_all_keeps_selected_and_passes_all(store):
         f"/candidates/{rows['Ana Ruiz']['candidate_id']}")
     assert stage_of(store, rows["Bo Li"]["candidate_id"], job["id"]) == "Contacted"
     passed = call(server, "pass_prospects", job_id=job["id"], prospect_ids=[pids["Cy Park"], pids["Di Wu"]],
-                  view_key=key, reason="Not open to hybrid")
+                  view_key=key_of(server, res), reason="Not open to hybrid")  # cycle 6 F: one key per press
     assert text(passed).startswith("Passed on 2 people")
     assert {p["pass_reason"] for p in shortlist.listed(store, job["id"], "passed")} == {"Not open to hybrid"}
     assert len(shortlist.keep_batches(store)) == 1  # one Keep, one Undo
@@ -313,10 +313,10 @@ def test_card_keep_all_and_pass_all_are_ai_actions_undo_covers():
     pids = {p["name"]: p["id"] for p in res.structuredContent["added"]}
     key = key_of(server, res)
     call(server, "keep_prospects", job_id=job["id"], prospect_ids=[pids["Ana Ruiz"], pids["Bo Li"]], view_key=key)
-    call(server, "pass_prospects", job_id=job["id"], prospect_ids=[pids["Cy Park"]], view_key=key)
+    call(server, "pass_prospects", job_id=job["id"], prospect_ids=[pids["Cy Park"]], view_key=key_of(server, res))
     acts = {a["kind"]: a for a in store.ai_actions() if a["kind"] in ("card_keep", "card_pass")}
     assert set(acts) == {"card_keep", "card_pass"}
-    assert "Kept 2 people from the Shortlist card" in local_client(store).get("/changes").text
+    assert "Kept 2 people on the Shortlist card" in local_client(store).get("/changes").text
     store.undo_ai_action(acts["card_keep"]["id"])
     store.undo_ai_action(acts["card_pass"]["id"])
     assert shortlist.counts(store, job["id"]) == {**shortlist.counts(store, job["id"]), "kept": 0, "passed": 0}

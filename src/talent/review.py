@@ -68,6 +68,13 @@ def hold_moves(store: Store) -> bool:
     return cautious(store) and store.setting(HOLD_MOVES) == "1"
 
 
+def extra_holds_text(store: Store) -> str:
+    """The extra holds that are on, named in the notice after saving Cautious mode ("" when none is)."""
+    bits = [x for on, x in ((hold_contacts(store), "new emails and phones on saved people"),
+                            (hold_moves(store), "every stage move, a submit to a client included")) if on]
+    return f" So do {' and '.join(bits)}." if bits else ""
+
+
 def held_contacts(store: Store, saved: dict[str, Any], data: dict[str, Any]) -> list[str]:
     """The email and phone the AI app would fill in on a saved person, when Settings holds new ones too."""
     if not hold_contacts(store):
@@ -209,6 +216,67 @@ def queue_move(store: Store, candidate_id: int, job_id: int, stage: str, before:
     return _queue(store, "stage_move", f"Move {quoted(c['name'])} from {before} to {stage} on {job}",
                   {"stage": stage, "before": before, "notes": notes}, candidate_id=candidate_id, job_id=job_id,
                   session=session)
+
+
+def queue_submit(store: Store, candidate_id: int, job_id: int, session: str | None) -> dict[str, Any] | None:
+    """Hold submit_to_client's move into the job's Submitted stage (Cautious mode with Hold every stage move).
+    Checked the way chase.submit checks first, so a submit that can't be made is refused now. None when they are
+    already in that stage, so there is nothing to move."""
+    from .chase import submit_stage  # here: chase imports reports, which this module imports
+    job, c = store.get_job(job_id), store.get_candidate(candidate_id)
+    app = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    if app is None:
+        raise ValueError(f"{c['name']} isn't on {job['title']} yet. Add them to the job first.")
+    target = submit_stage(store, job_id)
+    if target is None:
+        raise ValueError(f"{job['title']} has no stage that counts as Submitted. Add one (like Submitted to client), "
+                         "or set a stage's Counts as to Submitted on the job's Edit stages page.")
+    here = next((x for x in store.job_stages(job_id) if x["name"].lower() == app["stage"].lower()), None)
+    if here is not None and here["outcome"] != "open":
+        raise ValueError(f"{c['name']} is in {app['stage']} on {job['title']}, which counts as "
+                         f"{'hired' if here['outcome'] == 'hired' else 'out'}. Move them back first if they're in play.")
+    if app["stage"].lower() == target["name"].lower():
+        return None
+    if here is not None and here["position"] > target["position"]:
+        raise ValueError(f"{c['name']} is already past Submitted on {job['title']} ({app['stage']}).")
+    where = job["title"] + (f" ({job['company']})" if job.get("company") else "")
+    return _queue(store, "stage_move", f"Submit {quoted(c['name'])}: move from {app['stage']} to {target['name']} "
+                  f"on {where}", {"stage": target["name"], "before": app["stage"], "notes": None, "submit": True},
+                  candidate_id=candidate_id, job_id=job_id, session=session)
+
+
+def mark_submit(store: Store, candidate_id: int, job_id: int) -> None:
+    """Mark the AI app's newest move of this person on this job as a submit to the client, so it counts toward
+    the hourly cap on what the AI app changes."""
+    with store._write():
+        a = store._row("SELECT id, new_data FROM ai_actions WHERE kind = 'stage_move' AND candidate_id = ? AND job_id = ?"
+                       " ORDER BY id DESC LIMIT 1", (candidate_id, job_id))
+        if a is None:
+            return
+        try:
+            new = json.loads(a["new_data"] or "{}") or {}
+        except ValueError:
+            new = {}
+        store._conn.execute("UPDATE ai_actions SET new_data = ? WHERE id = ?",
+                            (json.dumps({**new, "submit": True}), a["id"]))
+
+
+def stale_move(store: Store, r: dict[str, Any]) -> str | None:
+    """Why a waiting stage move is out of date: a newer move of the same person on the same job waits too, or they
+    were moved since. None while it still fits."""
+    cid, jid = r.get("candidate_id"), r.get("job_id")
+    if r["kind"] != "stage_move" or cid is None or jid is None:
+        return None
+    app = next((a for a in store.candidate_pipelines(cid) if a["job_id"] == jid), None)
+    before = (r["payload"].get("before") or "")
+    if app is None:
+        return "They are no longer on this job."
+    if app["stage"].lower() != before.lower():
+        return f"They were moved to {app['stage']} since, so Keep won't make this move."
+    if store._row("SELECT 1 FROM ai_review WHERE status = 'pending' AND kind = 'stage_move' AND candidate_id = ?"
+                  " AND job_id = ? AND id > ?", (cid, jid, r["id"])):
+        return "A newer move for them on this job waits here too. Keep the one you want."
+    return None
 
 
 def queue_job(store: Store, job_id: int, fields: dict[str, Any], old: dict[str, Any],
@@ -505,6 +573,8 @@ def _apply(store: Store, r: dict[str, Any]) -> str:
             raise ValueError(f"They were moved to {app['stage']} since, so the move wasn't made.")
         store.move_stage(cid, jid, p["stage"], p.get("notes"), by="ai")
         store.mark_ai_stage(cid, jid, p["before"])
+        if p.get("submit"):
+            mark_submit(store, cid, jid)
         _confirm_newest(store, "stage_move", cid, jid)
         return r["summary"]
     if kind == "job_edit":
@@ -663,6 +733,7 @@ def sessions(store: Store) -> list[dict[str, Any]]:
         g = groups.setdefault(key, {"session": key, "started": r["created_at"], "items": []})
         r["lines"] = field_lines(r) if r["kind"] in ("profile", "job_edit") else _more_lines(r)
         r["detail"] = _detail(r)
+        r["stale"] = stale_move(store, r)
         g["items"].append(r)
     for g in groups.values():
         rec = ledger.get(store, g["session"]) if g["session"] else None
@@ -744,7 +815,7 @@ def today_items(store: Store) -> list[dict[str, Any]]:
                    "button": "Review"}]
 
 
-__all__ = ["HOLD_CONTACTS", "HOLD_MOVES", "JOB_CONTACT_FIELDS", "email_changes", "hold_contacts", "hold_moves",
+__all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOLD_CONTACTS", "HOLD_MOVES", "JOB_CONTACT_FIELDS", "email_changes", "hold_contacts", "hold_moves",
            "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
