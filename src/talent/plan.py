@@ -44,11 +44,22 @@ STEP_DAYS = 14  # between first people in the funnel, first interviews and an of
 TIGHT_DAYS = 7  # within this many days of missing a step, a seat reads Tight
 WAIT_DAYS = 7  # people waiting longer than this in one stage are worth a nudge
 THIN = 3  # fewer people than this in play reads as thin
+SEAT_AIM = THIN * 2  # how many people a hiring seat's job should have in play
 UNSET: Any = object()
 SNAP = FIELDS
 
 
 # ------------------------------------------------------------------ reading
+def enough_people(store: Store, job: dict[str, Any], default_min: int = 5) -> int:
+    """The one "enough people" number for a job: the job's own minimum, else the plan's when a seat is hiring
+    for it, else the Settings thin number (3 per opening, up to it). Today and the plan both say this one."""
+    if job.get("min_active"):
+        return int(job["min_active"])
+    if store._row("SELECT 1 FROM plan_seats WHERE job_id = ? AND status = 'open'", (job["id"],)):
+        return SEAT_AIM
+    return actions.thin_target(job, default_min)
+
+
 def seats(store: Store) -> list[dict[str, Any]]:
     return store._rows("SELECT * FROM plan_seats ORDER BY position, id")
 
@@ -198,7 +209,7 @@ def score(store: Store, seat: dict[str, Any], today: date | None = None, *, hire
                 todo.append(f"Start reaching out now: have people in the funnel by {by}.")
         play = sum(g[k]["count"] for k in GROUPS[:4])
         if play < THIN:
-            todo.append(f"Only {play} {'person' if play == 1 else 'people'} in play. Aim for at least {THIN * 2}: "
+            todo.append(f"Only {play} {'person' if play == 1 else 'people'} in play. Aim for at least {enough_people(store, job)}: "
                         "ask Claude to find more.")
         for k in GROUPS[:4]:
             waiting = [t for t in g[k]["names"] if t[0] > WAIT_DAYS]

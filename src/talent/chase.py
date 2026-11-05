@@ -24,6 +24,7 @@ NOTE_CHARS = 400
 SHOWN = 10  # people per nudge (oldest first), then "and 3 more" with a count per job and stage
 TODAY_SHOWN = 5  # names on a Today chase card: the worst few, then "and 30 more"
 TABLE_ROWS = 12  # job and stage rows in a nudge's count table
+COLLAPSE_OVER = 25  # more people than this for one client: Today shows one line for the client, not a card per manager
 _COMP = re.compile(r"\b(comp|compensation|salary|base|ote|total comp|tc|rate|expecting|expects|\$\s?\d)", re.I)
 _AVAIL = re.compile(r"\b(availab\w*|notice|start date|can start|start in|starting|open to start)\b", re.I)
 
@@ -37,6 +38,20 @@ def chase_days(store: Store) -> int:
     except (TypeError, ValueError):
         n = DEFAULT_DAYS
     return n if 1 <= n <= 90 else DEFAULT_DAYS
+
+
+IMPORT_DAY_KEY = "chase_from_import"
+
+
+def from_import_day(store: Store) -> bool:
+    """Count waits from the import day for people an import put in a stage with an older date (default on)."""
+    raw = store._row("SELECT value FROM settings WHERE key = ?", (IMPORT_DAY_KEY,))
+    return not raw or str(raw["value"]) != "0"
+
+
+def set_from_import_day(store: Store, on: bool) -> bool:
+    actions._put_setting(store, IMPORT_DAY_KEY, "1" if on else "0")
+    return on
 
 
 def set_chase_days(store: Store, value: Any) -> int:
@@ -444,11 +459,12 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
     Oldest first within a group; groups with the longest wait first. Stages the chase doesn't count (Onsite and
     reference checks by default) and waits past the optional upper limit are left out, counted in `left_out`
     ({"stages", "too_old"}) when given."""
-    from .importers import imported_placements
+    from .importers import file_entries, imported_placements
 
     now = now or datetime.now(timezone.utc)
     days = days or chase_days(store)
     own = actions.inhouse(store)
+    from_file = file_entries(store) if from_import_day(store) else {}  # (candidate, job) -> when the app got them
     cutoff = now - timedelta(days=days)
     oldest = chase_max_days(store)
     too_old = now - timedelta(days=oldest) if oldest else None
@@ -473,6 +489,10 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
             for a in store.pipeline(j["id"]):
                 g = stage_of.get(a["stage"].lower()) or reports.stage_group(a["stage"])
                 since = to_dt(a["stage_changed_at"])
+                entry = from_file.get((a["candidate_id"], j["id"]))
+                landed = to_dt(entry["created_at"]) if entry else None
+                if landed and since and since < landed:  # a stage date older than the import counts from the import day
+                    since = landed
                 if g not in want or not since or since > cutoff:
                     continue
                 if (a["candidate_id"], j["id"]) in booked or a["candidate_id"] in booked_any:
@@ -493,7 +513,7 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                 grp["people"].append({"candidate_id": a["candidate_id"], "name": a["candidate_name"],
                                       "job_id": j["id"], "job": j["title"], "stage": a["stage"],
                                       "since": a["stage_changed_at"], "days": (now - since).days,
-                                      "date_unknown": a["candidate_id"] in undated})
+                                      "date_unknown": a["candidate_id"] in undated, "imported": bool(entry)})
     out = []
     for (ck, mk), grp in groups.items():
         c = grp.pop("_c")
@@ -561,8 +581,27 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
     now = now or datetime.now(timezone.utc)
     days = chase_days(store)
     items = []
-    for g in chase_list(store, now=now, days=days):
-        if snoozed(store, g["key"], g["manager_key"], now):
+    live = [g for g in chase_list(store, now=now, days=days) if not snoozed(store, g["key"], g["manager_key"], now)]
+    totals: dict[str, int] = {}
+    for g in live:
+        totals[g["key"]] = totals.get(g["key"], 0) + len(g["people"])
+    done: set[str] = set()
+    for g in live:
+        if totals[g["key"]] > COLLAPSE_OVER:  # a big import: one line per client instead of a card per manager
+            if g["key"] in done:
+                continue
+            done.add(g["key"])
+            mine = [x for x in live if x["key"] == g["key"]]
+            n = totals[g["key"]]
+            since_import = sum(1 for x in mine for p in x["people"] if p.get("imported") or p["date_unknown"])
+            items.append({"key": f"client_chase:{g['key']}:all:{now.date().isocalendar()[1]}",
+                          "kind": "client_chase", "rank": 2, "when": min(x["people"][0]["since"] for x in mine),
+                          "title": f"{g['client']}: {n} waiting on feedback"
+                                   + (", most since your import" if since_import * 2 > n else "")
+                                   + ". Open the chase list",
+                          "detail": "", "client": g["client"],
+                          "href": f"/clients/chase#chase-{reports.slug(g['key'])}-"
+                                  f"{reports.slug(mine[0]['manager_key']) or 'none'}"})
             continue
         n = len(g["people"])
         who = f"{g['manager']} at {g['client']}" if g["manager"] else g["client"]

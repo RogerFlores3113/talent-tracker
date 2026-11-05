@@ -962,8 +962,9 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     if on("flag_thin"):
         default_min = _int(cfg, "thin_min", 5)
         thin = []
+        from .plan import enough_people  # here: plan imports this module
         for j in jobs.values():
-            minimum = thin_target(j, default_min)
+            minimum = enough_people(store, j, default_min)
             filled = j["hired_count"] >= (j.get("openings") or 1)
             if j["status"] != "open" or j["active_count"] >= minimum or filled or _offer_like(j):
                 continue

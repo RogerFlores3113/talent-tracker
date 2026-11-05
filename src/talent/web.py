@@ -2584,7 +2584,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         errors: dict[str, str] | None = None, status_code: int = 200) -> HTMLResponse:
         people, jobs = sample_ids(store)
         return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
-                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
+                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {},
+                    chase_import=chase.from_import_day(store), sample_people=len(people),
                     sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
@@ -2660,6 +2661,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if form.get("hiring_for") in ("own", "clients"):
             actions.set_inhouse(store, form.get("hiring_for") == "own")
         store.set_settings(**values)
+        if whole:  # the Settings page sends this box ticked or not
+            chase.set_from_import_day(store, str(form.get("chase_from_import") or "") not in ("", "0", "false", "off"))
         return RedirectResponse("/settings?saved=1", status_code=303)
 
     @app.get("/recipes", response_class=HTMLResponse)

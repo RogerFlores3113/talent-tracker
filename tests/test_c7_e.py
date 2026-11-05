@@ -143,17 +143,15 @@ def test_save_candidate_with_a_different_linkedin_is_saved_as_new(store):
     d = data(res)
     assert d["created"] is True and "Same name, different LinkedIn: saved as someone new" in text(res)
     assert len(store.find_by_name("Wen Khan")) == 3
-    # a name alone, or a person with no link saved, still asks
-    store.add_candidate(name="Ira Moss")
-    res = call(server, "save_candidate", name="Ira Moss", linkedin_url="https://www.linkedin.com/in/ira-moss")
-    assert data(res)["needs_confirmation"] is True
+    # a name alone still asks (a saved person with no email or link is no longer a hold when the new one brings
+    # one: see test_c7r_j)
     res = call(server, "save_candidate", name="Wen Khan")
     assert data(res)["needs_confirmation"] is True
 
 
 def test_one_matching_saved_person_still_holds_among_different_ones(store):
     store.add_candidate(name="Wen Khan", linkedin_url="https://www.linkedin.com/in/wen-khan-1")
-    store.add_candidate(name="Wen Khan")  # no link saved: could be the same person
+    store.add_candidate(name="Wen Khan", email="wen@old.example")  # an email saved: could be the same person
     res = call(build_server(store), "save_candidate", name="Wen Khan", linkedin_url="https://www.linkedin.com/in/new")
     d = data(res)
     assert d["needs_confirmation"] is True and len(d["possible_duplicates"]) == 1

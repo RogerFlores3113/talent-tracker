@@ -2055,6 +2055,12 @@ class Store:
         for c in self.find_by_name(name):
             saved_li = normalize_linkedin(c.get("linkedin_url"))
             (other if li and saved_li and li != saved_li else maybe).append(c)
+        if maybe and (li or _clean(email)) and not any(_clean(c.get("email")) or normalize_linkedin(c.get("linkedin_url"))
+                                                       for c in maybe):
+            # Every saved copy has no email and no LinkedIn, and this one brings one: nothing to compare, so they
+            # are saved as new (marked "_no_ids" for the reply) and can be merged later.
+            other += [{**c, "_no_ids": True} for c in maybe]
+            maybe = []
         return maybe, other
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
