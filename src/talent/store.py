@@ -605,6 +605,20 @@ _MIGRATIONS: tuple[Any, ...] = (
     );
     CREATE INDEX offers_job_idx ON offers(job_id, status);
     """,
+    # v12: the hiring plan (plan.py): one seat per role being hired, with the job that fills it and a target start.
+    """
+    CREATE TABLE plan_seats (
+        id           INTEGER PRIMARY KEY,
+        role         TEXT NOT NULL,
+        job_id       INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        target_start TEXT,
+        status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'filled', 'paused')),
+        position     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX plan_seats_job_idx ON plan_seats(job_id);
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -623,6 +637,7 @@ AI_ACTION_KINDS = {
     "outreach_batch": "Logged outreach in one batch",
     "interview_job": "Said which job an interview is for",
     "sequence_set": "Set a job's follow-up steps",
+    "plan_seat": "Changed the hiring plan",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -661,6 +676,9 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
         return overwrite_count(kind, old, new)
     if kind == "sequence_set":  # replacing steps that were saved counts; a first sequence doesn't
         return 1 if (old or {}).get("sequence") else 0
+    if kind == "plan_seat":
+        from .plan import overwrite_count as seat_overwrites  # here: plan imports this module
+        return seat_overwrites(old, new)
     if kind == "stages_edit":
         was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
         now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
@@ -1606,6 +1624,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind.startswith("offer_"):
         from .offers import ai_summary  # here: offers imports this module
         return ai_summary(r)
+    if kind == "plan_seat":
+        from .plan import ai_summary as seat_summary  # here: plan imports this module
+        return seat_summary(r)
     if kind == "note_logged":
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
@@ -1683,6 +1704,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("client", (r.get("new_data") or {}).get("_key")),)
     if kind.startswith("offer_"):
         return (("person", cid), ("offer", r.get("target_id")))
+    if kind == "plan_seat":
+        return (("plan", r.get("target_id")),)
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
@@ -2457,6 +2480,9 @@ class Store:
             if kind.startswith("offer_"):
                 from .offers import ai_blocker  # here: offers imports this module
                 return ai_blocker(self, a)
+            if kind == "plan_seat":
+                from .plan import ai_blocker as seat_blocker  # here: plan imports this module
+                return seat_blocker(self, a)
             if kind == "note_logged":
                 t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
                 if t is None:
@@ -2758,6 +2784,9 @@ class Store:
         if kind == "sequence_set":
             from .outreach import ai_undo as sequence_undo  # here: outreach imports this module
             return sequence_undo(self, a)
+        if kind == "plan_seat":
+            from .plan import ai_undo as seat_undo  # here: plan imports this module
+            return seat_undo(self, a)
         if kind == "interview_job":
             from .chase import ai_job_undo  # here: chase imports this module
             return ai_job_undo(self, a)

@@ -38,7 +38,7 @@ QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told t
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
          "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done",
-         "sequence": "Follow-up steps"}
+         "sequence": "Follow-up steps", "plan": "Hiring plan change"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
@@ -705,6 +705,9 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("The job's follow-up steps were changed since, so nothing was changed.")
         out = outreach.ai_set_sequence(store, jid, p["steps"], bool(p.get("enroll")))
         return r["summary"] + (f" (enrolled {len(out['enrolled'])})" if out["enrolled"] else "")
+    if kind == "plan":
+        from .plan import apply_review as apply_seat  # here: plan imports this module
+        return apply_seat(store, r)
     if kind == "todo":
         s = store._row("SELECT done_at FROM suggestions WHERE id = ?", (p.get("suggestion_id"),))
         if s is None:
@@ -774,6 +777,9 @@ def _more_lines(r: dict[str, Any]) -> list[dict[str, str]]:
     if r["kind"] == "offer":
         from .offers import review_lines  # here: offers imports this module
         return review_lines(r)
+    if r["kind"] == "plan":
+        from .plan import review_lines as seat_lines  # here: plan imports this module
+        return seat_lines(r)
     if r["kind"] == "client_edit":
         return [{"label": CLIENT_LABELS.get(k, k), "old": _short((p.get("old") or {}).get(k)) or "(empty)",
                  "new": _short(v) or "(cleared)"} for k, v in (p.get("fields") or {}).items()]

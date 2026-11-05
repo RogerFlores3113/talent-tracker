@@ -18,6 +18,7 @@ Rows live in the offers table (store migration v11).
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 from urllib.parse import urlencode
@@ -28,6 +29,7 @@ from mcp.types import CallToolResult
 from pydantic import WithJsonSchema
 
 from . import actions
+from .wording import who
 from .store import AI_NOTE_CAP, AI_EDIT_WINDOW_MINUTES, NotFound, Store, _stage_key, as_local, now_iso, quoted, to_dt
 
 STATUSES = ("drafted", "out", "accepted", "declined", "withdrawn")
@@ -83,7 +85,13 @@ def _status(value: Any, allowed: tuple[str, ...]) -> str:
     key = " ".join(str(value or "").strip().lower().replace("_", " ").split()).strip(" .!")
     key = _ALIASES.get(key, key)
     if key not in allowed:
-        raise ValueError(f"Status must be one of: {', '.join(allowed)}.")
+        if allowed == ("drafted", "out"):
+            raise ValueError(
+                f"No change made. {str(value)[:40]!r} isn't a status record_offer takes. Use drafted (terms still "
+                "being worked out) or out (the candidate has the offer). To record their answer, call "
+                "record_offer_answer with accepted, declined or withdrawn.")
+        raise ValueError(f"Status must be one of: {', '.join(allowed)}. accepted means they said yes, declined "
+                         "that they said no, and withdrawn that the company pulled the offer.")
     return key
 
 
@@ -181,12 +189,54 @@ def _pair(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
     return {"candidate": c, "job": j, "stage": app["stage"]}
 
 
+_MONEY = re.compile(r"^\s*(?P<sym>[$\u20ac\u00a3])?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<k>[kKmM])?\s*$")
+_MONTH_DAY = re.compile(r"\b(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<d>\d{1,2})"
+                        r"(?:st|nd|rd|th)?(?:,?\s+(?P<y>\d{4}))?\b|\b(?P<d2>\d{1,2})(?:st|nd|rd|th)?\s+"
+                        r"(?P<mon2>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?:,?\s+(?P<y2>\d{4}))?\b",
+                        re.I)
+_FILLER = re.compile(r"^(?:by|on|before|until|due|around|about|the)\s+", re.I)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def money_text(value: Any) -> Any:
+    """A number or a money string as readable text: 180000 -> '180,000', '$180k' -> '$180,000'. Other text stays
+    as it is ('$185,000 base' is already fine)."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
+    m = _MONEY.match(str(value))
+    if not m:
+        return value
+    num = float(m.group("num").replace(",", ""))
+    num *= {"k": 1_000, "m": 1_000_000}.get((m.group("k") or "").lower(), 1)
+    body = f"{num:,.0f}" if float(num).is_integer() else f"{num:,.2f}"
+    return (m.group("sym") or "") + body
+
+
 def _day(value: Any, label: str, today: date) -> str | None:
     v = str(value).strip() if value is not None else ""
     if not v:
         return None
+    text = v
+    while True:  # "by Friday", "on Nov 13th"
+        shorter = _FILLER.sub("", text)
+        if shorter == text:
+            break
+        text = shorter
+    m = _MONTH_DAY.search(text)  # "Nov 13", "Friday Nov 13", "13 Nov 2026": the user's own year, not the computer's
+    if m:
+        mon = (m.group("mon") or m.group("mon2")).lower()[:3]
+        day, year = int(m.group("d") or m.group("d2")), m.group("y") or m.group("y2")
+        try:
+            found = date(int(year) if year else today.year, _MONTHS.index(mon) + 1, day)
+            if not year and found < today:
+                found = date(today.year + 1, found.month, found.day)
+            return found.isoformat()
+        except ValueError:
+            pass
     try:
-        return actions.parse_day(v, today).isoformat()
+        return actions.parse_day(text, today).isoformat()
     except ValueError:
         raise ValueError(f"Couldn't read the {label} {v!r}. Try 2026-12-01, Dec 1, friday or tomorrow.") from None
 
@@ -204,7 +254,7 @@ def clean(given: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
         elif k == "share_status":
             out[k] = 1 if v and str(v).lower() not in ("0", "false", "off", "no") else 0
         elif k in LIMITS:
-            text = str(v or "").strip()
+            text = str(money_text(v) if k in ("salary", "bonus") else (v if v is not None else "")).strip()
             if k != "notes":
                 text = " ".join(text.split())
             if len(text) > LIMITS[k]:
@@ -598,17 +648,24 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
                 **{k: o.get(k) for k in TERMS if o.get(k)}, "reason": o.get("reason"),
                 "status_line": status_line(o), "app_url": app_url(href(o["candidate_id"], o["job_id"]))}
 
+    def _read_days(days: dict[str, str]) -> str:
+        """' I read the answer-by date as Fri Nov 13.' so a fuzzy 'Friday' is checked back."""
+        bits = [f"{LABELS[k]} as {actions.day_text(date.fromisoformat(v), '%a %b %-d')}" for k, v in days.items()]
+        return f" I read the {' and the '.join(bits)}." if bits else ""
+
     @mcp.tool(annotations=EDIT)
-    def record_offer(candidate_id: int, job_id: int, salary: str | None = None, equity: str | None = None,
-                     bonus: str | None = None, start_date: str | None = None, answer_by: str | None = None,
+    def record_offer(candidate_id: int, job_id: int, salary: str | int | float | None = None,
+                     equity: str | int | float | None = None, bonus: str | int | float | None = None,
+                     start_date: str | None = None, answer_by: str | None = None,
                      notes: str | None = None,
                      status: Annotated[str | None, WithJsonSchema({
                          "anyOf": [{"type": "string", "enum": ["drafted", "out"]}, {"type": "null"}],
                          "default": None})] = None) -> CallToolResult:
         """Create or change the offer for one person on one job. salary, equity and bonus are free text ("$185,000
-        base", "0.4% over 4 years"); start_date and answer_by are days (2026-12-01, Dec 1, friday); notes are what
+        base", "0.4% over 4 years") or a plain number (180000, or "180k"); start_date and answer_by are days
+        (2026-12-01, Nov 13, friday, next fri) and the reply says which day it read; notes are what
         was said on the offer call. status is drafted while the terms are worked out, out once the candidate has
-        the offer. Leave a field out to keep it; "" clears it (one per call). Offer terms are private: never put
+        the offer. Also accepted: base_salary, comp, start, deadline and note. Leave a field out to keep it; "" clears it (one per call). Offer terms are private: never put
         them in a status update, a client message or anything pasted to others. Record the answer with
         record_offer_answer. The recruiter sees every change on Changes and can undo it."""
         given = {k: v for k, v in {"salary": salary, "equity": equity, "bonus": bonus, "start_date": start_date,
@@ -620,26 +677,29 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         if row is not None and not given:
             raise ValueError("Nothing to change. Give salary, equity, bonus, start_date, answer_by, notes or status.")
         fields = clean(given)
+        days = {k: fields[k] for k in ("start_date", "answer_by") if fields.get(k)}
         changed = {k: v for k, v in fields.items() if (row or {}).get(k) != v}
         if row is not None and sum(1 for k, v in changed.items() if v is None and row.get(k)) > 1:
             raise ValueError("Clear one field per call, and only when you're sure. Nothing was changed.")
         if row is not None and not changed:
-            return _plain(f"Nothing changed: the offer for {quoted(name)} on {job} already says that.",
-                          {"offer": public(row)})
+            return _plain(f"Nothing changed: the offer for {quoted(name)} on {job} already says that."
+                          f"{_read_days(days)}", {"offer": public(row), **({"read_as": days} if days else {})})
         check_cap(store, candidate_id)
         if review.cautious(store):
             waiting = queue(store, "terms", candidate_id, job_id, {"fields": changed}, session)
-            return _plain(_wait_text(waiting), {"pending_review": _waiting(waiting),
-                                                "offer": public(row) if row else None,
-                                                **(stage_nudge(store, candidate_id, job_id) or {})})
+            return _plain(_wait_text(waiting) + _read_days(days), {
+                "pending_review": _waiting(waiting), "offer": public(row) if row else None,
+                **({"read_as": days} if days else {}), **(stage_nudge(store, candidate_id, job_id) or {})})
         _check_cap(store, overwrite_count("offer_terms", snap(row) or {}, {**(snap(row) or {}), **changed}))
         res = save(store, candidate_id, job_id, by="ai", **changed)
         o = res["offer"]
         what = ", ".join(LABELS[k] for k in res["changed"])
         sentence = (f"{'Recorded the offer' if res['created'] else 'Changed the offer'} for {quoted(name)} on {job}"
-                    + (f" ({what})" if what else "") + f". {status_line(o)}. The recruiter can undo it on Changes.")
+                    + (f" ({what})" if what else "") + f". {status_line(o)}.{_read_days(days)} "
+                    f"{who(store, cap=True)} can undo it on Changes.")
         return _plain(sentence, {"offer": public(o), "note": "Keep the terms out of status updates and client "
-                                                             "messages; they are for the recruiter and the candidate.",
+                                                             f"messages; they are for {who(store)} and the candidate.",
+                                 **({"read_as": days} if days else {}),
                                  **(stage_nudge(store, candidate_id, job_id) or {})})
 
     @mcp.tool(annotations=EDIT)
@@ -670,12 +730,12 @@ def register_tools(mcp: Any, store: Store, session: str) -> None:
         nxt = res["next"]
         said = (f"the offer to {quoted(name)} on {job} was withdrawn" if st == "withdrawn"
                 else f"{quoted(name)} {st} the offer on {job}")
-        tail = (f" The app offers the recruiter the move to {nxt['to']} in one click; move_stage also makes it."
+        tail = (f" The app offers {who(store)} the move to {nxt['to']} in one click; move_stage also makes it."
                 if nxt else "")
         data = {"offer": public(res["offer"])}
         if nxt:
             data["next_move"] = {"stage": nxt["to"], "notes": nxt["notes"]}
-        return _plain(f"Recorded that {said}.{tail} The recruiter can undo it on Changes.", data)
+        return _plain(f"Recorded that {said}.{tail} {who(store, cap=True)} can undo it on Changes.", data)
 
     @mcp.tool(annotations=READ)
     def list_offers(job_id: int | None = None) -> CallToolResult:

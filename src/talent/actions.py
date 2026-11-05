@@ -941,6 +941,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += chase_items(store, now)  # people waiting on a client's feedback past the chase days
     from .offers import today_items as offer_items  # here: offers imports this module
     items += offer_items(store, now)  # answers due, answers to act on, offer stages with no offer
+    from .plan import today_items as plan_items  # here: plan imports this module
+    items += plan_items(store, now)  # a hiring plan seat that has fallen behind its start date
     stuck_more = 0
     if on("flag_stuck"):
         rows, n_hidden, stuck_more = _stuck_items(store, now, _int(cfg, "stuck_days", 7), snoozed, label)
@@ -972,7 +974,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
             j = thin[0]
             items.append({
                 "key": f"thin:{j['id']}", "kind": "thin", "rank": 3, "when": j["updated_at"],
-                "title": says(j), "detail": "", "job_id": j["id"], "jobs": [j], "href": f"/jobs/{j['id']}",
+                "title": says(j), "detail": "", "job_id": j["id"], "jobs": [j],
+                "href": f"/jobs/{j['id']}?find=1#find-people",  # opens the job's "Find new people with AI" prompt
             })
         elif thin:
             items.append({

@@ -218,11 +218,11 @@ def test_unknown_mcp_arguments_are_named(store):
 def test_title_and_company_aliases_and_ignored_fields(store):
     server = build_server(store)
     res = call(server, "save_candidate", name="Priya Raman", email="p@x.com", title="Staff Engineer",
-               company="Stripe", headline="Builds ledgers", skills=["Go"])
+               company="Stripe", pronouns="she/her", skills=["Go"])
     out = structured(res)
     c = store.find_duplicate("p@x.com")
     assert (c["current_title"], c["current_company"], c["tags"]) == ("Staff Engineer", "Stripe", ["Go"])
-    assert out["ignored_fields"] == ["headline"] and "headline" in text(res)
+    assert out["ignored_fields"] == ["pronouns"] and "pronouns" in text(res)
     out = structured(call(server, "save_candidate", name="Priya Raman", email="p@x.com"))
     assert "ignored_fields" not in out
     call(server, "update_candidate", candidate_id=c["id"], title="Principal Engineer", company="Square")

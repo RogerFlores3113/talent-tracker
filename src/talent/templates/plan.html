@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% from "_macros.html" import recipe_buttons %}
+{% block title %}Hiring plan · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>Hiring plan</h1>
+    <p class="sub">One seat for each person you plan to hire, checked against the day you want them to start.</p>
+  </div>
+</div>
+
+{% if waiting %}
+<p class="fine">Your AI app sent {{ waiting | length }} change{{ '' if waiting | length == 1 else 's' }} to the plan that wait{{ 's' if waiting | length == 1 }} for you on <a href="/review">Review</a>.</p>
+{% endif %}
+
+{% if not seats %}
+<p class="lead">No seats yet. Add the roles you are hiring for below, with the job that fills each one and the day you want them to start.</p>
+{% endif %}
+
+{% for s in seats %}
+<section class="panel plan-seat" id="seat-{{ s.id }}">
+  <div class="sec-head">
+    <h2>{{ s.role }} <span class="badge{{ ' overdue' if s.state == 'behind' else ' warn' if s.state == 'tight' }}">{{ s.state_word }}</span></h2>
+    <span class="fine">{% if s.target_text %}Start {{ s.target_text }}{% if s.days_left is not none and s.days_left >= 0 %} · {{ s.days_left }} day{{ '' if s.days_left == 1 else 's' }} left{% endif %}{% else %}No start date yet{% endif %}
+      {% if s.job_id %} · <a href="/jobs/{{ s.job_id }}">{{ s.job }}</a>{% endif %}</span>
+  </div>
+
+  {% if s.funnel %}
+  <table class="table plan-funnel">
+    <thead><tr>{% for g in s.funnel.groups %}<th scope="col">{{ g.label }}</th>{% endfor %}<th scope="col">Out</th></tr></thead>
+    <tbody>
+      <tr>{% for g in s.funnel.groups %}<td><strong>{{ g.count }}</strong>{% if g.count and g.group != 'hired' %}<br><span class="fine">longest {{ g.longest_days }} day{{ '' if g.longest_days == 1 else 's' }}</span>{% endif %}</td>{% endfor %}<td>{{ s.funnel.out }}</td></tr>
+    </tbody>
+  </table>
+  <p class="fine">{{ s.funnel.total }} {{ 'person' if s.funnel.total == 1 else 'people' }} so far{% if s.funnel.total %}; {{ s.funnel.reached_interview }} reached interviews ({{ s.funnel.interview_rate }}%){% endif %}.
+    {% if s.next_step and s.state in ('behind', 'tight', 'on_track') %}Next step: {{ s.next_step.label }} by {{ s.next_step.by_text }}{% if s.next_step.days < 0 %} ({{ -s.next_step.days }} day{{ '' if s.next_step.days == -1 else 's' }} late){% else %} ({{ s.next_step.days }} day{{ '' if s.next_step.days == 1 else 's' }} left){% endif %}.{% endif %}</p>
+  {% endif %}
+
+  {% if s.todo %}
+  <h3>What to do this week</h3>
+  <ul class="plan-todo">{% for line in s.todo %}<li>{{ line }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if s.job_id and s.state in ('behind', 'tight') %}<p><a class="btn small" href="/jobs/{{ s.job_id }}?find=1#find-people">Find people for this seat</a></p>{% endif %}
+
+  <details class="plan-edit"><summary>Edit this seat</summary>
+    <form class="form" method="post" action="/plan/seat">
+      <input type="hidden" name="seat_id" value="{{ s.id }}">
+      <label>Role<input type="text" name="role" maxlength="120" value="{{ s.role }}" required></label>
+      <label>Job<select name="job_id"><option value="">No job yet</option>{% for j in jobs %}<option value="{{ j.id }}" {{ 'selected' if j.id == s.job_id }}>{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></label>
+      <label>Target start date<input type="date" name="target_start" value="{{ s.target_start or '' }}"></label>
+      <label>Status<select name="status">{% for k, v in statuses.items() %}<option value="{{ k }}" {{ 'selected' if k == s.status }}>{{ v }}</option>{% endfor %}</select></label>
+      <button class="btn primary" type="submit">Save seat</button>
+    </form>
+    <form method="post" action="/plan/seat/{{ s.id }}/remove" class="inline"><button class="link small" type="submit" title="Takes the seat off the plan. The job and its people stay.">Remove this seat</button></form>
+  </details>
+</section>
+{% endfor %}
+
+<section class="panel" id="add-seat">
+  <div class="sec-head"><h2>Add a seat</h2></div>
+  <form class="form" method="post" action="/plan/seat">
+    <label>Role<input type="text" name="role" maxlength="120" placeholder="Founding backend engineer" required></label>
+    <label>Job<select name="job_id"><option value="">No job yet</option>{% for j in jobs %}<option value="{{ j.id }}">{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></label>
+    <label>Target start date<input type="date" name="target_start"></label>
+    <button class="btn primary" type="submit">Add seat</button>
+  </form>
+</section>
+
+{% if seats %}
+<section class="panel" id="ask-claude">
+  <div class="sec-head"><h2>Plan the week with Claude</h2></div>
+  <p class="fine">Claude reads the plan and tells you the few things to do this week. It changes nothing until you say so.</p>
+  {{ recipe_buttons(prompt, "Plan my week with Claude") }}
+</section>
+{% endif %}
+
+<details class="panel" id="plan-settings"><summary>How the dates are worked out</summary>
+  <p class="fine">Working back from the start date: an offer should be out {{ leads.offer }} days before it ({{ notice_days }} days notice plus a week to answer), first interviews {{ leads.interview }} days before, and people in the funnel {{ leads.screening }} days before. A seat reads Tight within a week of missing a step, and Behind once it has.</p>
+  <form class="form" method="post" action="/plan/settings">
+    <label>Days of notice between an accepted offer and the start<input type="number" name="notice_days" min="0" max="120" value="{{ notice_days }}"></label>
+    <button class="btn" type="submit">Save</button>
+  </form>
+</details>
+{% endblock %}
