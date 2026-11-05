@@ -303,8 +303,8 @@ def test_mcp_submit_to_client_warns_on_resubmit_and_other_clients(store):
     assert "already submitted to Harbor Freight Labs" in text(res)
     nojob = store.add_job("Ops", company="Initech")
     store.add_to_pipeline(cid, nojob["id"])
-    with pytest.raises(ToolError, match="no stage that counts as Submitted"):
-        call(server, "submit_to_client", candidate_id=cid, job_id=nojob["id"])
+    res = call(server, "submit_to_client", candidate_id=cid, job_id=nojob["id"])  # c7: adds the missing stage
+    assert "added Submitted to client" in text(res) and data(res)["stage"] == "Submitted to client"
 
 
 def test_chase_list_per_manager_with_nudges_today_and_mark_chased(store):

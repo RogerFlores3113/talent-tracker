@@ -232,7 +232,8 @@ def test_record_decision_is_one_change_with_one_undo(store):
     job, priya, tomas, marcus, p1, t1, t2 = _finalists(store)
     client = local_client(store)
     r = client.post(f"/jobs/{job['id']}/decide", data={"offer": priya["id"], "pass": [priya["id"], tomas["id"]],
-                                                       "reason": "Not a fit", "note": "Best product sense"},
+                                                       "reason": "Not a fit", "note": "Best product sense",
+                                                       "confirmed": "1"},  # c7 B: missing feedback asks first
                     follow_redirects=False)
     notice = flash_of(r)
     assert 'Recorded: Offer to "Priya Natarajan", pass on "Tomas Reyes".' in notice

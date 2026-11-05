@@ -605,6 +605,31 @@ _MIGRATIONS: tuple[Any, ...] = (
     );
     CREATE INDEX offers_job_idx ON offers(job_id, status);
     """,
+    # v12: the hiring plan (plan.py): one seat per role being hired, with the job that fills it and a target start.
+    """
+    CREATE TABLE plan_seats (
+        id           INTEGER PRIMARY KEY,
+        role         TEXT NOT NULL,
+        job_id       INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        target_start TEXT,
+        status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'filled', 'paused')),
+        position     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX plan_seats_job_idx ON plan_seats(job_id);
+    """,
+    # v13: the AI apps that have connected (trust.py): the name each gave in its hello, when it was first and last
+    # seen, and how far the recruiter trusts it: read_only, suggest (every write waits on Review) or trusted.
+    """
+    CREATE TABLE ai_apps (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL UNIQUE,
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL,
+        trust      TEXT NOT NULL DEFAULT 'trusted' CHECK (trust IN ('read_only', 'suggest', 'trusted'))
+    );
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -622,6 +647,9 @@ AI_ACTION_KINDS = {
     "card_keep": "Kept someone from a Shortlist card", "card_pass": "Passed on someone on a Shortlist card",
     "outreach_batch": "Logged outreach in one batch",
     "interview_job": "Said which job an interview is for",
+    "sequence_set": "Set a job's follow-up steps",
+    "plan_seat": "Changed the hiring plan",
+    "loop_template": "Set a job's interview loop template",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -658,6 +686,13 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
     if kind.startswith("offer_"):
         from .offers import overwrite_count  # here: offers imports this module
         return overwrite_count(kind, old, new)
+    if kind == "sequence_set":  # replacing steps that were saved counts; a first sequence doesn't
+        return 1 if (old or {}).get("sequence") else 0
+    if kind == "loop_template":  # replacing a saved template counts; a first one doesn't
+        return 1 if (old or {}).get("template") else 0
+    if kind == "plan_seat":
+        from .plan import overwrite_count as seat_overwrites  # here: plan imports this module
+        return seat_overwrites(old, new)
     if kind == "stages_edit":
         was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
         now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
@@ -1157,7 +1192,7 @@ def _linkedin_rule() -> str:
 def _linkedin_parts(url: str) -> tuple[str, str] | None:
     """(host, path) of a linkedin.com address (any subdomain), else None. A bare "linkedin.com/in/x" works."""
     text = url.strip()
-    if not re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+    if not re.match(r"^[a-z][a-z0-9+.-]*:(?!\d)", text, re.I):
         text = "https://" + text.lstrip("/")
     try:
         parts = urlsplit(text)
@@ -1180,6 +1215,21 @@ def linkedin_lead_tool(url: str | None) -> str | None:
         return None
     path = got[1].lower()
     return next((tool for prefix, tool in LINKEDIN_LEAD_PATHS.items() if path.startswith(prefix)), None)
+
+
+_BARE_SITE = re.compile(r"^(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?::\d+)?(?:[/?#]\S*)?$", re.I)
+
+
+def web_link(url: str) -> str:
+    """A website or link as it may be saved: http(s) only. A bare address ("maya.dev") gets https://. Raises
+    ValueError for javascript:, data:, //host and anything else that is not a web address."""
+    text = (url or "").strip()
+    if re.fullmatch(r"https?://[^\s/?#]+\S*", text, re.I):
+        return text
+    if not re.match(r"^[a-z][a-z0-9+.-]*:(?!\d)", text, re.I) and not text.startswith(("/", "\\")) and _BARE_SITE.match(text):
+        return "https://" + text
+    raise ValueError("That Website isn't a web address, so nothing was saved. Use a link that starts with "
+                     "https:// or http://, like https://maya.dev.")
 
 
 def linkedin_problem(url: str | None) -> str | None:
@@ -1564,6 +1614,10 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Changed {job}: {r.get('body') or 'details'}"
     if kind == "stages_edit":
         return f"Changed the stages of {job}: {r.get('body') or 'stages'}"
+    if kind == "sequence_set":
+        return f"Set the follow-up steps of {job}: {r.get('body') or 'steps'}"
+    if kind == "loop_template":
+        return f"Set the interview loop template of {job}: {r.get('body') or 'sessions'}"
     if kind == "todo_added":
         return f"Added a to-do: {r.get('todo_text') or 'a to-do'}"
     if kind == "todo_done":
@@ -1579,7 +1633,7 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
             f" ({new['manager']})" if new.get("manager") else "")
     if kind == "client_edit":
-        return f"Changed {quoted(new.get('_client'))}'s client details: {r.get('body') or 'details'}"
+        return f"Changed {quoted(new.get('_client'))}'s client details: {(r.get('body') or 'details').replace('_', ' ')}"
     if kind == "client_create":
         return f"Added the client {quoted(new.get('_client'))}"
     what = f": {new['summary']}" if new.get("summary") else ""
@@ -1601,10 +1655,15 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind.startswith("offer_"):
         from .offers import ai_summary  # here: offers imports this module
         return ai_summary(r)
+    if kind == "plan_seat":
+        from .plan import ai_summary as seat_summary  # here: plan imports this module
+        return seat_summary(r)
     if kind == "note_logged":
         what = new.get("kind") or "note"
         body = " ".join(str(new.get("body") or "").split())
         body = body[:80] + ("..." if len(body) > 80 else "")
+        if new.get("reply"):
+            return f"Logged a reply from {name}" + (f": {body}" if body else "")
         return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
                 + (f": {body}" if body else ""))
     if kind == "card_keep":
@@ -1668,7 +1727,7 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("job", jid), ("stage", cid, jid))
     if kind == "job_created":
         return (("job", jid),)
-    if kind in ("job_edit", "stages_edit"):
+    if kind in ("job_edit", "stages_edit", "sequence_set", "loop_template"):
         return (("job", jid), (kind, jid))
     if kind.startswith("interview_"):
         return (("person", cid), ("interview", r.get("target_id")))
@@ -1676,6 +1735,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("client", (r.get("new_data") or {}).get("_key")),)
     if kind.startswith("offer_"):
         return (("person", cid), ("offer", r.get("target_id")))
+    if kind == "plan_seat":
+        return (("plan", r.get("target_id")),)
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
@@ -1909,6 +1970,8 @@ class Store:
                 label = {"tags": "the skills list"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
                 raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
                                  f"The limit is {limit:,}, so nothing was saved.")
+        if out.get("website"):
+            out["website"] = web_link(out["website"])
         if "linkedin_url" in out:
             problem = linkedin_problem(out["linkedin_url"])
             if problem:
@@ -1981,6 +2044,24 @@ class Store:
             if owner:
                 return DuplicateValue("linkedin_url", owner)
         return None
+
+    def split_same_name(self, name: str, email: str | None = None, linkedin_url: str | None = None
+                        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """People saved under this name, split in two: (could be the same person, clearly someone else). Someone
+        is clearly someone else when both have a LinkedIn link and the links differ. A name match alone, a link
+        against a saved person with none, or a different email (people change jobs) still needs a human."""
+        li = normalize_linkedin(linkedin_url)
+        maybe, other = [], []
+        for c in self.find_by_name(name):
+            saved_li = normalize_linkedin(c.get("linkedin_url"))
+            (other if li and saved_li and li != saved_li else maybe).append(c)
+        if maybe and (li or _clean(email)) and not any(_clean(c.get("email")) or normalize_linkedin(c.get("linkedin_url"))
+                                                       for c in maybe):
+            # Every saved copy has no email and no LinkedIn, and this one brings one: nothing to compare, so they
+            # are saved as new (marked "_no_ids" for the reply) and can be merged later.
+            other += [{**c, "_no_ids": True} for c in maybe]
+            maybe = []
+        return maybe, other
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
         """Everyone saved under this name, ignoring case, accents and punctuation ('Jose Alvarez'
@@ -2418,6 +2499,12 @@ class Store:
                                                                          key=lambda s: s["position"])]
                 now = [(s["id"], s["name"], s["outcome"]) for s in self.job_stages(a["job_id"])]
                 return None if now == shape else "its stages were changed again since"
+            if kind == "sequence_set":
+                from .outreach import ai_blocker  # here: outreach imports this module
+                return ai_blocker(self, a)
+            if kind == "loop_template":
+                from .loops import ai_blocker as template_blocker  # here: loops imports this module
+                return template_blocker(self, a)
             if kind in ("todo_added", "todo_done"):
                 s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
                 if kind == "todo_added":
@@ -2435,6 +2522,9 @@ class Store:
             if kind.startswith("offer_"):
                 from .offers import ai_blocker  # here: offers imports this module
                 return ai_blocker(self, a)
+            if kind == "plan_seat":
+                from .plan import ai_blocker as seat_blocker  # here: plan imports this module
+                return seat_blocker(self, a)
             if kind == "note_logged":
                 t = self._row("SELECT at, data FROM timeline WHERE id = ?", (a["target_id"],))
                 if t is None:
@@ -2527,7 +2617,7 @@ class Store:
                 n, last = n + hit, max(last or "", r["created_at"])
                 people.add(r["candidate_id"])
         for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
-                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'sequence_set', 'loop_template', 'interview_cancel',"
                             " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer', 'card_keep')"
                             " OR (kind = 'stage_move' AND json_valid(new_data)"
                             " AND json_extract(new_data, '$.submit') = 1))"  # a submit to a client, and card presses
@@ -2575,6 +2665,12 @@ class Store:
             if self._row("SELECT 1 FROM ai_actions WHERE kind = 'note_logged' AND target_id = ?", (entry["id"],)):
                 return None
             new = {"kind": entry["kind"], "body": (entry.get("body") or "")[:300], "at": entry["at"]}
+            fresh = self._row("SELECT data FROM timeline WHERE id = ?", (entry["id"],)) or {}
+            try:
+                if (json.loads(fresh.get("data") or "{}") or {}).get("reply"):
+                    new["reply"] = True  # a reply, so Changes says so
+            except (ValueError, AttributeError):
+                pass
             if entry["kind"] == "interview":  # as logged, so Undo can tell when it was changed since
                 raw = entry.get("data")
                 new["data"] = (json.loads(raw) if isinstance(raw, str) else raw) or {}
@@ -2727,6 +2823,15 @@ class Store:
         if kind.startswith("offer_"):
             from .offers import ai_undo  # here: offers imports this module
             return ai_undo(self, a)
+        if kind == "sequence_set":
+            from .outreach import ai_undo as sequence_undo  # here: outreach imports this module
+            return sequence_undo(self, a)
+        if kind == "loop_template":
+            from .loops import ai_undo as template_undo  # here: loops imports this module
+            return template_undo(self, a)
+        if kind == "plan_seat":
+            from .plan import ai_undo as seat_undo  # here: plan imports this module
+            return seat_undo(self, a)
         if kind == "interview_job":
             from .chase import ai_job_undo  # here: chase imports this module
             return ai_job_undo(self, a)
@@ -3275,6 +3380,9 @@ class Store:
             raise ValueError("The interviewer can be up to 200 characters. Name the person, not the whole invite.")
         if iv["status"] == "cancelled":
             raise ValueError("That interview was cancelled, so it has no feedback. Put it back first if it happened.")
+        if who:  # 'Priya' or 'tia b.' means the named interviewer it fits, so nobody stays owed by a spelling
+            from . import interviews
+            who = interviews.pick_interviewer(iv, who)
         data = dict(iv["data"])
         notes = [f for f in data.get("feedback") or [] if isinstance(f, dict)]
         if any((f.get("by") or "").casefold() == (who or "").casefold() and f.get("text") == body for f in notes):
@@ -3300,7 +3408,9 @@ class Store:
         return False, None
 
     def candidate_filters(self, *, location: str | None = None, title: str | None = None,
-                          tag: str | None = None, source: str | None = None) -> tuple[list[str], list[Any], dict]:
+                          tag: str | None = None, source: str | None = None, job_id: int | None = None,
+                          client: str | None = None, stage: str | None = None, pipe: str | None = None,
+                          days: int | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
         bay area, swe) and ignore case and accents; tag and source ignore case."""
         where: list[str] = []
@@ -3321,7 +3431,53 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        from .opsreview import PIPES, pipe_sql
+        pipe = pipe if pipe in PIPES else None  # a column of the Ops review: in process, stuck, offers out...
+        if job_id or (client and client.strip()) or (stage and stage.strip()) or pipe:
+            # one pipeline row has to match all of job, client and stage together
+            sub, sp = ["a.candidate_id = c.id"], []
+            if job_id:
+                sub.append("a.job_id = ?")
+                sp.append(int(job_id))
+                filters["job_id"] = str(job_id)
+            if client and client.strip():
+                from . import actions  # a client is a company by its key: "Plaid, Inc." and "plaid" are one
+                want = actions.company_key(client)
+                ids = [r["id"] for r in self._rows("SELECT id, company FROM jobs")
+                       if actions.company_key(r["company"]) == want]
+                sub.append("a.job_id IN (SELECT value FROM json_each(?))")
+                sp.append(json.dumps(ids))
+                filters["client"] = client
+            if stage and stage.strip():
+                sub.append("lower(trim(a.stage)) = lower(?)")
+                sp.append(stage.strip())
+                filters["stage"] = stage
+            if pipe:
+                cond, extra = pipe_sql(pipe, days)
+                sub.append(cond)
+                sp += extra
+                sub.append("j.status = 'open'")
+                filters["pipe"] = pipe
+            where.append("EXISTS (SELECT 1 FROM applications a JOIN jobs j ON j.id = a.job_id WHERE "
+                         + " AND ".join(sub) + ")")
+            params += sp
         return where, params, filters
+
+    def membership_choices(self, job_id: int | None = None) -> dict[str, Any]:
+        """Job, client and stage choices for the Candidates filter bar. Stages follow the chosen job."""
+        from . import actions
+        jobs = self._rows("SELECT id, title, company, status FROM jobs ORDER BY (status = 'open') DESC, title")
+        clients: dict[str, str] = {}
+        for j in jobs:
+            if (j["company"] or "").strip():
+                clients.setdefault(actions.company_key(j["company"]), j["company"].strip())
+        if job_id:
+            stages = [s["name"] for s in self.job_stages(job_id)]
+        else:
+            stages = [r["stage"] for r in self._rows(
+                "SELECT stage, count(*) n FROM applications GROUP BY lower(stage) ORDER BY n DESC LIMIT 40")]
+        return {"job_choices": jobs, "client_choices": sorted(clients.values(), key=str.lower),
+                "stage_choices": stages}
 
     def list_sources(self) -> list[dict[str, Any]]:
         """Where people came from ("LinkedIn", "Referral"), most common first, for the Candidates filter."""
@@ -3340,6 +3496,11 @@ class Store:
         limit: int = 25,
         offset: int = 0,
         fix_typos: bool = True,
+        job_id: int | None = None,
+        client: str | None = None,
+        stage: str | None = None,
+        pipe: str | None = None,
+        days: int | None = None,
     ) -> SearchResult:
         """Ranked search, best matches first; empty query lists most recent.
 
@@ -3347,7 +3508,8 @@ class Store:
         their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
         matches with some of the words. A word nobody has gets a spelling fix from the saved words.
         """
-        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source)
+        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source,
+                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
@@ -3375,7 +3537,8 @@ class Store:
                     for word, fix in all_fixes.items():
                         fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                     res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                                 limit=limit, offset=offset, fix_typos=False)
+                                                 limit=limit, offset=offset, fix_typos=False,
+                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                     res.suggestion = fixed
                     return res
             if fixes:
@@ -3383,12 +3546,14 @@ class Store:
                 for word, fix in fixes.items():
                     fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                 res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False)
+                                             limit=limit, offset=offset, fix_typos=False,
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                 if res.exact_total:
                     res.query, res.suggestion, res.corrected = query, fixed, True
                     return res
                 res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False)
+                                             limit=limit, offset=offset, fix_typos=False,
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
                 res.suggestion = fixed
                 return res
 

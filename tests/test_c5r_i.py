@@ -51,7 +51,7 @@ def test_decide_pass_boxes_start_unticked_and_name_sessions_still_to_come(store)
     body = text(call(build_server(store), "compare_finalists", job_id=job["id"]))
     assert "4 interviews still to come" in body
     # Nobody ticked: the offer goes out and everyone else stays put.
-    r = local_client(store).post(f"/jobs/{job['id']}/decide", data={"offer": mei["id"], "reason": "Not a fit"},
+    r = local_client(store).post(f"/jobs/{job['id']}/decide", data={"offer": mei["id"], "reason": "Not a fit", "confirmed": "1"},
                                  follow_redirects=False)
     assert flash_of(r).startswith('Recorded: Offer to "Mei Lin Zhao".')
     stages = {p["candidate_id"]: p["stage"] for p in store.pipeline(job["id"])}

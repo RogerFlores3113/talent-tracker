@@ -171,7 +171,7 @@ def test_move_out_with_an_interview_asks_to_cancel(store):
     assert "Cancel it?" in c.get(r.headers["location"]).text
     # The AI gets the list and a warning, and nothing is cancelled for it.
     store.move_stage(dana, job["id"], "Interviewing")
-    out = structured(call(build_server(store), "move_stage", candidate_id=dana, job_id=job["id"], stage="Withdrawn"))
+    out = structured(call(build_server(store), "move_stage", candidate_id=dana, job_id=job["id"], stage="Withdrawn", notes="Pulled out"))
     assert out["upcoming_interviews"][0]["interview_id"] == iv2["id"] and "update_interview" in out["warning"]
     assert store.get_interview(iv2["id"])["status"] == "scheduled"
     store.move_stage(dana, job["id"], "Interviewing")

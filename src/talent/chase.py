@@ -21,7 +21,10 @@ DEFAULT_DAYS = 5
 CHASED_KEY = "client_chased:{}"
 WRITEUP_NOTES = 3  # screen notes in a write-up, newest first
 NOTE_CHARS = 400
-SHOWN = 15  # people per nudge, then "and 3 more"
+SHOWN = 10  # people per nudge (oldest first), then "and 3 more" with a count per job and stage
+TODAY_SHOWN = 5  # names on a Today chase card: the worst few, then "and 30 more"
+TABLE_ROWS = 12  # job and stage rows in a nudge's count table
+COLLAPSE_OVER = 25  # more people than this for one client: Today shows one line for the client, not a card per manager
 _COMP = re.compile(r"\b(comp|compensation|salary|base|ote|total comp|tc|rate|expecting|expects|\$\s?\d)", re.I)
 _AVAIL = re.compile(r"\b(availab\w*|notice|start date|can start|start in|starting|open to start)\b", re.I)
 
@@ -35,6 +38,20 @@ def chase_days(store: Store) -> int:
     except (TypeError, ValueError):
         n = DEFAULT_DAYS
     return n if 1 <= n <= 90 else DEFAULT_DAYS
+
+
+IMPORT_DAY_KEY = "chase_from_import"
+
+
+def from_import_day(store: Store) -> bool:
+    """Count waits from the import day for people an import put in a stage with an older date (default on)."""
+    raw = store._row("SELECT value FROM settings WHERE key = ?", (IMPORT_DAY_KEY,))
+    return not raw or str(raw["value"]) != "0"
+
+
+def set_from_import_day(store: Store, on: bool) -> bool:
+    actions._put_setting(store, IMPORT_DAY_KEY, "1" if on else "0")
+    return on
 
 
 def set_chase_days(store: Store, value: Any) -> int:
@@ -144,12 +161,52 @@ def chased_at(store: Store, key: str, manager: str) -> str | None:
     return raw.get("at") if isinstance(raw, dict) else None
 
 
-def mark_chased(store: Store, key: str, manager: str, now: datetime | None = None) -> str:
-    """The recruiter sent this manager's nudge: Today stops asking until the next one is due."""
+def mark_chased(store: Store, key: str, manager: str, now: datetime | None = None,
+                snooze_days: int | None = None) -> str:
+    """The recruiter sent this manager's nudge: Today stops asking until the next one is due, or for snooze_days."""
     reports.client(store, key)  # NotFound for a client that isn't here
-    ts = (now or datetime.now(timezone.utc)).replace(microsecond=0).isoformat()
-    reports._put_json(store, _chased_key(key, manager), {"at": ts})
-    return ts
+    when = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    row: dict[str, Any] = {"at": when.isoformat()}
+    if snooze_days:
+        row["until"] = (when + timedelta(days=snooze_days)).isoformat()
+    reports._put_json(store, _chased_key(key, manager), row)
+    return row["at"]
+
+
+def snooze_days_from(value: Any) -> int | None:
+    """The snooze box: empty means the chase days; otherwise 1 to 365 days."""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError("Give the snooze as a number of days from 1 to 365.") from None
+    if not 1 <= n <= 365:
+        raise ValueError("Give the snooze as a number of days from 1 to 365.")
+    return n
+
+
+def mark_client_chased(store: Store, key: str, snooze_days: int | None = None,
+                       now: datetime | None = None) -> int:
+    """Mark every hiring manager's nudge for this client as chased in one go, with an optional snooze of N days.
+    Returns how many nudges that covered (at least one, so a client with nothing waiting still snoozes)."""
+    reports.client(store, key)
+    managers = {g["manager_key"] for g in chase_list(store, key, now=now)} or {""}
+    for mk in managers:
+        mark_chased(store, key, mk, now, snooze_days)
+    return len(managers)
+
+
+def snoozed(store: Store, key: str, manager: str, now: datetime) -> bool:
+    """Whether Today should stay quiet about this nudge: chased within the chase days, or snoozed until later."""
+    raw = reports._get_json(store, _chased_key(key, manager))
+    if not isinstance(raw, dict):
+        return False
+    until, last = to_dt(raw.get("until")), to_dt(raw.get("at"))
+    if until:
+        return now < until
+    return bool(last and now - last < timedelta(days=chase_days(store)))
 
 
 # ------------------------------------------------------------------ helpers
@@ -276,10 +333,26 @@ def screen_note(text: str | None) -> str | None:
     return t
 
 
-def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
+ABOUT_CHARS = 360
+SUBMITTED_STAGE = "Submitted to client"
+
+
+def missing_stage_edit(store: Store, job_id: int) -> dict[str, Any]:
+    """The stage add that gives a job a Submitted stage: {"name", "after"}. It lands after the last in-play stage
+    that comes before any interview or offer stage (Screening on the default stages)."""
+    stages = store.job_stages(job_id)
+    first_late = next((i for i, s in enumerate(stages) if s["outcome"] != "open"
+                       or set(re.findall(r"[a-z]+", s["name"].lower())) & actions.LATE_STAGE_WORDS), len(stages))
+    after = stages[first_late - 1]["name"] if first_late > 0 else None
+    return {"name": SUBMITTED_STAGE, "after": after} if after else {"name": SUBMITTED_STAGE}
+
+
+def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = None,
+            note: str | None = None) -> dict[str, Any]:
     """The submittal draft for one person and job: {"subject", "body", "to", "email", "client", "manager"}. Built from
     their profile, the newest screen notes on this job, and comp and availability when a note or the profile says
-    them. The recruiter reads and sends it from their own mail."""
+    them. why_fit and note are the recruiter's own words for this write-up. The recruiter reads and sends it from
+    their own mail."""
     cand = store.get_candidate(candidate_id)
     job = store.get_job(job_id)
     own = actions.inhouse(store)
@@ -307,8 +380,19 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
     if hist:
         lines.append("Before: " + "; ".join(
             " at ".join(x for x in (h.get("title"), h.get("company")) if x) for h in hist if h.get("title") or h.get("company")))
+    tags = cand.get("tags")
+    tags = ", ".join(tags) if isinstance(tags, (list, tuple)) else (tags or "").strip()
+    if tags:
+        lines.append(f"Skills: {tags[:200]}")
+    about = " ".join((cand.get("about") or "").split())
+    if about:
+        lines.append(f"About: {about[:ABOUT_CHARS].rstrip()}{'...' if len(about) > ABOUT_CHARS else ''}")
     if cand.get("linkedin_url"):
         lines.append(f"Profile: {cand['linkedin_url']}")
+    if (why_fit or "").strip():
+        lines += ["", f"Why they fit: {' '.join(why_fit.split())}"]
+    if (note or "").strip():
+        lines += ["", " ".join(note.split())]
     if notes:
         lines += ["", "From my screen:"]
         lines += [f"- {n[:NOTE_CHARS].strip()}{'...' if len(n) > NOTE_CHARS else ''}" for n in notes]
@@ -326,7 +410,8 @@ def writeup(store: Store, candidate_id: int, job_id: int) -> dict[str, Any]:
             "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail)}
 
 
-def submit(store: Store, candidate_id: int, job_id: int, by: str = "app") -> dict[str, Any]:
+def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fit: str | None = None,
+           note: str | None = None) -> dict[str, Any]:
     """Move someone into the job's Submitted stage and draft their write-up. {"moved", "stage", "before", "at",
     "writeup", "warning", "elsewhere"}. A second submit while they're already there moves nothing. Raises
     ValueError when they aren't on the job, are hired or out, or the job has no Submitted stage."""
@@ -357,7 +442,8 @@ def submit(store: Store, candidate_id: int, job_id: int, by: str = "app") -> dic
     else:
         warning = None  # already there: nothing new to warn about
     return {"moved": moved, "stage": target["name"], "before": app["stage"], "at": at, "warning": warning,
-            "elsewhere": other_clients(store, candidate_id, job_id), "writeup": writeup(store, candidate_id, job_id)}
+            "elsewhere": other_clients(store, candidate_id, job_id),
+            "writeup": writeup(store, candidate_id, job_id, why_fit, note)}
 
 
 # ------------------------------------------------------------------ the chase
@@ -373,11 +459,12 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
     Oldest first within a group; groups with the longest wait first. Stages the chase doesn't count (Onsite and
     reference checks by default) and waits past the optional upper limit are left out, counted in `left_out`
     ({"stages", "too_old"}) when given."""
-    from .importers import imported_placements
+    from .importers import file_entries, imported_placements
 
     now = now or datetime.now(timezone.utc)
-    days = days or chase_days(store)
+    days = chase_days(store) if days is None else days
     own = actions.inhouse(store)
+    from_file = file_entries(store) if from_import_day(store) else {}  # (candidate, job) -> when the app got them
     cutoff = now - timedelta(days=days)
     oldest = chase_max_days(store)
     too_old = now - timedelta(days=oldest) if oldest else None
@@ -402,6 +489,10 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
             for a in store.pipeline(j["id"]):
                 g = stage_of.get(a["stage"].lower()) or reports.stage_group(a["stage"])
                 since = to_dt(a["stage_changed_at"])
+                entry = from_file.get((a["candidate_id"], j["id"]))
+                landed = to_dt(entry["created_at"]) if entry else None
+                if landed and since and since < landed:  # a stage date older than the import counts from the import day
+                    since = landed
                 if g not in want or not since or since > cutoff:
                     continue
                 if (a["candidate_id"], j["id"]) in booked or a["candidate_id"] in booked_any:
@@ -422,7 +513,7 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                 grp["people"].append({"candidate_id": a["candidate_id"], "name": a["candidate_name"],
                                       "job_id": j["id"], "job": j["title"], "stage": a["stage"],
                                       "since": a["stage_changed_at"], "days": (now - since).days,
-                                      "date_unknown": a["candidate_id"] in undated})
+                                      "date_unknown": a["candidate_id"] in undated, "imported": bool(entry)})
     out = []
     for (ck, mk), grp in groups.items():
         c = grp.pop("_c")
@@ -435,8 +526,20 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                           + (f" for {c['name']}" if not own else ""))
         grp["email"] = _mailto(grp["to"], grp["subject"], grp["text"])
         grp["longest"] = max(p["days"] for p in grp["people"])
+        grp["by_job_stage"] = by_job_stage(grp["people"])
         out.append(grp)
     return sorted(out, key=lambda g: (-g["longest"], g["client"].lower(), g["manager_key"]))
+
+
+def by_job_stage(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """[{"job", "job_id", "stage", "count", "longest"}] for these people, biggest wait first."""
+    rows: dict[tuple[int, str], dict[str, Any]] = {}
+    for p in people:
+        r = rows.setdefault((p["job_id"], p["stage"]), {"job": p["job"], "job_id": p["job_id"], "stage": p["stage"],
+                                                        "count": 0, "longest": 0})
+        r["count"] += 1
+        r["longest"] = max(r["longest"], p["days"])
+    return sorted(rows.values(), key=lambda r: (-r["longest"], -r["count"], r["job"].lower(), r["stage"].lower()))
 
 
 def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
@@ -449,7 +552,11 @@ def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
         when = "" if p["date_unknown"] else f" since {reports.in_zone(p['since'], tz, '%b %-d')} ({p['days']} days)"
         lines.append(f"- {p['name']} ({p['job']}): {p['stage']}{when}")
     if len(people) > SHOWN:
-        lines.append(f"- and {len(people) - SHOWN} more")
+        rest = by_job_stage(people[SHOWN:])
+        lines.append(f"- and {len(people) - SHOWN} more" + (", by job and stage:" if rest else ""))
+        lines += [f"  {r['job']}, {r['stage']}: {r['count']}" for r in rest[:TABLE_ROWS]]
+        if len(rest) > TABLE_ROWS:
+            lines.append(f"  other jobs and stages: {sum(r['count'] for r in rest[TABLE_ROWS:])}")
     lines += ["", "Could you let me know where each one stands, or if you'd like to meet any of them?", "", "Thanks"]
     return "\n".join(lines)
 
@@ -474,17 +581,35 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
     now = now or datetime.now(timezone.utc)
     days = chase_days(store)
     items = []
-    for g in chase_list(store, now=now, days=days):
-        last = to_dt(g["chased_at"])
-        if last and now - last < timedelta(days=days):
+    live = [g for g in chase_list(store, now=now, days=days) if not snoozed(store, g["key"], g["manager_key"], now)]
+    totals: dict[str, int] = {}
+    for g in live:
+        totals[g["key"]] = totals.get(g["key"], 0) + len(g["people"])
+    done: set[str] = set()
+    for g in live:
+        if totals[g["key"]] > COLLAPSE_OVER:  # a big import: one line per client instead of a card per manager
+            if g["key"] in done:
+                continue
+            done.add(g["key"])
+            mine = [x for x in live if x["key"] == g["key"]]
+            n = totals[g["key"]]
+            since_import = sum(1 for x in mine for p in x["people"] if p.get("imported") or p["date_unknown"])
+            items.append({"key": f"client_chase:{g['key']}:all:{now.date().isocalendar()[1]}",
+                          "kind": "client_chase", "rank": 2, "when": min(x["people"][0]["since"] for x in mine),
+                          "title": f"{g['client']}: {n} waiting on feedback"
+                                   + (", most since your import" if since_import * 2 > n else "")
+                                   + ". Open the chase list",
+                          "detail": "", "client": g["client"],
+                          "href": f"/clients/chase#chase-{reports.slug(g['key'])}-"
+                                  f"{reports.slug(mine[0]['manager_key']) or 'none'}"})
             continue
         n = len(g["people"])
         who = f"{g['manager']} at {g['client']}" if g["manager"] else g["client"]
         items.append({"key": f"client_chase:{g['key']}:{g['manager_key']}:{now.date().isocalendar()[1]}",
                       "kind": "client_chase", "rank": 2, "when": g["people"][0]["since"],
                       "title": f"Chase {who} for feedback: {n} {'person' if n == 1 else 'people'} waiting {days}+ days",
-                      "detail": ", ".join(f"{p['name']} ({p['days']} days)" for p in g["people"][:3])
-                      + (f" and {n - 3} more" if n > 3 else ""), "client": g["client"],
+                      "detail": ", ".join(f"{p['name']} ({p['days']} days)" for p in g["people"][:TODAY_SHOWN])
+                      + (f" and {n - TODAY_SHOWN} more" if n > TODAY_SHOWN else ""), "client": g["client"],
                       "href": f"/clients/chase#chase-{reports.slug(g['key'])}-{reports.slug(g['manager_key']) or 'none'}"})
     return items
 
@@ -565,6 +690,6 @@ def ai_job_undo(store: Store, a: dict[str, Any]) -> str:
     return a["summary"]
 
 
-__all__ = ["attach_interview_job", "chase_days", "chase_max_days", "counts_stage", "set_chase_max_days",
+__all__ = ["attach_interview_job", "by_job_stage", "mark_client_chased", "snooze_days_from", "snoozed", "chase_days", "chase_max_days", "counts_stage", "set_chase_max_days",
            "set_stage_picks", "stage_choices", "chase_list", "chase_text", "interview_jobs", "mark_chased", "nudge_text",
            "set_chase_days", "set_interview_job", "submit", "submit_stage", "today_items", "writeup"]

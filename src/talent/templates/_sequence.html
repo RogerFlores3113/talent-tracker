@@ -2,7 +2,14 @@
 <section class="panel sequence" id="followups">
   <h2>Follow-ups</h2>
   {% if fu.steps %}
-  <p class="fine">After the first message, follow-ups come due on Today with the text ready to paste. Nothing is sent for you. A reply, or a move past {{ fu.contact or 'Contacted' }}, ends someone's follow-ups. People first contacted since {{ fu.since | date }} follow it.</p>
+  <p class="fine">After the first message, follow-ups come due on Today with the text ready to paste. Nothing is sent for you. A reply, or a move past {{ fu.contact or 'Contacted' }}, ends someone's follow-ups. People first contacted since {{ fu.since | date }} follow it{% if fu.enrolled %}, and {{ fu.enrolled }} you enrolled{% endif %}. <a href="/jobs/{{ job.id }}/outreach">See everyone you messaged</a>.</p>
+  {% if fu.not_following %}
+  <div class="flash warn" id="not-following">
+    <p><strong>{{ fu.not_following | length }} {{ 'person' if fu.not_following | length == 1 else 'people' }} you already messaged {% if fu.not_following | length == 1 %}isn't{% else %}aren't{% endif %} following these steps.</strong> They were first messaged before the steps were saved, so no follow-up comes due for them.</p>
+    <ul class="fine">{% for p in fu.not_following %}<li><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a> · last message {{ p.last_on | date }}{% if p.sent > 1 %} ({{ p.sent }} sent){% endif %}</li>{% endfor %}</ul>
+    <form method="post" action="/jobs/{{ job.id }}/sequence/enroll" class="inline" data-confirm="Enroll {{ fu.not_following | length }} already messaged? Nothing is sent."><span class="fine">Count from: <label><input type="radio" name="start" value="today" checked> Start counting from today</label> <label><input type="radio" name="start" value="first_message"> From their first message (some may be due now)</label></span> <button class="btn small primary" type="submit">Enroll people already in {{ fu.contact or 'Contacted' }}</button></form>
+  </div>
+  {% endif %}
   {% if fu.people %}
   <ul class="todo-list">{% for p in fu.people %}
     <li><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a>
@@ -14,6 +21,7 @@
         {% endif %}
         <form method="post" action="/jobs/{{ job.id }}/followups/{{ p.candidate_id }}/sent" class="inline"><input type="hidden" name="next" value="/jobs/{{ job.id }}#followups"><button class="btn small" type="submit">I sent it</button></form>
         <form method="post" action="/jobs/{{ job.id }}/followups/{{ p.candidate_id }}/replied" class="inline"><input type="hidden" name="next" value="/jobs/{{ job.id }}#followups"><button class="link small" type="submit">They replied</button></form>
+      {% elif p.status == 'paused' %}<span class="muted">· paused before {{ p.label }}</span>
       {% elif p.status == 'replied' %}<span class="muted">· replied</span>
         {% if p.next_stage %}<form method="post" action="/actions/advance" class="inline"><input type="hidden" name="candidate_id" value="{{ p.candidate_id }}"><input type="hidden" name="job_id" value="{{ job.id }}"><input type="hidden" name="stage" value="{{ p.next_stage }}"><button class="btn small" type="submit">Move to {{ p.next_stage }}</button></form>{% endif %}
       {% elif p.status == 'moved_on' %}<span class="muted">· moved on to {{ p.stage }}</span>
@@ -27,13 +35,16 @@
   <details {{ 'open' if not fu.steps and request.query_params.get('sequence') }}><summary>{{ 'Change the steps' if fu.steps else 'Set up follow-ups' }}</summary>
     <form method="post" action="/jobs/{{ job.id }}/sequence" class="sequence-form">
       <p class="fine">Day is days after the first message. You can use {first_name}, {job} and {company} in the text.</p>
-      {% for i in range(5) %}{% set s = (fu.steps or fu.defaults)[i] if i < (fu.steps or fu.defaults) | length else {} %}
-      <div class="seq-step">
+      {% set shown = (fu.steps or fu.defaults) | length %}
+      {% for i in range(5) %}{% set s = (fu.steps or fu.defaults)[i] if i < shown else {} %}
+      <div class="seq-step"{% if i > shown %} hidden{% endif %}>
         <input type="text" name="label_{{ i }}" value="{{ s.label or '' }}" maxlength="60" placeholder="{{ 'First message' if i == 0 else 'Follow-up' }}" aria-label="Step {{ i + 1 }} name">
         <label class="inline-label">Day <input type="number" name="day_{{ i }}" value="{{ s.day if s.day is not none else '' }}" min="0" max="90" aria-label="Step {{ i + 1 }} day"></label>
         <textarea name="text_{{ i }}" rows="2" maxlength="2000" aria-label="Step {{ i + 1 }} text">{{ s.text or '' }}</textarea>
       </div>
       {% endfor %}
+      {% if shown < 5 %}<button class="btn small" type="button" data-add-step>Add a step</button>{% endif %}
+      <p class="fine">If you message someone today: {% for p in fu.preview %}{{ p.label }} on {{ p.on | day }}{{ ', ' if not loop.last else '.' }}{% endfor %}</p>
       <button class="btn small primary" type="submit">Save follow-ups</button>
     </form>
     {% if fu.copy_from %}<form method="post" action="/jobs/{{ job.id }}/sequence/copy" class="inline copy-steps"{% if fu.steps %} data-confirm="Replace this job's steps with the ones you pick? Nothing logged changes."{% endif %}>

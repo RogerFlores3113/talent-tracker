@@ -6,6 +6,8 @@
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
+//   data-add-step             on a button in the follow-up steps form: show the next empty step row
+//   data-check-all            on a checkbox: tick or untick every person (name candidate_ids) in its form
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
 //                             (a submit button's own data-busy wins when that button sent it)
@@ -14,7 +16,9 @@
 //                             their interviews still to come, which get cancelled; data-open their sessions
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
+//   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
   "use strict";
@@ -71,12 +75,28 @@
     if (e.target.closest && e.target.closest("button[data-print]")) window.print();
   });
 
+  // Follow-up steps form: "Add a step" shows the next empty row; a box with data-check-all ticks every person in its form.
+  document.addEventListener("click", e => {
+    const add = e.target.closest && e.target.closest("button[data-add-step]");
+    if (!add) return;
+    const next = add.form.querySelector(".seq-step[hidden]");
+    if (next) { next.hidden = false; const f = next.querySelector("input"); if (f) f.focus(); }
+    if (!add.form.querySelector(".seq-step[hidden]")) add.hidden = true;
+  });
+  document.addEventListener("change", e => {
+    const all = e.target.closest && e.target.closest("input[data-check-all]");
+    if (!all) return;
+    all.form.querySelectorAll("input[name=candidate_ids]").forEach(b => { b.checked = all.checked; });
+  });
+
   // The time zone banner: suggest the zone this browser is in, so saving it is one click.
   function prefillZones() {
     let zone = "";
     try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
     if (!zone) return;
     document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
+    // One click: "Use America/Chicago" saves this browser's zone as it is.
+    document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
   else prefillZones();
@@ -139,6 +159,24 @@
     const el = e.target;
     if (el.matches && el.matches("select[data-autosubmit]") && el.form) el.form.submit();
     // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
+    if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
+      const shared = document.getElementById("tbl-move");
+      if (!shared) return;
+      shared.elements.candidate_id.value = el.dataset.cid;
+      shared.elements.stage.value = el.value;
+      const o = el.selectedOptions && el.selectedOptions[0];
+      const reason = shared.querySelector(".reason");
+      if (o && o.dataset.out && reason) {
+        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
+        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
+        const who = reason.querySelector(".tbl-who");
+        if (who) who.textContent = "Why " + (el.dataset.who || "this person") + " is going to " + o.textContent + ":";
+        reason.hidden = false; return;
+      }
+      if (reason) reason.hidden = true;
+      shared.requestSubmit ? shared.requestSubmit() : shared.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+      return;
+    }
     const form = el.closest && el.closest("form.stage-form");
     if (!form) return;
     if (el.matches("select[data-stage-pick]")) {

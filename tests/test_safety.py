@@ -167,7 +167,8 @@ def test_mcp_update_clears_at_most_one_field(store):
 
 def test_save_candidate_warns_about_same_name(store):
     server = build_server(store)
-    store.add_candidate(name="Pat Lee", current_title="Designer", current_company="Acme", location="Austin")
+    store.add_candidate(name="Pat Lee", current_title="Designer", current_company="Acme", location="Austin",
+                        email="pat@old.com")  # an email saved, so there is something to compare
     out = structured(call(server, "save_candidate", name="pat lee", email="pat@new.com"))
     assert out["created"] is False and out["needs_confirmation"] is True and store.count_candidates() == 1
     dup = out["possible_duplicates"][0]

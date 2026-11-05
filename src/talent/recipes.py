@@ -293,22 +293,61 @@ def report_private(store: Any) -> dict[str, list]:
     return {"names": column("SELECT name AS v FROM candidates"), "phrases": phrases, "notes": notes}
 
 
-def _scrub_all(text: str, names: list[str], private: dict[str, list] | None) -> str:
+_STREET = re.compile(r"\b\d{1,6}\s+(?:[\w.'-]+\s+){0,3}?(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|"
+                     r"way|court|ct|place|pl|square|sq|highway|hwy|terrace|parkway|pkwy)\b\.?", re.I)
+_PAIR = re.compile(r"\b[A-Z][a-z]{1,}(?:[ \t]+[A-Z][a-z]{1,})+\b")
+# Words of the app and the tools around it, so "Talent Search" or "Roll back" stay in a report.
+_APP_WORDS = frozenset(
+    "talent search today review changes settings shortlist candidates candidate jobs job pipeline interviews interview "
+    "clients client offers offer decide chase outreach import export claude cautious mode roll back sessions session ai "
+    "app csv linkedin github mcp windows mac macos linux python save keep pass sourced contacted screening onsite "
+    "hired rejected withdrawn the this that when after before not will would could should error problem report "
+    "nothing everything something what why how area".split())
+
+
+# Plain words that start a sentence in a report, so they survive the capital-letter check below.
+_COMMON_WORDS = frozenset(
+    "a an and as at be but by can cannot could did do does doesn't don't for from has have i if in is isn't it its no "
+    "of on one only or so some then there they to too two three was were with without won't wasn't yes "
+    "adding added clicking clicked fails failed failing loading opening saving searching showing stuck tried trying "
+    "using wrong slow empty missing broken crash crashes button page list view tool tools results result "
+    "monday tuesday wednesday thursday friday saturday sunday".split())
+
+
+def scrub_strict(text: str) -> str:
+    """Also take out street addresses, capitalised name pairs ("Jordan Smithers") and any other capitalised word
+    (a company like "Globex") that isn't a word of the app or a plain word. For reports the AI app writes, which
+    can name people and companies the database doesn't know."""
+    text = _STREET.sub("[address removed]", text or "")
+    text = _PAIR.sub(lambda m: m.group(0) if all(w.lower() in _APP_WORDS for w in m.group(0).split())
+                     else "[name removed]", text)
+    keep = _APP_WORDS | _COMMON_WORDS
+    return re.sub(r"\b[A-Z][A-Za-z'’]*\b", lambda m: m.group(0) if m.group(0).lower() in keep else "[name removed]", text)
+
+
+REPORT_SUMMARY_LIMIT = 200
+REPORT_AREAS = ("search", "saving people", "pipeline and stages", "interviews", "outreach", "reports and updates",
+                "settings and review", "other")
+
+
+def _scrub_all(text: str, names: list[str], private: dict[str, list] | None, strict: bool = False) -> str:
     private = private or {}
     text = _scrub_notes(text, private.get("notes") or ())
     text = _scrub_phrases(text, private.get("phrases") or ())
     text = _scrub_names(text, [*names, *(private.get("names") or ())])
+    if strict:  # last, so the labels above stay as they are
+        text = scrub_strict(text)
     return _scrub(text)
 
 
 def issue_text(summary: str, details: str = "", where: str = "app", names: Iterable[str] = (),
-               private: dict[str, list] | None = None) -> tuple[str, str]:
+               private: dict[str, list] | None = None, strict: bool = False) -> tuple[str, str]:
     """The (title, body) a problem report would have, with emails, phones, links, the names of saved
     candidates (pass them as names), and, with private (see report_private), job titles, client and company
     names and text copied from notes taken out. This is exactly what the GitHub link carries."""
     names = list(names)
-    title = _scrub_all((summary or "Problem report").strip(), names, private)[:120]
-    details = _scrub_all(details or "", names, private)
+    title = _scrub_all((summary or "Problem report").strip(), names, private, strict)[:120]
+    details = _scrub_all(details or "", names, private, strict)
     body = (
         f"**What happened**\n{details.strip() or title}\n\n"
         f"**Where**\n{where}\n\n"
@@ -319,11 +358,11 @@ def issue_text(summary: str, details: str = "", where: str = "app", names: Itera
 
 
 def issue_url(summary: str, details: str = "", where: str = "app", names: Iterable[str] = (),
-              private: dict[str, list] | None = None) -> str:
+              private: dict[str, list] | None = None, strict: bool = False) -> str:
     """A prefilled GitHub 'new issue' link. Opening it shows GitHub the text (it's in the address);
     it is posted only when the user presses Submit on GitHub.
 
     Never put candidate data in here.
     """
-    title, body = issue_text(summary, details, where, names, private)
+    title, body = issue_text(summary, details, where, names, private, strict)
     return ISSUES_URL + "?" + urlencode({"title": title, "body": body}, quote_via=quote)

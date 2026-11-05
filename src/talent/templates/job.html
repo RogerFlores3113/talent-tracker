@@ -46,7 +46,7 @@
     <input type="search" name="q" value="{{ q }}" placeholder="Add someone you already have: search by name or skill" aria-label="Find a candidate to add" autocomplete="off">
   </form>
   <a class="btn small" href="/candidates/new?job_id={{ job.id }}">Add someone new</a>
-  <details class="ai-source"><summary>Find new people with AI</summary>
+  <details class="ai-source" id="find-people" {{ 'open' if request.query_params.get('find') }}><summary>Find new people with AI</summary>
     <p class="fine">Claude searches your saved candidates first, then puts new people on this job's <a href="/jobs/{{ job.id }}/shortlist">Shortlist</a> for you to keep or pass.</p>
     {{ recipe_buttons(prompt, "Source with Claude") }}
   </details>

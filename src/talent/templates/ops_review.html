@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Ops review · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head"><h1>Ops review</h1>
+  <span class="actions-inline no-print"><button type="button" class="btn small" data-copy-from="ops-table" data-copy-note="next" data-copy-msg="Copied. Paste it into a sheet or an email.">Copy as table</button><span class="fine" role="status"></span>
+  <a class="btn small" href="{{ '/clients' }}">All {{ 'reports' if inhouse() else 'clients' }}</a></span></div>
+<p class="lead">Every open job in one table. Each number opens the people behind it. New and moved cover the last {{ data.week_days }} days; interviews booked are the next {{ data.interview_days }} days.</p>
+<form class="tablebar no-print" method="get" action="/clients/review">
+  <select name="client" aria-label="Filter by client" data-autosubmit>
+    <option value="">All {{ 'companies' if inhouse() else 'clients' }}</option>
+    {% for cl in client_choices %}<option value="{{ cl }}" {{ 'selected' if cl | lower == client | lower }}>{{ cl }}</option>{% endfor %}
+  </select>
+  <label class="inline-label">Stuck after <input type="number" name="stuck" min="1" max="365" value="{{ data.stuck_days }}" aria-label="Days before someone counts as stuck"> days</label>
+  <button class="btn small" type="submit">Go</button>
+</form>
+{% if data.rows %}
+<div class="table-wrap"><table class="dense ops-table" id="ops-table">
+  <thead><tr><th>Job</th><th>{{ 'Company' if inhouse() else 'Client' }}</th>{% for p in pipes %}<th>{{ labels[p] }}{% if p == 'stuck' %} over {{ data.stuck_days }} days{% endif %}</th>{% endfor %}<th>Days since client update</th></tr></thead>
+  <tbody>{% for r in data.rows %}
+  <tr>
+    <td><a href="/jobs/{{ r.job_id }}">{{ r.title }}</a></td>
+    <td>{% if r.client_slug %}<a href="/clients/{{ r.client_slug }}">{{ r.client }}</a>{% endif %}</td>
+    {% for p in pipes %}<td>{% if r.counts[p] %}<a href="{{ r.links[p] }}">{{ r.counts[p] }}</a>{% else %}0{% endif %}</td>{% endfor %}
+    <td class="nowrap">{% if r.days_since_update is not none %}{% if r.update_tone %}<span class="badge {{ r.update_tone }}">{{ r.days_since_update }}</span>{% else %}{{ r.days_since_update }}{% endif %}{% elif r.client %}never{% endif %}</td>
+  </tr>{% endfor %}</tbody>
+  <tfoot><tr><th>All {{ data.rows | length }} jobs</th><th></th>{% for p in pipes %}<th>{{ data.totals[p] }}</th>{% endfor %}<th></th></tr></tfoot>
+</table></div>
+<p class="fine">In process is everyone not yet hired or out. Stuck is in process and in the same stage longer than the number of days above. Offers out are offers recorded as out with the candidate. Days since client update counts from the last update you marked as sent. It turns amber after 7 days and red after 14.</p>
+{% else %}
+<div class="empty"><h2>No open jobs yet</h2><p>Open jobs show up here as soon as you add them.</p>
+<p class="actions"><a class="btn" href="/jobs">Go to jobs</a></p></div>
+{% endif %}
+{% endblock %}

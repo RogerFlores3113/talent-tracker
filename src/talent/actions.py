@@ -433,23 +433,28 @@ def interview_results(store: Store, job_id: int | None = None, now: datetime | N
             o = interview_result(_iv_data(t)) or "passed"
             counts[o] = counts.get(o, 0) + 1
         pending = len(g) - len(done)
+        from . import interviews
+        missing = sum(interviews.verdicts_missing(t) for t in done)  # a panelist who hasn't given theirs
         verdict = ("not_passed" if counts.get("not_passed") else "pending" if pending
                    else "mixed" if counts.get("mixed") else "passed" if counts.get("passed") else "no_show")
         first = g[0]
         day = local_time(first["at"], "%a %b %-d")
         name = first["candidate_name"]
+        gap = f"{missing} verdict{'' if missing == 1 else 's'} missing"
         if len(g) == 1:
             what = interview_name(first) or "the interview"
-            line = f"- {name} {RESULT_WORDS[verdict]} {what} ({day})"
+            line = (f"- {name}: {what} ({day}), {gap}" if missing and verdict == "passed"
+                    else f"- {name} {RESULT_WORDS[verdict]} {what} ({day})" + (f", {gap}" if missing else ""))
         else:
             what = f"the interviews on {day}"
             tally = ", ".join(f"{n} {INTERVIEW_WORDS_LOWER[o]}" for o, n in counts.items())
             line = (f"- {name}: {len(done)} of {len(g)} interviews on {day} recorded so far ({tally})" if pending
-                    else f"- {name} {RESULT_WORDS[verdict]} {what} ({tally})")
+                    else f"- {name}: {what} ({tally}, {gap})" if missing and verdict == "passed"
+                    else f"- {name} {RESULT_WORDS[verdict]} {what} ({tally}" + (f", {gap})" if missing else ")"))
         out.append({"candidate_id": first["candidate_id"], "name": name, "job_id": first["job_id"],
                     "job_title": first["job_title"], "job_company": first.get("job_company"),
                     "sessions": [_session(t, now.replace(microsecond=0).isoformat()) for t in g], "counts": counts,
-                    "pending": pending, "verdict": verdict, "day": day, "what": what, "line": line,
+                    "pending": pending, "missing": missing, "verdict": verdict, "day": day, "what": what, "line": line,
                     "label": (result_label(_iv_data(first)) if len(g) == 1 and interview_verdict(_iv_data(first))
                               else None),  # the interviewer's word: Strong yes
                     "outcome_at": max(str(_iv_data(t).get("outcome_at") or "") for t in done)})
@@ -489,7 +494,9 @@ def _result_items(store: Store, now: datetime, jobs: dict[int, dict[str, Any]],
             "rank": 1, "when": r["outcome_at"], "verdict": r["verdict"],
             "title": f"{r['name']} {RESULT_WORDS[r['verdict']]} {r['what']}" + (
                 f" ({r['label']})" if r.get("label") and r["verdict"] != "mixed" else ""),
-            "detail": " · ".join(x for x in (label(r["job_id"], r["job_title"]), f"now in {app['stage']}") if x),
+            "detail": " · ".join(x for x in (label(r["job_id"], r["job_title"]), f"now in {app['stage']}",
+                                             f"{r['missing']} verdict{'' if r['missing'] == 1 else 's'} missing"
+                                             if r.get("missing") else None) if x),
             "candidate_id": r["candidate_id"], "job_id": r["job_id"], "stage": app["stage"], "next_stage": to,
             "notes": notes, "href": (f"/jobs/{r['job_id']}/decide" if r["verdict"] == "mixed"
                                      else f"/candidates/{r['candidate_id']}#timeline"),
@@ -941,6 +948,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += chase_items(store, now)  # people waiting on a client's feedback past the chase days
     from .offers import today_items as offer_items  # here: offers imports this module
     items += offer_items(store, now)  # answers due, answers to act on, offer stages with no offer
+    from .plan import today_items as plan_items  # here: plan imports this module
+    items += plan_items(store, now)  # a hiring plan seat that has fallen behind its start date
     stuck_more = 0
     if on("flag_stuck"):
         rows, n_hidden, stuck_more = _stuck_items(store, now, _int(cfg, "stuck_days", 7), snoozed, label)
@@ -953,8 +962,9 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     if on("flag_thin"):
         default_min = _int(cfg, "thin_min", 5)
         thin = []
+        from .plan import enough_people  # here: plan imports this module
         for j in jobs.values():
-            minimum = thin_target(j, default_min)
+            minimum = enough_people(store, j, default_min)
             filled = j["hired_count"] >= (j.get("openings") or 1)
             if j["status"] != "open" or j["active_count"] >= minimum or filled or _offer_like(j):
                 continue
@@ -972,7 +982,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
             j = thin[0]
             items.append({
                 "key": f"thin:{j['id']}", "kind": "thin", "rank": 3, "when": j["updated_at"],
-                "title": says(j), "detail": "", "job_id": j["id"], "jobs": [j], "href": f"/jobs/{j['id']}",
+                "title": says(j), "detail": "", "job_id": j["id"], "jobs": [j],
+                "href": f"/jobs/{j['id']}?find=1#find-people",  # opens the job's "Find new people with AI" prompt
             })
         elif thin:
             items.append({
@@ -1652,8 +1663,11 @@ SET_GROUPS: dict[str, dict[str, str]] = {"inhouse": {"Hiring manager screen": "s
 
 
 def default_stage_set(store: Store) -> str:
-    """The stage set a new job starts with when none is picked: in-house for someone hiring for their own company."""
-    return "inhouse" if inhouse(store) else "default"
+    """The stage set a new job starts with when none is picked: in-house for someone hiring for their own company,
+    agency (with a Submitted stage) for someone who said they hire for clients."""
+    if inhouse(store):
+        return "inhouse"
+    return "agency" if store.setting(HIRING_FOR_ANSWERED_KEY) == "1" else "default"
 
 
 def apply_set_groups(store: Store, job_id: int, set_name: str | None) -> None:

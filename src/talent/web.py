@@ -28,17 +28,18 @@ from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions
+from . import ai_caps, trust
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
-from . import decide, interviews, offers
-from . import chase
+from . import decide, interviews, loops, offers, plan
+from . import chase, desk, opsreview
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
-from .store import as_local
+from .store import as_local, parse_when
 from .store import BATCH_KINDS
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
@@ -493,31 +494,41 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ------------------------------------------------------------ table
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
-              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0):
+              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = ""):
         per = 100
+        job_id = int(job) if job.strip().isdigit() else None
+        pipe = pipe if pipe in opsreview.PIPES else ""
+        day_n = int(days) if days.strip().isdigit() else None
+        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n)
         page_no = max(1, page_no)
         sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
         if q.strip():
             result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                   limit=per, offset=(page_no - 1) * per)
+                                   limit=per, offset=(page_no - 1) * per, **member)
             rows, total = [h.candidate for h in result.hits], result.total
             suggestion = result.suggestion
         else:
             conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
-                                                       source=source or None)
+                                                       source=source or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
+                                      client=client, stage=stage, pipe=pipe,
+                                      days="" if not pipe or day_n is None else day_n).items() if v != ""}
         ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
-                   page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
+                   job=job_id or "", client=client, stage=stage, keep=keep,
+                   pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources())
+        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+                    **store.membership_choices(job_id))
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
@@ -1487,7 +1498,68 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         contact = outreach.contact_stage(store, job_id)
         return {"steps": seq.get("steps") or [], "since": seq.get("since"), "people": people,
                 "defaults": list(outreach.DEFAULT_STEPS), "contact": contact["name"] if contact else None,
-                "copy_from": outreach.sequence_jobs(store, exclude=job_id)}
+                "copy_from": outreach.sequence_jobs(store, exclude=job_id),
+                "not_following": outreach.not_following(store, job_id) if seq else [],
+                "preview": outreach.preview(seq.get("steps") or list(outreach.DEFAULT_STEPS)),
+                "enrolled": len(seq.get("enrolled") or [])}
+
+    @app.post("/jobs/{job_id}/sequence/enroll")
+    async def enroll_existing(request: Request, job_id: int):
+        """Enroll the people already messaged on this job into its follow-up steps (from today, or from their
+        first message)."""
+        job_or_404(job_id)
+        form = await request.form()
+        start = str(form.get("start") or "today")
+        try:
+            got = outreach.enroll_existing(store, job_id, None, start)
+        except ValueError as exc:
+            return back(request, f"/jobs/{job_id}#followups", error=str(exc))
+        if not got:
+            return back(request, f"/jobs/{job_id}#followups", notice="Nobody needed enrolling.")
+        names = ", ".join(p["name"] for p in got[:3]) + (f" and {len(got) - 3} more" if len(got) > 3 else "")
+        when = ("Their next follow-up counts from today." if start == "today" else
+                "Their next follow-up comes due from their first message, so some may be due now.")
+        return back(request, f"/jobs/{job_id}#followups", notice=(
+            f"Enrolled {len(got)} {'person' if len(got) == 1 else 'people'} ({names}). {when}"))
+
+    @app.post("/jobs/{job_id}/followups/batch")
+    async def followups_batch(request: Request, job_id: int):
+        """I sent them all: log the follow-up each ticked person is due, once each."""
+        job_or_404(job_id)
+        form = await request.form()
+        ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
+        if not ids:
+            return back(request, f"/jobs/{job_id}#followups", error="Nobody was picked.")
+        try:
+            got = outreach.log_sent_batch(store, job_id, ids)
+        except NotFound as exc:
+            return back(request, f"/jobs/{job_id}#followups", error=str(exc))
+        n = len(got["logged"])
+        notice = f"Logged the follow-up to {n} {'person' if n == 1 else 'people'}." if n else "Nothing new to log."
+        if got["already"]:
+            notice += f" Already logged today for {', '.join(got['already'][:3])}, so not again."
+        return back(request, f"/jobs/{job_id}#followups", notice=notice)
+
+    @app.get("/jobs/{job_id}/outreach", response_class=HTMLResponse)
+    def outreach_page(request: Request, job_id: int):
+        """Everyone messaged on a job: first message, step, next due, replied, source, and reply rates."""
+        job = job_or_404(job_id)
+        only = request.query_params.get("status") or None
+        return page(request, "outreach.html", job=job, t=outreach.table(store, job_id, only=only),
+                    not_following=len(outreach.not_following(store, job_id)))
+
+    @app.post("/jobs/{job_id}/outreach/bulk")
+    async def outreach_bulk(request: Request, job_id: int):
+        """A bulk action on the people ticked on the Outreach tab: sent, replied, pause, resume or enroll."""
+        job_or_404(job_id)
+        form = await request.form()
+        ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
+        try:
+            notice = outreach.bulk_apply(store, job_id, str(form.get("action") or ""), ids,
+                                         str(form.get("start") or "today"))
+        except (ValueError, NotFound) as exc:
+            return back(request, f"/jobs/{job_id}/outreach", error=str(exc))
+        return back(request, f"/jobs/{job_id}/outreach", notice=notice)
 
     @app.post("/jobs/{job_id}/sequence/copy")
     async def copy_sequence(request: Request, job_id: int):
@@ -1599,6 +1671,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse("/clients/chase?" + urlencode({"notice": "Saved which stages the chase counts."}),
                                 status_code=303)
 
+    opsreview.register_routes(app, store, page)  # /clients/review, before /clients/{slug}
+
     def client_or_404(slug: str) -> dict[str, Any]:
         try:
             return reports.client(store, reports.unslug(slug))
@@ -1610,6 +1684,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return reports.report(store, c["key"], since or None, until or None), ""
         except ValueError as exc:
             return reports.report(store, c["key"]), str(exc)
+
+    @app.get("/clients/{slug}/desk", response_class=HTMLResponse)
+    def client_desk_page(request: Request, slug: str):
+        """One client's run sheet: the update, who to chase, feedback owed, offers and follow-ups, in work order."""
+        c = client_or_404(slug)
+        return page(request, "desk.html", c=c, d=desk.desk(store, c["key"]), max_items=desk.MAX_ITEMS)
 
     @app.get("/clients/{slug}", response_class=HTMLResponse)
     def client_page(request: Request, slug: str, since: str = "", until: str = ""):
@@ -1687,7 +1767,24 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mk = reports.manager_key(str(form.get("manager") or ""))
         chase.mark_chased(store, c["key"], mk)
         who = str(form.get("manager_name") or "").strip()[:200] or c["name"]
+        if form.get("back") == "desk":
+            return RedirectResponse(f"/clients/{c['slug']}/desk?" + urlencode({"notice": f"Marked {who} as chased today."}),
+                                    status_code=303)
         return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {who} as chased today."}),
+                                status_code=303)
+
+    @app.post("/clients/{slug}/chased-all")
+    async def client_chased_all(request: Request, slug: str):
+        """Mark the whole client chased, every hiring manager at once, and keep Today quiet for N days."""
+        c = client_or_404(slug)
+        form = await request.form()
+        try:
+            n = chase.snooze_days_from(form.get("snooze"))
+        except ValueError as exc:
+            return RedirectResponse("/clients/chase?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        chase.mark_client_chased(store, c["key"], n)
+        span = f" Today stays quiet about them for {n} days." if n else ""
+        return RedirectResponse("/clients/chase?" + urlencode({"notice": f"Marked {c['name']} as chased.{span}"}),
                                 status_code=303)
 
     @app.post("/clients/{slug}/note")
@@ -1809,38 +1906,116 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def _ids(raw: str) -> list[int]:
         return [int(x) for x in re.split(r"[,\s]+", raw or "") if x.isdigit()][:6]
 
-    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
-    def decide_page(request: Request, job_id: int, ids: str = ""):
-        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+    def _decide_back(job_id: int, error: str) -> RedirectResponse:
+        """Always back to a fresh Decide form (never the page the stale form was sent from)."""
+        return RedirectResponse(f"/jobs/{job_id}/decide?{urlencode({'flash_error': error})}", status_code=303)
+
+    def _render_decide(request: Request, job_id: int, ids: str = "", warn: dict[str, Any] | None = None):
         job = job_or_404(job_id)
         try:
             d = decide.finalists(store, job_id, _ids(ids) or None)
         except ValueError as exc:
             return back(request, f"/jobs/{job_id}/decide", error=str(exc))
         return page(request, "decide.html", job=job, people=d["people"], more=d["more"], offer_stage=d["offer_stage"],
-                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))),
+                    out_stage=d["out_stage"], ids=",".join(map(str, _ids(ids))), warn=warn,
                     pass_label="Hiring team passed" if actions.inhouse(store) else "Client passed")
+
+    @app.get("/jobs/{job_id}/decide", response_class=HTMLResponse)
+    def decide_page(request: Request, job_id: int, ids: str = ""):
+        """The finalists side by side: every interview, who ran it, how it went and what each interviewer said."""
+        return _render_decide(request, job_id, ids)
 
     @app.post("/jobs/{job_id}/decide")
     async def decide_form(request: Request, job_id: int):
-        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes."""
+        """Record a decision: offer to one, pass on the others. One change, undone as one under Changes. When
+        feedback or an outcome is still missing for anyone in it, the page asks first (and can add nudge to-dos)."""
         job_or_404(job_id)
         form = await request.form()
         offer = str(form.get("offer") or "")
         if not offer.isdigit() and offer != "none":
-            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer, or No offer yet.")
+            return _decide_back(job_id, "Pick who gets the offer, or No offer yet.")
         passed = [int(v) for v in form.getlist("pass") if str(v).isdigit()]
+        offer_id = int(offer) if offer.isdigit() else None
+        reason, note = str(form.get("reason") or "") or None, str(form.get("note") or "") or None
+        if not form.get("confirmed"):
+            missing = decide.missing_for(store, job_id, ([] if offer_id is None else [offer_id]) + passed)
+            if missing:
+                return _render_decide(request, job_id, str(form.get("ids") or ""), warn={
+                    "lines": decide.warning_lines(missing), "offer": offer, "pass": passed, "reason": reason or "",
+                    "note": note or "", "ids": str(form.get("ids") or ""),
+                    "owed": bool(any(m["owed"] for m in missing))})
         try:
-            res = decide.record_decision(store, job_id, int(offer) if offer.isdigit() else None, passed,
-                                         reason=str(form.get("reason") or "") or None,
-                                         note=str(form.get("note") or "") or None, by="app")
+            res = decide.record_decision(store, job_id, offer_id, passed, reason=reason, note=note, by="app",
+                                         nudge=bool(form.get("nudge")))
         except (ValueError, NotFound) as exc:
-            return back(request, f"/jobs/{job_id}/decide", error=str(exc))
+            if "in play" in str(exc):  # someone moved since the form was opened: a fresh form, not a bare error
+                return RedirectResponse(f"/jobs/{job_id}/decide?" + urlencode(
+                    {"notice": "Things changed since you opened this. Here's the latest."}), status_code=303)
+            return _decide_back(job_id, str(exc))
+        lets = res.get("todos", 0) - res.get("nudged", 0)
         notice = f"Recorded: {res['text']}." + (
             f" Cancelled {res['cancelled']} interview{'' if res['cancelled'] == 1 else 's'} still ahead." if res["cancelled"]
-            else "") + (f" Added {res['todos']} to-do{'' if res['todos'] == 1 else 's'} on Today to let them know."
-                        if res.get("todos") else "") + " You can undo it under Changes."
+            else "") + (f" Added {lets} to-do{'' if lets == 1 else 's'} on Today to let them know." if lets > 0 else ""
+                        ) + (f" Added {res['nudged']} to-do{'' if res['nudged'] == 1 else 's'} to ask for the missing "
+                             "feedback." if res.get("nudged") else "") + " You can undo it under Changes."
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
+
+    # ------------------------------------------------- the loop planner
+    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+        job = job_or_404(job_id)
+        tpl = loops.get_template(store, job_id)
+        people = actions.in_play(store, job_id)
+        plan, error = None, ""
+        if candidate.isdigit() and tpl:
+            try:
+                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out))
+            except (ValueError, NotFound) as exc:
+                error = str(exc)
+        return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
+                    hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
+                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
+                    plan_error=error)
+
+    @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
+    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+        """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
+        return _loop_page(request, job_id, candidate, start, out)
+
+    @app.post("/jobs/{job_id}/loop/template")
+    async def loop_template_form(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        try:
+            saved = loops.save_template(store, job_id, str(form.get("sessions") or ""), str(form.get("hours") or ""))
+        except ValueError as exc:
+            return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc)})}", status_code=303)
+        note = (f"Saved the loop template: {len(saved['sessions'])} session{'' if len(saved['sessions']) == 1 else 's'}."
+                if saved["sessions"] else "Removed the loop template.")
+        return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'notice': note})}", status_code=303)
+
+    @app.post("/jobs/{job_id}/loop/book")
+    async def loop_book_form(request: Request, job_id: int):
+        """Log the planned sessions as interviews (the same as logging each by hand). No calendar is written."""
+        job_or_404(job_id)
+        form = await request.form()
+        cid = str(form.get("candidate_id") or "")
+        names, ats = form.getlist("s_name"), form.getlist("s_at")
+        mins, whos = form.getlist("s_min"), form.getlist("s_who")
+        try:
+            if not cid.isdigit() or not names or not len(names) == len(ats) == len(mins) == len(whos):
+                raise ValueError("There is nothing to book. Plan the loop again.")
+            tpl = {x["name"].casefold(): x["name"] for x in (loops.get_template(store, job_id) or {"sessions": []})["sessions"]}
+            slots = [{"session": tpl[n.casefold()], "at": parse_when(a), "minutes": max(10, min(240, int(m))),
+                      "interviewer": w or None}
+                     for n, a, m, w in zip(names, ats, mins, whos) if n.casefold() in tpl and m.isdigit()][:loops.MAX_SESSIONS]
+            if not slots:
+                raise ValueError("There is nothing to book. Plan the loop again.")
+            loops.book(store, int(cid), job_id, slots, by="app")
+        except (ValueError, NotFound) as exc:
+            return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc), 'candidate': cid})}",
+                                    status_code=303)
+        note = f"Logged {len(slots)} interview{'' if len(slots) == 1 else 's'}. You can see them under Interviews."
+        return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'notice': note})}", status_code=303)
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/feedback")
     async def feedback_form(request: Request, candidate_id: int, entry_id: int):
@@ -1863,7 +2038,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return back(request, nxt, error=str(exc))
         sep = "&" if "?" in nxt else "?"
-        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
+        left = interviews.owed_after(store.get_interview(entry_id))
+        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.' + left})}#iv-{entry_id}",
+                                status_code=303)
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/verdict")
     async def verdict_form(request: Request, candidate_id: int, entry_id: int):
@@ -1879,7 +2056,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That interview isn't on this profile.")
         except ValueError as exc:
             return back(request, nxt, error=str(exc))
-        notice = f"Saved. The session now reads {interview_label(iv['data']) or 'as recorded'}."
+        notice = f"Saved. The session now reads {interview_label(iv['data']) or 'as recorded'}." + \
+            interviews.owed_after(iv)
         sep = "&" if "?" in nxt else "?"
         return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': notice})}#iv-{entry_id}", status_code=303)
 
@@ -1942,6 +2120,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                 status_code=303)
 
     offers.register_routes(app, store, page, back)  # the offer page, its answer and its one-click move
+    plan.register_routes(app, store, page, back)  # the Hiring plan page
 
     @app.post("/changes/decision/{batch_id}/undo")
     def undo_decision_form(request: Request, batch_id: int):
@@ -2117,7 +2296,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     ai_waiting=ai_waiting, ai_sessions=sessions.listing(store) if who in ("", "ai") else [],
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
-                    undo_last=last_undo_ai(),
+                    undo_last=last_undo_ai(), ai_allowance=ai_caps.allowance(store),
                     ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
                     undo_window={"1": "24", "7": "168", "30": "720"}.get(since, "24"))
 
@@ -2370,6 +2549,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             msg += review.extra_holds_text(store)
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
 
+    @app.post("/settings/ai-apps")
+    async def set_ai_apps(request: Request):
+        """How far each AI app that has connected is trusted, and what a new one starts as."""
+        form = await request.form()
+        trust.set_new_apps(store, "suggest" if form.get("new_apps") == "suggest" else "trusted")
+        changed = 0
+        for a in trust.apps(store):
+            level = str(form.get(f"trust_{a['id']}") or "")
+            if level in trust.LEVELS and level != a["trust"]:
+                trust.set_trust(store, a["id"], level)
+                changed += 1
+        msg = ("Saved. " + (f"{changed} AI app{'' if changed == 1 else 's'} changed. " if changed else "")
+               + ("New AI apps start at Suggest only." if trust.new_apps_level(store) == "suggest"
+                  else "New AI apps start as Trusted."))
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
+
     @app.post("/settings/time-zone")
     async def set_time_zone(request: Request):
         """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
@@ -2395,10 +2590,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         errors: dict[str, str] | None = None, status_code: int = 200) -> HTMLResponse:
         people, jobs = sample_ids(store)
         return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
-                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
+                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {},
+                    chase_import=chase.from_import_day(store), sample_people=len(people),
                     sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
-                    backup_list=backups.list_backups(), typesense=env_status())
+                    backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
+                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN)
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
@@ -2424,7 +2621,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         people, jobs = info["people"], info["jobs"]
         msg = (f"Restored the backup from {_local(info['when'])} ({info['why'].lower()}): {people} "
                f"{'person' if people == 1 else 'people'} and {jobs} job{'' if jobs == 1 else 's'}. Your data from "
-               f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it.")
+               f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it. "
+               "Your Cautious mode and AI app settings stayed as they are now.")
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#backups", status_code=303)
 
     @app.post("/settings/backups/delete")
@@ -2469,6 +2667,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if form.get("hiring_for") in ("own", "clients"):
             actions.set_inhouse(store, form.get("hiring_for") == "own")
         store.set_settings(**values)
+        if whole:  # the Settings page sends this box ticked or not
+            chase.set_from_import_day(store, str(form.get("chase_from_import") or "") not in ("", "0", "false", "off"))
         return RedirectResponse("/settings?saved=1", status_code=303)
 
     @app.get("/recipes", response_class=HTMLResponse)

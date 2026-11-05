@@ -23,6 +23,7 @@ KEEP_PREFIX = "shortlist_keep:"  # settings key of one Keep or Keep all, so Chan
 EXTRA_PREFIX = "prospect_extra:"
 ABOUT_LIMIT, TAG_LIMIT, HISTORY_LIMIT = 5000, 30, 15
 SENTENCE_NAME = "the name reads like a sentence, not a person's name"
+_EMAIL = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$")
 _PROFILE = re.compile(r"^https://linkedin\.com/in/([^/?#]+)")
 
 
@@ -60,6 +61,9 @@ def _extra_in(raw: dict[str, Any]) -> dict[str, Any]:
     about = " ".join(str(raw.get("about") or "").split())[:ABOUT_LIMIT].rstrip()
     if about:
         out["about"] = about
+    email = " ".join(str(raw.get("email") or "").split()).lower()
+    if _EMAIL.match(email) and len(email) <= 200:
+        out["email"] = email
     tags = raw.get("tags") or raw.get("skills")
     tags = [t[:60] for t in split_tags(tags if isinstance(tags, (str, list, tuple)) else None)][:TAG_LIMIT]
     if tags:
@@ -90,7 +94,7 @@ def _attach_extras(store: Store, rows: list[dict[str, Any]]) -> list[dict[str, A
         except ValueError:
             x = None
         if isinstance(x, dict) and x.get("name") == r["name"] and x.get("created_at") == r["created_at"]:
-            r.update({f: x[f] for f in ("about", "tags", "work_history") if x.get(f)})
+            r.update({f: x[f] for f in ("about", "tags", "work_history", "email") if x.get(f)})
     return rows
 
 
@@ -324,6 +328,12 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
     target = store.get_candidate(link_id) if link_id else None
     if target is None and p["linkedin_url"]:
         target = store.find_duplicate(linkedin_url=p["linkedin_url"])
+    email = p.get("email")
+    owner = store.find_duplicate(email=email) if email else None  # who already has the email the AI app sent
+    if owner is not None and target is None and fold_name(owner["name"]) == fold_name(p["name"]):
+        target = owner
+    if owner is not None and (target is None or owner["id"] != target["id"]):
+        email = None  # it belongs to someone else: don't save it on this person
     if target is None and not as_new:
         same = same_name(store, p)
         if same:
@@ -332,13 +342,15 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
     if created:
         target = store.add_candidate(p.get("work_history"), name=p["name"], linkedin_url=p["linkedin_url"],
                                      current_title=p["title"], current_company=p["company"], location=p["location"],
-                                     source=p["source"], about=p.get("about"),
+                                     source=p["source"], about=p.get("about"), email=email,
                                      tags=", ".join(p.get("tags") or []) or None)
     linked = None
     if not created:  # the recruiter said it's the same person: their blank fields take what the row has
         fill = {dst: p[src] for src, dst in (("linkedin_url", "linkedin_url"), ("title", "current_title"),
                                              ("company", "current_company"), ("location", "location"),
                                              ("about", "about")) if p.get(src) and not target.get(dst)}
+        if email and not target.get("email"):
+            fill["email"] = email
         if p.get("tags") and not target.get("tags"):
             fill["tags"] = ", ".join(p["tags"])
         history = p.get("work_history") if p.get("work_history") and not store.work_history(target["id"]) else None
@@ -579,7 +591,7 @@ def today_items(store: Store) -> list[dict[str, Any]]:
 def row_view(p: dict[str, Any]) -> dict[str, Any]:
     """One Shortlist row as the AI app and the in-chat view see it."""
     out = {k: p.get(k) for k in ("id", "name", "linkedin_url", "title", "company", "location", "fit", "about",
-                                 "tags", "work_history", "status", "pass_reason", "candidate_id", "stage")
+                                 "email", "tags", "work_history", "status", "pass_reason", "candidate_id", "stage")
            if p.get(k) not in (None, "", [])}
     if p.get("checks"):
         out["checks"] = p["checks"]

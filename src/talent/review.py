@@ -37,14 +37,16 @@ CANDIDATE_CONTACT_FIELDS = ("email", "phone")
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
-         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done"}
+         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done",
+         "sequence": "Follow-up steps", "plan": "Hiring plan change", "loop_template": "Loop template", "tool_call": "AI request"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
 
 
 def cautious(store: Store) -> bool:
-    return store.setting(SETTING) == "1"
+    from .trust import REPLAY  # here: trust imports this module
+    return store.setting(SETTING) == "1" and not REPLAY.get()  # a request the recruiter just kept doesn't wait again
 
 
 def set_cautious(store: Store, on: bool) -> None:
@@ -140,7 +142,7 @@ def _dedupe_key(payload: dict[str, Any]) -> str:
 
 
 def _queue(store: Store, kind: str, summary: str, payload: dict[str, Any], *, candidate_id: int | None = None,
-           job_id: int | None = None, session: str | None = None) -> dict[str, Any]:
+           job_id: int | None = None, session: str | None = None, app: str | None = None) -> dict[str, Any]:
     if candidate_id is not None:
         store.get_candidate(candidate_id)  # a plain "not found", never a database error
     if job_id is not None:
@@ -157,7 +159,9 @@ def _queue(store: Store, kind: str, summary: str, payload: dict[str, Any], *, ca
                 same = False
             if same:  # sent twice: one row
                 return get(store, r["id"])
-        n = store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending'")["n"]
+        # the cap is per app: held requests carry their app's name, everything else counts together
+        n = store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending' AND coalesce("
+                       "json_extract(payload, '$.app'), '') = ?", (app or "",))["n"]
         if n >= QUEUE_CAP:
             raise ValueError(f"No change made. {n} changes from your AI app already wait for the recruiter's review. "
                              "Ask them to review those in the app (Review) first.")
@@ -434,6 +438,34 @@ def queue_stages(store: Store, job_id: int, args: dict[str, Any], session: str |
                   {"args": args, "before": _stage_shape(store, job_id)}, job_id=job_id, session=session)
 
 
+def queue_sequence(store: Store, job_id: int, steps: list[dict[str, Any]], enroll: bool,
+                   session: str | None, enroll_from: str = "today") -> dict[str, Any]:
+    """Hold the AI app's follow-up steps for a job (and enrolling the people already messaged, if it asked)."""
+    from . import outreach
+    j = store.get_job(job_id)
+    clean = outreach.clean_steps(steps)
+    if not clean:
+        raise ValueError("Send at least two steps: the first message on day 0, then a follow-up on a later day.")
+    job = j["title"] + (f" ({j['company']})" if j.get("company") else "")
+    return _queue(store, "sequence", f"Set the follow-up steps of {job}: {len(clean)} steps"
+                  + (", and enroll the people already messaged" if enroll else ""),
+                  {"steps": clean, "enroll": enroll, "enroll_from": enroll_from, "before": outreach.sequence(store, job_id)},
+                  job_id=job_id, session=session)
+
+
+def queue_loop_template(store: Store, job_id: int, sessions: Any, hours: str | None,
+                        session: str | None) -> dict[str, Any]:
+    """Hold the AI app's loop template for a job."""
+    from . import loops
+    j = store.get_job(job_id)
+    clean = loops.clean_sessions(sessions)
+    job = j["title"] + (f" ({j['company']})" if j.get("company") else "")
+    return _queue(store, "loop_template", f"Set the interview loop template of {job}: {len(clean)} session"
+                  f"{'' if len(clean) == 1 else 's'}",
+                  {"sessions": clean, "hours": hours, "before": loops.get_template(store, job_id)},
+                  job_id=job_id, session=session)
+
+
 def queue_todo(store: Store, row: dict[str, Any], session: str | None) -> dict[str, Any]:
     """Hold the AI app's Mark done of one of the recruiter's own to-dos."""
     return _queue(store, "todo", f"Mark the to-do {quoted(row.get('text'))} done",
@@ -680,6 +712,27 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
     if kind == "offer":
         from .offers import apply_review  # here: offers imports this module
         return apply_review(store, r)
+    if kind == "sequence":
+        from . import outreach
+        jid = r.get("job_id")
+        if jid is None:
+            raise ValueError("That job is gone.")
+        if outreach.sequence(store, jid) != p.get("before"):
+            raise ValueError("The job's follow-up steps were changed since, so nothing was changed.")
+        out = outreach.ai_set_sequence(store, jid, p["steps"], bool(p.get("enroll")), p.get("enroll_from") or "today")
+        return r["summary"] + (f" (enrolled {len(out['enrolled'])})" if out["enrolled"] else "")
+    if kind == "plan":
+        from .plan import apply_review as apply_seat  # here: plan imports this module
+        return apply_seat(store, r)
+    if kind == "loop_template":
+        from . import loops
+        jid = r.get("job_id")
+        if jid is None:
+            raise ValueError("That job is gone.")
+        if loops.get_template(store, jid) != p.get("before"):
+            raise ValueError("The job's loop template was changed since, so nothing was changed.")
+        loops.ai_set_template(store, jid, p["sessions"], p.get("hours"))
+        return r["summary"]
     if kind == "todo":
         s = store._row("SELECT done_at FROM suggestions WHERE id = ?", (p.get("suggestion_id"),))
         if s is None:
@@ -688,6 +741,9 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
             raise ValueError("That to-do is already done.")
         store.complete_suggestion(p["suggestion_id"], by="ai")
         return r["summary"]
+    if kind == "tool_call":  # a write from an AI app set to Suggest only: run it once now
+        from .trust import replay  # here: trust imports this module
+        return replay(store, r)
     raise ValueError("That change can't be made here.")
 
 
@@ -699,7 +755,12 @@ def keep(store: Store, review_id: int) -> str:
         what = _apply(store, r)
     except (ValueError, NotFound) as exc:
         reason = str(exc).rstrip(".")
-        _result(store, review_id, f"Couldn't keep it: {reason}", "passed")  # decided: it won't wait again
+        if r["kind"] == "tool_call":  # a held request whose replay failed keeps waiting, with the reason shown
+            with store._write():
+                store._conn.execute("UPDATE ai_review SET status = 'pending', decided_at = NULL, result = ?"
+                                    " WHERE id = ?", (f"Couldn't keep it: {reason}", review_id))
+        else:
+            _result(store, review_id, f"Couldn't keep it: {reason}", "passed")  # decided: it won't wait again
         raise ValueError(f"Couldn't keep it: {reason}.") from None
     finally:
         AI_KEPT.reset(token)
@@ -749,6 +810,12 @@ def _more_lines(r: dict[str, Any]) -> list[dict[str, str]]:
     if r["kind"] == "offer":
         from .offers import review_lines  # here: offers imports this module
         return review_lines(r)
+    if r["kind"] == "plan":
+        from .plan import review_lines as seat_lines  # here: plan imports this module
+        return seat_lines(r)
+    if r["kind"] == "tool_call":
+        from .trust import lines  # here: trust imports this module
+        return lines(r)
     if r["kind"] == "client_edit":
         return [{"label": CLIENT_LABELS.get(k, k), "old": _short((p.get("old") or {}).get(k)) or "(empty)",
                  "new": _short(v) or "(cleared)"} for k, v in (p.get("fields") or {}).items()]
@@ -819,5 +886,5 @@ __all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOL
            "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
-           "queue_interview", "queue_job", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_stages",
+           "queue_interview", "queue_job", "queue_loop_template", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_sequence", "queue_stages",
            "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]

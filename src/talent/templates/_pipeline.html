@@ -16,6 +16,11 @@
 {% if total == 0 %}
 <div class="empty"><h2>No one in this pipeline yet</h2><p>Search above to add people you already have, or source new ones with AI.</p></div>
 {% elif view == 'table' %}
+<form method="post" action="/jobs/{{ job.id }}/move" hx-post="/jobs/{{ job.id }}/move" hx-target="#pipeline" hx-trigger="submit" class="stage-form tbl-move" id="tbl-move">
+  <input type="hidden" name="candidate_id" value=""><input type="hidden" name="view" value="{{ view }}"><input type="hidden" name="stage" value="">
+  <span class="reason" hidden><span class="tbl-who"></span> <select name="notes" aria-label="Reason"><option value="">Pick a reason</option>{% for r, like in move_reasons() %}<option value="Reason: {{ r }}" data-like="{{ like }}">{{ r }}</option>{% endfor %}</select><button class="btn small" type="submit">Move without a reason</button></span>
+  <noscript><button class="btn small" type="submit">Move</button></noscript>
+</form>
 <div class="table-wrap"><table class="dense">
   <thead><tr><th>Name</th><th>Title</th><th>Stage</th><th>In stage since</th><th>Last contacted</th><th>Next interview</th></tr></thead>
   {% for g in groups if g.candidates %}
@@ -25,7 +30,7 @@
     <tr>
       <td><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}</td>
       <td>{{ a.current_title or '' }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
-      <td>{% include "_stage_select.html" %}</td>
+      <td><select aria-label="Stage for {{ a.candidate_name }}" data-table-stage data-cid="{{ a.candidate_id }}" data-who="{{ a.candidate_name }}">{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}{{ ' data-out=1' if s.outcome == 'lost' and s.name | lower != a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select></td>
       <td class="nowrap">{{ a.stage_changed_at | ago }}</td>
       <td class="nowrap">{{ a.last_contacted_at | ago if a.last_contacted_at else 'never' }}</td>
       <td class="nowrap">{{ next_iv[a.candidate_id] | local if a.candidate_id in next_iv else '' }}</td>

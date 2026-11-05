@@ -29,6 +29,7 @@
 
 <section class="panel" id="terms">
   <div class="sec-head"><h2>Terms</h2></div>
+  <p class="fine">{{ 'Private to you. They never go in a status update.' if inhouse() else 'Private to you. They never go in a client update.' }}</p>
   <form class="form" method="post" action="/jobs/{{ job.id }}/offers/{{ c.id }}">
     {% if not o or o.status in ('drafted', 'out') %}
     <label>Where it stands<select name="status">{% for s in ('drafted', 'out') %}<option value="{{ s }}" {{ 'selected' if (o.status if o else 'drafted') == s }}>{{ statuses[s] }}</option>{% endfor %}</select></label>

@@ -29,6 +29,13 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("TYPESENSE_API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_card_key_gap(monkeypatch):
+    """A Shortlist card key waits a moment before it works; tests press at once (the gap has its own test)."""
+    from talent import mcp_server
+    monkeypatch.setattr(mcp_server, "CARD_MIN_GAP", 0)
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(tmp_path / "talent.db")

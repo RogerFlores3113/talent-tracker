@@ -200,8 +200,38 @@ def _listed(names: list[str]) -> str:
     return q[0] if len(q) == 1 else ", ".join(q[:-1]) + " and " + q[-1]
 
 
+def missing_for(store: Store, job_id: int, ids: list[int]) -> list[dict[str, Any]]:
+    """Of these people, the ones with feedback or an outcome still missing on sessions that have taken place:
+    [{candidate_id, name, owed: [interviewer names], open_sessions, items}], items being group_owed's entries."""
+    play = {a["candidate_id"]: a for a in actions.in_play(store, job_id)}
+    out = []
+    for cid in dict.fromkeys(ids):
+        if cid not in play:
+            continue
+        ivs = _interviews(store, cid, job_id)
+        items = [{"who": who, "email": None, "candidate_id": cid, "name": play[cid]["candidate_name"],
+                  "job_id": job_id, "job": None, "interview_id": i["interview_id"], "session": i["name"], "at": i["at"],
+                  "day": i["at_local"].split(",")[0]} for i in ivs for who in i["owed"]]
+        open_n = sum(1 for i in ivs if i["needs_outcome"])
+        if items or open_n:
+            out.append({"candidate_id": cid, "name": play[cid]["candidate_name"],
+                        "owed": list(dict.fromkeys(i["who"] for i in items)), "open_sessions": open_n, "items": items})
+    return out
+
+
+def warning_lines(missing: list[dict[str, Any]]) -> list[str]:
+    """'Dana Cho: Tia Brandt still owes feedback; 1 session has no outcome.'"""
+    lines = []
+    for m in missing:
+        bits = ([f"{interviews._and(m['owed'])} still {'owes' if len(m['owed']) == 1 else 'owe'} feedback"]
+                if m["owed"] else []) + ([f"{m['open_sessions']} session{'' if m['open_sessions'] == 1 else 's'} "
+                                          "with no outcome"] if m["open_sessions"] else [])
+        lines.append(f"{m['name']}: " + "; ".join(bits) + ".")
+    return lines
+
+
 def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: list[int], reason: str | None = None,
-                    note: str | None = None, by: str = "app") -> dict[str, Any]:
+                    note: str | None = None, by: str = "app", nudge: bool = False) -> dict[str, Any]:
     """Offer to one finalist and pass on the others, as one change: the offer person moves to the job's offer
     stage, the others to its Out stage with a reason, and their interviews still ahead are cancelled. Saved as
     one batch (a setting), so Changes lists it once and undo_decision puts it all back. offer_id None is
@@ -220,6 +250,8 @@ def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: l
         raise ValueError("This job has no Offer stage. Add one under Edit job, then record the decision.")
     out, default_reason = actions.pass_stage(store, job_id)
     why = f"Reason: {reason.strip()}" if reason and reason.strip() else default_reason
+    nudge_entries = ([i for m in missing_for(store, job_id, ([] if offer_id is None else [offer_id]) + pass_ids)
+                      for i in m["items"]] if nudge else [])  # read before anyone moves out of play
     if pass_ids and not any(s["outcome"] == "lost" for s in stages):
         store.add_stage(job_id, out, outcome="lost")
     moves: list[dict[str, Any]] = []
@@ -246,6 +278,12 @@ def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: l
             cancelled.append(iv["id"])
     todos = [store.add_suggestion(f"Let {play[cid]['candidate_name']} know", candidate_id=cid, job_id=job_id,
                                   source="App", note="You passed on them in Decide.")["id"] for cid in pass_ids]
+    nudged = 0
+    if nudge:  # one to-do per interviewer who still owes feedback, covering everyone in this decision
+        for p in interviews.group_owed(nudge_entries):
+            todos.append(store.add_suggestion(f"Ask {p['name']} for feedback on {interviews._and(p['candidates'])}",
+                                              job_id=job_id, source="App", note=p["body"])["id"])
+            nudged += 1
     rows = store._rows(f"SELECT key FROM settings WHERE key LIKE '{DECISION_PREFIX}%'")
     batch_id = 1 + max((int(r["key"][len(DECISION_PREFIX):]) for r in rows
                         if r["key"][len(DECISION_PREFIX):].isdigit()), default=0)
@@ -260,7 +298,7 @@ def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: l
         text = f"Offer to {quoted(play[offer_id]['candidate_name'])}" + (
             f", pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}" if pass_ids else "")
     return {"id": batch_id, "text": text, "offer_stage": offer, "out_stage": out, "cancelled": len(cancelled),
-            "moved": len(moves), "todos": len(todos)}
+            "moved": len(moves), "todos": len(todos), "nudged": nudged}
 
 
 def decision_batches(store: Store, since: str | None = None) -> list[dict[str, Any]]:

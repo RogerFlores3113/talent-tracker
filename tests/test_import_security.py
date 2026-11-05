@@ -316,7 +316,7 @@ def test_report_problem_tool_scrubs(store):
     from talent.mcp_server import build_server
 
     server = build_server(store)
-    res = asyncio.run(server.call_tool("report_problem", {"summary": "Broke on bob@x.com", "details": ""}))
+    res = asyncio.run(server.call_tool("report_problem", {"summary": "Broke on bob@x.com"}))
     out = res[1] if isinstance(res, tuple) else res
     q = parse_qs(urlsplit(out["url"]).query)
     assert "bob@x.com" not in q["title"][0] + q["body"][0] and "[email removed]" in q["title"][0]

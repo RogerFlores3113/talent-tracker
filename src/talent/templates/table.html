@@ -18,18 +18,31 @@
     <option value="">Found via: Any source</option>
     {% for s in sources %}<option value="{{ s.source }}" {{ 'selected' if s.source | lower == source | lower }}>{{ s.source }} ({{ s.count }})</option>{% endfor %}
   </select>{% endif %}
+  {% if job_choices %}<select name="job" aria-label="Filter by job" data-autosubmit>
+    <option value="">Any job</option>
+    {% for j in job_choices %}<option value="{{ j.id }}" {{ 'selected' if j.id == job }}>{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}
+  </select>{% endif %}
+  {% if client_choices %}<select name="client" aria-label="Filter by client" data-autosubmit>
+    <option value="">Any client</option>
+    {% for cl in client_choices %}<option value="{{ cl }}" {{ 'selected' if cl | lower == client | lower }}>{{ cl }}</option>{% endfor %}
+  </select>{% endif %}
+  {% if stage_choices %}<select name="stage" aria-label="Filter by stage" data-autosubmit>
+    <option value="">Any stage</option>
+    {% for st in stage_choices %}<option value="{{ st }}" {{ 'selected' if st | lower == stage | lower }}>{{ st }}</option>{% endfor %}
+  </select>{% endif %}
   <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">
   <button class="btn" type="submit">Go</button>
-  {% if q or tag or location or source %}<a href="/candidates" class="small">Clear</a>{% endif %}
+  {% if q or keep %}<a href="/candidates" class="small">Clear</a>{% endif %}
 </form>
+{% if pipe_label %}<p class="fine">Showing people in {{ 'this job' if job else 'open jobs' }}: <strong>{{ pipe_label }}</strong>. <a href="/clients/review">Back to the Ops review</a></p>{% endif %}
 {% if suggestion and corrected %}<p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ suggestion }}</strong>.</p>
-{% elif suggestion %}<p class="suggest">Did you mean <a href="/candidates?{{ {'q': suggestion, 'tag': tag, 'location': location, 'source': source} | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
+{% elif suggestion %}<p class="suggest">Did you mean <a href="/candidates?{{ dict(keep, q=suggestion) | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
 {% if q %}<p class="fine">Sorted by best match.</p>{% endif %}
 <div class="table-wrap">
 <table class="dense">
   <thead><tr>
     {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated')] %}
-    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ {'tag': tag, 'location': location, 'source': source, 'sort': key, 'dir': 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))} | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
+    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ dict(keep, sort=key, dir= 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))) | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
     {% endfor %}
     <th>Skills</th>
   </tr></thead>
@@ -39,6 +52,6 @@
 </table>
 </div>
 {% if page_no > 1 %}
-<p class="pager"><a href="/candidates?{{ {'q': q, 'tag': tag, 'location': location, 'source': source, 'sort': sort, 'dir': dir} | urlencode }}">Back to the start</a></p>
+<p class="pager"><a href="/candidates?{{ dict(keep, q=q, sort=sort, dir=dir) | urlencode }}">Back to the start</a></p>
 {% endif %}
 {% endblock %}

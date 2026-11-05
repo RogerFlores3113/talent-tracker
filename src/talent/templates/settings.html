@@ -12,6 +12,8 @@
     <label class="check"><input type="checkbox" name="{{ key }}" value="1" {{ 'checked' if s[key] == '1' }}>
       <span><strong>{{ label }}</strong> <span class="fine">{{ help }}</span></span></label>
     {% endfor %}
+    <label class="check"><input type="checkbox" name="chase_from_import" value="1" {{ 'checked' if chase_import }}>
+      <span><strong>Count waits from my import day for imported people</strong> <span class="fine">A stage date from before the import counts as the day you imported, so a big import doesn't fill the chase list.</span></span></label>
     <div class="form three">
       {% for key, label in thresholds %}
       <label>{{ label }}<input type="number" name="{{ key }}" min="1" max="9999" value="{{ s[key] }}"{% if errors[key] %} aria-invalid="true" aria-describedby="err-{{ key }}"{% endif %}>
@@ -92,6 +94,39 @@
       <span><strong>Hold every stage move</strong> <span class="fine">Every move waits, a move to Offer included, not only moves into Hired or out.</span></span></label>
     <div><button class="btn" type="submit">Save</button> <a class="btn ghost" href="/review">Review AI changes</a></div>
   </form>
+</section>
+
+<section class="panel" id="ai-apps">
+  <h2>AI apps</h2>
+  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and Keep makes it once. <strong>Trusted</strong> apps follow the rules above: Cautious mode, the hourly limits and Undo.</p>
+  {% if ai_apps %}
+  <form method="post" action="/settings/ai-apps" class="stack">
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>AI app</th><th>First seen</th><th>Last seen</th><th>Writes</th><th>Trust</th></tr></thead>
+      <tbody>
+      {% for a in ai_apps %}
+        <tr>
+          <td>{{ a.name }} {% if a.is_new %}<span class="badge warn">New</span> {% endif %}<span class="fine">(calls itself this)</span></td>
+          <td>{{ a.first_seen | ago }}</td>
+          <td>{{ a.last_seen | ago }}</td>
+          <td>{{ a.writes }}</td>
+          <td><select name="trust_{{ a.id }}" aria-label="Trust for {{ a.name }}">{% for k, label in trust_levels.items() %}<option value="{{ k }}" {{ 'selected' if a.trust == k }} title="{{ trust_explain[k] }}">{{ label }}</option>{% endfor %}</select></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
+      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+    <div><button class="btn" type="submit">Save</button></div>
+  </form>
+  {% else %}
+  <p class="fine">No AI app has connected yet. Once one does, it shows up here.</p>
+  <form method="post" action="/settings/ai-apps" class="stack">
+    <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
+      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+    <div><button class="btn" type="submit">Save</button></div>
+  </form>
+  {% endif %}
 </section>
 
 <section class="panel">
