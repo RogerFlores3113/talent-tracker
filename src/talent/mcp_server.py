@@ -988,6 +988,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
             out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
                               "Use add_to_pipeline if they should be.")
+        later = interviews.future_note(entry["at"], entry["kind"])  # a call dated later today, say
+        if later:
+            out["warning"] = f"{out['warning']} {later}" if out.get("warning") else later
         what = entry["kind"]
         with_ = "on" if what == "note" else "with"
         sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {quoted(cand['name'])} "
@@ -1065,16 +1068,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _said(". ".join(done) + ".", out)
 
     @mcp.tool(annotations=WRITE)
-    def add_interview_feedback(interview_id: int, feedback: str, interviewer: str | None = None) -> CallToolResult:
+    def add_interview_feedback(interview_id: int, feedback: str, interviewer: str | None = None,
+                               verdict: Annotated[str | None, WithJsonSchema({
+                                   "anyOf": [{"type": "string", "enum": [v for v, _ in interviews.VERDICT_CHOICES]},
+                                             {"type": "null"}], "default": None})] = None) -> CallToolResult:
         """Save one interviewer's feedback on an interview, in their own words (free text, no rubric).
 
         interview_id is from get_candidate's timeline or log_activity (logged.id). `interviewer` is who said it
-        (for a panel, call once per person). Feedback is kept with the interview, shows in the app's Decide view
-        and in compare_finalists. The same words from the same person twice are kept once. The recruiter sees it
-        under Changes and can undo it there.
+        (for a panel, call once per person). verdict, only when that person gave one, is their own verdict on
+        the session (strong yes, yes, mixed, no, strong no); on a joint or panel session each person keeps theirs,
+        and the session's outcome rolls up from everyone's latest (all yes is the least sure yes, a split is
+        mixed). Feedback is kept with the interview, shows in the app's Decide view and in compare_finalists.
+        The same words from the same person twice are kept once. The recruiter sees it under Changes and can
+        undo it there.
         """
         before = store.get_interview(interview_id)
         _check_note_cap(store, before["candidate_id"], "Nothing saved")
+        if verdict is not None:
+            interviews._verdict_key(verdict)  # a bad word is refused before anything waits or is saved
         if review.cautious(store):
             body, who = (feedback or "").strip(), (interviewer or "").strip()
             if not body:
@@ -1091,18 +1102,26 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 return _said(f"That feedback was already saved on {quoted(before['candidate_name'])}'s interview.",
                              {"data_note": DATA_NOTE, "interview": {"id": before["id"],
                                                                      "candidate_id": before["candidate_id"]}})
-            waiting = review.queue_feedback(store, interview_id, body, who or None, session)
+            waiting = review.queue_feedback(store, interview_id, body, who or None, session, verdict=verdict)
             return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "interview": {
                 "id": before["id"], "candidate_id": before["candidate_id"], "status": before["status"]},
                 "pending_review": _waiting(waiting)})
-        iv = store.add_interview_feedback(interview_id, feedback, interviewer, by="ai")
+        if verdict is not None:
+            if not (feedback or "").strip():
+                raise ValueError("Feedback needs some text: what the interviewer said.")
+            _check_cap(store, 1)
+            iv = interviews.give_verdict(store, interview_id, verdict, interviewer, feedback, by="ai")
+        else:
+            iv = store.add_interview_feedback(interview_id, feedback, interviewer, by="ai")
         notes = iv["data"].get("feedback") or []
-        same = len(notes) == len(before["data"].get("feedback") or [])
+        same = len(notes) == len(before["data"].get("feedback") or []) and iv["data"] == before["data"]
         whose = f"{quoted(iv['candidate_name'])}'s interview" + (
             f" ({actions.interview_name(iv)})" if actions.interview_name(iv) else "")
         who = f" from {quoted(interviewer)}" if interviewer and interviewer.strip() else ""
         sentence = (f"That feedback{who} was already saved on {whose}." if same
                     else f"Saved feedback{who} on {whose} {_when_words(iv['at'])}.")
+        if verdict is not None and not same:
+            sentence += f" The session now reads {interview_label(iv['data']) or iv['status']}."
         return _said(sentence, {"data_note": DATA_NOTE, "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
             "job_id": iv.get("job_id"), "at_local": _local(iv["at"]), "summary": iv.get("body"), "status": iv["status"],
@@ -1111,25 +1130,37 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     def list_interviews(week: str | None = None) -> CallToolResult:
-        """Every interview booked Monday to Friday across all jobs, grouped into onsite loops, with each
-        interviewer's load and clashes (an interviewer booked twice at once, or a candidate in two sessions).
-        week is any day in that week (2026-11-09); empty means this week (next week on a weekend)."""
-        day = None
-        if week and week.strip():
-            try:
-                day = to_dt(week.strip()).astimezone().date() if "T" in week else datetime.fromisoformat(week.strip()).date()
-            except ValueError:
-                raise ValueError("week is a day like 2026-11-09.")
+        """Every interview booked that week across all jobs (Monday to Friday, plus Saturday and Sunday when
+        something is booked then), grouped into onsite loops, with each interviewer's load, clashes (an
+        interviewer booked twice at once, or a candidate in two sessions), and sessions still open: no outcome
+        yet, or named interviewers who owe feedback. week is any day in that week (2026-11-09), or "this" or
+        "next"; empty means this week (next week on a weekend)."""
+        day = interviews.week_day(week)
         w = interviews.week(store, day)
         data = {"start": w["start"].isoformat(), "end": w["end"].isoformat(), "total": w["total"],
                 "loops": [{**{k: lp[k] for k in ("candidate_id", "name", "job_id", "job", "size")},
-                           "sessions": [{"interview_id": x["interview_id"], "at_local": _local(x["at"]), "name": x["name"],
-                                         "interviewer": x["interviewer"], "status": x["status"]} for x in lp["sessions"]]}
+                           "sessions": [_slim({"interview_id": x["interview_id"], "at_local": _local(x["at"]),
+                                               "name": x["name"], "interviewer": x["interviewer"], "status": x["status"],
+                                               "needs_outcome": x["needs_outcome"] or None,
+                                               "feedback_owed_by": x["owed"] or None}) for x in lp["sessions"]]}
                           for lp in w["loops"]],
                 "load": [{"interviewer": e["name"], "sessions": e["count"]} for e in w["load"]],
                 "clashes": [{"kind": c["kind"], "text": c["text"], "interview_ids": c["ids"]} for c in w["clashes"]],
                 "app_url": app_url(f"/interviews?week={w['start'].isoformat()}")}
         return _result(DATA_NOTE + "\n" + interviews.week_text(w), data)
+
+    @mcp.tool(annotations=READ)
+    def list_feedback_owed(job_id: int | None = None) -> CallToolResult:
+        """Interviewers who still owe feedback, a day or more after a session (up to two weeks back), for people
+        still in play on an open job. One entry per loop, each owed interviewer with a short request (subject
+        and body) the recruiter can send from their own mail. Draft the nudges for the recruiter; Talent Search
+        sends nothing. Feedback saved with add_interview_feedback clears the entry."""
+        rows = interviews.feedback_owed(store, job_id=job_id)
+        data = {"data_note": DATA_NOTE, "loops": [{
+            **{k: r[k] for k in ("candidate_id", "name", "job_id", "job", "day")},
+            "owed": [_slim({k: o[k] for k in ("name", "email", "session", "interview_id", "subject", "body")})
+                     for o in r["owed"]]} for r in rows], "app_url": app_url("/interviews")}
+        return _result(DATA_NOTE + "\n" + interviews.feedback_owed_text(rows), data)
 
     @mcp.tool(annotations=READ, meta=tool_meta("decide"))
     def compare_finalists(job_id: int, candidate_ids: list[int] | None = None) -> CallToolResult:
@@ -1195,7 +1226,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Prefer a built-in stage_set over making up stage names: "agency" (Sourced, Screened, Submitted, Client
         interview, Offer, Placed, Client passed, Withdrawn) for a recruiter hiring for clients, "inhouse"
         (Applied, Recruiter screen, Hiring manager screen, Interviews, Offer, Hired, Rejected, Withdrawn) for
-        a company's own hiring, or "default". stages_from_job_id copies another job's stages (list_jobs shows
+        a company's own hiring, "founder" (Applied, Founder call, Technical, Cofounder chat, Trial, Offer, Hired,
+        Rejected, Withdrawn) for a founder hiring on their own, or "default". stages_from_job_id copies another job's stages (list_jobs shows
         the ids), which keeps a recruiter's own stages the same across jobs. Give at most one of stages,
         stage_set and stages_from_job_id.
 
@@ -1997,6 +2029,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        if i["kind"] == "interview_out" else "")
                     + (" Ask the recruiter how it went, then record it with update_interview outcome."
                        if i["kind"] == "interview_outcome" else "")
+                    + (" Draft a short feedback request to each interviewer (list_feedback_owed); the recruiter sends it."
+                       if i["kind"] == "feedback_owed" else "")
                     + (f" Ask the recruiter whether to move them to {i['next_stage']} (move_stage)."
                        if i["kind"] == "interview_result" and i.get("next_stage") else "")
                     + (" Mixed: help the recruiter weigh it with compare_finalists."

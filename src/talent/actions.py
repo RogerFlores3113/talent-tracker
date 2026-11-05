@@ -51,6 +51,8 @@ STAGE_SETS: dict[str, tuple[str, tuple[str, ...] | None]] = {
                           "Withdrawn")),
     "inhouse": ("In-house", ("Applied", "Recruiter screen", "Hiring manager screen", "Interviews", "Offer", "Hired",
                              "Rejected", "Withdrawn")),
+    "founder": ("Founder-led", ("Applied", "Founder call", "Technical", "Cofounder chat", "Trial", "Offer", "Hired",
+                                "Rejected", "Withdrawn")),
 }
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -346,12 +348,13 @@ def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], 
             if any(t["id"] not in pending and not _iv_data(t).get("outcome") for t in g):
                 continue  # a session of this loop is still ahead: ask after the last one
             first = g[0]
+            left = (f"{len(todo)} of {len(g)} sessions still need{'s' if len(todo) == 1 else ''} an outcome"
+                    if len(todo) < len(g) else f"{len(g)} sessions")
             out.append({
                 "key": _loop_key("interview_outcome_loop", g), "kind": "interview_outcome", "rank": 1,
-                "when": first["at"], "loop": True,
+                "when": todo[0]["at"], "loop": True,
                 "title": f"How did {first['candidate_name']}'s interviews on {local_time(first['at'], '%a %b %-d')} go?",
-                "detail": " · ".join(x for x in (label(first.get("job_id"), first.get("job_title")),
-                                                 f"{len(g)} sessions") if x),
+                "detail": " · ".join(x for x in (label(first.get("job_id"), first.get("job_title")), left) if x),
                 "interview_id": todo[0]["id"], "interview_ids": [t["id"] for t in todo],
                 "sessions": [{**_session(t, stamp), "status": "scheduled" if t["id"] in pending else
                               _iv_data(t).get("outcome") or "scheduled"} for t in g],
@@ -799,7 +802,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     hidden = scheduled = scheduled_later = 0
 
     hints = twin_hints(list(jobs.values()))
-    today = now.astimezone().date().isoformat()
+    today = as_local(now).date().isoformat()  # the recruiter's day (Settings > Your time zone)
 
     def label(job_id: int | None, fallback: str | None = None) -> str:
         j = jobs.get(job_id) if job_id else None
@@ -870,9 +873,11 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 items.append(row)
         items += _outcome_asks(store, now, jobs, asked, label)
         items += _result_items(store, now, jobs, label)
+        from .interviews import today_items as chase_items  # here: interviews imports this module
+        items += chase_items(store, now)  # feedback still owed a day after a session
 
     if on("flag_suggestions"):
-        horizon = (now + timedelta(days=14)).astimezone().date().isoformat()
+        horizon = as_local(now + timedelta(days=14)).date().isoformat()
         for s in store.open_suggestions():
             due = s.get("due_on") or ""
             mine = (s.get("source") or "") != "AI app"

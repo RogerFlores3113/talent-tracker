@@ -14,7 +14,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any
 
-from . import actions
+from . import actions, interviews
 from .store import NotFound, Store, _stage_key, interview_label, interview_note, interview_result, quoted, to_dt
 
 MAX_FINALISTS = 4
@@ -49,7 +49,10 @@ def _interviews(store: Store, candidate_id: int, job_id: int) -> list[dict[str, 
             continue
         status = interview_result(d) or "scheduled"
         ahead = status == "scheduled" and r["at"] > _now()
-        out.append({"interview_id": r["id"], "at": r["at"], "at_local": actions.local_time(r["at"], actions.IV_TIME),
+        row = {**r, "data": d}
+        out.append({"_data": d, "verdicts": interviews.verdict_rows(row), "owed": [] if ahead else interviews.owed_by(row),
+                    "needs_outcome": status == "scheduled" and not ahead,
+                    "names": [interviews.display_name(n) for n in interviews.named(row)],"interview_id": r["id"], "at": r["at"], "at_local": actions.local_time(r["at"], actions.IV_TIME),
                     "name": actions.interview_name(r) or "Interview", "summary": r.get("body"),
                     "interviewer": d.get("interviewer"), "status": status, "upcoming": ahead,
                     "outcome": interview_label(d) or ("Coming up" if ahead else "Not recorded yet"),
@@ -57,6 +60,14 @@ def _interviews(store: Store, candidate_id: int, job_id: int) -> list[dict[str, 
                     "feedback": [{"by": f.get("by"), "text": f.get("text"), "at": f.get("at"), "source": f.get("source")}
                                  for f in d.get("feedback") or [] if isinstance(f, dict) and f.get("text")]})
     return out
+
+
+def _first_activity(store: Store, candidate_id: int, job_id: int, since: str | None) -> str | None:
+    """When this person's process for the job began: the earliest of their add to the pipeline and anything on
+    their timeline for this job (an interview logged before the add counts)."""
+    row = store._row("SELECT min(at) AS at FROM timeline WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    first = row["at"] if row else None
+    return min(x for x in (since, first) if x) if since or first else None
 
 
 def _now() -> str:
@@ -94,14 +105,18 @@ def finalists(store: Store, job_id: int, ids: list[int] | None = None, now: date
     people = []
     for a in chosen:
         c = store.get_candidate(a["candidate_id"])
-        since = a.get("created_at") or a["stage_changed_at"]
+        since = _first_activity(store, c["id"], job_id, a.get("created_at") or a["stage_changed_at"])
+        ivs = _interviews(store, c["id"], job_id)
+        roll = interviews.tally([{**i, "data": i.pop("_data")} for i in ivs])
         people.append({
             "candidate_id": c["id"], "name": c["name"], "current_title": c.get("current_title"),
             "current_company": c.get("current_company"), "location": c.get("location"), "stage": a["stage"],
             "days_in_process": actions.local_days(to_dt(since), now) if since else None,
             "days_in_stage": actions.local_days(to_dt(a["stage_changed_at"]), now) if a.get("stage_changed_at") else None,
             "source": c.get("source"), "referrer": referrer(c.get("source")),
-            "interviews": _interviews(store, c["id"], job_id),
+            "interviews": ivs, "tally": roll["text"] or None,
+            "open_sessions": sum(1 for i in ivs if i["needs_outcome"]),
+            "owed": list(dict.fromkeys(n for i in ivs for n in i["owed"])),
             "still_to_come": len(actions.upcoming_for(store, c["id"], job_id, now)),
             "todos": [{"text": s["text"], "due_on": s.get("due_on")} for s in todos if s.get("candidate_id") == c["id"]],
         })
@@ -149,6 +164,12 @@ def finalists_text(d: dict[str, Any]) -> str:
             bits.append(f"referred by {_fenced(p['referrer'])}")
         if p.get("still_to_come"):
             bits.append(still_to_come(p["still_to_come"]))
+        if p.get("tally"):
+            bits.append(f"verdicts: {_fenced(p['tally'])}")
+        if p.get("open_sessions"):
+            bits.append(f"{p['open_sessions']} session{'' if p['open_sessions'] == 1 else 's'} with no outcome yet")
+        if p.get("owed"):
+            bits.append(f"feedback still owed by {_fenced(', '.join(p['owed']))}")
         if bits:
             lines.append("; ".join(bits))
         if not p["interviews"]:
@@ -159,6 +180,10 @@ def finalists_text(d: dict[str, Any]) -> str:
                     + i["outcome"])
             if i.get("note"):
                 line += f". How it went: {_fenced(i['note']).rstrip(' .')}"
+            given = [v for v in i.get("verdicts") or [] if v["label"]]
+            if given and (len(given) > 1 or len(i.get("verdicts") or []) > 1):
+                line += ". Each interviewer: " + ", ".join(f"{_fenced(v['name'] or 'unnamed')} {v['label']}"
+                                                           for v in given)
             lines.append(line)
             lines += [f"  Feedback from {_fenced(f['by'] or 'an interviewer')}: {_fenced(f['text'])}"
                       for f in i["feedback"]]
@@ -175,20 +200,23 @@ def _listed(names: list[str]) -> str:
     return q[0] if len(q) == 1 else ", ".join(q[:-1]) + " and " + q[-1]
 
 
-def record_decision(store: Store, job_id: int, offer_id: int, pass_ids: list[int], reason: str | None = None,
+def record_decision(store: Store, job_id: int, offer_id: int | None, pass_ids: list[int], reason: str | None = None,
                     note: str | None = None, by: str = "app") -> dict[str, Any]:
     """Offer to one finalist and pass on the others, as one change: the offer person moves to the job's offer
     stage, the others to its Out stage with a reason, and their interviews still ahead are cancelled. Saved as
-    one batch (a setting), so Changes lists it once and undo_decision puts it all back."""
+    one batch (a setting), so Changes lists it once and undo_decision puts it all back. offer_id None is
+    "No offer yet": only the people ticked are passed on, and everyone else stays for another round."""
     play = {a["candidate_id"]: a for a in actions.in_play(store, job_id)}
-    if offer_id not in play:
+    if offer_id is not None and offer_id not in play:
         raise ValueError("Pick who gets the offer from the people still in play on this job.")
     pass_ids = [i for i in dict.fromkeys(pass_ids) if i != offer_id]
     if any(i not in play for i in pass_ids):
         raise ValueError("Someone you passed on isn't in play on this job any more. Reload the page.")
+    if offer_id is None and not pass_ids:
+        raise ValueError("No offer yet and nobody ticked to pass on, so there was nothing to record.")
     stages = store.job_stages(job_id)
     offer = _offer_stage(stages)
-    if not offer:
+    if not offer and offer_id is not None:
         raise ValueError("This job has no Offer stage. Add one under Edit job, then record the decision.")
     out, default_reason = actions.pass_stage(store, job_id)
     why = f"Reason: {reason.strip()}" if reason and reason.strip() else default_reason
@@ -208,7 +236,8 @@ def record_decision(store: Store, job_id: int, offer_id: int, pass_ids: list[int
                       "notes": a.get("notes"), "set_notes": notes,
                       "timeline_id": entry["id"] if entry and a["stage"].lower() != stage.lower() else None})
 
-    move(offer_id, offer, (note or "").strip() or None)
+    if offer_id is not None:
+        move(offer_id, offer, (note or "").strip() or None)
     for cid in pass_ids:
         ivs = actions.upcoming_for(store, cid, job_id)
         move(cid, out, why)
@@ -219,12 +248,15 @@ def record_decision(store: Store, job_id: int, offer_id: int, pass_ids: list[int
     batch_id = 1 + max((int(r["key"][len(DECISION_PREFIX):]) for r in rows
                         if r["key"][len(DECISION_PREFIX):].isdigit()), default=0)
     actions._put_setting(store, f"{DECISION_PREFIX}{batch_id}", json.dumps({
-        "job_id": job_id, "at": _now(), "offer": {"candidate_id": offer_id, "name": play[offer_id]["candidate_name"],
-                                                  "stage": offer},
+        "job_id": job_id, "at": _now(), "offer": None if offer_id is None else {
+            "candidate_id": offer_id, "name": play[offer_id]["candidate_name"], "stage": offer},
         "passed": [{"candidate_id": i, "name": play[i]["candidate_name"]} for i in pass_ids], "out_stage": out,
         "reason": why, "moves": moves, "interviews": cancelled}))
-    text = f"Offer to {quoted(play[offer_id]['candidate_name'])}" + (
-        f", pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}" if pass_ids else "")
+    if offer_id is None:
+        text = f"No offer yet, pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}"
+    else:
+        text = f"Offer to {quoted(play[offer_id]['candidate_name'])}" + (
+            f", pass on {_listed([play[i]['candidate_name'] for i in pass_ids])}" if pass_ids else "")
     return {"id": batch_id, "text": text, "offer_stage": offer, "out_stage": out, "cancelled": len(cancelled),
             "moved": len(moves)}
 
@@ -245,8 +277,9 @@ def decision_batches(store: Store, since: str | None = None) -> list[dict[str, A
             continue
         passed = [p.get("name") or "someone" for p in b.get("passed") or []]
         m = len(b.get("interviews") or [])
-        text = (f"Decision on {actions.job_label(job['title'], job['company'])}: offer to "
-                f"{quoted((b.get('offer') or {}).get('name'))}" + (f", passed on {_listed(passed)}" if passed else "")
+        offer = (f"offer to {quoted((b.get('offer') or {}).get('name'))}" if b.get("offer") else "no offer yet")
+        text = (f"Decision on {actions.job_label(job['title'], job['company'])}: {offer}"
+                + (f", passed on {_listed(passed)}" if passed else "")
                 + (f", and cancelled {m} interview{'' if m == 1 else 's'}" if m else ""))
         out.append({**b, "id": int(bid), "job_title": job["title"], "text": text, "undoable": not b.get("undone_at")})
     return sorted(out, key=lambda b: (b["at"], b["id"]), reverse=True)

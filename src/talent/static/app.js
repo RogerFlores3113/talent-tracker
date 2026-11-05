@@ -11,7 +11,8 @@
 //                             (a submit button's own data-busy wins when that button sent it)
 //   data-decide="Out stage"   on the Decide form: before sending, confirm naming who gets the offer and who is
 //                             passed on (radio offer and ticked pass boxes, each with data-name; data-ahead counts
-//                             their interviews still to come, which get cancelled)
+//                             their interviews still to come, which get cancelled; data-open their sessions
+//                             with no outcome yet, named as still open)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -81,6 +82,14 @@
       passed.forEach(b => {
         const n = parseInt(b.dataset.ahead || "0", 10);
         q += "\n  " + b.dataset.name + (n ? " (cancels " + n + " interview" + (n === 1 ? "" : "s") + " still to come)" : "");
+      });
+    }
+    const open = [offer, ...passed].filter(b => b && b.dataset.open);
+    if (open.length) {
+      q += "\n\nStill open:";
+      open.forEach(b => {
+        const n = parseInt(b.dataset.open, 10);
+        q += "\n  " + b.dataset.name + " has " + n + " session" + (n === 1 ? "" : "s") + " with no outcome";
       });
     }
     return q + "\n\nYou can undo it all under Changes.";

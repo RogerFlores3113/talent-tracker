@@ -320,6 +320,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
     env.globals["interview_form_choices"] = INTERVIEW_FORM_CHOICES  # the profile's How it went menu
+    env.globals["verdict_choices"] = interviews.VERDICT_CHOICES  # one interviewer's own verdict (Decide)
     env.globals["interview_label"] = interview_label  # 'Strong yes', 'Mixed', 'Passed'
     env.globals["interview_note"] = interview_note
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
@@ -1604,11 +1605,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         job_or_404(job_id)
         form = await request.form()
         offer = str(form.get("offer") or "")
-        if not offer.isdigit():
-            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer.")
+        if not offer.isdigit() and offer != "none":
+            return back(request, f"/jobs/{job_id}/decide", error="Pick who gets the offer, or No offer yet.")
         passed = [int(v) for v in form.getlist("pass") if str(v).isdigit()]
         try:
-            res = decide.record_decision(store, job_id, int(offer), passed, reason=str(form.get("reason") or "") or None,
+            res = decide.record_decision(store, job_id, int(offer) if offer.isdigit() else None, passed,
+                                         reason=str(form.get("reason") or "") or None,
                                          note=str(form.get("note") or "") or None, by="app")
         except (ValueError, NotFound) as exc:
             return back(request, f"/jobs/{job_id}/decide", error=str(exc))
@@ -1624,9 +1626,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         nxt = str(form.get("next") or "")
         nxt = nxt if safe_local_path(nxt.split("?", 1)[0]) else f"/candidates/{candidate_id}"
+        verdict = str(form.get("verdict") or "").strip()
+        who = str(form.get("interviewer") or "") or None
         try:
-            store.add_interview_feedback(entry_id, str(form.get("text") or ""), str(form.get("interviewer") or "") or None,
-                                         candidate_id=candidate_id, by="app")
+            if verdict:  # their own verdict too: the session's outcome rolls up from everyone's
+                interviews.give_verdict(store, entry_id, verdict, who, str(form.get("text") or ""),
+                                        candidate_id=candidate_id, by="app")
+            else:
+                store.add_interview_feedback(entry_id, str(form.get("text") or ""), who, candidate_id=candidate_id,
+                                             by="app")
         except NotFound:
             raise HTTPException(404, "That interview isn't on this profile.")
         except ValueError as exc:
@@ -1634,12 +1642,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         sep = "&" if "?" in nxt else "?"
         return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': 'Feedback saved.'})}#iv-{entry_id}", status_code=303)
 
+    @app.post("/candidates/{candidate_id}/interviews/{entry_id}/verdict")
+    async def verdict_form(request: Request, candidate_id: int, entry_id: int):
+        """Record or change one interviewer's verdict on a session, from the Decide view."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        nxt = str(form.get("next") or "")
+        nxt = nxt if safe_local_path(nxt.split("?", 1)[0]) else f"/candidates/{candidate_id}"
+        try:
+            iv = interviews.give_verdict(store, entry_id, str(form.get("verdict") or ""),
+                                         str(form.get("interviewer") or "") or None, candidate_id=candidate_id, by="app")
+        except NotFound:
+            raise HTTPException(404, "That interview isn't on this profile.")
+        except ValueError as exc:
+            return back(request, nxt, error=str(exc))
+        notice = f"Saved. The session now reads {interview_label(iv['data']) or 'as recorded'}."
+        sep = "&" if "?" in nxt else "?"
+        return RedirectResponse(f"{nxt}{sep}{urlencode({'notice': notice})}#iv-{entry_id}", status_code=303)
+
     @app.get("/interviews", response_class=HTMLResponse)
     def interviews_page(request: Request, week: str = ""):
-        """Monday to Friday: every session booked across all jobs, grouped into loops, with clashes flagged."""
-        from datetime import date
+        """The week: every session booked across all jobs, grouped into loops, with clashes and what's owed flagged."""
         try:
-            day = date.fromisoformat(week) if week else None
+            day = interviews.week_day(week)
         except ValueError:
             day = None
         return page(request, "interviews.html", w=interviews.week(store, day))

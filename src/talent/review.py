@@ -290,11 +290,13 @@ def queue_interview(store: Store, interview_id: int, args: dict[str, Any], sessi
 
 
 def queue_feedback(store: Store, interview_id: int, feedback: str, interviewer: str | None,
-                   session: str | None) -> dict[str, Any]:
+                   session: str | None, verdict: str | None = None) -> dict[str, Any]:
     iv = store.get_interview(interview_id)
     who = f" from {quoted(interviewer.strip())}" if interviewer and interviewer.strip() else ""
-    return _queue(store, "feedback", f"Save feedback{who} on {_interview_whose(iv)}",
-                  {"interview_id": interview_id, "feedback": feedback, "interviewer": interviewer},
+    said = f" (verdict: {verdict})" if verdict else ""
+    return _queue(store, "feedback", f"Save feedback{who}{said} on {_interview_whose(iv)}",
+                  {"interview_id": interview_id, "feedback": feedback, "interviewer": interviewer,
+                   **({"verdict": verdict} if verdict else {})},
                   candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), session=session)
 
 
@@ -495,7 +497,11 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
         return r["summary"]
     if kind == "feedback":
         try:
-            store.add_interview_feedback(p["interview_id"], p["feedback"], p.get("interviewer"), by="ai")
+            if p.get("verdict"):  # one interviewer's own verdict, with their words (interviews.give_verdict)
+                from .interviews import give_verdict
+                give_verdict(store, p["interview_id"], p["verdict"], p.get("interviewer"), p["feedback"], by="ai")
+            else:
+                store.add_interview_feedback(p["interview_id"], p["feedback"], p.get("interviewer"), by="ai")
         except NotFound:
             raise ValueError("That interview is gone.") from None
         return r["summary"]

@@ -244,6 +244,9 @@ section.welcome.panel { margin-bottom: 20px; }
 .decide .iv { border-top: 1px solid var(--line); padding: 6px 0; }
 .decide blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--line); white-space: pre-wrap; }
 .week { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 8px; overflow-x: auto; }
+.week.days-6 { grid-template-columns: repeat(6, minmax(140px, 1fr)); }
+.week.days-7 { grid-template-columns: repeat(7, minmax(140px, 1fr)); }
+.decide .inline-verdict { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 4px 0; }
 .week .day { border: 1px solid var(--line); border-radius: 10px; padding: 8px; min-height: 80px; }
 .week .day h3 { font-size: 13px; margin: 0 0 6px; }
 .week .slot { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin-bottom: 6px; font-size: 13px; }

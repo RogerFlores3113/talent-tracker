@@ -52,7 +52,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','feedback_owed':'Feedback owed','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -64,6 +64,15 @@
           <div class="fine">{% if i.kind in ('interview', 'interview_out', 'interview_outcome') %}{{ i.when | local(IV_TIME) }}{% if i.detail %} · {% endif %}{% endif %}{{ i.detail }}</div>
           {% endif %}
           {% if i.sessions %}{{ loop_sessions(i) }}{% endif %}
+          {% if i.kind == 'feedback_owed' %}
+          <ul class="sessions">
+          {% for o in i.owed %}
+            <li>{{ o.name }} <span class="fine">on {{ o.session }}</span>
+              <a class="link small" href="{{ o.mailto }}" title="Opens your own mail app with the request filled in. Nothing is sent until you send it.">Email {{ o.name }}</a>
+              <button type="button" class="link small" data-copy-text="{{ o.body }}">Copy request</button></li>
+          {% endfor %}
+          </ul>
+          {% endif %}
         </div>
         <div class="item-acts">
           {% if i.kind == 'stuck' and i.next_stage %}
@@ -102,6 +111,8 @@
           {% elif i.kind == 'interview' %}
           <a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Reschedule</a>
           {% if i.started %}<a class="link small" href="/candidates/{{ i.candidate_id }}?iv={{ i.interview_id }}#iv-{{ i.interview_id }}">Record outcome</a>{% endif %}
+          {% elif i.kind == 'feedback_owed' %}
+          <a class="btn small" href="{{ i.href }}">Add feedback</a>
           {% endif %}
           {% if i.kind not in ('suggestion', 'interview_out') %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
