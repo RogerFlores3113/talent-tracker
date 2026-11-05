@@ -29,6 +29,7 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
+PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
 TABLE_SORTS = {
@@ -379,8 +380,9 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
+        history_text = _history_to_text(guess.pop("work_history", None) or [])
         dupe = store.find_duplicate(guess.get("email"), guess.get("linkedin_url"))
-        return page(request, "candidate_form.html", c=guess, history_text="", error=None, job_id=None,
+        return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
                     from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text))
 
     # ----------------------------------------------------------- csv
@@ -406,29 +408,58 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         fd = os.open(imports_dir() / f"{token}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        mapping = importers.guess_mapping(header)
+        mapping = importers.guess_mapping(header, rows)
+        return map_step(request, token, header, rows, mapping, importers.default_source(header), upload.filename)
+
+    def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
+                 source: str, filename: str | None = None, error: str | None = None) -> HTMLResponse:
+        has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
+        preview = None
+        if has_name and len(rows) <= PREVIEW_MAX_ROWS:
+            try:
+                preview = importers.preview_import(store, header, rows, mapping, source=source)
+            except Exception:  # a preview that can't be worked out never blocks the import
+                preview = None
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
-                    mapping=mapping, targets=importers.IMPORT_TARGETS, filename=upload.filename,
-                    has_name=any(m in ("name", "first_name", "last_name") for m in mapping))
+                    mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
+                    filename=filename, source=source, error=error, has_name=has_name, preview=preview,
+                    preview_lines=importers.preview_lines(preview) if preview else [])
+
+    def _upload(form: Any) -> tuple[str, Path] | None:
+        token = str(form.get("token") or "")
+        _sweep_uploads()
+        path = imports_dir() / f"{token}.csv"
+        return (token, path) if token.isalnum() and path.exists() else None
+
+    def _form_mapping(form: Any, header: list[str]) -> list[str]:
+        mapping = [str(form.get(f"col{i}") or "") for i in range(len(header))]
+        return [m if m in importers.IMPORT_TARGETS else "" for m in mapping]
+
+    @app.post("/import/check", response_class=HTMLResponse)
+    async def import_check(request: Request):
+        """The map step again, with the dry run worked out for the columns as they're matched now."""
+        form = await request.form()
+        up = _upload(form)
+        if up is None:
+            return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
+        header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
+        return map_step(request, up[0], header, rows, _form_mapping(form, header),
+                        str(form.get("source") or "CSV import"))
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
         form = await request.form()
-        token = str(form.get("token") or "")
-        _sweep_uploads()
-        path = imports_dir() / f"{token}.csv"
-        if not token.isalnum() or not path.exists():
+        up = _upload(form)
+        if up is None:
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
+        token, path = up
         header, rows = importers.read_csv(importers.decode(path.read_bytes()))
-        mapping = [str(form.get(f"col{i}") or "") for i in range(len(header))]
-        mapping = [m if m in importers.IMPORT_TARGETS else "" for m in mapping]
+        mapping = _form_mapping(form, header)
+        source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
-            return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5],
-                        total=len(rows), mapping=mapping, targets=importers.IMPORT_TARGETS,
-                        error="Pick which column holds the name.", has_name=False)
+            return map_step(request, token, header, rows, mapping, source, error="Pick which column holds the name.")
         try:
-            result = importers.import_rows(store, header, rows, mapping,
-                                           source=str(form.get("source") or "CSV import"))
+            result = importers.import_rows(store, header, rows, mapping, source=source)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:

@@ -102,6 +102,8 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
     imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
     imp.add_argument("file")
+    imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
+    imp.add_argument("--source", default=None, help='where these people came from (default "CSV import")')
     exp = sub.add_parser("export-csv", help="write every candidate to a CSV file")
     exp.add_argument("file")
     args = parser.parse_args(argv)
@@ -144,14 +146,33 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
         else:
             header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))
-            mapping = importers.guess_mapping(header)
+            mapping = importers.guess_mapping(header, rows)
             if not any(m in ("name", "first_name", "last_name") for m in mapping):
                 sys.exit("Couldn't find a name column. Use the app's Import page to match columns by hand.")
-            r = importers.import_rows(store, header, rows, mapping)
-            print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
-                  f"skipped {r['skipped_rows']}.")
-            for line in (r["skipped"] + r["warnings"])[:20]:
-                print("  " + line)
+            source = args.source or importers.default_source(header)
+            print("Columns: " + ", ".join(f"{h} -> {importers.TARGET_LABELS.get(m, m)}" for h, m in zip(header, mapping)
+                                          if m))
+            if args.dry_run:
+                r = importers.preview_import(store, header, rows, mapping, source=source)
+                for line in importers.preview_lines(r):
+                    print(line)
+                details = r["changes"] + r["skipped"] + r["possible_duplicates"] + r["warnings"]
+                for line in details[:20]:
+                    print("  " + line)
+                print("Nothing was changed (dry run).")
+            else:
+                r = importers.import_rows(store, header, rows, mapping, source=source)
+                print(f"Added {r['added']}, updated {r['updated']}, unchanged {r['unchanged']}, "
+                      f"skipped {r['skipped_rows']}, {r['notes']} note{'' if r['notes'] == 1 else 's'} added.")
+                if r["pipelines_added"] or r["jobs_created"]:
+                    print(f"Put {r['pipelines_added']} in job pipelines"
+                          + (f", made {len(r['jobs_created'])} new job(s): " + ", ".join(r["jobs_created"])
+                             if r["jobs_created"] else "") + ".")
+                for line in (r["skipped"] + r["possible_duplicates"] + r["warnings"])[:20]:
+                    print("  " + line)
+                if r["not_imported"]:
+                    print("Not imported: " + ", ".join(r["not_imported"]))
+                print(f"Backup from before this import: {r['backup']}")
     elif cmd in ("connect-claude", "connect-codex", "connect-lmstudio"):
         from . import integrations
 

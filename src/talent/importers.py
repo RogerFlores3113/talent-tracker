@@ -6,12 +6,16 @@ import io
 import os
 import re
 import sqlite3
+import unicodedata
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from .paths import backups_dir
-from .store import CANDIDATE_FIELDS, DuplicateValue, IdentityConflict, Store, parse_when, split_tags
+from .store import (CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
+                    IdentityConflict, Store, normalize_linkedin, parse_when, same_person_name, split_tags,
+                    stage_outcome)
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
@@ -21,31 +25,64 @@ EXPORT_HEADERS = {
     "name": "Name", "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn", "website": "Website",
     "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills",
     "about": "About", "source": "Source", "last_contacted_at": "Last contacted", "created_at": "Added",
-    "updated_at": "Last updated", "work_history": "Work history",
+    "updated_at": "Last updated", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
 }
+EXPORT_NOTES_KEPT = 20      # newest notes per person in the export's Notes column
+EXPORT_NOTES_CHARS = 5000   # and at most this much text
 
-# Header words people use in spreadsheets, mapped to our fields.
+# Header words people use in spreadsheets, mapped to our fields. An exact header match beats a
+# partial one, and a longer hint beats a shorter one ("Job Title" is a title before "Role" is).
 _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("email", ("email", "e-mail", "mail")),
-    ("linkedin_url", ("linkedin", "profile url", "li url")),
-    ("phone", ("phone", "mobile", "cell", "tel")),
-    ("website", ("website", "github", "portfolio", "site", "url")),
-    ("current_title", ("title", "role", "position", "headline", "job")),
-    ("current_company", ("company", "employer", "organization", "organisation", "current company")),
-    ("location", ("location", "city", "where", "based", "country", "region")),
-    ("tags", ("skills", "tags", "keywords", "tech", "stack")),
-    ("note", ("notes", "note", "comments", "comment")),
+    ("email", ("email", "e-mail", "mail", "email address", "e-mail address", "work email", "personal email")),
+    ("linkedin_url", ("linkedin", "profile url", "li url", "linkedin url", "linkedin profile")),
+    ("phone", ("phone", "mobile", "cell", "tel", "telephone", "phone number", "cellphone")),
+    ("website", ("website", "github", "portfolio", "site", "url", "homepage")),
+    ("current_title", ("title", "role", "position", "headline", "job title", "current title", "current role",
+                       "current position", "job")),
+    ("current_company", ("company", "employer", "organization", "organisation", "current company",
+                         "current employer", "company name")),
+    ("location", ("location", "city", "based", "based in", "country", "region", "state", "province")),
+    ("tags", ("skills", "tags", "keywords", "tech", "stack", "tech stack")),
+    ("note", ("notes", "note", "comments", "comment", "salary", "salary expectation", "notice", "notice period",
+              "feedback")),
     ("about", ("about", "summary", "bio", "description")),
-    ("source", ("source", "found via", "referral", "channel")),
-    ("last_contacted_at", ("last contacted", "last contact", "contacted")),
+    ("source", ("source", "found via", "referral", "channel", "where we met", "met at", "how we met", "met via",
+                "how found", "found through", "lead source")),
+    ("last_contacted_at", ("last contacted", "last contact", "contacted", "last spoke", "last spoken",
+                           "last touch", "last reached out")),
+    # Pipeline columns: which job a row is for, at which client, and where they are in it.
+    ("job_title", ("requisition", "req", "job req", "opening", "job opening", "position applied", "applied for",
+                   "role", "job")),
+    ("job_company", ("client", "client company", "client name", "hiring company", "account")),
+    ("stage", ("status", "stage", "pipeline stage", "pipeline status", "candidate status")),
 )
+# "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
+_PIPELINE_ONLY_HINTS = {"role", "job"}
+_MULTI_TARGETS = {"location", "note"}  # several columns may feed these
 FIRST_NAME = ("first name", "firstname", "given name", "first")
 LAST_NAME = ("last name", "lastname", "surname", "family name", "last")
-FULL_NAME = ("name", "full name", "candidate", "candidate name")
+FULL_NAME = ("name", "full name", "candidate", "candidate name", "contact", "contact name")
 
-# "note" is not a candidate field: it becomes a note on the candidate's timeline.
-IMPORT_TARGETS = ("", "name", "first_name", "last_name") + tuple(f for f in CANDIDATE_FIELDS if f != "name") + ("note",)
+# "note" is not a candidate field: it becomes a note on the candidate's timeline. "notes" is our own
+# export's Notes column (several notes split by " | "). job_title, job_company and stage put the person
+# in a job's pipeline; "jobs" is our export's Jobs column ("Title (Company): Stage; ...").
+IMPORT_TARGETS = (("", "name", "first_name", "last_name") + tuple(f for f in CANDIDATE_FIELDS if f != "name")
+                  + ("note", "notes", "job_title", "job_company", "stage", "jobs"))
+TARGET_LABELS = {
+    "": "Skip this column", "name": "Full name", "first_name": "First name", "last_name": "Last name",
+    "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn URL", "website": "Website",
+    "current_title": "Current title", "current_company": "Current company", "location": "Location",
+    "about": "About", "note": "Note on their timeline", "notes": "Notes, split at | (from an export)",
+    "tags": "Skills", "source": "Source", "last_contacted_at": "Last contacted",
+    "job_title": "Job they're up for", "job_company": "Client (the job's company)", "stage": "Stage in that job",
+    "jobs": "Jobs, as exported",
+}
 BACKUPS_KEPT = 10
+
+_RELATIVE_DATE = re.compile(
+    r"^(?:today|tonight|now|yesterday|tomorrow|(?:last|next|this) \w+|(?:a|an|\d+|a few|few) "
+    r"(?:min(?:ute)?s?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?) ago|"
+    r"(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?)\.?$", re.I)
 
 
 def decode(data: bytes) -> str:
@@ -57,7 +94,42 @@ def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _norm_header(h: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[_\-:#*]+", " ", (h or "").lower())).strip()
+
+
+_KNOWN_HEADERS = ({*FIRST_NAME, *FULL_NAME, *LAST_NAME} - {"first", "last", "contact"}) | {
+    _norm_header(w) for _, ws in _HEADER_HINTS for w in ws}
+
+
+def _header_score(line: str) -> int:
+    """How many cells of this line read like column headers ('First Name', 'URL', 'Email Address')."""
+    best = 0
+    for delim in (",", ";", "\t"):
+        try:
+            cells = next(csv.reader([line], delimiter=delim))
+        except (csv.Error, StopIteration):
+            continue
+        if len(cells) >= 2:
+            best = max(best, sum(1 for c in cells if _norm_header(c) in _KNOWN_HEADERS))
+    return best
+
+
+def _skip_preamble(text: str) -> str:
+    """LinkedIn's Connections.csv starts with a few 'Notes:' lines before the real header. Drop them."""
+    lines = text.splitlines(keepends=True)
+    seen = 0
+    for i, line in enumerate(lines[:30]):
+        if not line.strip():
+            continue
+        if _header_score(line) >= 2:
+            return "".join(lines[i:]) if seen else text
+        seen += 1
+    return text
+
+
 def read_csv(text: str) -> tuple[list[str], list[list[str]]]:
+    text = _skip_preamble(text)
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
     except csv.Error:
@@ -70,29 +142,72 @@ def read_csv(text: str) -> tuple[list[str], list[list[str]]]:
     return header, body
 
 
-def guess_mapping(header: list[str]) -> list[str]:
-    """For each column, which field it most likely holds ('' = skip)."""
-    out: list[str] = []
-    used: set[str] = set()
-    for h in header:
-        low = re.sub(r"[_\-]+", " ", h.lower()).strip()
-        pick = ""
+def looks_like_linkedin_export(header: list[str]) -> bool:
+    low = {_norm_header(h) for h in header}
+    return {"first name", "last name", "url"} <= low and ("connected on" in low or "position" in low)
+
+
+def looks_like_our_export(header: list[str]) -> bool:
+    return {EXPORT_HEADERS[k] for k in ("name", "jobs", "notes", "created_at", "updated_at")} <= set(header)
+
+
+def default_source(header: list[str]) -> str:
+    return "LinkedIn connections" if looks_like_linkedin_export(header) else "CSV import"
+
+
+def _hint_score(low: str, hint: str) -> int:
+    hint = _norm_header(hint)
+    if low == hint:
+        return 1000 + len(hint)
+    if re.search(rf"(?<![a-z]){re.escape(hint)}(?![a-z])", low):
+        return 10 * len(hint) + 5
+    return 10 * len(hint) if len(hint) >= 4 and hint in low else 0
+
+
+def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> list[str]:
+    """For each column, which field it most likely holds ('' = skip).
+
+    Every (column, field) pair gets a score and the best pairs are picked first, so an exact or longer
+    header match wins ("Job Title" is the title even when a "Role" column comes first). A column whose
+    values are linkedin.com links is the LinkedIn URL whatever its header says.
+    """
+    lows = [_norm_header(h) for h in header]
+    pipeline_sheet = any(_hint_score(low, w) >= 1000 for low in lows
+                         for f, ws in _HEADER_HINTS if f in ("job_company", "stage") for w in ws)
+    ours = looks_like_our_export(header)
+    out = [""] * len(header)
+    pairs: list[tuple[int, int, str]] = []
+    for col, low in enumerate(lows):
         if low in FIRST_NAME:
-            pick = "first_name"
+            pairs.append((5000, col, "first_name"))
         elif low in LAST_NAME:
-            pick = "last_name"
+            pairs.append((5000, col, "last_name"))
         elif low in FULL_NAME:
-            pick = "name"
-        else:
-            for f, hints in _HEADER_HINTS:
-                if f not in used and any(low == w or w in low for w in hints):
-                    pick = f
-                    break
-        if pick and pick in used:
-            pick = ""
-        if pick:
-            used.add(pick)
-        out.append(pick)
+            pairs.append((5000, col, "name"))
+        if ours and header[col] == EXPORT_HEADERS["jobs"]:
+            pairs.append((5000, col, "jobs"))
+        if ours and header[col] == EXPORT_HEADERS["notes"]:
+            pairs.append((5000, col, "notes"))
+        values = [r[col].strip() for r in (rows or [])[:50] if col < len(r) and r[col].strip()]
+        if values and sum("linkedin.com/" in v.lower() for v in values) * 2 >= len(values):
+            pairs.append((3000, col, "linkedin_url"))
+        for f, hints in _HEADER_HINTS:
+            for w in hints:
+                if f == "job_title" and w in _PIPELINE_ONLY_HINTS and not pipeline_sheet:
+                    continue
+                if f == "current_title" and w in _PIPELINE_ONLY_HINTS and pipeline_sheet and low == w:
+                    continue  # on a pipeline sheet a bare "Role" is the job they're up for
+                s = _hint_score(low, w)
+                if s:
+                    pairs.append((s, col, f))
+    used: set[str] = set()
+    for score, col, f in sorted(pairs, key=lambda p: (-p[0], p[1])):
+        if out[col] or (f in used and f not in _MULTI_TARGETS):
+            continue
+        out[col] = f
+        used.add(f)
+    if "job_title" not in used:  # a client or status means nothing without the job itself
+        out = ["" if f in ("job_company", "stage") else f for f in out]
     return out
 
 
@@ -104,18 +219,66 @@ def _cell(v: str) -> str:
     return v
 
 
-def _rows(header: list[str], rows: Iterable[list[str]],
-          mapping: list[str]) -> Iterable[tuple[dict[str, Any], list[str]]]:
-    """Each row as (candidate fields, warnings about cells we had to leave out)."""
-    for r in rows:
+def _fold(s: str | None) -> str:
+    """Lower case, no accents, single spaces: 'José  Álvarez' -> 'jose alvarez'."""
+    s = unicodedata.normalize("NFKD", (s or "").casefold())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s)).strip()
+
+
+def _digits(phone: str | None) -> str:
+    d = re.sub(r"\D", "", phone or "")
+    return d[-10:] if len(d) >= 7 else ""
+
+
+def _split_role(title: str) -> tuple[str, str] | None:
+    """'Frontend Lead at Ramp' -> ('Frontend Lead', 'Ramp')."""
+    for sep in (" at ", " @ "):
+        if sep in title:
+            t, _, c = title.partition(sep)
+            if t.strip() and c.strip():
+                return t.strip(" ,|-"), c.strip(" ,|-")
+    return None
+
+
+def _parse_jobs_cell(v: str) -> list[tuple[str, str, str]]:
+    """Our export's Jobs cell: 'Senior Backend Engineer (Acme): Screening; Designer: Offer'."""
+    out = []
+    for part in (p.strip() for p in v.split(";")):
+        m = re.match(r"^(?P<t>.+?)(?: \((?P<c>[^()]*)\))?: (?P<s>[^:]+)$", part)
+        if m:
+            out.append((m["t"].strip(), (m["c"] or "").strip(), m["s"].strip()))
+        elif part:
+            out.append((part, "", ""))
+    return out
+
+
+def _split_notes_cell(v: str) -> list[str]:
+    """Our export's Notes cell: newest first, ' | ' between notes, a | inside a note written as \\|."""
+    parts = re.split(r"(?<!\\) \| ", v)
+    return [p.replace("\\|", "|").strip() for p in parts if p.strip()]
+
+
+def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -> Iterable[dict[str, Any]]:
+    """Each row as {"rows": [row number], "data": candidate fields, "notes", "jobs", "warnings"}."""
+    note_cols = sum(1 for m in mapping if m == "note")
+    for n, r in enumerate(rows, start=2):
         data: dict[str, Any] = {}
         warnings: list[str] = []
+        notes: list[str] = []
+        jobs: list[tuple[str, str, str, bool]] = []
+        job = {"job_title": "", "job_company": "", "stage": ""}
         first = last = ""
         for col, target in enumerate(mapping):
             if not target or col >= len(r):
                 continue
+            col_name = header[col] if col < len(header) and header[col] else TARGET_LABELS.get(target, target)
+            raw = r[col].strip()
             v = _cell(r[col])
             if not v:
+                continue
+            if raw.startswith("=") and len(raw) > 1:
+                warnings.append(f"left {col_name} blank, {raw[:40]!r} looks like a spreadsheet formula, not a value")
                 continue
             if target == "first_name":
                 first = v
@@ -124,23 +287,100 @@ def _rows(header: list[str], rows: Iterable[list[str]],
             elif target == "tags":
                 data["tags"] = split_tags((data.get("tags") or []) + split_tags(v))  # , ; | (never / as in ci/cd)
             elif target == "last_contacted_at":
+                if _RELATIVE_DATE.match(v.strip()):
+                    warnings.append(f"left {col_name} blank, {v!r} depends on when the sheet was written. "
+                                    "Use a date like 2026-11-05")
+                    continue
                 try:
                     data[target] = parse_when(v, default_now=False)
                 except ValueError:
-                    col_name = header[col] if col < len(header) and header[col] else "Last contacted"
                     warnings.append(f"left {col_name} blank, couldn't read the date {v!r}")
-            elif target in data:
+            elif target == "note":
+                notes.append(f"{col_name}: {v}" if note_cols > 1 else v)
+            elif target == "notes":
+                notes.extend(reversed(_split_notes_cell(v)))  # oldest first, so the newest ends up on top
+            elif target in job:
+                job[target] = v
+            elif target == "jobs":
+                jobs.extend((t, c, s, True) for t, c, s in _parse_jobs_cell(v))
+            elif target == "location" and target in data:
+                data[target] = f"{data[target]}, {v}"
+            elif target == "about" and target in data:
                 data[target] = f"{data[target]}\n{v}"
-            else:
+            elif target not in data:
                 data[target] = v
         if not data.get("name") and (first or last):
             data["name"] = f"{first} {last}".strip()
-        yield data, warnings
+        if data.get("current_title") and not data.get("current_company"):
+            split = _split_role(data["current_title"])
+            if split:
+                data["current_title"], data["current_company"] = split
+        if job["job_title"]:
+            jobs.append((job["job_title"], job["job_company"], job["stage"], False))
+        elif job["job_company"] or job["stage"]:
+            warnings.append("left the client and stage out, there's no job title on this row")
+        yield {"rows": [n], "data": data, "notes": notes, "jobs": jobs, "warnings": warnings}
+
+
+def _rows(header: list[str], rows: Iterable[list[str]],
+          mapping: list[str]) -> Iterable[tuple[dict[str, Any], list[str]]]:
+    """Each row as (candidate fields, warnings about cells we had to leave out)."""
+    for rec in _records(header, rows, mapping):
+        data = dict(rec["data"])
+        if rec["notes"]:
+            data["note"] = "\n".join(rec["notes"])
+        yield data, rec["warnings"]
 
 
 def rows_to_candidates(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -> Iterable[dict[str, Any]]:
     for data, _ in _rows(header, rows, mapping):
+        data.pop("note", None)
         yield data
+
+
+def _merge_records(a: dict[str, Any], b: dict[str, Any]) -> None:
+    """Fold row b into row a (same person, same file): later non-empty values win, notes add up."""
+    for k, v in b["data"].items():
+        cur = a["data"].get(k)
+        if k == "tags":
+            a["data"][k] = split_tags((cur or []) + v)
+        elif k == "last_contacted_at":
+            a["data"][k] = max(cur or "", v)
+        else:
+            a["data"][k] = v
+    a["rows"] += b["rows"]
+    a["notes"] += [x for x in b["notes"] if x not in a["notes"]]
+    a["jobs"] += b["jobs"]
+    a["warnings"] += b["warnings"]
+
+
+def _collapse(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows with the same email or LinkedIn in one file become one row, so they don't flip-flop."""
+    out: list[dict[str, Any]] = []
+    owner: dict[tuple[str, str], dict[str, Any]] = {}
+    for rec in records:
+        d = rec["data"]
+        keys = [k for k in (("email", (d.get("email") or "").strip().lower()),
+                            ("li", normalize_linkedin(d.get("linkedin_url")) or "")) if k[1]]
+        hit = next((owner[k] for k in keys if k in owner), None)
+        if hit is not None and d.get("name") and hit["data"].get("name") \
+                and not same_person_name(hit["data"]["name"], d["name"]):
+            hit = None  # a different person on the same email: let the identity check report it
+        if hit is None:
+            out.append(rec)
+            hit = rec
+        else:
+            _merge_records(hit, rec)
+        for k in keys:
+            owner.setdefault(k, hit)
+    return out
+
+
+def _label(rows: list[int]) -> str:
+    if len(rows) == 1:
+        return f"Row {rows[0]}"
+    nums = [str(n) for n in rows]
+    return "Rows " + ", ".join(nums[:-1]) + " and " + nums[-1]
 
 
 def backup_before_import(store: Store, keep: int = BACKUPS_KEPT) -> Path:
@@ -178,60 +418,322 @@ def _row_error(exc: Exception) -> str:
     return f"couldn't be saved ({exc.__class__.__name__}: {exc})"
 
 
+def _is_conflict(exc: Exception) -> bool:
+    return isinstance(exc, (IdentityConflict, DuplicateValue, sqlite3.IntegrityError))
+
+
+def _note_bodies(store: Store, candidate_id: int) -> set[str]:
+    return {t.get("body") or "" for t in store.timeline(candidate_id, limit=1000) if t["kind"] == "note"}
+
+
 def _has_note(store: Store, candidate_id: int, body: str) -> bool:
-    return any(t["kind"] == "note" and (t.get("body") or "") == body for t in store.timeline(candidate_id, limit=500))
+    return body in _note_bodies(store, candidate_id)
+
+
+class _People:
+    """Saved people by folded name, so a row with no email or LinkedIn can find them."""
+
+    def __init__(self, store: Store) -> None:
+        self.by_name: dict[str, list[dict[str, Any]]] = {}
+        for c in store.all_candidates():
+            self.add(c)
+
+    def add(self, c: dict[str, Any]) -> None:
+        entry = {k: c.get(k) for k in ("id", "name", "email", "linkedin_url", "current_company", "phone")}
+        entries = self.by_name.setdefault(_fold(c.get("name")), [])
+        entries[:] = [e for e in entries if e["id"] != c["id"]] + [entry]
+
+    def match(self, data: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """(the one person this row is, or None; everyone else with the same name)."""
+        same = self.by_name.get(_fold(data.get("name")), [])
+        company, phone = _fold(data.get("current_company")), _digits(data.get("phone"))
+        for e in reversed(same):
+            if (company and _fold(e["current_company"]) == company) or (phone and _digits(e["phone"]) == phone):
+                return e, []
+        return None, list(same)
+
+
+def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    """The same merge rules as a save by email or LinkedIn, for someone matched by name."""
+    cur = store.get_candidate(candidate_id)
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if v in (None, "", []):
+            continue
+        if k == "tags":
+            out[k] = split_tags(cur["tags"] + split_tags(v))
+        elif k in MERGE_OVERWRITES:
+            out[k] = v
+        elif k == "last_contacted_at":
+            if not cur.get(k) or v > cur[k]:
+                out[k] = v
+        elif not cur.get(k):
+            out[k] = v
+    return out
+
+
+class _Jobs:
+    """Find a job by title and company (ignoring case), or make it. One lookup per import."""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+        self.jobs = store.list_jobs()
+        self.created: list[str] = []
+
+    def get(self, title: str, company: str, any_status: bool) -> dict[str, Any]:
+        key = (_fold(title), _fold(company))
+        rank = {"open": 0, "on_hold": 1, "closed": 2}
+        found = sorted((j for j in self.jobs if (_fold(j["title"]), _fold(j.get("company"))) == key
+                        and (any_status or j["status"] == "open")), key=lambda j: rank.get(j["status"], 3))
+        if found:
+            return found[0]
+        job = self.store.add_job(title, company or None)
+        self.jobs.append(job)
+        self.created.append(job_label(job))
+        return job
+
+
+def job_label(job: dict[str, Any]) -> str:
+    company = job.get("company") or job.get("job_company")
+    title = job.get("title") or job.get("job_title")
+    return f"{title} ({company})" if company else str(title)
+
+
+def _rename_change_source(store: Store, candidate_id: int, source: str) -> None:
+    """Say which sheet made the change ("from Old agency sheet"), not just "CSV import"."""
+    if not source or source == CHANGE_SOURCES["import"]:
+        return
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE timeline SET source = ? WHERE id = (SELECT max(id) FROM timeline"
+            " WHERE candidate_id = ? AND kind = 'change')", (source, candidate_id))
+
+
+def _labels(fields: Iterable[str]) -> str:
+    return ", ".join(FIELD_LABELS.get(f, f.replace("_", " ")) for f in fields)
 
 
 def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
                 source: str = "CSV import", backup: bool = True) -> dict[str, Any]:
     """Add or update one candidate per row. A bad row is skipped and listed, never fatal.
 
-    Backs up the database first (see backup_before_import). A row that matched someone and
-    changed nothing counts as `unchanged`, not `updated`. `skipped` lists the rows left out, as
-    "Row N: reason" (`skipped_rows` counts them); `warnings` lists cells we left blank and notes
-    we couldn't save, on rows that were still imported. Changes are logged as made by the import.
+    Backs up the database first (see backup_before_import). Rows with the same email or LinkedIn
+    in one file are folded into one first. A row with neither is matched to a saved person by
+    name plus company or phone; if only the name matches, it's added and listed in
+    `possible_duplicates`. A row that matched someone and changed nothing counts as `unchanged`,
+    not `updated`. `skipped` lists the rows left out, as "Row N: reason" (`skipped_rows` counts
+    them, `conflicts` the ones that clashed with someone already here); `warnings` lists cells we
+    left blank and notes we couldn't save, on rows that were still imported; `changes` says what
+    each updated row changed. Job, client and stage columns put people in pipelines.
     """
     backup_file = backup_before_import(store) if backup else None
-    added = updated = unchanged = skipped_rows = notes = 0
+    added = updated = unchanged = skipped_rows = notes = conflicts = pipelines = 0
     skipped: list[str] = []
     warned: list[str] = []
-    for i, (data, warnings) in enumerate(_rows(header, rows, mapping), start=2):
-        note = data.pop("note", None)
+    changes: list[str] = []
+    possible: list[str] = []
+    field_counts: Counter[str] = Counter()
+    records = _collapse(list(_records(header, rows, mapping)))
+    people: _People | None = None
+    jobs: _Jobs | None = None
+    tag_case = {t["tag"].casefold(): t["tag"] for t in store.list_tags(100000)}
+    for rec in records:
+        label, data = _label(rec["rows"]), rec["data"]
         if not data.get("name"):
-            skipped.append(f"Row {i}: no name")
-            skipped_rows += 1
+            skipped.append(f"{label}: no name")
+            skipped_rows += len(rec["rows"])
             continue
-        data.setdefault("source", source)
+        if data.get("tags"):
+            data["tags"] = [tag_case.setdefault(t.casefold(), t) for t in data["tags"]]
+        others: list[dict[str, Any]] = []
         try:
-            res = store.upsert_candidate(by="import", **data)
-            cand, created = res[0], bool(res[1])
+            match = None
+            if not (data.get("email") or data.get("linkedin_url")):
+                people = people or _People(store)
+                match, others = people.match(data)
+            if not match and not store.find_duplicate(data.get("email"), data.get("linkedin_url")):
+                data.setdefault("source", source)  # only new people get the sheet as where they came from
+            if match and not (match["email"] or match["linkedin_url"]):
+                cand = store.update_candidate(match["id"], by="import", **_merge_fields(store, match["id"], data))
+                created = False
+            else:
+                if match:  # same name and company or phone: save into them through their email or LinkedIn
+                    data = {**data, "email": match["email"], "linkedin_url": match["linkedin_url"]}
+                    data = {k: v for k, v in data.items() if v not in (None, "")}
+                res = store.upsert_candidate(by="import", **data)
+                cand, created = res[0], bool(res[1])
         except Exception as exc:  # one bad row must never stop the rest
-            skipped.append(f"Row {i}: {_row_error(exc)}")
-            skipped_rows += 1
+            skipped.append(f"{label}: {_row_error(exc)}")
+            skipped_rows += len(rec["rows"])
+            conflicts += _is_conflict(exc)
             continue
+        if people is not None:
+            people.add(cand)
         if created:
             added += 1
+            if others:
+                ids = ", ".join(f"id {o['id']}" for o in others[:3])
+                possible.append(f"{label}: {cand['name']} was added, but someone with that name is already "
+                                f"here ({ids}). It has no email or LinkedIn to tell them apart.")
         elif cand.get("_changed"):
             updated += 1
+            field_counts.update(cand["_changed"])
+            changes.append(f"{label} ({cand['name']}): {_labels(cand['_changed'])}")
+            _rename_change_source(store, cand["id"], source)
         else:
             unchanged += 1
-        warned.extend(f"Row {i}: {w}" for w in warnings)
-        if note:
+        warned.extend(f"{label}: {w}" for w in rec["warnings"])
+        if rec["notes"]:
             try:
-                if not _has_note(store, cand["id"], note):
-                    store.log(cand["id"], "note", note, source=source)
-                    notes += 1
+                have = _note_bodies(store, cand["id"])
+                for note in rec["notes"]:
+                    if note not in have:
+                        store.log(cand["id"], "note", note, source=source, at=data.get("last_contacted_at"))
+                        have.add(note)
+                        notes += 1
             except Exception as exc:
-                warned.append(f"Row {i}: note not saved ({exc})")
+                warned.append(f"{label}: note not saved ({exc})")
+        for title, company, stage, any_status in rec["jobs"]:
+            jobs = jobs or _Jobs(store)
+            try:
+                pipelines += _place(store, jobs, cand, title, company, stage, any_status, label, warned)
+            except Exception as exc:
+                warned.append(f"{label}: not added to {title} ({exc})")
+    mapped_cols = {i for i, m in enumerate(mapping) if m}
+    not_imported = [h for i, h in enumerate(header) if i not in mapped_cols and h.strip()]
     return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
-            "skipped_rows": skipped_rows, "warnings": warned, "notes": notes,
-            "backup": str(backup_file) if backup_file else None}
+            "skipped_rows": skipped_rows, "conflicts": conflicts, "warnings": warned, "notes": notes,
+            "changes": changes, "changed_fields": dict(field_counts.most_common()),
+            "possible_duplicates": possible, "pipelines_added": pipelines,
+            "jobs_created": jobs.created if jobs else [], "not_imported": not_imported,
+            "backup": str(backup_file) if backup_file else None, "dry_run": False}
+
+
+def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company: str, stage: str,
+           any_status: bool, label: str, warned: list[str]) -> int:
+    """Put the person in that job's pipeline at that stage. 1 if they were added, 0 if already there."""
+    job = jobs.get(title, company, any_status)
+    stages = store.job_stages(job["id"])
+    want = stages[0]
+    if stage:
+        key = stage.strip().casefold()
+        exact = [s for s in stages if s["name"].casefold() == key]
+        starts = [s for s in stages if s["name"].casefold().startswith(key)]
+        outcome = stage_outcome(stage)
+        by_outcome = [s for s in stages if outcome != "open" and s["outcome"] == outcome]
+        if exact or len(starts) == 1:
+            want = (exact or starts)[0]
+        elif by_outcome:  # "Placed" on a job whose win stage is "Hired"
+            want = by_outcome[0]
+        else:
+            warned.append(f"{label}: no stage called {stage!r} on {job_label(job)}, so they went in {want['name']}")
+    current = next((p for p in store.candidate_pipelines(cand["id"]) if p["job_id"] == job["id"]), None)
+    if current:
+        if current["stage"].casefold() != want["name"].casefold():
+            warned.append(f"{label}: already in {job_label(job)} at {current['stage']}, so they were left there")
+        return 0
+    store.add_to_pipeline(cand["id"], job["id"], stage=want["name"])
+    return 1
+
+
+def preview_import(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
+                   source: str = "CSV import") -> dict[str, Any]:
+    """What import_rows would do, worked out on a private copy of the database. Nothing here changes."""
+    scratch = Store(":memory:")
+    try:
+        try:
+            with store._lock:
+                store._conn.backup(scratch._conn)
+        except sqlite3.Error:  # page sizes differ: fall back to a copy on disk
+            scratch.close()
+            return _preview_on_disk(store, header, rows, mapping, source)
+        result = import_rows(scratch, header, rows, mapping, source=source, backup=False)
+    finally:
+        try:
+            scratch.close()
+        except sqlite3.Error:
+            pass
+    result["dry_run"] = True
+    return result
+
+
+def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], mapping: list[str],
+                     source: str) -> dict[str, Any]:
+    import tempfile
+
+    folder = Path(tempfile.mkdtemp(prefix="preview-", dir=backups_dir()))
+    copy = folder / "preview.db"
+    try:
+        store.backup_to(copy)
+        scratch = Store(copy)
+        try:
+            result = import_rows(scratch, header, rows, mapping, source=source, backup=False)
+        finally:
+            scratch.close()
+    finally:
+        for f in folder.glob("*"):
+            f.unlink(missing_ok=True)
+        folder.rmdir()
+    result["dry_run"] = True
+    return result
+
+
+def _plural(n: int, word: str, many: str | None = None) -> str:
+    return f"{n} {word if n == 1 else many or word + 's'}"
+
+
+def preview_lines(result: dict[str, Any]) -> list[str]:
+    """What a dry run found, in plain lines. The first line is the headline."""
+    fields = _labels(result.get("changed_fields") or {})
+    parts = [f"add {result['added']}",
+             f"update {result['updated']}" + (f" ({fields})" if fields and result["updated"] else "")]
+    if result.get("conflicts"):
+        parts.append(f"leave {result['conflicts']} alone because of conflicts")
+    other_skips = result["skipped_rows"] - result.get("conflicts", 0)
+    if other_skips:
+        parts.append(f"skip {_plural(other_skips, 'row')}")
+    if result.get("possible_duplicates"):
+        n = len(result["possible_duplicates"])
+        parts.append(f"flag {_plural(n, 'possible duplicate')} (no email or LinkedIn, and the name matches "
+                     "someone here)")
+    lines = ["Will " + ", ".join(parts) + "."]
+    extra = []
+    if result["unchanged"]:
+        extra.append(f"{result['unchanged']} already up to date")
+    if result.get("notes"):
+        extra.append(f"{_plural(result['notes'], 'note')} to add")
+    if result.get("pipelines_added"):
+        extra.append(f"{_plural(result['pipelines_added'], 'person', 'people')} to put in job pipelines")
+    if result.get("jobs_created"):
+        extra.append(f"{_plural(len(result['jobs_created']), 'new job')}: " + ", ".join(result["jobs_created"][:5]))
+    if extra:
+        lines.append("Also: " + "; ".join(extra) + ".")
+    return lines
+
+
+def _jobs_text(store: Store, candidate_id: int) -> str:
+    return "; ".join(f"{job_label(p)}: {p['stage']}" for p in store.candidate_pipelines(candidate_id))
+
+
+def _notes_text(store: Store, candidate_id: int) -> str:
+    out: list[str] = []
+    size = 0
+    for t in store.timeline(candidate_id, limit=200):  # newest first
+        if t["kind"] != "note" or not t.get("body"):
+            continue
+        body = t["body"].replace("|", "\\|")
+        if len(out) >= EXPORT_NOTES_KEPT or size + len(body) > EXPORT_NOTES_CHARS:
+            break
+        out.append(body)
+        size += len(body) + 3
+    return " | ".join(out)
 
 
 def export_csv(store: Store) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow([EXPORT_HEADERS[f] for f in EXPORT_FIELDS] + [EXPORT_HEADERS["work_history"]])
+    w.writerow([EXPORT_HEADERS[f] for f in EXPORT_FIELDS]
+               + [EXPORT_HEADERS["jobs"], EXPORT_HEADERS["notes"], EXPORT_HEADERS["work_history"]])
     for c in store.all_candidates():
         history = "; ".join(
             " at ".join(x for x in (h["title"], h["company"]) if x)
@@ -239,7 +741,8 @@ def export_csv(store: Store) -> str:
             for h in store.work_history(c["id"])
         )
         row = [", ".join(c[f]) if f == "tags" else (c.get(f) or "") for f in EXPORT_FIELDS]
-        w.writerow([_safe_cell(v) for v in row] + [_safe_cell(history)])
+        row += [_jobs_text(store, c["id"]), _notes_text(store, c["id"]), history]
+        w.writerow([_safe_cell(v) for v in row])
     return buf.getvalue()
 
 
@@ -284,22 +787,125 @@ def _clean_line(line: str) -> str:
     return " · ".join(p for p in keep if p)
 
 
-def _looks_like_linkedin(text: str) -> bool:
-    if _LINKEDIN.search(text):
-        return True
+def _linkedin_marks(text: str) -> int:
+    """How many things in the text only a LinkedIn profile page has. A LinkedIn link alone isn't one:
+    resumes carry those too."""
     low = text.lower()
     marks = ("contact info" in low, bool(re.search(r"\b\d[\d,+]* (?:connections|followers)\b", low)),
-             bool(re.search(r"(?m)^\s*(?:·\s*)?(?:1st|2nd|3rd\+?)\s*$", low)), "endorse" in low,
-             bool(re.search(r"(?m)^\s*experience\s*$", low)) and bool(re.search(r"(?m)^\s*about\s*$", low)))
-    return sum(marks) >= 2
+             bool(re.search(r"(?m)^\s*(?:·\s*)?(?:1st|2nd|3rd\+?)(?: degree connection)?\s*$", low)
+                  or re.search(r"·\s*(?:1st|2nd|3rd\+?)\b", low)), "endorse" in low,
+             bool(re.search(r"(?m)^\s*experience\s*$", low)) and bool(re.search(r"(?m)^\s*about\s*$", low)),
+             bool(re.search(r"(?m)^\s*(?:message|connect|follow)\s*$", low)),
+             bool(re.search(r"(?m)^\s*(?:full-time|part-time|self-employed)\b|· (?:full-time|part-time)\b", low)))
+    return sum(marks)
+
+
+def _looks_like_linkedin(text: str) -> bool:
+    return _linkedin_marks(text) >= 2
+
+
+_SKILL_HEADS = re.compile(r"^(?:technical |core |key )?(?:skills|skills & tools|skills and tools|tech stack|"
+                          r"technologies|tools|competencies)\s*:?\s*(?P<rest>.*)$", re.I)
+_EXP_HEADS = {"experience", "work experience", "professional experience", "employment", "employment history",
+              "work history", "career history", "experience:", "work experience:", "employment:"}
+_RESUME_SECTIONS = _SECTIONS | {"education:", "skills:", "projects:", "summary", "summary:", "profile", "objective",
+                                "certifications", "awards", "references", "contact", "technical skills",
+                                "publications:", "languages:", "interests:"} | _EXP_HEADS
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+_WHEN = rf"(?:{_MON}\s+)?(?:\d{{1,2}}/)?(?:19|20)\d{{2}}"
+_RANGE = re.compile(rf"(?P<start>{_WHEN})\s*(?:-|–|—|to|until)\s*(?P<end>{_WHEN}|present|now|current|today)", re.I)
+
+
+def _is_section(line: str) -> bool:
+    low = line.lower().strip()
+    return low in _RESUME_SECTIONS or bool(_SKILL_HEADS.match(line) and not _SKILL_HEADS.match(line)["rest"])
+
+
+def _skills_section(lines: list[str]) -> list[str]:
+    """'Skills: Python, Go' or a Skills heading with the skills under it."""
+    for i, line in enumerate(lines):
+        m = _SKILL_HEADS.match(line)
+        if not m:
+            continue
+        body = [m["rest"]] if m["rest"] else []
+        if not body:
+            for nxt in lines[i + 1:i + 30]:
+                if _is_section(nxt) or _RANGE.search(nxt):
+                    break
+                body.append(nxt)
+        tags = []
+        for part in re.split(r"[,;|•·]|\s{2,}", " , ".join(body)):
+            t = re.sub(r"^[-*–\s]+|\s*\(?\d+\s*endorsements?\)?$", "", part.strip(), flags=re.I).strip(" .")
+            if t and len(t) <= 40 and len(t.split()) <= 4 and not re.search(r"endorse|\d{3,}", t, re.I):
+                tags.append(t)
+        if tags:
+            return split_tags(tags)[:40]
+    return []
+
+
+def _experience_section(lines: list[str]) -> list[dict[str, str]]:
+    """Roles under an Experience heading, only where each one has a clear date range.
+
+    Takes 'Senior Engineer at Stripe (2021 - Present)', 'Senior Engineer | Stripe | 2021 - now', and
+    LinkedIn's three lines (title, 'Stripe · Full-time', 'Jan 2021 - Present · 3 yrs')."""
+    start = next((i for i, l in enumerate(lines) if l.lower().strip() in _EXP_HEADS), None)
+    if start is None:
+        return []
+    body: list[str] = []
+    for line in lines[start + 1:]:
+        if _is_section(line):
+            break
+        body.append(line)
+    out: list[dict[str, str]] = []
+    used = -1
+    for i, line in enumerate(body):
+        m = _RANGE.search(line)
+        if not m:
+            continue
+        span = {"start": m["start"].strip(), "end": "now" if m["end"].lower() in ("present", "now", "current", "today")
+                else m["end"].strip()}
+        rest = (line[:m.start()] + " " + line[m.end():]).strip()
+        rest = re.sub(r"\s*·\s*\d+\s*(?:yrs?|mos?|years?|months?)\b.*$", "", rest, flags=re.I)
+        rest = re.sub(r"[()\[\]]", " ", rest).strip(" ,|·-–")
+        title = company = ""
+        if rest:
+            split = _split_role(rest)
+            parts = [p.strip() for p in re.split(r"\s+\|\s+|\s+·\s+|,\s+|\s+[-–]\s+", rest) if p.strip()]
+            if split:
+                title, company = split
+            elif len(parts) >= 2:
+                title, company = parts[0], parts[1]
+            else:
+                continue  # one bare phrase and a date: not clear enough
+        else:
+            prev = [l for l in body[max(used + 1, i - 2):i] if not _RANGE.search(l)]
+            if len(prev) < 2:
+                continue
+            title, company = prev[-2], re.split(r"\s+·\s+", prev[-1])[0]
+        title, company = title.strip(), company.strip()
+        if (len(title) > 80 or len(company) > 80 or not title
+                or any(re.match(r"^[-*•–]", x) for x in (title, company))
+                or re.search(r"\b\d+\s*(?:yrs?|mos?|years?|months?)\b", f"{title} {company}", re.I)):
+            continue  # a bullet or a "5 yrs" line: not clearly a role
+        out.append({"title": title, "company": company, **span})
+        used = i
+    return out[:15]
+
+
+def _header_location(headline: str) -> str | None:
+    """'Senior Backend Engineer | Austin, TX' -> 'Austin, TX'."""
+    for part in [p.strip() for p in re.split(r"\s+[|·•]\s+", headline)][1:]:
+        if _LOCATION.match(part):
+            return part
+    return None
 
 
 def _about_section(lines: list[str]) -> str | None:
     for i, line in enumerate(lines):
-        if line.lower() == "about":
+        if line.lower().rstrip(":") in ("about", "summary", "professional summary", "profile"):
             body: list[str] = []
             for nxt in lines[i + 1:]:
-                if nxt.lower() in _SECTIONS:
+                if nxt.lower() in _RESUME_SECTIONS or _is_section(nxt):
                     break
                 nxt = re.sub(r"\s*(?:…|\.\.\.)?\s*see more$", "", nxt, flags=re.I).strip()
                 if nxt and nxt.lower() not in _NOISE:
@@ -366,9 +972,18 @@ def quick_parse(text: str) -> dict[str, Any]:
                 out["current_title"], out["current_company"] = t.strip(" |-"), c.split("|")[0].strip(" |-")
             else:
                 out["current_title"] = headline.split("|")[0].strip()
-            if len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]):
+            if loc := _header_location(headline):
+                out["location"] = loc
+            elif len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]):
                 out["location"] = rest[1].split(" · ")[0]
-    if _looks_like_linkedin(text):
+    marks = _linkedin_marks(text)
+    if marks >= 2:
         out["source"] = "LinkedIn"
+    elif marks == 0:
+        out["source"] = "Resume"
+    if tags := _skills_section(raw):
+        out["tags"] = tags
+    if history := _experience_section(raw):
+        out["work_history"] = history
     out["about"] = _about_section(raw) or text[:1500]
     return out
