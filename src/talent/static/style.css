@@ -190,6 +190,13 @@ table.dense { border-collapse: collapse; width: 100%; font-size: 13px; }
 
 /* Sample data, status update, follow-ups */
 .badge.sample { background: #fff3cd; color: #7a5a00; text-transform: none; }
+.badge.overdue { background: #fde2e1; color: #9b1c1c; text-transform: none; }
+.badge.iv-cancelled { text-decoration: line-through; }
+.t-interview.cancelled .when { text-decoration: line-through; color: var(--muted); }
+.iv-edit { margin-top: 4px; } .iv-edit form { margin: 4px 8px 4px 0; }
+.today .later { margin-top: 16px; } .add-todo input[type=text] { min-width: 16em; }
+.job-facts { margin: 2px 0 0; } .omit-stages { flex-wrap: wrap; gap: 4px 10px; margin-bottom: 8px; }
+@media (prefers-color-scheme: dark) { .badge.overdue { background: #4a1414; color: #ffb4b4; } }
 .row1 .co { font-weight: 400; color: var(--muted); }
 .next-iv { font-size: 12px; color: var(--accent); margin-top: 2px; }
 .copy-status { display: inline-flex; gap: 8px; align-items: center; }

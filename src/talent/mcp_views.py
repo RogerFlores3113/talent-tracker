@@ -33,7 +33,7 @@ mark{background:var(--mark);color:inherit;border-radius:2px}a,button.link{color:
 .board{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}.col{min-width:150px;flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px}
 .col h3{font-size:12px;margin:0 0 6px;display:flex;justify-content:space-between}.pc{border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin-bottom:6px;font-size:13px}
 ul{margin:4px 0;padding-left:18px}.kind{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-.empty{color:var(--muted);padding:12px}.click{cursor:pointer}.click:hover{border-color:var(--accent)}
+.col.closed{opacity:.6;min-width:120px;flex:.6}.empty{color:var(--muted);padding:12px}.click{cursor:pointer}.click:hover{border-color:var(--accent)}
 .contact{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:13px}
 """
 
@@ -97,8 +97,11 @@ function render(d){
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.job.title+(d.job.company?" · "+d.job.company:"")),appLink(d.app_url)));
+ const n=d.counts||{active:d.stages.filter(s=>s.outcome==="open").reduce((a,s)=>a+s.candidates.length,0)};
+ const sum=[n.active+" in the running"];if(n.hired!=null)sum.push(d.openings>1?n.hired+" of "+d.openings+" hired":n.hired+" hired");if(n.out)sum.push(n.out+" out");
+ wrap.append(el("div",{class:"small muted"},sum.join(" · ")+(d.job.status&&d.job.status!=="open"?" · "+d.job.status.replace("_"," "):"")));
  const board=el("div",{class:"board"});
- for(const s of d.stages){board.append(el("div",{class:"col"},el("h3",{},el("span",{},s.name),el("span",{class:"muted"},s.candidates.length)),
+ for(const s of d.stages){board.append(el("div",{class:"col"+(s.outcome!=="open"?" closed":"")},el("h3",{},el("span",{},s.name+(s.outcome==="hired"?" (hired)":s.outcome==="lost"?" (out)":"")),el("span",{class:"muted"},s.candidates.length)),
   s.candidates.length?s.candidates.map(c=>openCard("pc",c.app_url,el("b",{},c.name),c.current_title?el("div",{class:"muted small"},c.current_title):null,
    el("div",{class:"muted small"},(c.days_in_stage!=null?c.days_in_stage+(c.days_in_stage===1?" day":" days")+" in stage":"since "+day(c.since))),
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
@@ -108,8 +111,11 @@ const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"N
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
- for(const i of d.items){wrap.append(el("div",{class:"card"},el("div",{class:"kind"},LABEL[i.kind]||i.kind),el("div",{},i.title),
-  (i.kind==="interview"&&i.when)?el("div",{class:"small"},when(i.when)):null,i.detail?el("div",{class:"small muted"},i.detail):null))}
+ const card=i=>el("div",{class:"card"},el("div",{class:"kind"},LABEL[i.kind]||i.kind),el("div",{},i.title),
+  (i.kind==="interview"&&i.when)?el("div",{class:"small"},when(i.when)):null,i.due_text?el("div",{class:"small"+(i.overdue?"":" muted")},i.due_text):null,
+  i.detail?el("div",{class:"small muted"},i.detail):null);
+ for(const i of d.items)wrap.append(card(i));
+ if(d.next_week&&d.next_week.length){wrap.append(el("h2",{},"Next week"));for(const i of d.next_week)wrap.append(card(i))}
  return wrap}""",
 }
 

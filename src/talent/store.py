@@ -44,7 +44,11 @@ WON_STAGE_NAMES = frozenset({"hired", "placed", "started", "offer accepted", "ac
 LOST_STAGE_NAMES = frozenset({
     "rejected", "not a fit", "declined", "withdrew", "withdrawn", "lost", "closed", "offer declined",
     "not interested", "no hire", "dropped out", "turned down", "archived",
+    "passed", "pass", "no go", "ghosted", "not moving forward", "rejected by client", "client rejected",
+    "declined offer", "not selected", "did not proceed",
 })
+_OUTCOME_ALIASES = {"in play": "open", "active": "open", "won": "hired", "hire": "hired", "placed": "hired",
+                    "out": "lost", "no": "lost", "rejected": "lost", "closed": "lost"}
 
 
 def normalize_job_status(value: str | None) -> str:
@@ -60,6 +64,17 @@ def stage_outcome(name: str) -> str:
     """Guess a stage's outcome from its name: 'hired' for wins, 'lost' for exits, else 'open'."""
     key = re.sub(r"[\W_]+", " ", name or "").strip().lower()
     return "hired" if key in WON_STAGE_NAMES else "lost" if key in LOST_STAGE_NAMES else "open"
+
+
+def normalize_outcome(value: str | None) -> str | None:
+    """'Out', 'lost', 'in play', 'hired' -> a stage outcome. None or blank stays None. Raises on anything else."""
+    v = re.sub(r"[\s_-]+", " ", (value or "").strip().lower())
+    if not v:
+        return None
+    v = _OUTCOME_ALIASES.get(v, v)
+    if v not in STAGE_OUTCOMES:
+        raise ValueError("A stage's outcome must be open (still in play), hired or lost (out).")
+    return v
 
 # Things that can go on a candidate's timeline. Contact kinds also move
 # "last contacted" when they happened in the past.
@@ -143,6 +158,25 @@ def _migrate_v2_data(conn: sqlite3.Connection) -> None:
                   ac.at, ac.at
            FROM activity ac JOIN applications a ON a.id = ac.application_id"""
     )
+
+
+def _migrate_v4_data(conn: sqlite3.Connection) -> None:
+    # Follow-up days move from settings rows (followup:<id>) onto the to-do itself.
+    for key, value in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'followup:%'").fetchall():
+        sid = key.split(":", 1)[1]
+        if sid.isdigit():
+            conn.execute("UPDATE suggestions SET due_on = ? WHERE id = ?", (value[:10], int(sid)))
+    conn.execute("DELETE FROM settings WHERE key LIKE 'followup:%'")
+    # Exit names that are new to the list ("Passed", "Not moving forward") count as out when they sit
+    # after every in-play stage, as they would have if the job were made today.
+    for (job_id,) in conn.execute("SELECT id FROM jobs").fetchall():
+        stages = conn.execute("SELECT id, name, outcome FROM job_stages WHERE job_id = ? ORDER BY position",
+                              (job_id,)).fetchall()
+        for sid, name, outcome in reversed(stages):
+            if outcome == "open" and stage_outcome(name) == "lost":
+                conn.execute("UPDATE job_stages SET outcome = 'lost' WHERE id = ?", (sid,))
+            elif outcome == "open":
+                break
 
 
 _MIGRATIONS: tuple[Any, ...] = (
@@ -306,6 +340,20 @@ _MIGRATIONS: tuple[Any, ...] = (
     """
     ALTER TABLE timeline ADD COLUMN data TEXT;
     """,
+    # v4: jobs get a hiring manager, headcount, target date and their own thin-pipeline target;
+    # to-dos keep their due day and the note they were logged with (due days used to live in settings).
+    (
+        """
+        ALTER TABLE jobs ADD COLUMN hiring_manager TEXT;
+        ALTER TABLE jobs ADD COLUMN hiring_manager_email TEXT;
+        ALTER TABLE jobs ADD COLUMN openings INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE jobs ADD COLUMN target_date TEXT;
+        ALTER TABLE jobs ADD COLUMN min_active INTEGER;
+        ALTER TABLE suggestions ADD COLUMN due_on TEXT;
+        ALTER TABLE suggestions ADD COLUMN note TEXT;
+        """,
+        _migrate_v4_data,
+    ),
 )
 
 
@@ -1076,18 +1124,78 @@ class Store:
             r["data"] = json.loads(r["data"]) if r.get("data") else None
             r["undoable"] = bool(r["kind"] == CHANGE_KIND and r["data"] and r["data"].get("old")
                                  and not r["data"].get("undone_at"))
+            if r["kind"] == "interview":
+                r["status"] = interview_status(r["data"])
         return rows
 
     def upcoming_interviews(self, days: int = 7, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Scheduled interviews from two hours ago to `days` ahead. Cancelled ones, and ones with an outcome
+        already recorded, are left out."""
         now = now or datetime.now(timezone.utc)
         start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
         end = (now + timedelta(days=days)).replace(microsecond=0).isoformat()
         return self._rows(
-            """SELECT t.*, c.name AS candidate_name, j.title AS job_title
+            f"""SELECT t.*, c.name AS candidate_name, j.title AS job_title
                FROM timeline t JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
-               WHERE t.kind = 'interview' AND t.at >= ? AND t.at <= ? ORDER BY t.at""",
+               WHERE t.kind = 'interview' AND t.at >= ? AND t.at <= ? AND {LIVE_INTERVIEW} ORDER BY t.at""",
             (start, end),
         )
+
+    def get_interview(self, entry_id: int, candidate_id: int | None = None) -> dict[str, Any]:
+        row = self._row("SELECT t.*, c.name AS candidate_name FROM timeline t JOIN candidates c ON c.id = t.candidate_id"
+                        " WHERE t.id = ? AND t.kind = 'interview'", (entry_id,))
+        if row is None or (candidate_id is not None and row["candidate_id"] != candidate_id):
+            raise NotFound(f"No interview with id {entry_id}" + (" on this profile" if candidate_id else ""))
+        row["data"] = json.loads(row["data"]) if row.get("data") else {}
+        row["status"] = interview_status(row["data"])
+        return row
+
+    def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
+                         restore: bool = False, outcome: str | None = None, note: str | None = None,
+                         candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
+        """Reschedule, cancel (it stays on the timeline, marked cancelled), restore, or record how it went.
+
+        outcome: passed, not passed or no show, with an optional note. Nothing is ever deleted; the
+        old time is kept in the entry's data as `rescheduled_from`.
+        """
+        iv = self.get_interview(entry_id, candidate_id)
+        data = dict(iv["data"])
+        ts = now_iso()
+        new_at = iv["at"]
+        if at is not None and str(at).strip():
+            new_at = parse_when(at)
+            if new_at != iv["at"]:
+                data["rescheduled_from"] = [*data.get("rescheduled_from", []), iv["at"]]
+                data["rescheduled_at"] = ts
+            data.pop("cancelled_at", None)
+            if data.get("status") == "cancelled":
+                data["status"] = "scheduled"
+        if cancel:
+            data["status"], data["cancelled_at"] = "cancelled", ts
+        elif restore:
+            data["status"] = "scheduled"
+            data.pop("cancelled_at", None)
+        if outcome is not None:
+            key = re.sub(r"[\s_-]+", " ", outcome.strip().lower())
+            value = INTERVIEW_OUTCOMES.get(key)
+            if value is None:
+                raise ValueError("The outcome must be passed, not passed or no show.")
+            data["outcome"], data["outcome_at"] = value, ts
+            if data.get("status") == "cancelled":
+                data["status"] = "scheduled"
+        if note is not None:
+            data["outcome_note"] = _clean(note)
+        if not (at or cancel or restore or outcome is not None or note is not None):
+            raise ValueError("Say what to change: a new time, cancel, or an outcome.")
+        data["updated_by"] = CHANGE_SOURCES.get(by, by)
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
+                               (new_at, json.dumps(data), entry_id))
+            if outcome is not None and data["outcome"] != "no_show" and new_at <= ts:
+                self._conn.execute(
+                    "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
+                    " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
+        return self.get_interview(entry_id)
 
     # ---------------------------------------------------------------- search
     def lookup_exact(self, query: str | None) -> tuple[bool, dict[str, Any] | None]:
@@ -1173,18 +1281,26 @@ class Store:
     # ------------------------------------------------------------------ jobs
     def add_job(self, title: str, company: str | None = None, location: str | None = None,
                 description: str | None = None, status: str = "open",
-                stages: list[str] | None = None) -> dict[str, Any]:
+                stages: list[str | dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
+        """extra: hiring_manager, hiring_manager_email, openings, target_date, min_active."""
         if not _clean(title):
             raise ValueError("A job needs a title.")
         if status not in JOB_STATUSES:
             raise ValueError(f"status must be one of {', '.join(JOB_STATUSES)}")
+        unknown = set(extra) - set(JOB_EXTRA_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown job field(s): {', '.join(sorted(unknown))}")
+        more = _job_extras(extra)
+        if more.get("openings") is None:
+            more["openings"] = 1
         plan = _stage_plan(stages) if stages else list(DEFAULT_STAGES)
         ts = now_iso()
+        cols = ["title", "company", "location", "description", "status", "created_at", "updated_at", *more]
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO jobs (title, company, location, description, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (_clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts),
+                f"INSERT INTO jobs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                (_clean(title), _clean(company), _clean(location), _clean(description), status, ts, ts,
+                 *more.values()),
             )
             self._conn.executemany(
                 "INSERT INTO job_stages(job_id, name, position, outcome) VALUES (?, ?, ?, ?)",
@@ -1207,7 +1323,7 @@ class Store:
         return row
 
     def update_job(self, job_id: int, **data: Any) -> dict[str, Any]:
-        allowed = {"title", "company", "location", "description", "status"}
+        allowed = {"title", "company", "location", "description", "status", *JOB_EXTRA_FIELDS}
         unknown = set(data) - allowed
         if unknown:
             raise ValueError(f"Unknown job field(s): {', '.join(sorted(unknown))}")
@@ -1216,7 +1332,10 @@ class Store:
         if "title" in data and not _clean(data["title"]):
             raise ValueError("A job needs a title.")
         self.get_job(job_id)
-        fields = {k: _clean(v) for k, v in data.items()}
+        extras = _job_extras({k: v for k, v in data.items() if k in JOB_EXTRA_FIELDS})
+        if "openings" in extras and extras["openings"] is None:
+            extras["openings"] = 1
+        fields = {**{k: _clean(v) for k, v in data.items() if k not in JOB_EXTRA_FIELDS}, **extras}
         if fields:
             fields["updated_at"] = now_iso()
             sets = ", ".join(f"{k} = ?" for k in fields)
@@ -1296,7 +1415,7 @@ class Store:
         name = _clean(name)
         if not name:
             raise ValueError("A stage needs a name.")
-        outcome = outcome or stage_outcome(name)
+        outcome = normalize_outcome(outcome) or stage_outcome(name)
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         self.get_job(job_id)
@@ -1318,16 +1437,29 @@ class Store:
         self._touch_job(job_id)
         return self.job_stages(job_id)
 
-    def rename_stage(self, job_id: int, old: str, new: str) -> list[dict[str, Any]]:
+    def rename_stage(self, job_id: int, old: str, new: str, outcome: str | None = None) -> list[dict[str, Any]]:
+        """Rename a stage (its candidates move with it). An in-play stage with in-play stages after it
+        can't take a closing name like "Passed" unless `outcome` says what it should count as."""
         stage = self.resolve_stage(job_id, old)
         new = _clean(new)
         if not new:
             raise ValueError("A stage needs a name.")
-        if new.lower() != stage["name"].lower() and any(
-                s["name"].lower() == new.lower() for s in self.job_stages(job_id)):
+        outcome = normalize_outcome(outcome)
+        stages = self.job_stages(job_id)
+        if new.lower() != stage["name"].lower() and any(s["name"].lower() == new.lower() for s in stages):
             raise ValueError(f"This job already has a stage called {new}.")
+        implied = stage_outcome(new)
+        if outcome is None and stage["outcome"] == "open" and implied != "open":
+            if any(s["position"] > stage["position"] and s["outcome"] == "open" for s in stages):
+                word = "a hire" if implied == "hired" else "out"
+                raise ValueError(
+                    f"{new} sounds like {word}, but {stage['name']} is a working stage with more stages after it. "
+                    f"Say what {new} should count as (open, hired or lost; in the app, change Counts as first), "
+                    "or pick another name.")
+            outcome = implied  # the last working stage can become a closing one, as its new name says
         with self._lock, self._conn:
-            self._conn.execute("UPDATE job_stages SET name = ? WHERE id = ?", (new, stage["id"]))
+            self._conn.execute("UPDATE job_stages SET name = ?, outcome = ? WHERE id = ?",
+                               (new, outcome or stage["outcome"], stage["id"]))
             self._conn.execute("UPDATE applications SET stage = ? WHERE job_id = ? AND lower(stage) = lower(?)",
                                (new, job_id, stage["name"]))
         self._touch_job(job_id)
@@ -1346,6 +1478,7 @@ class Store:
         return self.job_stages(job_id)
 
     def set_stage_outcome(self, job_id: int, name: str, outcome: str) -> list[dict[str, Any]]:
+        outcome = normalize_outcome(outcome) or ""
         if outcome not in STAGE_OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(STAGE_OUTCOMES)}")
         stage = self.resolve_stage(job_id, name)
@@ -1490,7 +1623,9 @@ class Store:
 
     # ----------------------------------------------------------- suggestions
     def add_suggestion(self, text: str, candidate_id: int | None = None, job_id: int | None = None,
-                       source: str | None = None) -> dict[str, Any]:
+                       source: str | None = None, due_on: str | None = None,
+                       note: str | None = None) -> dict[str, Any]:
+        """A to-do on Today. due_on (YYYY-MM-DD) hides it until that day; note is what was logged with it."""
         text = _clean(text)
         if not text:
             raise ValueError("A suggestion needs some text.")
@@ -1498,17 +1633,31 @@ class Store:
             self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)
+        due_on = parse_day_text(due_on)
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM suggestions WHERE done_at IS NULL AND text = ? AND coalesce(candidate_id, 0) = ?"
                 " AND coalesce(job_id, 0) = ?", (text, candidate_id or 0, job_id or 0)).fetchone()
-            sid = dupe["id"] if dupe else self._conn.execute(
-                "INSERT INTO suggestions(candidate_id, job_id, text, created_at, source) VALUES (?, ?, ?, ?, ?)",
-                (candidate_id, job_id, text, now_iso(), _clean(source)),
-            ).lastrowid
+            if dupe:
+                sid = dupe["id"]
+                if due_on or _clean(note):
+                    self._conn.execute(
+                        "UPDATE suggestions SET due_on = coalesce(?, due_on), note = coalesce(?, note) WHERE id = ?",
+                        (due_on, _clean(note), sid))
+            else:
+                sid = self._conn.execute(
+                    "INSERT INTO suggestions(candidate_id, job_id, text, created_at, source, due_on, note)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (candidate_id, job_id, text, now_iso(), _clean(source), due_on, _clean(note)),
+                ).lastrowid
         return self._row("SELECT * FROM suggestions WHERE id = ?", (sid,))
 
-    def open_suggestions(self) -> list[dict[str, Any]]:
+    def open_suggestions(self, job_id: int | None = None) -> list[dict[str, Any]]:
+        if job_id is not None:
+            return self._rows(
+                """SELECT s.*, c.name AS candidate_name, j.title AS job_title FROM suggestions s
+                   LEFT JOIN candidates c ON c.id = s.candidate_id LEFT JOIN jobs j ON j.id = s.job_id
+                   WHERE s.done_at IS NULL AND s.job_id = ? ORDER BY coalesce(s.due_on, s.created_at)""", (job_id,))
         return self._rows(
             """SELECT s.*, c.name AS candidate_name, j.title AS job_title FROM suggestions s
                LEFT JOIN candidates c ON c.id = s.candidate_id LEFT JOIN jobs j ON j.id = s.job_id
@@ -1559,20 +1708,90 @@ class Store:
             self._conn.execute("DELETE FROM search_outbox")
 
 
+JOB_EXTRA_FIELDS = ("hiring_manager", "hiring_manager_email", "openings", "target_date", "min_active")
+
+
+def _count(value: Any, label: str) -> int | None:
+    """A whole number of 1 or more; blank is None."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        raise ValueError(f"{label} must be a whole number, like 2.") from None
+    if n < 1:
+        raise ValueError(f"{label} must be 1 or more.")
+    return n
+
+
+def parse_day_text(value: Any) -> str | None:
+    """'2026-12-01', '12/1/2026' or 'Dec 1, 2026' -> '2026-12-01'. Blank is None."""
+    v = _clean(value) if isinstance(value, str) else value
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    try:
+        return datetime.fromisoformat(str(v)[:10]).date().isoformat()
+    except ValueError:
+        loose = _parse_loose(re.sub(r"\s+", " ", str(v)))
+        if loose is None:
+            raise ValueError(f"Couldn't read the date {v!r}. Use a form like 2026-12-01 or Dec 1, 2026.") from None
+        return loose.date().isoformat()
+
+
+def _job_extras(data: dict[str, Any]) -> dict[str, Any]:
+    """Check and tidy the hiring manager, openings, target date and thin-pipeline target of a job."""
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if k == "openings":
+            out[k] = _count(v, "Openings")
+        elif k == "min_active":
+            out[k] = _count(v, "The active candidate target")
+        elif k == "target_date":
+            out[k] = parse_day_text(v)
+        elif k == "hiring_manager_email":
+            v = _clean(v)
+            if v and not _EMAIL_RE.match(v):
+                raise ValueError(f"{v!r} doesn't look like an email address.")
+            out[k] = v
+        else:
+            out[k] = _clean(v)
+    return out
+
+
+# Interviews are timeline entries; their state lives in timeline.data. One with no data is scheduled.
+INTERVIEW_OUTCOMES = {"passed": "passed", "pass": "passed", "not passed": "not_passed", "failed": "not_passed",
+                      "did not pass": "not_passed", "no show": "no_show", "noshow": "no_show"}
+INTERVIEW_OUTCOME_LABELS = {"passed": "Passed", "not_passed": "Not passed", "no_show": "No show"}
+LIVE_INTERVIEW = ("coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
+                  " AND json_extract(t.data, '$.outcome') IS NULL")
+
+
+def interview_status(data: dict[str, Any] | None) -> str:
+    """'scheduled', 'cancelled', or the recorded outcome ('passed', 'not_passed', 'no_show')."""
+    data = data or {}
+    if data.get("status") == "cancelled":
+        return "cancelled"
+    return data.get("outcome") or "scheduled"
+
+
 def _stage_key(name: str | None) -> str:
     """'Phone-screen ' and 'phone screen' compare equal."""
     return re.sub(r"[\W_]+", " ", name or "").strip().lower()
 
 
-def _stage_plan(names: list[str]) -> list[tuple[str, str]]:
-    """Custom stage list for a new job. Closing names (Hired, Placed, Not a fit, Withdrew...) close the application."""
+def _stage_plan(names: list[str | dict[str, Any]]) -> list[tuple[str, str]]:
+    """Custom stage list for a new job. Closing names (Hired, Placed, Not a fit, Passed...) close the application.
+    A stage can also be {"name": "Passed", "outcome": "lost"} to say so outright."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for n in names:
-        n = _clean(n)
+    for item in names:
+        n, outcome = (item.get("name"), item.get("outcome")) if isinstance(item, dict) else (item, None)
+        n = _clean(str(n or ""))
         if n and n.lower() not in seen:
             seen.add(n.lower())
-            out.append((n, stage_outcome(n)))
+            out.append((n, normalize_outcome(outcome) or stage_outcome(n)))
     if not out:
         raise ValueError("Give at least one stage name.")
     return out

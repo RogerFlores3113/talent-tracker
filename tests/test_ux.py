@@ -27,7 +27,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
     rows = [i for i in actions.action_items(store)["items"] if i["kind"] == "thin"]
     assert len(rows) == 1
     assert rows[0]["title"] == "3 jobs have thin pipelines"
-    assert "Backend, Acme Payments" in rows[0]["detail"] and "Aim for at least 4 active candidates." in rows[0]["detail"]
+    assert "Backend (Acme Payments) has no active candidates. Aim for at least 4." in rows[0]["detail"]
     html = client(store).get("/").text
     assert "3 jobs have thin pipelines" in html and "Needs more candidates" in html
 
@@ -35,8 +35,7 @@ def test_thin_jobs_fold_into_one_row_with_company_and_threshold(store):
 def test_single_thin_job_detail_copy(store):
     store.add_job("Senior Backend Engineer", company="Acme Payments")
     row = next(i for i in actions.action_items(store)["items"] if i["kind"] == "thin")
-    assert row["title"] == "Senior Backend Engineer has no active candidates"
-    assert row["detail"] == "Acme Payments. Aim for at least 5 active candidates."
+    assert row["title"] == "Senior Backend Engineer (Acme Payments) has no active candidates. Aim for at least 5."
 
 
 def test_stale_profiles_fold_into_one_row_with_real_count(store):
