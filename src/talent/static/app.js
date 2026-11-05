@@ -8,6 +8,7 @@
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
+//                             (a submit button's own data-busy wins when that button sent it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -74,7 +75,8 @@
       form.dataset.sent = "1";
       form.setAttribute("aria-busy", "true");
       const note = form.querySelector("[data-busy-note]");
-      if (note) note.textContent = form.dataset.busy;
+      // The button that sent it can say what it does instead ("Check again" saves nothing).
+      if (note) note.textContent = (e.submitter && e.submitter.dataset.busy) || form.dataset.busy;
     }
   });
   // Coming back to a page from the browser's history: let its forms be sent again.

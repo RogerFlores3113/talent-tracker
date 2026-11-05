@@ -263,6 +263,17 @@ def _migrate_v6_data(conn: sqlite3.Connection) -> None:
                      " VALUES (?, ?, ?, ?, ?, ?)", (what, cid, job_id, tid, created, data.get("undone_at")))
 
 
+def _fill_linkedin_keys(conn: sqlite3.Connection, everyone: bool = True) -> None:
+    """Set candidates.linkedin_key (see v9): for everyone, or only rows that have a link and no key yet. Marks
+    which matching rule made the keys, so Store._refresh_linkedin_keys works them all out again when it changes."""
+    where = "linkedin_url IS NOT NULL" + ("" if everyone else " AND linkedin_key IS NULL")
+    rows = conn.execute(f"SELECT id, linkedin_url, linkedin_key FROM candidates WHERE {where}").fetchall()
+    conn.executemany("UPDATE candidates SET linkedin_key = ? WHERE id = ?",
+                     [(k, cid) for cid, url, key in rows if (k := normalize_linkedin(url)) != key])
+    conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                 (LINKEDIN_RULE_KEY, _linkedin_rule()))
+
+
 _MIGRATIONS: tuple[Any, ...] = (
     # v1: core tables, FTS5 index, outbox
     """
@@ -531,6 +542,18 @@ _MIGRATIONS: tuple[Any, ...] = (
     );
     CREATE INDEX client_updates_client_idx ON client_updates(client_id, sent_at);
     """,
+    # v9: each person's LinkedIn link in its matching form (normalize_linkedin), kept by add_candidate and _apply,
+    # so finding a saved profile is an index lookup, not a pass over everyone (imports were O(rows x people)).
+    # A row written some other way has no key yet; the second index keeps those few findable and quick to fill.
+    (
+        """
+        ALTER TABLE candidates ADD COLUMN linkedin_key TEXT;
+        CREATE INDEX candidates_linkedin_key_idx ON candidates(linkedin_key) WHERE linkedin_key IS NOT NULL;
+        CREATE INDEX candidates_linkedin_unkeyed_idx ON candidates(id)
+            WHERE linkedin_key IS NULL AND linkedin_url IS NOT NULL;
+        """,
+        _fill_linkedin_keys,
+    ),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -933,6 +956,22 @@ def stored_tags(text: str | None) -> list[str]:
     if text and ";" in text:
         return split_tags([p for p in text.split(";")])
     return split_tags(text)
+
+
+LINKEDIN_RULE_KEY = "linkedin_key_rule"
+# Saved email equals ?, ignoring case. The blank checks let SQLite use candidates_email_uq (a partial index).
+_EMAIL_MATCH = "lower(email) = lower(?) AND email IS NOT NULL AND email <> ''"
+
+
+def _linkedin_rule() -> str:
+    """A fingerprint of the LinkedIn matching code, so stored keys are worked out again when it changes."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for fn in (normalize_linkedin, _linkedin_parts, _clean):
+        code = fn.__code__
+        h.update(code.co_code + repr(code.co_consts).encode() + repr(code.co_names).encode())
+    return h.hexdigest()[:16]
 
 
 def _linkedin_parts(url: str) -> tuple[str, str] | None:
@@ -1389,6 +1428,7 @@ class Store:
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
+        self._refresh_linkedin_keys()
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:
@@ -1405,6 +1445,28 @@ class Store:
                 except Exception:
                     self._conn.rollback()
                     raise
+
+    def _refresh_linkedin_keys(self) -> None:
+        """On open: fill linkedin_key where it is missing (a row written by another tool), and work every key out
+        again when the matching rule itself changed (a new normalize_linkedin), so stale keys never hide a match."""
+        with self._lock:
+            try:
+                with self._conn:
+                    mark = self._conn.execute("SELECT value FROM settings WHERE key = ?", (LINKEDIN_RULE_KEY,)).fetchone()
+                    everyone = not mark or mark[0] != _linkedin_rule()
+                    if everyone or self._conn.execute("SELECT 1 FROM candidates WHERE linkedin_key IS NULL"
+                                                      " AND linkedin_url IS NOT NULL LIMIT 1").fetchone():
+                        _fill_linkedin_keys(self._conn, everyone)
+            except sqlite3.OperationalError:  # another process holds the write lock: the next open fills them
+                pass
+
+    def _linkedin_owner(self, key: str, exclude_id: int = 0, cols: str = "*") -> dict[str, Any] | None:
+        """The first saved person (other than exclude_id) whose LinkedIn link matches this normalised key: an
+        index lookup, then the few rows written without a key (see v9)."""
+        return (self._row(f"SELECT {cols} FROM candidates WHERE linkedin_key = ? AND id <> ?"
+                          " ORDER BY linkedin_url = ? DESC, id LIMIT 1", (key, exclude_id, key))
+                or self._row(f"SELECT {cols} FROM candidates WHERE linkedin_key IS NULL AND linkedin_url IS NOT NULL"
+                             " AND id <> ? AND li_key(linkedin_url) = ? ORDER BY id LIMIT 1", (exclude_id, key)))
 
     @contextmanager
     def _write(self):
@@ -1543,6 +1605,7 @@ class Store:
         if row is not None:
             row["tags"] = stored_tags(row.get("tags"))
             row.pop("history_text", None)
+            row.pop("linkedin_key", None)
         return row
 
     def _prepare(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -1597,6 +1660,8 @@ class Store:
             raise ValueError("A candidate needs a name.")
         ts = now_iso()
         fields["created_at"] = fields["updated_at"] = ts
+        if fields.get("linkedin_url"):
+            fields["linkedin_key"] = normalize_linkedin(fields["linkedin_url"])
         cols = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
         with self._lock, self._conn:
@@ -1617,23 +1682,26 @@ class Store:
     def find_duplicate(self, email: str | None = None, linkedin_url: str | None = None) -> dict[str, Any] | None:
         email = _clean(email)
         if email:
-            hit = self._row("SELECT * FROM candidates WHERE lower(email) = lower(?)", (email,))
+            hit = self._row(f"SELECT * FROM candidates WHERE {_EMAIL_MATCH}", (email,))
             if hit:
                 return self._hydrate(hit)
         li = normalize_linkedin(linkedin_url)
         if li:  # a URL saved before links were cut to /in/<slug> (with a /details/ tail) still matches
-            return self._hydrate(self._row("SELECT * FROM candidates WHERE linkedin_url = ? OR li_key(linkedin_url) = ?"
-                                           " ORDER BY linkedin_url = ? DESC, id LIMIT 1", (li, li, li)))
+            return self._hydrate(self._linkedin_owner(li))
         return None
 
     def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
         """The first prepared email or LinkedIn value in `fields` that someone else already has."""
-        for f, sql in (("email", "lower(email) = lower(?)"), ("linkedin_url", "li_key(linkedin_url) = li_key(?)")):
-            if fields.get(f):
-                owner = self._row(f"SELECT id, name FROM candidates WHERE {sql} AND id <> ?",
-                                  (fields[f], candidate_id or 0))
-                if owner:
-                    return DuplicateValue(f, owner)
+        if fields.get("email"):
+            owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?",
+                              (fields["email"], candidate_id or 0))
+            if owner:
+                return DuplicateValue("email", owner)
+        key = normalize_linkedin(fields.get("linkedin_url"))
+        if key:
+            owner = self._linkedin_owner(key, candidate_id or 0, "id, name")
+            if owner:
+                return DuplicateValue("linkedin_url", owner)
         return None
 
     def find_by_name(self, name: str) -> list[dict[str, Any]]:
@@ -1662,16 +1730,15 @@ class Store:
         same email, LinkedIn URL or phone number, or a name that could be theirs ('Mike Okonkwo' and
         'Michael Okonkwo', 'Priya R.' and 'Priya Raman') at the same current company."""
         c = self.get_candidate(candidate_id)
-        key, phone = fold_name(c["name"]), phone_key(c.get("phone"))
+        key, phone, li = fold_name(c["name"]), phone_key(c.get("phone")), normalize_linkedin(c.get("linkedin_url"))
         rows = self._rows(
             """SELECT * FROM candidates WHERE id <> ? AND (
                    (? <> '' AND fold_name(name) = ?)
                    OR (? IS NOT NULL AND lower(email) = lower(?))
-                   OR (? IS NOT NULL AND li_key(linkedin_url) = li_key(?))
+                   OR (? IS NOT NULL AND coalesce(linkedin_key, li_key(linkedin_url)) = ?)
                    OR (? IS NOT NULL AND phone_key(phone) = ?))
                ORDER BY updated_at DESC LIMIT 10""",
-            (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
-             phone, phone))
+            (candidate_id, key, key, c.get("email"), c.get("email"), li, li, phone, phone))
         if _clean(c.get("current_company")) and len(rows) < 10:
             seen = {r["id"] for r in rows}
             rows += [r for r in self._rows(
@@ -1815,6 +1882,8 @@ class Store:
     def _apply(self, candidate_id: int, new: dict[str, Any]) -> None:
         """Write already-prepared values. Call inside a transaction."""
         cols = {k: v for k, v in new.items() if k != "work_history"}
+        if "linkedin_url" in cols:
+            cols["linkedin_key"] = normalize_linkedin(cols["linkedin_url"])
         cols["updated_at"] = now_iso()
         sets = ", ".join(f"{k} = ?" for k in cols)
         self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))

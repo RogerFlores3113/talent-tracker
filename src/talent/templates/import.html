@@ -48,7 +48,7 @@
   </section>{% endif %}
   {% if big %}<p class="fine">This is a big file: importing {{ total }} rows takes about a minute. Keep this page open until the result shows.</p>{% endif %}
   <div><button class="btn primary" type="submit">{{ button_label or ('Import ' ~ total ~ ' row' ~ ('' if total == 1 else 's')) }}</button>
-    <button class="btn" type="submit" formaction="/import/check">Check again</button>
+    <button class="btn" type="submit" formaction="/import/check" data-busy="Checking {{ total }} row{{ '' if total == 1 else 's' }} again. Nothing is saved yet. Keep this page open, the result shows here when it's done.">Check again</button>
     <a class="btn" href="/import">Start over</a></div>
   <p class="fine" data-busy-note role="status" aria-live="polite"></p>
 </form>

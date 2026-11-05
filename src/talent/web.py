@@ -490,8 +490,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         try:
             cand, created = store.upsert_candidate(work_history=history or None, **data)
             if job_id.isdigit():
-                store.add_to_pipeline(cand["id"], int(job_id))
-                return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+                warning = add_with_warning(cand["id"], int(job_id))
+                return RedirectResponse(f"/jobs/{job_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
+                                        status_code=303)
         except ValueError as exc:
             return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                         error=str(exc), job_id=form.get("job_id"))
@@ -674,9 +675,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         cand_or_404(candidate_id)
         form = await request.form()
         job = str(form.get("job_id") or "")
-        if job.isdigit():
-            store.add_to_pipeline(candidate_id, int(job))
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        warning = add_with_warning(candidate_id, int(job)) if job.isdigit() else ""
+        return RedirectResponse(f"/candidates/{candidate_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
+                                status_code=303)
 
     # ----------------------------------------------------------- paste
     @app.get("/paste", response_class=HTMLResponse)
@@ -1100,6 +1101,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/jobs/{job_id}/edit" + (f"?{urlencode({'notice': notice})}" if notice else "")
                                 + "#stages", status_code=303)
 
+    def resubmit_warning(candidate_id: int, job_id: int, before: str | None) -> str:
+        """After an add or a move into a Submitted or Presented stage: the warning when the person was already
+        submitted to this client in the last 12 months, else ''."""
+        sub = reports.submittal_note(store, candidate_id, job_id)
+        return (sub["warning"] or "") if sub and sub["stage"] != before else ""
+
+    def add_with_warning(candidate_id: int, job_id: int) -> str:
+        """add_to_pipeline (first stage), and the resubmit warning when that stage is a submittal."""
+        before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
+        store.add_to_pipeline(candidate_id, job_id)
+        return resubmit_warning(candidate_id, job_id, before)
+
     @app.post("/jobs/{job_id}/move", response_class=HTMLResponse)
     async def move(request: Request, job_id: int):
         job = job_or_404(job_id)
@@ -1111,9 +1124,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             store.move_stage(int(cid), job_id, str(form.get("stage") or ""), notes=str(form.get("notes") or "") or None,
                              by="app")
             ask = actions.exit_interviews(store, int(cid), job_id) or None
-            sub = reports.submittal_note(store, int(cid), job_id)
-            if sub and sub["stage"] != before:  # a submittal: it's on the client's list; warn about a second one
-                resubmit = sub["warning"] or ""
+            resubmit = resubmit_warning(int(cid), job_id, before)
         except (ValueError, NotFound) as exc:
             error = str(exc)
         if is_htmx(request):
@@ -1146,7 +1157,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not cid.isdigit():
             return RedirectResponse(f"/jobs/{job_id}", status_code=303)
         cand = cand_or_404(int(cid))
-        store.add_to_pipeline(cand["id"], job_id)
+        warning = add_with_warning(cand["id"], job_id)
         # From the same-name box on Add: fill the details they have empty with what was typed. Never replace one.
         fill = {f: str(form.get("fill_" + f)).strip() for f in FILL_FIELDS
                 if str(form.get("fill_" + f) or "").strip() and not (cand.get(f) or "").strip()}
@@ -1166,7 +1177,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         notice += "."
         if skipped:
             notice += f" Didn't fill the {_and(skipped)}: another saved candidate has it."
-        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}", status_code=303)
+        q = {"notice": notice, **({"flash_error": warning} if warning else {})}
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}", status_code=303)
 
     # ------------------------------------------------------------ shortlist
     def to_shortlist(job_id: int, notice: str = "", error: str = "") -> RedirectResponse:
