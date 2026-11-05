@@ -11,7 +11,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import quote, urlencode, urlsplit
 
 from . import __version__
@@ -106,13 +106,15 @@ def linkedin_profile(url: str | None) -> str | None:
 def refresh_candidate(c: dict) -> str:
     """The candidate page's "Refresh with Claude": update someone already saved, never save them again.
 
-    Only a linkedin.com profile goes in the prompt. Any other saved site could be one an import or a
-    web page put there, so the AI asks for the link instead of opening it."""
+    Built from the candidate id and LinkedIn URL only. The recruiter pastes it as their own message, so the
+    saved name (which an import or an AI could have set to anything) stays out of it. Only a linkedin.com
+    profile goes in. Any other saved site could be one an import or a web page put there, so the AI asks for
+    the link instead of opening it."""
     url = linkedin_profile(c.get("linkedin_url"))
     look = (f"look up their current profile ({url})" if url else
             "ask me for their profile link (I'll paste it), then look it up")
     return (
-        f"Refresh {c.get('name') or 'this person'} (candidate {c.get('id')}) in Talent Search.\n\n"
+        f"Refresh candidate {c.get('id')} in Talent Search.\n\n"
         f"Call get_candidate with candidate_id {c.get('id')}, then {look}. "
         f"Call update_candidate on candidate {c.get('id')} with only what changed: current title, company, "
         "location, a fresh 2 to 4 sentence `about`, skills as tags (the full list, since it replaces the saved "
@@ -192,35 +194,111 @@ def _scrub(text: str) -> str:
 
 
 def _scrub_names(text: str, names: Iterable[str]) -> str:
-    """Take out saved candidates' names: the full name in any case, and a surname written capitalized."""
+    """Take out saved candidates' names: the full name in any case, and a first name or surname written
+    capitalized (one-word names too)."""
     if not text:
         return text
     folded = text.casefold()
-    full, last = set(), set()
+    full, parts_found = set(), set()
     for name in names:
         name = " ".join((name or "").split())
         if len(name) < 3:
             continue
         if name.casefold() in folded:
             full.add(name)
-        parts = name.split(" ")
-        if len(parts) > 1 and len(parts[-1]) >= 4 and parts[-1] in text:
-            last.add(parts[-1])
+        parts = [p.strip(".,") for p in name.split(" ")]
+        words = [(parts[0], 3), (parts[-1], 4)] if len(parts) > 1 else [(parts[0], 3)]
+        parts_found.update(w for w, least in words if len(w) >= least and w in text)
     for name in sorted(full, key=len, reverse=True):
         text = re.sub(r"(?<!\w)" + r"\s+".join(map(re.escape, name.split(" "))) + r"(?!\w)", "[name removed]", text,
                       flags=re.I)
-    for word in sorted(last, key=len, reverse=True):
+    for word in sorted(parts_found, key=len, reverse=True):
         if word[:1].isupper():
             text = re.sub(r"(?<!\w)" + re.escape(word) + r"(?!\w)", "[name removed]", text)
     return text
 
 
-def issue_text(summary: str, details: str = "", where: str = "app", names: Iterable[str] = ()) -> tuple[str, str]:
-    """The (title, body) a problem report would have, with emails, phones, links and the names of saved
-    candidates (pass them as names) taken out."""
+def _cut(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """Replace each (start, end, label) span; overlapping spans become one, labelled as the longest."""
+    merged: list[list[Any]] = []
+    for start, end, label in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            last = merged[-1]
+            if end - start > last[3]:
+                last[2], last[3] = label, end - start
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end, label, end - start])
+    for start, end, label, _ in reversed(merged):
+        text = text[:start] + label + text[end:]
+    return text
+
+
+def _scrub_phrases(text: str, phrases: Iterable[tuple[str, str]]) -> str:
+    """Take out each (phrase, label): job titles and client or company names, in any case. Where two overlap
+    ("Stealth Client Nimbus" and "Nimbus Platform Eng"), the whole run goes."""
+    if not text:
+        return text
+    spans = []
+    for phrase, label in {(" ".join(p.split()), lab) for p, lab in phrases if p and len(p.strip()) >= 3}:
+        pattern = r"(?<!\w)" + r"\s+".join(map(re.escape, phrase.split(" "))) + r"(?!\w)"
+        spans += [(m.start(), m.end(), label) for m in re.finditer(pattern, text, flags=re.I)]
+    return _cut(text, spans)
+
+
+NOTE_RUN = 5  # this many words in a row, as written in a saved note, profile or job description
+
+
+def _scrub_notes(text: str, notes: Iterable[str]) -> str:
+    """Take out text copied from a saved note, profile or job description: any run of NOTE_RUN or more words
+    that also appears, in that order, in one of them."""
+    if not text:
+        return text
+    grams = set()
+    for note in notes:
+        words = re.findall(r"\w+", (note or "").casefold())
+        grams.update(tuple(words[i:i + NOTE_RUN]) for i in range(len(words) - NOTE_RUN + 1))
+    if not grams:
+        return text
+    toks = list(re.finditer(r"\w+", text))
+    spans = [(toks[i].start(), toks[i + NOTE_RUN - 1].end(), "[note removed]")
+             for i in range(len(toks) - NOTE_RUN + 1)
+             if tuple(t.group(0).casefold() for t in toks[i:i + NOTE_RUN]) in grams]
+    return _cut(text, spans)
+
+
+def report_private(store: Any) -> dict[str, list]:
+    """What a problem report must not carry, from the store: saved people's names, job titles, client and
+    company names, and the text of notes, profiles and job descriptions."""
+    def column(sql: str) -> list[str]:
+        return [r["v"] for r in store._rows(sql) if r.get("v")]
+
+    phrases = [(t, "[job removed]") for t in column("SELECT DISTINCT title AS v FROM jobs")]
+    phrases += [(c, "[company removed]") for c in column(
+        "SELECT DISTINCT company AS v FROM jobs UNION SELECT DISTINCT current_company FROM candidates"
+        " UNION SELECT DISTINCT company FROM work_history")]
+    notes = column("SELECT body AS v FROM timeline WHERE kind NOT IN ('stage', 'change') AND body IS NOT NULL")
+    notes += column("SELECT about AS v FROM candidates UNION ALL SELECT description FROM jobs"
+                    " UNION ALL SELECT notes FROM applications")
+    return {"names": column("SELECT name AS v FROM candidates"), "phrases": phrases, "notes": notes}
+
+
+def _scrub_all(text: str, names: list[str], private: dict[str, list] | None) -> str:
+    private = private or {}
+    text = _scrub_notes(text, private.get("notes") or ())
+    text = _scrub_phrases(text, private.get("phrases") or ())
+    text = _scrub_names(text, [*names, *(private.get("names") or ())])
+    return _scrub(text)
+
+
+def issue_text(summary: str, details: str = "", where: str = "app", names: Iterable[str] = (),
+               private: dict[str, list] | None = None) -> tuple[str, str]:
+    """The (title, body) a problem report would have, with emails, phones, links, the names of saved
+    candidates (pass them as names), and, with private (see report_private), job titles, client and company
+    names and text copied from notes taken out. This is exactly what the GitHub link carries."""
     names = list(names)
-    title = _scrub(_scrub_names((summary or "Problem report").strip(), names))[:120]
-    details = _scrub(_scrub_names(details or "", names))
+    title = _scrub_all((summary or "Problem report").strip(), names, private)[:120]
+    details = _scrub_all(details or "", names, private)
     body = (
         f"**What happened**\n{details.strip() or title}\n\n"
         f"**Where**\n{where}\n\n"
@@ -230,11 +308,12 @@ def issue_text(summary: str, details: str = "", where: str = "app", names: Itera
     return title, body
 
 
-def issue_url(summary: str, details: str = "", where: str = "app", names: Iterable[str] = ()) -> str:
+def issue_url(summary: str, details: str = "", where: str = "app", names: Iterable[str] = (),
+              private: dict[str, list] | None = None) -> str:
     """A prefilled GitHub 'new issue' link. Opening it shows GitHub the text (it's in the address);
     it is posted only when the user presses Submit on GitHub.
 
     Never put candidate data in here.
     """
-    title, body = issue_text(summary, details, where, names)
+    title, body = issue_text(summary, details, where, names, private)
     return ISSUES_URL + "?" + urlencode({"title": title, "body": body}, quote_via=quote)

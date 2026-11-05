@@ -4,7 +4,7 @@
 <div class="sec-head">
   <h1>Changes</h1>
 </div>
-<p class="lead">Every edit to a candidate's details, and everything your AI app wrote: people it added, pipeline adds and stage moves, jobs it made or edited, stage edits and to-dos. Newest first. Undo puts things back as they were. Activity it logged, like notes and interviews, stays on the timeline.</p>
+<p class="lead">Every edit to a candidate's details, and everything your AI app wrote: people it added, pipeline adds and stage moves, jobs it made or edited, stage edits and to-dos. Newest first. Undo puts things back as they were, including interviews it cancelled or moved. Activity it logged, like notes, interviews and how an interview went, stays on the timeline.</p>
 <form class="tablebar" method="get" action="/changes">
   <select name="who" aria-label="Who made the change" data-autosubmit>
     <option value="">Anyone</option>
@@ -36,7 +36,9 @@
     <span class="muted">· {{ who_options[r.who] }}</span>
     <div>{{ r.text }}</div>
     {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
-    {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>{% endif %}
+    {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>
+    {% elif r.record %}<div class="fine">Kept as a record. There is nothing to undo.</div>
+    {% elif r.blocked %}<div class="fine">Can't undo: {{ r.blocked }}.</div>{% endif %}
     {% if r.undo_from_url and r.from_count > (1 if r.undoable else 0) %}<form method="post" action="{{ r.undo_from_url }}" class="inline" data-confirm="Undo {{ r.from_count }} change{{ '' if r.from_count == 1 else 's' }} your AI app made, from this one to the newest? People and jobs it added are taken out only if nobody worked on them since. Things you edited yourself since then stay as they are."><button class="btn small" type="submit">Undo this and everything after</button></form>{% endif %}
   </li>
   {% endfor %}
