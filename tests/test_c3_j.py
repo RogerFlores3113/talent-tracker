@@ -29,13 +29,13 @@ def test_write_tools_lead_with_a_plain_sentence(store):
     cid = store.add_candidate(name="Priya Raman")["id"]
 
     res = call(server, "add_to_pipeline", candidate_id=cid, job_id=job["id"])
-    assert text(res).splitlines()[0] == "Added Priya Raman to Staff Backend Engineer (Acme Fintech), in Sourced."
+    assert text(res).splitlines()[0] == 'Added "Priya Raman" to Staff Backend Engineer (Acme Fintech), in Sourced.'
     assert structured(res)["stage"] == "Sourced"  # structured data as before
     again = call(server, "add_to_pipeline", candidate_id=cid, job_id=job["id"])
-    assert text(again).startswith("Priya Raman is already in Staff Backend Engineer (Acme Fintech), in Sourced.")
+    assert text(again).startswith('"Priya Raman" is already in Staff Backend Engineer (Acme Fintech), in Sourced.')
 
     moved = call(server, "move_stage", candidate_id=cid, job_id=job["id"], stage="screen")
-    assert text(moved).splitlines()[0] == ("Moved Priya Raman to Screening on Staff Backend Engineer (Acme Fintech) "
+    assert text(moved).splitlines()[0] == ('Moved "Priya Raman" to Screening on Staff Backend Engineer (Acme Fintech) '
                                            "(was Sourced).")
     upd = call(server, "update_job", job_id=job["id"], status="on hold", openings=2)
     assert text(upd).splitlines()[0] == "Updated Staff Backend Engineer (Acme Fintech): status on hold, openings 2."
@@ -49,11 +49,11 @@ def test_log_activity_says_when_in_local_time(store):
     res = call(server, "log_activity", candidate_id=cid, kind="interview", summary="Onsite", when=at)
     local = to_dt(at).astimezone()
     first = text(res).splitlines()[0]
-    assert first.startswith(f"Logged an interview with Dana Lee for {local:%a %b} {local.day}, ")
+    assert first.startswith(f'Logged an interview with "Dana Lee" for {local:%a %b} {local.day}, ')
     assert first.endswith(f"{local.tzname()}.")
     assert structured(res)["logged"]["at_local"] in first
     past = call(server, "log_activity", candidate_id=cid, kind="call", when="2026-01-05 1:00 PM")
-    assert text(past).startswith("Logged a call with Dana Lee on Mon Jan 5, 1:00 PM")
+    assert text(past).startswith('Logged a call with "Dana Lee" on Mon Jan 5, 1:00 PM')
 
 
 def test_get_candidate_shows_local_times_and_the_client(store):

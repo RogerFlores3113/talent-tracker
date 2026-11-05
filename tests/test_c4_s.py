@@ -160,7 +160,8 @@ def test_keep_all_pass_all_put_back_badge_and_today(store):
     page = c.get(f"/jobs/{job['id']}/shortlist").text
     assert 'data-confirm="Keep all 3' in page and 'data-confirm="Pass on all 3?' in page
     r = c.post(f"/jobs/{job['id']}/shortlist/keep-all", follow_redirects=False)
-    assert flash_of(r) == "Kept 2 people and added them to Sourced. 1 need your choice first: Cy Park."
+    assert flash_of(r) == ("Kept 2 people and added them to Sourced. You can undo this on Changes. 1 need your "
+                           "choice first: Cy Park.")
     r = c.post(f"/jobs/{job['id']}/shortlist/pass-all", data={"reason": "Not now"}, follow_redirects=False)
     assert "Passed on 1 person" in flash_of(r)
     assert not [i for i in actions.action_items(store)["items"] if i["kind"] == "shortlist"]
@@ -194,7 +195,9 @@ def test_save_candidates_batches_with_the_same_rules_and_undo_all(store):
         {"name": "Tom Ng", "email": "kim@x.com"},
     ])
     d, t = data(res), text(res)
-    assert t.startswith("Saved 1 new person, updated 1, and 2 need the recruiter's answer before saving; "
+    # Cycle 4 W: a batch merge keeps a saved title (Wei stays "SWE"), so Wei is "already saved".
+    assert t.startswith("Saved 1 new person, 1 already saved with nothing new, and 2 need the recruiter's answer "
+                        "before saving; "
                         "added 2 to Backend Engineer (Acme) in Contacted.")
     assert [r["name"] for r in d["saved"]] == ["Ana Ruiz"] and d["saved"][0]["ignored_fields"] == ["hobby"]
     assert [r["name"] for r in d["needs_answer"]] == ["Bo Li", "Tom Ng"]
@@ -206,7 +209,7 @@ def test_save_candidates_batches_with_the_same_rules_and_undo_all(store):
     assert store.find_by_name("Tom Ng") == []
     c = local_client(store)
     r = c.post("/changes/undo-ai", data={"since": "1"}, follow_redirects=False)
-    assert "Undid 4 AI changes" in flash_of(r)
+    assert "Undid 3 AI changes" in flash_of(r)
     assert store.pipeline(job["id"]) == [] and store.find_by_name("Ana Ruiz") == []
     assert store.find_by_name("Wei Zhang")[0]["current_title"] == "SWE"
 

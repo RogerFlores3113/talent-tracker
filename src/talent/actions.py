@@ -372,6 +372,20 @@ def ai_identity_changes(store: Store, now: datetime | None = None, days: int = 7
     return out
 
 
+def ai_clear_cap(store: Store) -> list[dict[str, Any]]:
+    """A Today item while the AI app has hit its hourly limit on clearing saved values across everyone, so
+    the recruiter looks at what it emptied (and more clears wait until the hour has passed)."""
+    from .store import AI_CLEAR_CAP
+
+    got = store.ai_clears_this_hour()
+    if got["count"] < AI_CLEAR_CAP:
+        return []
+    people = f"{got['people']} {'person' if got['people'] == 1 else 'people'}"
+    return [{"key": f"aiclears:{got['last']}", "kind": "ai_change", "rank": 0, "when": got["last"],
+             "title": f"Your AI app cleared {got['count']} saved values on {people} in the last hour. Review or undo.",
+             "detail": "It can't clear more until the hour has passed.", "href": "/changes?who=ai&since=1"}]
+
+
 def _offer_name(name: str | None) -> bool:
     return "offer" in _stage_key(name).split()
 
@@ -594,7 +608,7 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
                 else f"/jobs/{s['job_id']}" if s.get("job_id") else "/",
             })
 
-    items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now)
+    items += ai_identity_changes(store, now) + ai_pipeline_changes(store, now) + ai_clear_cap(store)
     from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
     items += shortlist_items(store)
     if on("flag_stuck"):

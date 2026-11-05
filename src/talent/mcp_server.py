@@ -30,9 +30,9 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from . import __version__, actions, recipes, shortlist, reports
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import (INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES, TIMELINE_KINDS, IdentityConflict,
-                    NotFound, Store, _labels, linkedin_lead_tool, normalize_linkedin, now_iso, same_person_name,
-                    snippet_text, split_tags, to_dt)
+from .store import (AI_CLEAR_CAP, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES, TIMELINE_KINDS,
+                    _EMAIL_RE, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool, normalize_linkedin,
+                    now_iso, quoted, same_person_name, snippet_text, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -285,9 +285,84 @@ def _said(sentence: str, data: dict[str, Any]) -> CallToolResult:
     """A write tool's reply. The text leads with one plain sentence (who, which stage, which job and client,
     times in local time with zone), then any warning or note, then the record itself as JSON, which is also
     the structured result."""
-    lines = [sentence, *(str(data[k]) for k in ("warning", "note", "close_out_hint") if data.get(k))]
+    lines = [sentence, *(str(data[k]) for k in ("warning", "note", "nudge", "close_out_hint") if data.get(k))]
     lines.append(json.dumps(data, ensure_ascii=False, default=str))
     return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
+
+
+def _batch_job_warning(job: dict[str, Any], added: int, hired: int) -> str | None:
+    """After save_candidates added people to a job: a warning when its openings are all filled already, or when
+    it isn't open, so the AI asks before more people are worked on."""
+    if not added:
+        return None
+    if job.get("status") != "open":
+        return (f"{_job_name(job)} is {str(job.get('status') or '').replace('_', ' ')}. Ask the recruiter whether it "
+                "still needs people.")
+    openings = job.get("openings") or 1
+    if hired >= openings:
+        return (f"{_job_name(job)} already has {hired} hired for {openings} opening{'' if openings == 1 else 's'}, "
+                "so these people would over-fill it. Ask the recruiter whether it still needs people.")
+    return None
+
+
+_OUTREACH_KINDS = ("call", "email", "message")
+_INTERVIEW_WORDS = ("interview", "screen", "onsite", "loop", "panel", "technical")
+
+
+def _stage_nudge(store: Store, cand: dict[str, Any], job_id: int, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """After the AI logs outreach or an interview for someone still in an early stage of that job: the move_stage
+    step that would bring the board up to date, as {"nudge": sentence, "suggested_step": {...}}. None otherwise.
+    Outreach nudges only from the job's first stage; an interview nudges while no interview-like stage is reached."""
+    kind = entry.get("kind")
+    if kind not in (*_OUTREACH_KINDS, "interview"):
+        return None
+    current = next((p["stage"] for p in store.candidate_pipelines(cand["id"]) if p["job_id"] == job_id), None)
+    stages = store.job_stages(job_id)
+    at = next((i for i, s in enumerate(stages) if s["name"].lower() == (current or "").lower()), None)
+    if at is None or stages[at]["outcome"] != "open":
+        return None
+    later = [s for s in stages[at + 1:] if s["outcome"] == "open"]
+    like = lambda s: any(w in s["name"].lower() for w in _INTERVIEW_WORDS)  # noqa: E731
+    if kind == "interview":
+        if any(like(s) for s in stages[:at + 1]):
+            return None
+        target = next((s for s in later if like(s)), None)
+    else:
+        if at != 0:
+            return None
+        target = next((s for s in later if "contact" in s["name"].lower() or "outreach" in s["name"].lower()),
+                      later[0] if later else None)
+    if target is None:
+        return None
+    job = store.get_job(job_id)
+    what = "an interview booked" if kind == "interview" else "outreach logged"
+    nudge = (f"{quoted(cand['name'])} is still in {current} on {_job_name(job)} with {what}. If they've moved on, "
+             f"call move_stage(candidate_id={cand['id']}, job_id={job_id}, stage=\"{target['name']}\") so the board "
+             "and status updates show it; ask the recruiter if you're not sure.")
+    return {"nudge": nudge, "suggested_step": {"tool": "move_stage", "candidate_id": cand["id"], "job_id": job_id,
+                                               "stage": target["name"]}}
+
+
+def _booked_left_out(stages: list[dict[str, Any]], left_out: list[str]) -> dict[str, Any] | None:
+    """People with an interview booked who sit in a stage the status update leaves out (Sourced, say), so
+    the recruiter knows the update hides them: {"text": "1 in Sourced has an interview booked: ...", "people"}."""
+    hidden = {x.lower() for x in left_out}
+    people = [{"candidate_id": c["candidate_id"], "name": c["name"], "stage": s["name"], "next_interview": c["next_interview"]}
+              for s in stages if s["name"].lower() in hidden and s["outcome"] == "open"
+              for c in s["candidates"] if c.get("next_interview")]
+    if not people:
+        return None
+    by_stage: dict[str, list[dict[str, Any]]] = {}
+    for p in people:
+        by_stage.setdefault(p["stage"], []).append(p)
+    parts = []
+    for stage, ps in by_stage.items():
+        n = len(ps)
+        names = ", ".join(f"{quoted(p['name'])} ({_local(p['next_interview'])})" for p in ps[:5])
+        parts.append(f"{n} in {stage} {'has' if n == 1 else 'have'} an interview booked: {names}")
+    text = ("For the recruiter: " + "; ".join(parts) + ". The update above leaves them out. If they've moved on, "
+            "move them with move_stage so it shows them.")
+    return {"text": text, "people": people}
 
 
 def _filled_hint(store: Store, job: dict[str, Any]) -> dict[str, Any]:
@@ -640,6 +715,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if len(clearing) > 1:
             raise ValueError(f"You can clear only one field per call, and this would clear {len(clearing)}: "
                              f"{', '.join(clearing)}. Check with the recruiter, then clear them one at a time.")
+        if clearing and not store.ai_clears_left(len(clearing)):
+            raise ValueError(f"No change made. Your AI app has already cleared {AI_CLEAR_CAP} saved values this hour, "
+                             "across everyone. Ask the recruiter to clear more in the app, or try again later.")
         wanted = store._prepare({k: v for k, v in data.items() if k in IDENTITY_FIELDS})
         identity = [k for k, v in wanted.items() if (v or None) != (current.get(k) or None)]
         if len(identity) > 1:
@@ -660,7 +738,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError("No change made. " + _budget_text(current["name"]))
         cand = store.update_candidate(candidate_id, work_history=_history(work_history), by="ai", **data)
         changed = cand.pop("_changed", [])
-        who = f"{cand['name']} (id {candidate_id})"
+        who = f"{quoted(cand['name'])} (id {candidate_id})"
         if not changed:
             sentence = f"Nothing to change on {who}; those values were already saved."
         else:
@@ -716,8 +794,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                               "Use add_to_pipeline if they should be.")
         what = entry["kind"]
         with_ = "on" if what == "note" else "with"
-        sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {cand['name']} {_when_words(entry['at'])}"
-                    + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "") + ".")
+        sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {quoted(cand['name'])} "
+                    f"{_when_words(entry['at'])}" + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "")
+                    + ".")
+        nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None else None
+        if nudge:
+            out.update(nudge)
         return _said(sentence, out)
 
     @mcp.tool(annotations=EDIT)
@@ -892,8 +974,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["note"] = f"Already in this pipeline, in {out['stage']}. Use move_stage to move them."
         job = store.get_job(job_id)
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
-        sentence = (f"{name} is already in {_job_name(job)}, in {out['stage']}." if already
-                    else f"Added {name} to {_job_name(job)}, in {out['stage']}.")
+        sentence = (f"{quoted(name)} is already in {_job_name(job)}, in {out['stage']}." if already
+                    else f"Added {quoted(name)} to {_job_name(job)}, in {out['stage']}.")
         return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
@@ -918,8 +1000,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         name = out.get("candidate_name") or store.get_candidate(candidate_id)["name"]
         if not was_filled and job["status"] == "open" and actions.job_numbers(store, job_id)["filled"]:
             out.update(_filled_hint(store, job))
-        sentence = (f"{name} is already in {out['stage']} on {_job_name(job)}." if before == out["stage"]
-                    else f"Moved {name} to {out['stage']} on {_job_name(job)}" + (f" (was {before})." if before else "."))
+        sentence = (f"{quoted(name)} is already in {out['stage']} on {_job_name(job)}." if before == out["stage"]
+                    else f"Moved {quoted(name)} to {out['stage']} on {_job_name(job)}"
+                    + (f" (was {before})." if before else "."))
         return _said(sentence, out)
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
@@ -946,12 +1029,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         text = actions.job_status_text(store, job_id, omit_stages=omit_stages)
         total = sum(len(s["candidates"]) for s in stages)
         hidden = actions.hidden_note(store, job_id, omit_stages)
+        booked = _booked_left_out(stages, left_out)
         content = [TextContent(type="text", text=text)]
         if total:  # the note, and who was left out (for the recruiter only), sit apart from the paste text
-            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}." if hidden else "")))
+            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}." if hidden else "")
+                                       + (f"\n{booked['text']}" if booked else "")))
         data = {"job": _job_out(_slim(job)), "stages": stages, "counts": {k: nums[k] for k in ("active", "hired", "out")},
                 "openings": nums["openings"], "filled": nums["filled"], "headline": actions.headline(shown, job["status"]),
                 "left_out": left_out, "app_url": app_url(f"/jobs/{job_id}")}
+        if booked:
+            data["interviews_left_out"] = booked["people"]
         return CallToolResult(content=content, structuredContent=data)
 
     @mcp.tool(annotations=READ)
@@ -1045,7 +1132,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                               "prospects": rows, "counts": counts, "data_note": DATA_NOTE,
                               "app_url": app_url(f"/jobs/{job_id}/shortlist")})
 
-    @mcp.tool(annotations=WRITE)
+    @mcp.tool(annotations=WRITE, meta=tool_meta("saved"))
     def save_candidates(people: list[PersonIn], job_id: int | None = None, stage: str | None = None) -> CallToolResult:
         """Save several people at once (up to 25), only when the recruiter asks you to save them. While sourcing,
         use propose_candidates instead.
@@ -1053,27 +1140,58 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Each person takes the same fields as save_candidate and follows its rules: a matching email or LinkedIn
         merges, a saved person with the same name or a LinkedIn that belongs to someone else is not saved and
         comes back under needs_answer (ask the recruiter; then save_candidate with create_anyway=true or
-        update_candidate), and identity fields can be held. With job_id, everyone saved is added to that job,
-        in `stage` or its first stage. Each save and add can be undone in the app."""
+        update_candidate), and identity fields can be held. A merge here only fills empty fields: a saved title,
+        company, location or work history is kept (the reply says which), so use update_candidate for a real
+        change. An email that isn't an address is dropped. With job_id, everyone saved is added to that job, in
+        `stage` or its first stage; only a stage still in play works (not one that counts as hired or out). The
+        whole call is one change in the app, which the recruiter can undo there."""
         if len(people) > shortlist.MAX_BATCH:
             raise ValueError(f"Nothing saved. Send at most {shortlist.MAX_BATCH} people per call ({len(people)} "
                              "given); split them into several calls.")
         if stage and job_id is None:
             raise ValueError("Nothing saved. stage needs a job_id.")
         job = store.get_job(job_id) if job_id is not None else None
-        stage_name = store.resolve_stage(job_id, stage)["name"] if job_id is not None else None
+        stage_name = None
+        if job_id is not None:
+            s = store.resolve_stage(job_id, stage)
+            if s["outcome"] != "open":
+                in_play = [x["name"] for x in store.job_stages(job_id) if x["outcome"] == "open"]
+                raise ValueError(
+                    f"Nothing saved. {s['name']} counts as {'hired' if s['outcome'] == 'hired' else 'out'} on "
+                    f"{_job_name(job)}, and a batch save can only add people to a stage still in play: "
+                    f"{', '.join(in_play) or 'none'}. Save them there (or leave out stage), and ask the recruiter "
+                    "before anyone moves further.")
+            stage_name = s["name"]
         groups: dict[str, list[dict[str, Any]]] = {"saved": [], "updated": [], "unchanged": [], "needs_answer": [],
                                                     "not_saved": []}
         added = 0
+        mark = store._row("SELECT coalesce(max(id), 0) AS n FROM ai_actions")["n"]
         for person in people:
             fields = person.model_dump(exclude={"create_anyway"}, exclude_none=True)
             fields.pop("work_history", None)
             extra = list((person.model_extra or {}).keys())
             for k in extra:
                 fields.pop(k, None)
+            history, notes = person.work_history, []
+            email = (fields.get("email") or "").strip()
+            if email and not _EMAIL_RE.match(email):
+                fields.pop("email")
+                notes.append(f"Dropped the email {email[:80]!r}: it isn't an email address")
+            li = fields.get("linkedin_url")
+            match = store.find_duplicate(fields.get("email"), None if linkedin_lead_tool(li) else li)
+            kept_saved: list[str] = []
+            if match is not None and same_person_name(match["name"], person.name):
+                for k in MERGE_OVERWRITES:  # a batch merge never replaces a saved value; it only fills blanks
+                    new, old = fields.get(k), match.get(k)
+                    if isinstance(new, str) and new.strip() and old and str(old).strip().casefold() != new.strip().casefold():
+                        fields.pop(k)
+                        kept_saved.append(k)
+                if history and store.work_history(match["id"]):
+                    history = None
+                    kept_saved.append("work_history")
             token = _IGNORED.set(extra)
             try:
-                d = save_candidate(**fields, work_history=person.work_history,
+                d = save_candidate(**fields, work_history=history,
                                    create_anyway=person.create_anyway).structuredContent or {}
             except (ValueError, NotFound) as exc:
                 groups["not_saved"].append({"name": person.name, "reason": str(exc)})
@@ -1085,8 +1203,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     "name": person.name, "reason": d.get("warning"), "existing": d.get("existing"),
                     "possible_duplicates": d.get("possible_duplicates")}))
                 continue
+            kept = [*kept_saved, *(k for k in d.get("kept") or [] if k not in kept_saved)]
             row = _slim({"id": d["id"], "name": d["name"], "saved_status": d.get("saved_status"),
-                         "held": d.get("identity_kept"), "kept": d.get("kept"), "ignored_fields": d.get("ignored_fields")})
+                         "held": (d.get("identity_kept") or []) + (d.get("budget_kept") or []), "kept": kept,
+                         "ignored_fields": d.get("ignored_fields"), "notes": notes,
+                         "app_url": app_url(f"/candidates/{d['id']}")})
             if job_id is not None:
                 try:
                     p = add_to_pipeline(d["id"], job_id, stage_name).structuredContent or {}
@@ -1110,6 +1231,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             (", and " if i == len(bits) - 1 else ", ") + b for i, b in enumerate(bits[1:], 1))
         if job is not None:
             sentence += f"; added {added} to {_job_name(job)} in {stage_name}"
+        warning = (_batch_job_warning(job, added, actions.job_numbers(store, job_id)["hired"])
+                   if job is not None else None)
         lines = [sentence + "."]
         names = {"saved": "Saved", "updated": "Updated", "unchanged": "Already saved, nothing new",
                  "needs_answer": "Needs your answer (nothing saved)", "not_saved": "Not saved"}
@@ -1118,22 +1241,37 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 continue
             lines.append(f"{label}:")
             for r in groups[key]:
-                line = f"- {r['name']}" + (f" (id {r['id']})" if r.get("id") else "")
+                line = f"- {quoted(r['name'])}" + (f" (id {r['id']})" if r.get("id") else "")
                 if r.get("saved_status") and key == "updated":
                     line += f": {r['saved_status']}"
                 if r.get("reason"):
-                    line += f": {r['reason']}"
+                    line += f": {r['reason'].rstrip('.')}"
                 if r.get("held"):
                     line += f". Held for the recruiter: {_labels(r['held'])}"
                 if r.get("kept"):
-                    line += f". Kept the saved {_labels(r['kept'])}"
+                    line += f". Kept the saved {_labels(r['kept'])}; use update_candidate if the new ones are right"
+                for x in r.get("notes") or []:
+                    line += f". {x}"
                 if r.get("ignored_fields"):
                     line += f". Ignored fields: {', '.join(r['ignored_fields'])}"
                 if r.get("pipeline_error"):
-                    line += f". Not added to the job: {r['pipeline_error']}"
+                    line += f". Not added to the job: {r['pipeline_error'].rstrip('.')}"
                 lines.append(line + ".")
-        data = {**groups, "counts": n, "data_note": DATA_NOTE,
-                **({"job_id": job_id, "stage": stage_name, "added_to_job": added} if job is not None else {})}
+        kids = [r["id"] for r in store._rows("SELECT id FROM ai_actions WHERE id > ? AND kind IN"
+                                             " ('candidate', 'profile', 'pipeline_add') ORDER BY id", (mark,))]
+        batch_id = None
+        if kids:  # the whole call is one row on Changes, with one Undo
+            with store._write():
+                batch_id = store._log_ai("save_batch", job_id=job_id, body=sentence, new={
+                    "action_ids": kids, "saved": n["saved"], "updated": n["updated"], "added": added,
+                    "stage": stage_name, "saved_names": [r["name"] for r in groups["saved"]][:5],
+                    "updated_names": [r["name"] for r in groups["updated"]][:5]})
+            lines.append("The recruiter can undo this whole batch in the app, under Changes.")
+        data = {**groups, "counts": n, "summary": sentence + ".", "data_note": DATA_NOTE, "batch_id": batch_id,
+                **({"job": _slim({k: job.get(k) for k in ("id", "title", "company")}), "job_id": job_id,
+                    "stage": stage_name, "added_to_job": added, "app_url": app_url(f"/jobs/{job_id}")}
+                   if job is not None else {"app_url": app_url("/changes?who=ai")}),
+                **({"warning": warning} if warning else {})}
         return _said("\n".join(lines), data)
 
     @mcp.tool(annotations=READ)

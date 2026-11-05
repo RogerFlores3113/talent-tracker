@@ -539,13 +539,15 @@ AI_ACTION_KINDS = {
     "stages_edit": "Edited a job's stages", "todo_added": "Added a to-do", "todo_done": "Marked a to-do done",
     "prospects_proposed": "Proposed people for a Shortlist",
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
-    "interview_outcome": "Recorded how an interview went",
+    "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
 }
 # AI actions listed on Changes as a record only: there is nothing to put back.
 AI_RECORD_KINDS = frozenset({"interview_outcome"})
 # How many saved values (cleared or replaced) the AI app may change on one person in an hour.
 AI_EDIT_BUDGET = 3
 AI_EDIT_WINDOW_MINUTES = 60
+# How many saved values the AI app may clear (empty), across everyone, in an hour.
+AI_CLEAR_CAP = 10
 AI_SOURCE = "AI app"
 
 
@@ -974,7 +976,27 @@ def linkedin_problem(url: str | None) -> str | None:
     if tool:
         return (f"That is a {tool} link, which only works inside {tool}, so nothing was saved. Use their profile "
                 "link instead, like https://www.linkedin.com/in/their-name.")
+    if not linkedin_slug_ok(url):
+        return ("That LinkedIn link doesn't end in a profile name (it has spaces, quotes or only dots after /in/), "
+                "so nothing was saved. Use a link like https://www.linkedin.com/in/their-name.")
     return None
+
+
+_BAD_SLUG = re.compile(r"[\s\"'`<>\\]")
+
+
+def linkedin_slug_ok(url: str | None) -> bool:
+    """False for a /in/ link whose profile name is only dots ("in/..") or holds spaces, quotes, angle brackets or
+    backslashes ('in/ab"onmouseover=x'): junk that would still dedupe as if it were a person. True otherwise."""
+    got = _linkedin_parts(_clean(url) or "")
+    if not got:
+        return True
+    path = re.sub(r"^/mwlite(?=/)", "", re.sub(r"/{2,}", "/", got[1]), flags=re.I)
+    m = re.match(r"^/in(?:/([^/]*))?", path, re.I)
+    if not m:
+        return True
+    slug = unquote(m.group(1) or "").strip()
+    return bool(slug) and slug.strip(".") != "" and not _BAD_SLUG.search(slug)
 
 
 def normalize_linkedin(url: str | None) -> str | None:
@@ -1332,6 +1354,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "prospects_proposed":
         n = len(new.get("prospect_ids") or [])
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
+    if kind == "save_batch":
+        return _batch_summary(new, job if r.get("job_title") else None)
     what = f": {new['summary']}" if new.get("summary") else ""
     if kind == "interview_cancel":
         return f"Cancelled an interview with {name}{what}"
@@ -1343,9 +1367,38 @@ def _ai_summary(r: dict[str, Any]) -> str:
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
+def quoted(name: Any) -> str:
+    """A person's name as a write sentence repeats it: in double quotes, so an injected "name" reads as data."""
+    return '"' + " ".join(str(name or "").split()).replace('"', "'") + '"'
+
+
+def _batch_summary(new: dict[str, Any], job: str | None) -> str:
+    """'Saved 3 new people ("Ana Ruiz", "Bo Li" and 1 more) and updated 1 ("Wei Zhang") in one batch, and added 4
+    to Backend (Acme) in Sourced'."""
+    def people(n: int, names: list[str], adj: str = "") -> str:
+        shown = [quoted(x) for x in names[:2]]
+        more = n - len(shown)
+        listed = ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+        return f"{n} {adj}{'person' if n == 1 else 'people'}" + (f" ({listed})" if shown else "")
+
+    saved, updated = int(new.get("saved") or 0), int(new.get("updated") or 0)
+    bits = []
+    if saved:
+        bits.append("saved " + people(saved, list(new.get("saved_names") or []), "new "))
+    if updated:
+        bits.append("updated " + people(updated, list(new.get("updated_names") or [])))
+    text = (" and ".join(bits) or "saved nobody new") + " in one batch"
+    added = int(new.get("added") or 0)
+    if job and added:
+        text += f", and added {added} to {job} in {new.get('stage')}"
+    return text[:1].upper() + text[1:]
+
+
 def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     """What an AI action changed, so a newer action on the same thing can be found (see Store.ai_actions)."""
     kind, cid, jid = r["kind"], r.get("candidate_id"), r.get("job_id")
+    if kind == "save_batch":
+        return (("batch", r["id"]),)
     if kind == "candidate":
         return (("person", cid),)
     if kind == "profile":
@@ -1988,7 +2041,31 @@ class Store:
                     later[k] = max(later.get(k, 0), r["id"])
         for r in rows:
             r["undo_pending"] = r["undoable"] or bool(r.get("after_newer"))
+        self._fold_batches(rows)
         return rows
+
+    def _fold_batches(self, rows: list[dict[str, Any]]) -> None:
+        """A save_candidates batch is one row on Changes: its own state follows the saves and adds it made
+        (undone once they all are, undoable while any is). Each of those carries `batch_id`. The batch row
+        never counts as pending itself, so Undo all doesn't count its changes twice."""
+        by_id = {r["id"]: r for r in rows}
+        for b in (r for r in rows if r["kind"] == "save_batch"):
+            ids = [i for i in ((b.get("new_data") or {}).get("action_ids") or []) if isinstance(i, int)]
+            kids = []
+            for i in ids:
+                kid = by_id[i] if i in by_id else next(iter(self.ai_actions(action_id=i)), None)
+                if kid is not None:
+                    kid["batch_id"] = b["id"]
+                    kids.append(kid)
+            b["children"] = [k["id"] for k in kids]
+            b["record"], b["undo_pending"] = False, False
+            if not b["undone_at"] and kids and all(k["undone_at"] for k in kids):
+                b["undone_at"] = max(k["undone_at"] for k in kids)
+            if not b["undone_at"] and not kids:
+                b["undone_at"] = b["at"]  # everything it saved was taken out since
+            b["undoable"] = not b["undone_at"] and any(k["undo_pending"] for k in kids)
+            b["blocked"] = None if b["undone_at"] or b["undoable"] else next(
+                (k["blocked"] for k in kids if k.get("blocked")), "it was changed since")
 
     def _ai_blocker(self, a: dict[str, Any]) -> str | None:
         """Why one AI change can't be undone any more (short, for Changes), or None if it still can."""
@@ -2063,6 +2140,29 @@ class Store:
             n += sum(1 for k, v in (data.get("old") or {}).items() if k not in derived and v not in (None, "", []))
         return n
 
+    def ai_clears_this_hour(self, minutes: int = AI_EDIT_WINDOW_MINUTES) -> dict[str, Any]:
+        """Saved values the AI app emptied in the last hour, across everyone: {"count", "people", "last"}.
+        Undone clears still count, so undoing doesn't reopen the limit for the same AI session."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n, people, last = 0, set(), None
+        for r in self._rows("SELECT candidate_id, data, created_at FROM timeline WHERE kind = ? AND source = ?"
+                            " AND created_at >= ? ORDER BY id", (CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived, new = set(data.get("derived") or ()), data.get("new") or {}
+            hit = sum(1 for k, v in (data.get("old") or {}).items()
+                      if k not in derived and v not in (None, "", []) and new.get(k) in (None, "", []))
+            if hit:
+                n, last = n + hit, r["created_at"]
+                people.add(r["candidate_id"])
+        return {"count": n, "people": len(people), "last": last}
+
+    def ai_clears_left(self, n: int) -> bool:
+        """Whether the AI app may clear n more saved values now (at most AI_CLEAR_CAP an hour, across everyone)."""
+        return n <= 0 or self.ai_clears_this_hour()["count"] + n <= AI_CLEAR_CAP
+
     def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
                       work_history: list[dict[str, Any]] | None = None) -> list[str]:
         """The saved (non-empty) fields this update would clear or replace."""
@@ -2110,6 +2210,8 @@ class Store:
         if a["undone_at"]:
             raise ValueError("That change was already undone.")
         kind, what = a["kind"], a["summary"]
+        if kind == "save_batch":
+            return self._undo_save_batch(a, by, before_delete)
         if kind in ("profile", "pipeline_add", "stage_move"):
             entry = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
             if entry is None:
@@ -2170,6 +2272,33 @@ class Store:
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
                                (now_iso(), note, action_id))
         return what + (f" ({note})" if note else "")
+
+    def _undo_save_batch(self, a: dict[str, Any], by: str, before_delete: Callable[[], Any] | None) -> str:
+        """Undo what one save_candidates call did, newest first: its job adds, its profile updates (put back as
+        they were) and the people it added (taken out again, as Undo does for one person, once nothing else
+        holds them). Anything changed since stays, and the note says so."""
+        done, left = 0, []
+        for cid in sorted(a.get("children") or [], reverse=True):
+            try:
+                kid = self.ai_action(cid)
+            except NotFound:
+                continue  # went with a person taken out just before
+            if kid["undone_at"]:
+                continue
+            try:
+                self.undo_ai_action(cid, by=by, before_delete=before_delete)
+                done += 1
+            except NotFound:
+                continue
+            except ValueError as exc:
+                left.append(f"{kid['summary']} ({str(exc).rstrip('.')})")
+        if not done and left:
+            raise ValueError("Nothing in it could be undone: " + "; ".join(left) + ".")
+        note = (f"left {len(left)} as {'it is' if len(left) == 1 else 'they are'}: " + "; ".join(left)) if left else None
+        with self._write():
+            self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
+                               (now_iso(), note, a["id"]))
+        return a["summary"] + (f" ({note})" if note else "")
 
     def _candidate_touched(self, candidate_id: int) -> str | None:
         """Why an AI-added person can't simply be taken out again: someone else has worked on them since."""
