@@ -319,10 +319,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Make a link that opens a prefilled GitHub issue about a problem with Talent Search.
 
         Opening it sends nothing; the recruiter reviews and submits it on GitHub (they need a GitHub account).
-        Describe the problem only: never include candidate names, emails or notes.
+        Describe the problem only: never include candidate names, emails or notes. Anything that looks
+        like an email, phone number or link is taken out of the report before the link is made.
         """
         return {"url": recipes.issue_url(summary, details, where="MCP / AI app"),
-                "tell_the_user": "Open this link to review and submit the report on GitHub. Nothing is sent until you do."}
+                "tell_the_user": "Open this link to review and submit the report on GitHub. Nothing is sent until you "
+                                 "do. Emails, phone numbers and links were taken out; check for names too."}
 
     # --------------------------------------------------------------- prompts
     @mcp.prompt(title="Plan my day")

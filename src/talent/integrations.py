@@ -1,8 +1,10 @@
 """One-click hookup to AI desktop apps.
 
 The app writes its own entry into Claude Desktop's and Codex's MCP config so a
-recruiter never edits JSON or TOML. Existing config is kept, a backup is saved
-next to it first, and we only ever touch our own `talent-search` entry.
+recruiter never edits JSON or TOML. Existing config is kept, one backup is saved
+next to it first (name.bak, replaced each time), the file keeps its permissions,
+and we only ever touch our own `talent-search` entry. If the app isn't installed
+(its settings folder doesn't exist) we create nothing and say so.
 """
 from __future__ import annotations
 
@@ -10,10 +12,10 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,17 +56,53 @@ def claude_config_path() -> Path:
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
+# Where to look once connected, per app.
+NEXT_STEPS = {
+    "Claude Desktop": "Restart Claude Desktop, then click + and Connectors to see Talent Search.",
+    "Codex": "Restart Codex, then type /mcp to see Talent Search in the list.",
+    "LM Studio": "Restart LM Studio, then open the Program tab on the right of a chat and turn on mcp/talent-search.",
+}
+
+
+def _not_installed(path: Path, app_name: str) -> dict[str, Any] | None:
+    """The app keeps its settings in path.parent; if that folder is missing the app isn't set up here."""
+    if path.parent.is_dir():
+        return None
+    return {"path": str(path), "installed": False, "backup": None,
+            "message": f"{app_name} doesn't seem to be installed on this computer. Install it, open it once, "
+                       "then try again."}
+
+
 def _backup(path: Path) -> Path | None:
+    """One backup next to the file (config.json.bak), replaced each time."""
     if not path.exists():
         return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = path.with_name(f"{path.name}.bak-{stamp}")
-    shutil.copy2(path, dest)
+    dest = path.with_name(f"{path.name}.bak")
+    shutil.copy2(path, dest)  # copy2 keeps the original permissions
     return dest
+
+
+def _write(path: Path, text: str) -> None:
+    """Replace the file in one step, keeping its permissions (new files are owner-only)."""
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    if os.name != "nt":
+        os.chmod(tmp, mode)  # os.open's mode is filtered by the umask
+    tmp.replace(path)
+
+
+def _done(path: Path, backup: Path | None, app_name: str, **extra: Any) -> dict[str, Any]:
+    return {"path": str(path), "installed": True, "backup": str(backup) if backup else None,
+            "next_step": NEXT_STEPS.get(app_name, f"Restart {app_name} to load Talent Search."), **extra}
 
 
 def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]:
     """Add or refresh our entry in an `mcpServers` JSON file, keeping everything else."""
+    if missing := _not_installed(path, app_name):
+        return missing
     config: dict[str, Any] = {}
     if path.exists() and path.read_text(encoding="utf-8").strip():
         try:
@@ -79,11 +117,8 @@ def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]
     servers = config.setdefault("mcpServers", {})
     already = servers.get(SERVER_KEY) == spec.as_json_entry()
     servers[SERVER_KEY] = spec.as_json_entry()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-    return {"path": str(path), "backup": str(backup) if backup else None, "already_connected": already}
+    _write(path, json.dumps(config, indent=2) + "\n")
+    return _done(path, backup, app_name, already_connected=already)
 
 
 def _json_connected(path: Path) -> bool:
@@ -94,7 +129,7 @@ def _json_connected(path: Path) -> bool:
 
 
 def connect_claude(path: Path | None = None, spec: LaunchSpec | None = None) -> dict[str, Any]:
-    return _connect_json(path or claude_config_path(), spec or mcp_launch_spec(), "Claude")
+    return _connect_json(path or claude_config_path(), spec or mcp_launch_spec(), "Claude Desktop")
 
 
 def claude_connected(path: Path | None = None) -> bool:
@@ -155,6 +190,8 @@ def _strip_our_section(text: str) -> str:
 
 def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> dict[str, Any]:
     path = path or codex_config_path()
+    if missing := _not_installed(path, "Codex"):
+        return missing
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     if original.strip():
         try:
@@ -165,11 +202,8 @@ def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> d
     base = _strip_our_section(original).rstrip()
     text = (base + "\n\n" if base else "") + codex_snippet(spec)
     tomllib.loads(text)  # never write something Codex can't read
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-    return {"path": str(path), "backup": str(backup) if backup else None}
+    _write(path, text)
+    return _done(path, backup, "Codex")
 
 
 def codex_connected(path: Path | None = None) -> bool:

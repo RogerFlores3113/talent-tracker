@@ -1,8 +1,10 @@
 """The app window: a local web UI on 127.0.0.1 opened in the user's browser."""
 from __future__ import annotations
 
+import os
 import secrets
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,13 +18,16 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, importers, integrations, recipes
-from .paths import data_dir, db_path, resource_dir
+from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     Store, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
+UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
 TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
@@ -103,22 +108,29 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     env.filters["claude_link"] = recipes.claude_link
     env.globals["version"] = __version__
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
-    imports_dir = Path(tempfile.gettempdir()) / "talent-search-imports"
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
         # The server only listens on 127.0.0.1, but a web page in the same browser
         # could still try to reach it. Block DNS-rebinding (foreign Host header)
-        # and cross-site form posts (foreign Origin) before any handler runs.
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-        if host not in LOCAL_HOSTS:
+        # and cross-site requests (CSRF) before any handler runs.
+        host_header = (request.headers.get("host") or "").strip().lower()
+        if _hostname(host_header) not in LOCAL_HOSTS:
             return PlainTextResponse("Forbidden", status_code=403)
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        fetch_site = (request.headers.get("sec-fetch-site") or "").lower()
+        if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
-            if origin and origin != "null" and urlsplit(origin).hostname not in LOCAL_HOSTS:
+            if origin is not None:
+                # Sandboxed frames, file:// pages and some redirects send "null": never ours.
+                # Otherwise the origin must be exactly this server, port included.
+                if origin.strip().lower() == "null" or urlsplit(origin.strip().lower()).netloc != host_header:
+                    return PlainTextResponse("Forbidden", status_code=403)
+            elif fetch_site and fetch_site not in ("same-origin", "none"):
                 return PlainTextResponse("Forbidden", status_code=403)
-            if request.headers.get("sec-fetch-site") == "cross-site":
-                return PlainTextResponse("Forbidden", status_code=403)
+            # With neither header (curl, scripts, very old browsers) we allow it: browsers
+            # always send at least one of them on a cross-site request, so this can't be CSRF.
+        elif request.url.path in DOWNLOADS and fetch_site in ("cross-site", "same-site"):
+            return PlainTextResponse("Forbidden", status_code=403)
         response = await call_next(request)
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -313,9 +325,11 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             header, rows = importers.read_csv(importers.decode(data))
         except ValueError as exc:
             return page(request, "import.html", step="upload", error=str(exc))
-        imports_dir.mkdir(parents=True, exist_ok=True)
+        _sweep_uploads()
         token = secrets.token_hex(8)
-        (imports_dir / f"{token}.csv").write_bytes(data)
+        fd = os.open(imports_dir() / f"{token}.csv", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         mapping = importers.guess_mapping(header)
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, filename=upload.filename,
@@ -325,7 +339,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     async def import_run(request: Request):
         form = await request.form()
         token = str(form.get("token") or "")
-        path = imports_dir / f"{token}.csv"
+        _sweep_uploads()
+        path = imports_dir() / f"{token}.csv"
         if not token.isalnum() or not path.exists():
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
         header, rows = importers.read_csv(importers.decode(path.read_bytes()))
@@ -335,9 +350,24 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5],
                         total=len(rows), mapping=mapping, targets=importers.IMPORT_TARGETS,
                         error="Pick which column holds the name.", has_name=False)
-        result = importers.import_rows(store, header, rows, mapping, source=str(form.get("source") or "CSV import"))
-        path.unlink(missing_ok=True)  # our own temporary copy of the upload
+        try:
+            result = importers.import_rows(store, header, rows, mapping,
+                                           source=str(form.get("source") or "CSV import"))
+        except ValueError as exc:  # the backup before importing failed, so nothing changed
+            return page(request, "import.html", step="upload", error=str(exc))
+        finally:
+            path.unlink(missing_ok=True)  # our own private copy of the upload
         return page(request, "import.html", step="done", result=result)
+
+    def _sweep_uploads() -> None:
+        """Uploads nobody finished importing are deleted after an hour."""
+        cutoff = time.time() - UPLOAD_TTL
+        for f in imports_dir().glob("*.csv"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
 
     @app.get("/export.csv")
     def export_csv():
@@ -348,7 +378,9 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     @app.get("/backup")
     def backup():
         stamp = datetime.now().strftime("%Y-%m-%d")
-        tmp = Path(tempfile.mkstemp(suffix=".db")[1])
+        fd, name = tempfile.mkstemp(prefix="download-", suffix=".db", dir=backups_dir())  # 0600, private folder
+        os.close(fd)
+        tmp = Path(name)
         store.backup_to(tmp)
         return FileResponse(tmp, filename=f"talent-search-backup-{stamp}.db", media_type="application/octet-stream",
                             background=BackgroundTask(lambda: tmp.unlink(missing_ok=True)))
@@ -620,6 +652,13 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
                     message=detail if detail and detail != "Not Found" else "That page doesn't exist.")
 
     return app
+
+
+def _hostname(host_header: str) -> str:
+    """'127.0.0.1:8765' -> '127.0.0.1', '[::1]:8765' -> '[::1]', 'localhost' -> 'localhost'."""
+    if host_header.startswith("["):
+        return host_header.split("]", 1)[0] + "]"
+    return host_header.rsplit(":", 1)[0] if host_header.count(":") == 1 else host_header
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

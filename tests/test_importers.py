@@ -8,14 +8,14 @@ from talent import importers, recipes
 def test_guess_mapping_handles_common_headers():
     header = ["First Name", "Last Name", "E-mail", "LinkedIn Profile URL", "Job Title", "Company", "City", "Skills", "Notes"]
     assert importers.guess_mapping(header) == [
-        "first_name", "last_name", "email", "linkedin_url", "current_title", "current_company", "location", "tags", "about"]
+        "first_name", "last_name", "email", "linkedin_url", "current_title", "current_company", "location", "tags", "note"]
 
 
 def test_import_merges_and_reports_skips(store):
     text = "Name,Email,Skills\nAna Diaz,ana@x.com,go; rust\n,nobody@x.com,\nAna Diaz,ANA@x.com,python\n"
     header, rows = importers.read_csv(text)
     r = importers.import_rows(store, header, rows, importers.guess_mapping(header))
-    assert r == {"added": 1, "updated": 1, "skipped": ["Row 3: no name"]}
+    assert (r["added"], r["updated"], r["skipped"], r["skipped_rows"]) == (1, 1, ["Row 3: no name"], 1)
     ana = store.search_candidates("ana").hits[0].candidate
     assert ana["tags"] == ["go", "rust", "python"] and ana["source"] == "CSV import"
 
