@@ -13,6 +13,9 @@ from .store import AI_OVERWRITE_CAP, Store
 PEOPLE_CAP = 40  # new people the AI app may save in an hour (save_candidate(s), and Keep on the Shortlist card)
 PASS_CAP = 100  # people it may pass on in an hour (Pass on the Shortlist card)
 PRESS_CAP = 30  # Keep and Pass presses on the Shortlist card in an hour, whatever their size
+PROPOSE_CAP = 50  # people the AI app may put on Shortlists in an hour
+JOB_CAP = 10  # jobs it may create in an hour
+CLIENT_CAP = 10  # clients it may create in an hour
 WINDOW_MINUTES = 60
 PEOPLE_KEY = "ai_people_cap"  # optional settings row that replaces PEOPLE_CAP
 
@@ -51,6 +54,38 @@ def presses_this_hour(store: Store) -> int:
                       (_since(),))["n"]
 
 
+def proposed_this_hour(store: Store) -> int:
+    n = 0
+    for r in store._rows("SELECT new_data FROM ai_actions WHERE at >= ? AND kind = 'prospects_proposed'", (_since(),)):
+        try:
+            n += len((json.loads(r["new_data"] or "{}") or {}).get("prospect_ids") or [])
+        except (ValueError, TypeError, AttributeError):
+            n += 1
+    return n
+
+
+def _kind_this_hour(store: Store, kind: str) -> int:
+    return store._row("SELECT count(*) AS n FROM ai_actions WHERE at >= ? AND kind = ?", (_since(), kind))["n"]
+
+
+def proposed_left(store: Store) -> int:
+    return max(0, PROPOSE_CAP - proposed_this_hour(store))
+
+
+def jobs_left(store: Store) -> int:
+    return max(0, JOB_CAP - _kind_this_hour(store, "job_created"))
+
+
+def clients_left(store: Store) -> int:
+    return max(0, CLIENT_CAP - _kind_this_hour(store, "client_create"))
+
+
+def limit_text(what: str, left: int) -> str:
+    """what: "propose 50 people for Shortlists", "create 10 jobs"."""
+    return (f"Nothing added. Your AI app can {what} an hour and has {left} left now. Add the rest in Talent "
+            "Search, or try again later.")
+
+
 def people_left(store: Store) -> int:
     return max(0, people_cap(store) - people_this_hour(store))
 
@@ -70,4 +105,7 @@ def allowance(store: Store) -> dict[str, Any]:
     return {"people_left": people_left(store), "people_cap": people_cap(store),
             "passes_left": passes_left(store), "passes_cap": PASS_CAP,
             "presses_left": max(0, PRESS_CAP - presses_this_hour(store)), "presses_cap": PRESS_CAP,
+            "proposed_left": proposed_left(store), "proposed_cap": PROPOSE_CAP,
+            "jobs_left": jobs_left(store), "jobs_cap": JOB_CAP,
+            "clients_left": clients_left(store), "clients_cap": CLIENT_CAP,
             "overwrites_left": max(0, AI_OVERWRITE_CAP - over), "overwrites_cap": AI_OVERWRITE_CAP}

@@ -302,15 +302,27 @@ _APP_WORDS = frozenset(
     "clients client offers offer decide chase outreach import export claude cautious mode roll back sessions session ai "
     "app csv linkedin github mcp windows mac macos linux python save keep pass sourced contacted screening onsite "
     "hired rejected withdrawn the this that when after before not will would could should error problem report "
-    "nothing everything something what why how".split())
+    "nothing everything something what why how area".split())
+
+
+# Plain words that start a sentence in a report, so they survive the capital-letter check below.
+_COMMON_WORDS = frozenset(
+    "a an and as at be but by can cannot could did do does doesn't don't for from has have i if in is isn't it its no "
+    "of on one only or so some then there they to too two three was were with without won't wasn't yes "
+    "adding added clicking clicked fails failed failing loading opening saving searching showing stuck tried trying "
+    "using wrong slow empty missing broken crash crashes button page list view tool tools results result "
+    "monday tuesday wednesday thursday friday saturday sunday".split())
 
 
 def scrub_strict(text: str) -> str:
-    """Also take out street addresses and capitalised name pairs ("Jordan Smithers") that aren't words of the app.
-    For reports the AI app writes, which can name people the database doesn't know."""
+    """Also take out street addresses, capitalised name pairs ("Jordan Smithers") and any other capitalised word
+    (a company like "Globex") that isn't a word of the app or a plain word. For reports the AI app writes, which
+    can name people and companies the database doesn't know."""
     text = _STREET.sub("[address removed]", text or "")
-    return _PAIR.sub(lambda m: m.group(0) if all(w.lower() in _APP_WORDS for w in m.group(0).split())
+    text = _PAIR.sub(lambda m: m.group(0) if all(w.lower() in _APP_WORDS for w in m.group(0).split())
                      else "[name removed]", text)
+    keep = _APP_WORDS | _COMMON_WORDS
+    return re.sub(r"\b[A-Z][A-Za-z'’]*\b", lambda m: m.group(0) if m.group(0).lower() in keep else "[name removed]", text)
 
 
 REPORT_SUMMARY_LIMIT = 200
