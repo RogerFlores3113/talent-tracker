@@ -171,13 +171,17 @@ def test_keep_all_pass_all_put_back_badge_and_today(store):
     assert [p["name"] for p in shortlist.listed(store, job["id"])] == ["Cy Park"]
 
 
-def test_the_ai_can_only_propose(store):
+def test_the_ai_can_only_propose(store, monkeypatch):
+    from talent import mcp_server
+    assert "keep_prospect" not in {t.name for t in anyio.run(build_server(store).list_tools)}  # c6 A: plain client
+    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: True)
     tools = {t.name: t for t in anyio.run(build_server(store).list_tools)}
     assert {"propose_candidates", "list_prospects", "save_candidates"} <= set(tools)
     # Cycle 5: Keep and Pass exist only for the Shortlist card's buttons, hidden from the model (MCP Apps
-    # visibility "app") and refused without the card's key (tests/test_c5_e.py).
+    # visibility "app") and refused without the card's key (tests/test_c5_e.py). Cycle 6 A: listed only to hosts
+    # that say they show views, with the card's own key tool.
     app_only = [n for n in tools if (tools[n].meta or {}).get("ui", {}).get("visibility") == ["app"]]
-    assert sorted(app_only) == ["keep_prospect", "pass_prospect"]
+    assert sorted(app_only) == ["keep_prospect", "pass_prospect", "shortlist_card_key"]
     assert not [n for n in tools if n not in app_only and any(w in n for w in ("keep", "pass", "delete", "remove"))]
     assert tools["propose_candidates"].meta["ui"]["resourceUri"].endswith("shortlist.html")
     assert "propose_candidates" in INSTRUCTIONS and "only when the recruiter asks you to save" in INSTRUCTIONS

@@ -19,6 +19,7 @@ import sqlite3
 import threading
 import unicodedata
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -618,6 +619,7 @@ AI_ACTION_KINDS = {
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
     "offer_terms": "Recorded an offer", "offer_answer": "Recorded an answer to an offer",
+    "card_keep": "Kept someone from a Shortlist card", "card_pass": "Passed on someone on a Shortlist card",
 }
 # AI interview changes that Undo puts back by restoring the interview's time and data as they were (an
 # outcome the AI app recorded too, so a planted "Not passed" can be taken back, and the feedback under it).
@@ -660,6 +662,12 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
         return renamed + int(moved)
     return 1
 AI_SOURCE = "AI app"
+# The AI session (one `talent mcp` run) a tool call runs in, set around each call, so every AI action it logs
+# lands in that session's ledger (see sessions.py).
+AI_SESSION: ContextVar[str | None] = ContextVar("talent_ai_session", default=None)
+# True while a change the recruiter kept on Review is being made: its AI actions are marked confirmed, so
+# Undo all AI leaves them alone unless asked.
+AI_KEPT: ContextVar[bool] = ContextVar("talent_ai_kept", default=False)
 
 
 def now_iso() -> str:
@@ -1587,6 +1595,10 @@ def _ai_summary(r: dict[str, Any]) -> str:
         body = body[:80] + ("..." if len(body) > 80 else "")
         return (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'on' if what == 'note' else 'with'} {name}"
                 + (f": {body}" if body else ""))
+    if kind == "card_keep":
+        return f"Kept {quoted(new.get('name'))} from the Shortlist card in Claude, for {job}"
+    if kind == "card_pass":
+        return f"Passed on {quoted(new.get('name'))} on the Shortlist card in Claude, for {job}"
     return AI_ACTION_KINDS.get(kind, "A change")
 
 
@@ -1641,6 +1653,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
+    if kind in ("card_keep", "card_pass"):
+        return ((kind, r.get("target_id")),)
     return (("todo", r.get("target_id")),)
 
 
@@ -2264,11 +2278,16 @@ class Store:
     def _log_ai(self, kind: str, *, candidate_id: int | None = None, job_id: int | None = None,
                 target_id: int | None = None, body: str | None = None, old: Any = None, new: Any = None) -> int:
         """Record one write the AI app made, with what it replaced. Call inside a transaction."""
-        return self._conn.execute(
-            "INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, body, old_data, new_data, at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ts = now_iso()
+        aid = self._conn.execute(
+            "INSERT INTO ai_actions(kind, candidate_id, job_id, target_id, body, old_data, new_data, at, confirmed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (kind, candidate_id, job_id, target_id, body, None if old is None else json.dumps(old),
-             None if new is None else json.dumps(new), now_iso())).lastrowid
+             None if new is None else json.dumps(new), ts, ts if AI_KEPT.get() else None)).lastrowid
+        if AI_SESSION.get():
+            from .sessions import note_action  # here: sessions imports this module
+            note_action(self, AI_SESSION.get(), aid)
+        return aid
 
     def _ai_undone(self, target_id: int, kinds: tuple[str, ...], note: str | None = None) -> None:
         """Mark the AI action behind a timeline entry as undone (it was undone from the timeline). In a transaction."""
@@ -2397,6 +2416,16 @@ class Store:
                 if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
                     return "that interview was changed again since"
                 return None
+            if kind == "card_keep":
+                raw = self._row("SELECT value FROM settings WHERE key = ?", (f"shortlist_keep:{a['target_id']}",))
+                if raw is None:
+                    return "it is gone"
+                return "that keep was undone already" if (json.loads(raw["value"]) or {}).get("undone_at") else None
+            if kind == "card_pass":
+                p = self._row("SELECT status FROM prospects WHERE id = ?", (a["target_id"],))
+                if p is None:
+                    return "it is gone"
+                return None if p["status"] == "passed" else "they were put back or kept since"
         except (NotFound, ValueError):
             return "it is gone"
         return None
@@ -2698,6 +2727,18 @@ class Store:
                 raise ValueError(reason[:1].upper() + reason[1:] + ".")
             self.strike_entry(a["target_id"], by=by)
             return what + " (struck out, kept on the timeline)"
+        if kind in ("card_keep", "card_pass"):
+            from . import shortlist  # here: shortlist imports this module
+            reason = self._ai_blocker(a)
+            if reason:
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
+            if kind == "card_keep":
+                shortlist.undo_keep(self, a["target_id"], before_delete=before_delete)
+            else:
+                shortlist.put_back(self, a["job_id"], a["target_id"])
+            with self._write():
+                self._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), action_id))
+            return what
         old, new = a["old_data"] or {}, a["new_data"] or {}
         with self._write():
             note = None

@@ -18,6 +18,7 @@
   {% if p.rep.loose_interviews %}<p class="fine no-print recruiter-only" role="note">For you only: an interview logged with no job stays out of this update. Pick the job: {% for x in p.rep.loose_interviews %}<a href="{{ x.href }}">{{ x.name }}</a>{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
   <pre class="code wrap" id="{{ tid }}">{{ p.text }}</pre>
   {% if p.manager is none and p.email %}{% set ck = p.key %}{% include "_ai_contacts.html" %}{% endif %}
+  {% if p.email and p.rep %}{% set jx_ids = p.rep.jobs | map(attribute='id') | list %}{% include "_ai_job_email.html" %}{% endif %}
   <div class="actions-inline no-print">
     {% if p.email %}{% set e = p.email %}<a class="btn small" href="{{ e.href }}">Email {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">Too long to fill in by link: the email opens empty, so copy the update first and paste it in.</span>{% elif e.trimmed %} <span class="fine">The email gets a shorter version to fit the link; Copy gives the full one.</span>{% endif %}
     {% else %}<span class="fine">No email saved{% if p.manager is none %}. Add the contacts on <a href="/clients/{{ p.slug }}#details">its page</a>{% endif %}.</span>{% endif %}
