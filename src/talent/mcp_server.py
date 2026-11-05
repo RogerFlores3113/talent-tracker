@@ -467,6 +467,19 @@ def _stage_nudge(store: Store, cand: dict[str, Any], job_id: int, entry: dict[st
                                                "stage": target["name"]}}
 
 
+def _reply_nudge(store: Store, cand: dict[str, Any], job_id: int) -> dict[str, Any] | None:
+    """After a reply is logged for someone still in Sourced or Contacted: offer the move to the job's next stage
+    (Screening, say) as {"nudge", "suggested_step"}. The AI asks the recruiter; nothing moves by itself."""
+    move = outreach.reply_stage(store, cand["id"], job_id)
+    if not move:
+        return None
+    nudge = (f"{quoted(cand['name'])} is still in {move['from']} on {_job_name(store.get_job(job_id))}. Ask the "
+             f"recruiter whether to move them to {move['to']}; if yes, call move_stage(candidate_id={cand['id']}, "
+             f"job_id={job_id}, stage=\"{move['to']}\").")
+    return {"nudge": nudge, "suggested_step": {"tool": "move_stage", "candidate_id": cand["id"], "job_id": job_id,
+                                               "stage": move["to"]}}
+
+
 def _booked_left_out(stages: list[dict[str, Any]], left_out: list[str]) -> dict[str, Any] | None:
     """People with an interview booked who sit in a stage the status update leaves out (Sourced, say), so
     the recruiter knows the update hides them: {"text": "1 in Sourced has an interview booked: ...", "people"}."""
@@ -1081,10 +1094,26 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        and outreach.sequence(store, job_id) else "")
                     + (f"\nIts interview id is {entry['id']}; update_interview takes it to move, cancel or "
                        "record how it went." if what == "interview" else ""))
-        nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None and not moved and not quiet else None
+        if reply and job_id is not None:  # a reply is when people move on: offer it, never move them
+            nudge = _reply_nudge(store, cand, job_id)
+        else:
+            nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None and not moved and not quiet else None
         if nudge:
             out.update(nudge)
         return sentence, out, [a for a in acts if a]
+
+    def _logged_already(ids: list[int], what_kind: str, reply: bool, when: str | None,
+                        job_id: int | None) -> set[int]:
+        """For a batch of outreach dated today: the people who already have that outreach logged today on the
+        job, so a repeated batch says Already logged instead of logging it again."""
+        if reply or what_kind not in outreach.OUTREACH_KINDS or review.cautious(store):
+            return set()
+        if when and str(when).strip():
+            day = as_local(to_dt(parse_when(when))).date()
+            if day != as_local(datetime.now(timezone.utc)).date():
+                return set()
+        return {cid for cid in ids if outreach.logged_kind_today(
+            store, cid, what_kind, job_id if job_id is not None else outreach.job_for(store, cid))}
 
     def _log_many(ids: list[int], what_kind: str, reply: bool, summary: str | None, when: str | None,
                   job_id: int | None) -> CallToolResult:
@@ -1101,8 +1130,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         for cid in ids:
             store.get_candidate(cid)  # "No candidate with id 7", before anything is logged
             _check_note_cap(store, cid, "No change made")
+        already = _logged_already(ids, what_kind, reply, when, job_id)
         done, acts, moved, waiting = [], [], [], []
         for cid in ids:
+            if cid in already:
+                continue
             sentence, out, made = _log_one(cid, what_kind, reply, summary, when, job_id, None, quiet=True)
             name = store.get_candidate(cid)["name"]
             row = {"candidate_id": cid, "name": name, **{k: out[k] for k in ("logged", "moved", "warning",
@@ -1115,23 +1147,34 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 waiting.append(row)
         n, what = len(done), "reply" if reply else what_kind
         names = ", ".join(quoted(r["name"]) for r in done[:3]) + (f" and {n - 3} more" if n > 3 else "")
+        skipped = [{"candidate_id": cid, "name": store.get_candidate(cid)["name"], "already": True}
+                   for cid in ids if cid in already]
+        same = (", ".join(quoted(r["name"]) for r in skipped[:3])
+                + (f" and {len(skipped) - 3} more" if len(skipped) > 3 else ""))
+        if not done:  # the same batch again: say so, log nothing twice
+            return _plain(f"Already logged {'an' if what[0] in 'aeiou' else 'a'} {what} with {len(skipped)} people "
+                          f"today ({same}), so nothing new was logged.",
+                          {"data_note": DATA_NOTE, "people": skipped, "moved": 0, "already": len(skipped)})
         if waiting:
             sentence = (f"Nothing logged yet for {n} people ({names}): Cautious mode is on, so each {what} waits for "
                         "the recruiter on Review.")
             return _said(sentence, {"data_note": DATA_NOTE, "people": done, "pending_review": len(waiting)})
         stages = sorted({r["moved"]["to"] for r in moved})
-        text = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} people "
+        who = "person" if n == 1 else "people"
+        text = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} {who} "
                 f"({names}) {_when_words(done[0]['logged']['at']) if done[0].get('logged') else ''}".rstrip()
                 + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "") + "."
-                + (f" Moved {len(moved)} to {' and '.join(stages)}." if moved else ""))
-        out: dict[str, Any] = {"data_note": DATA_NOTE, "people": done, "moved": len(moved)}
+                + (f" Moved {len(moved)} to {' and '.join(stages)}." if moved else "")
+                + (f" Already logged today for {len(skipped)}, so not again: {same}." if skipped else ""))
+        out: dict[str, Any] = {"data_note": DATA_NOTE, "people": done + skipped, "moved": len(moved),
+                               **({"already": len(skipped)} if skipped else {})}
         if acts:
             with store._write():
                 batch = store._log_ai("outreach_batch", job_id=job_id, body=(
-                    f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} people"
+                    f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {'from' if reply else 'with'} {n} {who}"
                     + (f" and moved {len(moved)} to {' and '.join(stages)}" if moved else "")
                     + (f" in {_job_name(store.get_job(job_id))}" if job_id is not None else "")),
-                    new={"action_ids": acts, "candidate_ids": ids})
+                    new={"action_ids": acts, "candidate_ids": [r["candidate_id"] for r in done]})
             out["batch_id"] = batch
             text += " The recruiter can undo the whole batch on Changes."
         warned = [r for r in done if r.get("warning")]
@@ -1898,7 +1941,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     if n else "") + f" on {_job_name(job)}." + (" You can undo it in Talent Search, under Changes."
                                                                if n else ""))
         if done["left"]:
-            sentence += f" {len(done['left'])} need your choice first: {', '.join(quoted(x) for x in done['left'])}."
+            n_left = len(done["left"])
+            sentence += (f" {n_left} {'needs' if n_left == 1 else 'need'} your choice first: "
+                         f"{', '.join(quoted(x) for x in done['left'])}.")
         if done["held"]:
             sentence += f" Left {len(done['held'])} whose name reads like a sentence; keep them one at a time."
         warn = [k["elsewhere"] for k in done["kept"] if k.get("elsewhere")]
@@ -2428,7 +2473,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        if i["kind"] == "interview_result" and i.get("next_stage") else "")
                     + (" Mixed: help the recruiter weigh it with compare_finalists."
                        if i["kind"] == "interview_result" and i.get("verdict") == "mixed" else "")
-                    + (" list_followups has the text to paste." if i["kind"] == "followup" else ""))
+                    + (" list_followups has the text to paste." if i["kind"] == "followup" else "")
+                    + (f" They replied: ask the recruiter whether to move them to {i['next_stage']} (move_stage)."
+                       if i["kind"] == "replied" and i.get("next_stage") else ""))
 
         if not items and not later:
             text = "Nothing needs attention right now."

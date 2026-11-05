@@ -99,6 +99,18 @@ def logged_today(store: Store, candidate_id: int, now: datetime | None = None) -
     return any(as_local(to_dt(r["at"])).date() == today for r in rows)
 
 
+def logged_kind_today(store: Store, candidate_id: int, kind: str, job_id: int | None,
+                      now: datetime | None = None) -> bool:
+    """Whether this kind of outreach (not a reply) was already logged for them today on this job (on the
+    recruiter's clock), so a repeated batch doesn't log it twice."""
+    now = now or datetime.now(timezone.utc)
+    today = as_local(now).date()
+    since = (now - timedelta(days=2)).replace(microsecond=0).isoformat()
+    rows = store._rows(f"SELECT t.at, t.data FROM timeline t WHERE t.candidate_id = ? AND t.kind = ? AND t.at >= ?"
+                       f" AND t.job_id IS ? AND {NOT_STRUCK}", (candidate_id, kind, since, job_id))
+    return any(as_local(to_dt(r["at"])).date() == today and not _json(r["data"]).get("reply") for r in rows)
+
+
 def mark_reply(store: Store, entry_id: int) -> None:
     """Mark a logged message as their reply (it ends a follow-up sequence)."""
     with store._write():
@@ -305,7 +317,7 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
                           "title": f"{p['label']} to {p['name']}",
                           "detail": f"{p['job']} · step {p['step']} of {p['steps']} · {due_text(p, now)}",
                           "draft": p["draft"], "overdue": p["overdue"], "href": f"/jobs/{jid}#followups"})
-    return items
+    return items + reply_items(store, now)
 
 
 def summary_line(p: dict[str, Any], now: datetime | None = None) -> str:
@@ -315,6 +327,79 @@ def summary_line(p: dict[str, Any], now: datetime | None = None) -> str:
     word = {"replied": "replied", "moved_on": f"moved on to {p['stage']}",
             "finished": f"no reply after all {p['steps']} steps"}[p["status"]]
     return f"{quoted(p['name'])}: {word}"
+
+
+def copy_sequence(store: Store, job_id: int, from_job_id: int) -> list[dict[str, Any]]:
+    """Use another job's follow-up steps on this job (they replace any it had). {job} and {company} in the text
+    fill in with this job's own title and client."""
+    if from_job_id == job_id:
+        raise ValueError("Pick another job to copy the steps from.")
+    store.get_job(job_id)
+    src = sequence(store, from_job_id)
+    if not src:
+        raise ValueError("That job has no follow-up steps to copy.")
+    return save_sequence(store, job_id, [dict(s) for s in src["steps"]])
+
+
+def sequence_jobs(store: Store, exclude: int | None = None) -> list[dict[str, Any]]:
+    """Jobs with a follow-up sequence (open ones first), to copy steps from: [{"id", "name", "steps"}]."""
+    out = []
+    for r in store._rows(f"SELECT key FROM settings WHERE key LIKE '{SEQ_PREFIX}%'"):
+        tail = r["key"][len(SEQ_PREFIX):]
+        if not tail.isdigit() or int(tail) == exclude:
+            continue
+        job = store._row("SELECT id, title, company, status FROM jobs WHERE id = ?", (int(tail),))
+        seq = sequence(store, int(tail))
+        if job and seq:
+            out.append({"id": job["id"], "name": job_label(job["title"], job.get("company")),
+                        "steps": len(seq["steps"]), "open": job["status"] == "open"})
+    out.sort(key=lambda j: (not j["open"], j["name"].lower(), j["id"]))
+    return out
+
+
+def reply_stage(store: Store, candidate_id: int, job_id: int) -> dict[str, Any] | None:
+    """After someone replied: {"from", "to"} when they still sit in the job's first or Contacted stage and the
+    job has an open stage after Contacted (Screening, say). The recruiter decides; nothing moves by itself."""
+    job = store._row("SELECT status FROM jobs WHERE id = ?", (job_id,))
+    app = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    if not job or job["status"] != "open" or not app:
+        return None
+    stages = store.job_stages(job_id)
+    i = _at(stages, app["stage"])
+    contact = contact_stage(store, job_id)
+    reach = _at(stages, contact["name"]) if contact else None
+    if i is None or reach is None or stages[i]["outcome"] != "open" or i > reach:
+        return None
+    nxt = next((s for s in stages[reach + 1:] if s["outcome"] == "open"), None)
+    return {"from": app["stage"], "to": nxt["name"]} if nxt else None
+
+
+REPLY_DAYS = 14  # a reply offers its stage move on Today for this long
+
+
+def reply_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Today rows: people who replied on a job in the last two weeks and still sit in Sourced or Contacted there,
+    each with a "Move to Screening" button (next_stage)."""
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(days=REPLY_DAYS)).replace(microsecond=0).isoformat()
+    rows = store._rows(
+        f"""SELECT t.candidate_id, t.job_id, max(t.at) AS at, c.name, j.title, j.company FROM timeline t
+            JOIN candidates c ON c.id = t.candidate_id JOIN jobs j ON j.id = t.job_id
+            WHERE t.kind = 'message' AND t.job_id IS NOT NULL AND t.at >= ? AND t.at <= ? AND {NOT_STRUCK}
+              AND json_valid(t.data) AND json_extract(t.data, '$.reply') = 1
+            GROUP BY t.candidate_id, t.job_id ORDER BY max(t.at) DESC""",
+        (since, now.replace(microsecond=0).isoformat()))
+    items = []
+    for r in rows:
+        move = reply_stage(store, r["candidate_id"], r["job_id"])
+        if not move:
+            continue
+        items.append({"key": f"replied:{r['candidate_id']}:{r['job_id']}", "kind": "replied", "rank": 1,
+                      "when": r["at"], "candidate_id": r["candidate_id"], "job_id": r["job_id"],
+                      "title": f"{r['name']} replied. Move them to {move['to']}?",
+                      "detail": f"{job_label(r['title'], r.get('company'))} · still in {move['from']}",
+                      "stage": move["from"], "next_stage": move["to"], "href": f"/candidates/{r['candidate_id']}"})
+    return items
 
 
 # ---------------------------------------------------------- other clients
@@ -373,6 +458,6 @@ def board_badges(store: Store, job_id: int) -> dict[int, tuple[str, str]]:
 
 
 __all__ = ["MOVES_KEY", "OUTREACH_KINDS", "REPLY_KIND", "DEFAULT_STEPS", "advance", "board_badges", "clean_steps",
-           "contact_stage", "draft", "due", "job_for", "logged_today", "mark_reply", "other_clients",
+           "contact_stage", "copy_sequence", "draft", "logged_kind_today", "reply_items", "reply_stage", "sequence_jobs", "due", "job_for", "logged_today", "mark_reply", "other_clients",
            "other_clients_text", "progress", "save_sequence", "sequence", "steps_from_form", "summary_line",
            "today_items"]

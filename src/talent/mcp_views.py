@@ -147,7 +147,7 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",interview_result:"Interview result",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist",followup:"Follow-up due",update_due:"Update due",client_chase:"Client feedback",feedback_owed:"Feedback owed",offer:"Offer",openings:"Openings"};
+const LABEL={interview:"Interview",interview_out:"Interview still on",interview_outcome:"How did it go",interview_result:"Interview result",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist",followup:"Follow-up due",replied:"Replied",update_due:"Update due",client_chase:"Client feedback",feedback_owed:"Feedback owed",offer:"Offer",openings:"Openings"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
@@ -190,13 +190,13 @@ function bulk(tool,ids,args,status){
   for(const p of d.prospects||[])swap(p);status.textContent=d.message||said(r);refreshBulk()});
 }
 function refreshBulk(){if(!bulkBox)return;const n=waitingIds(false).length,k=waitingIds(true).length;
- bulkBox.style.display=n>1?"":"none";const sel=bulkBox.querySelector(".keep-sel");if(sel){sel.textContent=k?"Keep selected ("+k+")":"Keep selected";sel.disabled=!k}}
+ bulkBox.style.display=n>1?"":"none";const all=bulkBox.querySelector(".keep-all");if(all)all.textContent="Keep all ("+n+")";const sel=bulkBox.querySelector(".keep-sel");if(sel){sel.textContent=k?"Keep selected ("+k+")":"Keep selected";sel.disabled=!k}}
 function bulkBar(d){
  const status=el("div",{class:"status muted",role:"status"});
  const box=el("div",{class:"card"});
  const why=el("input",{class:"reason",type:"text",maxlength:"300",placeholder:"Reason for passing on all (optional)","aria-label":"Why you're passing on all"});
  const row=el("div",{class:"acts"},
-  el("button",{class:"btn primary",onclick:()=>bulk("keep_prospects",waitingIds(false),stageArg(),status)},"Keep all"),
+  el("button",{class:"btn primary keep-all",onclick:()=>bulk("keep_prospects",waitingIds(false),stageArg(),status)},"Keep all"),
   el("button",{class:"btn keep-sel",onclick:()=>bulk("keep_prospects",waitingIds(true),stageArg(),status)},"Keep selected"),
   el("button",{class:"btn",onclick:()=>{row.replaceWith(passRow);why.focus()}},"Pass all"));
  const passRow=el("div",{class:"acts"},why,

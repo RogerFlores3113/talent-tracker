@@ -1,6 +1,6 @@
 // Talent Search app window. All page scripts live here so the Content-Security-Policy
 // can forbid inline scripts. Pages opt in with data- attributes:
-//   data-confirm="question"   on a form: ask before submitting
+//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form)
 //   data-autosubmit           on a select: submit its form when it changes
 //   data-recipe="run|copy"    on a button with data-prompt (and optional data-fill)
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
@@ -106,10 +106,16 @@
     return q + "\n\nYou can undo it all under Changes.";
   }
 
+  // A confirm can name the stage picked in the form's stage menu: "{stage}" reads as the chosen stage.
+  function confirmText(form) {
+    const pick = form.querySelector("select[name=stage]");
+    return form.dataset.confirm.split("{stage}").join(pick && pick.value ? pick.value : "the first stage");
+  }
+
   document.addEventListener("submit", e => {
     const form = e.target;
     if (form.dataset && form.dataset.decide !== undefined && !window.confirm(decideQuestion(form))) { e.preventDefault(); return; }
-    if (form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) { e.preventDefault(); return; }
+    if (form.dataset && form.dataset.confirm && !window.confirm(confirmText(form))) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.busy) {
       // A big import takes a while: say so, and don't let a second click send it again.
       if (form.dataset.sent) { e.preventDefault(); return; }

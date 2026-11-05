@@ -160,7 +160,7 @@ def test_keep_all_pass_all_put_back_badge_and_today(store):
     page = c.get(f"/jobs/{job['id']}/shortlist").text
     assert 'data-confirm="Keep all 3' in page and 'data-confirm="Pass on all 3?' in page
     r = c.post(f"/jobs/{job['id']}/shortlist/keep-all", follow_redirects=False)
-    assert flash_of(r) == ("Kept 2 people and added them to Sourced. You can undo this on Changes. 1 need your "
+    assert flash_of(r) == ("Kept 2 people and added them to Sourced. You can undo this on Changes. 1 needs your "
                            "choice first: Cy Park.")
     r = c.post(f"/jobs/{job['id']}/shortlist/pass-all", data={"reason": "Not now"}, follow_redirects=False)
     assert "Passed on 1 person" in flash_of(r)

@@ -658,6 +658,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 logged = True
                 if reply:
                     outreach.mark_reply(store, entry["id"])
+                    move = outreach.reply_stage(store, candidate_id, job_id) if job_id is not None else None
+                    if move:
+                        notice = f"Logged their reply. Move to {move['to']} is on Today when you're ready."
                 elif job_id is not None:
                     moved = outreach.advance(store, candidate_id, job_id, entry["kind"], entry["at"])
                     if moved:
@@ -1415,7 +1418,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         stage = done["kept"][0]["stage"] if done["kept"] else ""
         notice = (f"Kept {n} {'person' if n == 1 else 'people'}" + (f" and added them to {stage}" if n else "") + "."
                   + (" You can undo this on Changes." if n else "")
-                  + (f" {len(left)} need your choice first: {_and(left)}." if left else "")
+                  + (f" {len(left)} {'needs' if len(left) == 1 else 'need'} your choice first: {_and(left)}."
+                     if left else "")
                   + (f" Left {len(held)} whose name reads like a sentence; keep them one at a time if they are "
                      "real people." if held else ""))
         warn = " ".join(k["elsewhere"] for k in done["kept"] if k.get("elsewhere"))
@@ -1477,9 +1481,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         for p in people:
             if p["status"] in ("due", "waiting"):
                 p["due_text"] = outreach.due_text(p)
+            elif p["status"] == "replied":
+                move = outreach.reply_stage(store, p["candidate_id"], job_id)
+                p["next_stage"] = move["to"] if move else None
         contact = outreach.contact_stage(store, job_id)
         return {"steps": seq.get("steps") or [], "since": seq.get("since"), "people": people,
-                "defaults": list(outreach.DEFAULT_STEPS), "contact": contact["name"] if contact else None}
+                "defaults": list(outreach.DEFAULT_STEPS), "contact": contact["name"] if contact else None,
+                "copy_from": outreach.sequence_jobs(store, exclude=job_id)}
+
+    @app.post("/jobs/{job_id}/sequence/copy")
+    async def copy_sequence(request: Request, job_id: int):
+        """Copy steps from another job: the same cadence on a new req, with this job's title and client filled in."""
+        job_or_404(job_id)
+        form = await request.form()
+        src = str(form.get("from_job_id") or "")
+        try:
+            if not src.isdigit():
+                raise ValueError("Pick a job to copy the steps from.")
+            steps = outreach.copy_sequence(store, job_id, int(src))
+            name = store.get_job(int(src))["title"]
+        except (ValueError, NotFound) as exc:
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'flash_error': str(exc), 'sequence': '1'})}#followups",
+                                    status_code=303)
+        notice = (f"Copied {len(steps)} steps from {name}. Follow-ups show on Today when they come due. "
+                  "Check the text fits this job.")
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#followups", status_code=303)
 
     @app.post("/jobs/{job_id}/sequence")
     async def save_sequence(request: Request, job_id: int):
@@ -1506,6 +1532,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             entry = store.log(candidate_id, "message", "Replied", job_id=job_id, source="App")
             outreach.mark_reply(store, entry["id"])
             notice = f"Logged a reply from {cand['name']}. Their follow-ups for this job stop."
+            move = outreach.reply_stage(store, candidate_id, job_id)
+            if move:
+                notice += f" They're still in {move['from']}: Move to {move['to']} is on Today when you're ready."
         else:
             label = step["label"] if step and step.get("label") else "Follow-up"
             store.log(candidate_id, "message", f"{label} sent", job_id=job_id, source="App")
