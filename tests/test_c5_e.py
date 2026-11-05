@@ -200,20 +200,20 @@ def test_keep_and_pass_tools_are_app_only_and_refuse_the_model(store):
     pid = res.structuredContent["added"][0]["id"]
     assert res.meta[VIEW_KEY]["job_id"] == job["id"] and key_of(res) not in text(res)
     assert key_of(res) not in str(res.structuredContent)
-    for args in ({}, {"view_key": "guess"}, {"view_key": key_of(res) + "x"}):
-        with pytest.raises(ToolError, match="Only the recruiter keeps or passes"):
-            call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, **args)
-        with pytest.raises(ToolError, match="Only the recruiter keeps or passes"):
-            call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, **args)
+    # Refusals come back as plain error results (cycle 5 re-review: no "Error executing tool" prefix on the card).
+    for args, says in (({}, "Only the recruiter keeps or passes"), ({"view_key": "guess"}, "earlier Claude session"),
+                       ({"view_key": key_of(res) + "x"}, "earlier Claude session")):
+        for tool in ("keep_prospect", "pass_prospect"):
+            out = call(server, tool, job_id=job["id"], prospect_id=pid, **args)
+            assert out.isError and says in text(out) and not text(out).startswith("Error")
     assert shortlist.counts(store, job["id"])["proposed"] == 1 and store.count_candidates() == 0
     assert "Nothing changed" in NOT_FROM_VIEW
-    # A key is per job and per server run.
+    # A key is per job. Since the cycle 5 re-review it survives a restart (a new server takes it).
     other = store.add_job("Platform")
     other_key = key_of(call(server, "list_prospects", job_id=other["id"]))
-    with pytest.raises(ToolError):
-        call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=other_key)
-    with pytest.raises(ToolError):
-        call(build_server(store), "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    assert call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=other_key).isError
+    assert not call(build_server(store), "keep_prospect", job_id=job["id"], prospect_id=pid,
+                    view_key=key_of(res)).isError
 
 
 def test_a_keep_from_the_card_is_logged_in_claude_and_undoable(store):
@@ -234,8 +234,8 @@ def test_a_keep_from_the_card_is_logged_in_claude_and_undoable(store):
     assert r.status_code == 303 and "Undid the keep" in flash_of(r)
     assert shortlist.counts(store, job["id"])["proposed"] == 1
     call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
-    with pytest.raises(ToolError, match="already kept"):
-        call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(res))
+    assert again.isError and "already kept" in text(again)
 
 
 def test_card_keep_asks_for_a_choice_then_keeps_as_the_chosen_person_or_passes(store):
@@ -256,8 +256,8 @@ def test_card_keep_asks_for_a_choice_then_keeps_as_the_chosen_person_or_passes(s
     passed = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key, reason="Too junior")
     assert passed.structuredContent["prospect"]["pass_reason"] == "Too junior"
     assert text(passed).startswith('Passed on "Bo Li".')
-    with pytest.raises(ToolError, match="already passed"):
-        call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key)
+    again = call(server, "pass_prospect", job_id=job["id"], prospect_id=bo_pid, view_key=key)
+    assert again.isError and text(again) == "Bo Li was already passed."
 
 
 def test_the_shortlist_card_has_buttons_only_when_the_host_can_call_tools():

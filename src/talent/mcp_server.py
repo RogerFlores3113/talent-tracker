@@ -34,7 +34,7 @@ from . import __version__, actions, recipes, review, shortlist, reports
 from . import decide, interviews
 from .store import INTERVIEW_OUTCOME_CHOICES
 from .mcp_views import MIME, URIS, tool_meta, view_html
-from .paths import app_url
+from .paths import app_key, app_url
 from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, _EMAIL_RE, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
@@ -108,6 +108,46 @@ APP_ONLY = {"ui": {"visibility": ["app"]}}
 VIEW_KEY = "talent-search/shortlist"
 NOT_FROM_VIEW = ("Nothing changed. Only the recruiter keeps or passes people, with the buttons on the Shortlist "
                  "card or in the app. Use propose_candidates and leave the choice to them.")
+# A press on a card whose key no longer fits: the person who pressed reads this on the card.
+CARD_STALE = ("This card is from an earlier Claude session. Ask Claude to show the Shortlist again, or review it in "
+              "Talent Search.")
+CARD_TOOLS = ("keep_prospect", "pass_prospect")
+# How an MCP Apps host says it shows in-chat views (client capabilities, under extensions).
+UI_EXTENSION = "io.modelcontextprotocol/ui"
+
+
+def _card_secret() -> bytes:
+    """The Shortlist cards' key, derived from this install's key file in the data folder, so a card keeps working
+    after a restart. A data folder that can't be written falls back to a key for this run only."""
+    try:
+        base = app_key().encode()
+    except OSError:
+        base = secrets.token_bytes(32)
+    return hmac.new(base, b"talent-search:shortlist-cards", hashlib.sha256).digest()
+
+
+def apps_support(params: Any) -> bool | None:
+    """Whether the AI app said it shows MCP Apps views: True, False when it lists extensions without that one,
+    None when it didn't say (then the card tools stay offered, since most hosts don't say yet)."""
+    caps = getattr(params, "capabilities", None)
+    if caps is None:
+        return None
+    ext = (getattr(caps, "model_extra", None) or {}).get("extensions")
+    if UI_EXTENSION in (caps.experimental or {}) or (isinstance(ext, dict) and UI_EXTENSION in ext):
+        return True
+    return False if isinstance(ext, dict) else None
+
+
+def _client_apps(mcp: FastMCP) -> bool | None:
+    try:
+        return apps_support(mcp.get_context().session.client_params)
+    except (LookupError, ValueError, AttributeError):  # no request in flight (tests, startup)
+        return None
+
+
+def _card_error(exc: Exception) -> CallToolResult:
+    """A refused press, as plain text the card shows as it is (no "Error executing tool" prefix)."""
+    return CallToolResult(content=[TextContent(type="text", text=str(exc))], isError=True)
 
 
 class WorkEntry(BaseModel):
@@ -929,11 +969,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         with_ = "on" if what == "note" else "with"
         sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {quoted(cand['name'])} "
                     f"{_when_words(entry['at'])}" + (f", for {_job_name(store.get_job(job_id))}" if job_id is not None else "")
-                    + ".")
+                    + "." + (f"\nIts interview id is {entry['id']}; update_interview takes it to move, cancel or "
+                             "record how it went." if what == "interview" else ""))
         nudge = _stage_nudge(store, cand, job_id, entry) if job_id is not None else None
         if nudge:
             out.update(nudge)
-        return _said(sentence, out)
+        return _plain(sentence, out)
 
     @mcp.tool(annotations=EDIT)
     def update_interview(interview_id: int, when: str | None = None, cancel: bool = False,
@@ -1377,7 +1418,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         page = app_url(f"/jobs/{job_id}/shortlist")
         data = {"job": _slim({k2: job.get(k2) for k2 in ("id", "title", "company")}), "added": added,
                 "skipped": res["skipped"], "counts": res["counts"], "data_note": DATA_NOTE, "app_url": page}
-        return _with_view_key(_said("\n".join(lines), data), job_id)
+        return _with_view_key(_plain("\n".join(lines), data), job_id, [a["id"] for a in added])
 
     @mcp.tool(annotations=READ, meta=tool_meta("shortlist"))
     def list_prospects(job_id: int, status: str = "proposed") -> CallToolResult:
@@ -1394,22 +1435,39 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _with_view_key(_result(text, {"job": _slim({k: job.get(k) for k in ("id", "title", "company")}),
                                              "status": status, "prospects": rows, "counts": counts,
                                              "data_note": DATA_NOTE, "app_url": app_url(f"/jobs/{job_id}/shortlist")}),
-                              job_id)
+                              job_id, [p["id"] for p in rows if p.get("status") == "proposed"])
 
     # Keep and Pass on the in-chat Shortlist card. The host hides these from the model (visibility "app"), and a
     # call without the key that only the card received (in the result's _meta) is refused, so only a press acts.
-    view_secret = secrets.token_bytes(32)
+    # The key comes from this install's own key file, so a card still works after Claude or the app restarts. It
+    # is per job and covers only the proposal batches the card shows, so it acts on nobody proposed later.
+    card_secret = _card_secret()
 
-    def key_for(job_id: int) -> str:
-        return hmac.new(view_secret, f"shortlist:{job_id}".encode(), hashlib.sha256).hexdigest()[:32]
+    def key_for(job_id: int, scope: str) -> str:
+        mac = hmac.new(card_secret, f"shortlist:{job_id}:{scope}".encode(), hashlib.sha256).hexdigest()[:32]
+        return f"{scope}:{mac}"
 
-    def _with_view_key(res: CallToolResult, job_id: int) -> CallToolResult:
-        res.meta = {**(res.meta or {}), VIEW_KEY: {"job_id": job_id, "key": key_for(job_id)}}
+    def _with_view_key(res: CallToolResult, job_id: int, prospect_ids: list[int]) -> CallToolResult:
+        res.meta = {**(res.meta or {}), VIEW_KEY: {"job_id": job_id, "key": key_for(job_id, _scope(prospect_ids))}}
         return res
 
-    def _from_view(job_id: int, key: str | None) -> None:
-        if not key or not hmac.compare_digest(str(key), key_for(job_id)):
+    def _scope(prospect_ids: list[int]) -> str:
+        """The proposal batches these Shortlist rows came in ("b12.b15"); a row the recruiter added has none."""
+        if not prospect_ids:
+            return ""
+        rows = store._rows(f"SELECT id, batch_id FROM prospects WHERE id IN ({', '.join('?' * len(prospect_ids))})",
+                           tuple(prospect_ids))
+        return ".".join(sorted({f"b{r['batch_id']}" if r["batch_id"] else f"p{r['id']}" for r in rows}))
+
+    def _from_view(job_id: int, prospect_id: int, key: str | None) -> None:
+        if not key or _client_apps(mcp) is False:
             raise ToolError(NOT_FROM_VIEW)
+        scope, _, _mac = str(key).rpartition(":")
+        if not hmac.compare_digest(str(key).encode(), key_for(job_id, scope).encode()):
+            raise ToolError(CARD_STALE)
+        row = store._row("SELECT id, batch_id FROM prospects WHERE id = ? AND job_id = ?", (prospect_id, job_id))
+        if row and (f"b{row['batch_id']}" if row["batch_id"] else f"p{row['id']}") not in scope.split("."):
+            raise ToolError(CARD_STALE)
 
     def _decided(job_id: int, prospect_id: int, sentence: str, **extra: Any) -> CallToolResult:
         row = shortlist.get(store, job_id, prospect_id)
@@ -1424,13 +1482,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                       as_new: bool = False) -> CallToolResult:
         """Only the Shortlist card in the chat calls this, when the recruiter presses Keep. Calls from the model
         are refused. candidate_id: keep as that saved person; as_new: keep as someone new."""
-        _from_view(job_id, view_key)
         try:
+            _from_view(job_id, prospect_id, view_key)
             done = shortlist.keep(store, job_id, prospect_id, link_id=candidate_id, as_new=as_new, via="claude")
         except shortlist.NeedsChoice as exc:
             return _decided(job_id, prospect_id, str(exc), needs_choice=True,
                             matches=[{**shortlist._brief(c), "pipelines": shortlist._pipelines(store, c["id"])}
                                      for c in exc.matches[:5]])
+        except (ToolError, ValueError, NotFound) as exc:
+            return _card_error(exc)
         c, stage, job = done["candidate"], done["stage"], store.get_job(job_id)
         if done["already"]:
             sentence = f"Kept {quoted(c['name'])}. They were already in {_job_name(job)}, in {stage}."
@@ -1444,11 +1504,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def pass_prospect(job_id: int, prospect_id: int, view_key: str = "", reason: str | None = None) -> CallToolResult:
         """Only the Shortlist card in the chat calls this, when the recruiter presses Pass. Calls from the model
         are refused."""
-        _from_view(job_id, view_key)
-        p = shortlist.pass_on(store, job_id, prospect_id, reason)
+        try:
+            _from_view(job_id, prospect_id, view_key)
+            p = shortlist.pass_on(store, job_id, prospect_id, reason)
+        except (ToolError, ValueError, NotFound) as exc:
+            return _card_error(exc)
         return _decided(job_id, prospect_id, f"Passed on {quoted(p['name'])}. They won't be proposed for "
                         f"{_job_name(store.get_job(job_id))} again. You can put them back on the Shortlist in "
                         "Talent Search.")
+
+    # Hosts that say they don't show MCP Apps views never see the card-only tools.
+    async def listed_tools() -> list[Any]:
+        tools = await FastMCP.list_tools(mcp)
+        return [t for t in tools if t.name not in CARD_TOOLS] if _client_apps(mcp) is False else tools
+
+    mcp.list_tools = listed_tools  # type: ignore[method-assign]
+    mcp._mcp_server.list_tools()(listed_tools)
 
     @mcp.tool(annotations=WRITE, meta=tool_meta("saved"))
     def save_candidates(people: list[PersonIn], job_id: int | None = None, stage: str | None = None) -> CallToolResult:
@@ -1717,15 +1788,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if out["ai_moves"]:
             data["warning"] = (f"It included {len(out['ai_moves'])} move(s) you made that the recruiter hasn't "
                                "reviewed yet. Ask them to check those on Changes in the app.")
-        return _said(f"Marked {who} as sent ({_local(out['sent_at'])}). The next update starts from now.", data)
+        return _plain(f"Marked {who} as sent ({_local(out['sent_at'])}). The next update starts from now.", data)
 
     @mcp.tool(annotations=EDIT)
     def update_client(client: str, contacts: str | None = None, update_day: str | None = None,
                       time_zone: str | None = None, notes: str | None = None) -> CallToolResult:
         """Change a client's details: contacts (one per line; client updates go to the first email, with the
         others on cc), update_day (Monday to Sunday, the day their update is due), time_zone (America/New_York,
-        or ET, CT, MT, PT; interview times in their update use it), notes. Leave a field out to keep it; an empty
-        string clears it (one field per call). The recruiter sees the change on Changes and can undo it."""
+        or ET, CT, MT, PT; interview times in their update use it), notes. Set several fields in one call. Leave
+        a field out to keep it; an empty string clears it (clear at most one field per call). The recruiter sees
+        the change on Changes and can undo it."""
         key = _one_client(client)
         given = {k: v for k, v in {"contacts": contacts, "update_day": update_day, "time_zone": time_zone,
                                    "notes": notes}.items() if v is not None}
@@ -1738,7 +1810,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         out = reports.ai_save_client(store, key, **given)
         c = out["client"]
         if not out["changed"]:
-            return _said(f"Nothing changed for {quoted(c['name'])}: those details were already saved.",
+            return _plain(f"Nothing changed for {quoted(c['name'])}: those details were already saved.",
                          {"client": c["name"], "app_url": app_url(f"/clients/{quote(c['slug'])}")})
         words = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
         bits = [f"{words[k]} {'cleared' if not new else 'set to ' + repr(new) if k != 'contacts' else 'updated'}"
@@ -1747,7 +1819,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 "changed": sorted(out["changed"]), "app_url": app_url(f"/clients/{quote(c['slug'])}")}
         if "contacts" in out["changed"]:
             data["note"] = "The recruiter sees who updates go to on the client's page before anything is emailed."
-        return _said(f"Changed {quoted(c['name'])}: {', '.join(bits)}. The recruiter can undo it on Changes.", data)
+        return _plain(f"Changed {quoted(c['name'])}: {', '.join(bits)}. The recruiter can undo it on Changes.", data)
 
     # ------------------------------------------------------------- dashboard
     @mcp.tool(annotations=READ, meta=tool_meta("today"))

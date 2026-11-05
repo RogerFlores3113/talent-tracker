@@ -40,7 +40,7 @@
   <li>
     <a href="{{ r.href }}"><strong>{{ r.name }}</strong></a>
     <span class="when" title="{{ r.at | local }}">{{ r.at | local('%b %-d, %Y, %-I:%M %p') }}</span>
-    <span class="muted">· {{ who_options[r.who] }}</span>
+    <span class="muted">· {{ r.who_label or who_options[r.who] }}</span>
     <div>{{ r.text }}</div>
     {% if r.undoable %}<form method="post" action="{{ r.undo_url }}" class="inline"{% if r.confirm %} data-confirm="{{ r.confirm }}"{% endif %}><button class="btn small" type="submit">{{ r.undo_label or 'Undo' }}</button></form>
     {% elif r.undone %}<div class="fine">Undone{% if r.note %} ({{ r.note }}){% endif %}</div>

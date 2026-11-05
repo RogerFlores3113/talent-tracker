@@ -321,7 +321,7 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
             if not attempt and not history:
                 break
             try:
-                target = store.update_candidate(target["id"], history, **attempt)
+                target = store.update_candidate(target["id"], history, via=via, **attempt)
             except ValueError:  # their LinkedIn link belongs to someone else: fill the rest
                 continue
             if target.get("_changed"):

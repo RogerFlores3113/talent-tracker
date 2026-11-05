@@ -161,7 +161,7 @@ function render(d){
 const KEY="talent-search/shortlist";
 function viewKey(){const k=META&&META[KEY];return k&&k.key?k:null}
 function canAct(){return !!(HOST&&HOST.serverTools&&viewKey())}
-function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ")}
+function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ").replace(/^Error executing tool [\w-]+: /,"")}
 let countsLine=null;
 function countText(c){c=c||{};return(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"}
 function act(card,p,tool,args){
