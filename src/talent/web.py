@@ -289,6 +289,7 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
+                    dupes=store.possible_duplicates(candidate_id),
                     kinds=[k for k in TIMELINE_KINDS if k != "stage"],
                     refresh_prompt=recipes.save_from_linkedin(c.get("linkedin_url") or c["name"]))
 
@@ -307,11 +308,49 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
 
     @app.post("/candidates/{candidate_id}/delete")
     def delete_candidate_form(candidate_id: int):
+        c = cand_or_404(candidate_id)
+        try:
+            importers.backup_before_import(store, reason="delete")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'flash_error': str(exc)})}",
+                                    status_code=303)
         try:
             store.delete_candidate(candidate_id)
         except NotFound:
             raise HTTPException(404, "Candidate not found")
-        return RedirectResponse("/?deleted=1", status_code=303)
+        return RedirectResponse("/?" + urlencode({"notice": f"Deleted {c['name']}. This can't be undone."}),
+                                status_code=303)
+
+    @app.get("/candidates/{candidate_id}/merge/{other_id}", response_class=HTMLResponse)
+    def merge_confirm(request: Request, candidate_id: int, other_id: int):
+        """App window only: look at two records side by side before merging them."""
+        cand_or_404(candidate_id)
+        cand_or_404(other_id)
+        if candidate_id == other_id:
+            raise HTTPException(404, "Pick two different people")
+        return page(request, "merge.html", keep=store.candidate_detail(candidate_id, timeline_limit=5),
+                    other=store.candidate_detail(other_id, timeline_limit=5))
+
+    @app.post("/candidates/{candidate_id}/merge/{other_id}")
+    def merge_form(candidate_id: int, other_id: int):
+        """App window only. The AI has no merge tool: merging deletes the other record."""
+        cand_or_404(candidate_id)
+        other = cand_or_404(other_id)
+        try:
+            importers.backup_before_import(store, reason="merge")
+            cand = store.merge_candidates(candidate_id, other_id, by="app")
+        except ValueError as exc:
+            return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'flash_error': str(exc)})}",
+                                    status_code=303)
+        m = cand["_merged"]
+        bits = [f"filled {_labels(m['filled'])}"] if m["filled"] else []
+        if m["timeline"]:
+            bits.append(f"moved {m['timeline']} timeline entr{'y' if m['timeline'] == 1 else 'ies'}")
+        if m["jobs"]:
+            bits.append("moved " + ", ".join(m["jobs"]))
+        notice = (f"Merged {other['name']} into {cand['name']}" + (": " + "; ".join(bits) if bits else "")
+                  + ". A backup was saved first.")
+        return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}", status_code=303)
 
     @app.post("/candidates/{candidate_id}/log", response_class=HTMLResponse)
     async def log_entry(request: Request, candidate_id: int):
@@ -468,10 +507,20 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
 
     @app.post("/sample-data/remove")
     def sample_data_remove(request: Request):
-        people, jobs = remove_sample_data(store)
+        try:
+            r = remove_sample_data(store)
+        except ValueError as exc:  # the backup failed, so nothing was removed
+            return back(request, error=str(exc))
+        people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
+        if not (people or jobs or kp or kj):
+            return back(request, notice="There was no sample data to remove.")
         msg = (f"Removed the sample data: {people} candidate{'' if people == 1 else 's'} and "
-               f"{jobs} job{'' if jobs == 1 else 's'}." if people or jobs else "There was no sample data to remove.")
-        return back(request, notice=msg)
+               f"{jobs} job{'' if jobs == 1 else 's'}.")
+        kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
+                if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
+        if kept:
+            msg += " Kept " + " and ".join(kept) + ". They are your own data now."
+        return back(request, notice=msg + " A backup was saved first.")
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)
@@ -583,6 +632,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     def delete_job_form(job_id: int):
         """App window only. The AI has no tool to delete a job."""
         job = job_or_404(job_id)
+        try:
+            importers.backup_before_import(store, reason="delete")
+        except ValueError as exc:
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'flash_error': str(exc)})}", status_code=303)
         store.delete_job(job_id)
         return RedirectResponse("/jobs?" + urlencode({"notice": f"Deleted {actions.job_label(job['title'], job.get('company'))}. "
                                                       "The candidates are still saved."}), status_code=303)
@@ -637,7 +690,27 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         people, jobs = sample_ids(store)
         return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
                     thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
-                    sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()))
+                    sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
+                    backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()))
+
+    def _backup_files() -> list[Path]:
+        return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
+
+    @app.post("/settings/backups/delete")
+    def delete_backups(request: Request):
+        """App window only: remove the automatic backups (copies taken before imports, deletes and merges)."""
+        removed = 0
+        for f in _backup_files():
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+        left = len(_backup_files())
+        msg = (f"Deleted {removed} backup{'' if removed == 1 else 's'}." if removed else "There were no backups to delete.")
+        if left:
+            msg += f" {left} couldn't be deleted. Close other apps using them and try again."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}), status_code=303)
 
     @app.post("/settings", response_class=HTMLResponse)
     async def save_settings(request: Request):
