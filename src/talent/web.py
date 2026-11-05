@@ -57,6 +57,8 @@ LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open
 FLASH_KEYS = ("notice", "flash_error", "error")
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
+FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
+UNDO_AI_LAST = "undo_ai_last"  # settings key: what the last Undo all AI did, shown on Changes for a day
 REDIRECTS = {301, 302, 303, 307, 308}
 log = logging.getLogger(__name__)
 CHANGE_WHO = {"ai": "Your AI app", "import": "CSV import", "app": "You, in the app"}
@@ -237,9 +239,13 @@ def _flash_sig(key: str, raw: str) -> str:
 
 
 def encode_flash(key: str, messages: dict[str, str]) -> str:
-    kept = {k: (v if len(v) <= FLASH_CHARS else v[:FLASH_CHARS - 3].rstrip() + "...") for k, v in messages.items()}
-    raw = base64.urlsafe_b64encode(json.dumps(kept).encode()).decode().rstrip("=")
-    return raw + "." + _flash_sig(key, raw)
+    limit = FLASH_CHARS
+    while True:  # names in other scripts take several bytes each: shorten until the cookie surely fits
+        kept = {k: (v if len(v) <= limit else v[:limit - 3].rstrip() + "...") for k, v in messages.items()}
+        raw = base64.urlsafe_b64encode(json.dumps(kept).encode()).decode().rstrip("=")
+        if len(raw) <= FLASH_COOKIE_CHARS or limit <= 80:
+            return raw + "." + _flash_sig(key, raw)
+        limit = limit * 2 // 3
 
 
 def decode_flash(value: str, key: str | None = None) -> dict[str, str]:
@@ -685,7 +691,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.post("/candidates/{candidate_id}/timeline/{timeline_id}/strike")
     def strike_entry(candidate_id: int, timeline_id: int):
-        """Strike out a note, call, email, message or meeting the AI app logged. It stays, marked struck."""
+        """Strike out a note, call, email, message, meeting or interview the AI app logged. It stays, marked struck."""
         cand_or_404(candidate_id)
         try:
             store.strike_entry(timeline_id, candidate_id=candidate_id, by="app")
@@ -1786,6 +1792,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
+                    undo_last=last_undo_ai(),
                     ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
                     undo_window={"1": "24", "7": "168", "30": "720"}.get(since, "24"))
 
@@ -1839,7 +1846,24 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
         if saved is not None and undone:
             notice += " A backup from just before is under Automatic backups in Settings."
+        remember_undo_ai(notice)
         return back(request, "/changes", notice=notice)
+
+    def remember_undo_ai(notice: str) -> None:
+        """Keep what an Undo all AI did, so Changes still says so if the one-time message didn't arrive."""
+        at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with store._write():
+            store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
+                                " SET value = excluded.value", (UNDO_AI_LAST, json.dumps({"at": at, "notice": notice})))
+
+    def last_undo_ai() -> dict[str, str] | None:
+        """The last Undo all AI, from the last 24 hours ({"at", "notice"}), or None."""
+        try:
+            last = json.loads(store.setting(UNDO_AI_LAST) or "null")
+            fresh = isinstance(last, dict) and to_dt(last.get("at")) > datetime.now(timezone.utc) - timedelta(days=1)
+        except (TypeError, ValueError):
+            return None
+        return {"at": str(last["at"]), "notice": str(last.get("notice") or "")} if fresh else None
 
     @app.post("/changes/stage-outcome/{change_id}/undo")
     def undo_stage_outcome(request: Request, change_id: int):
@@ -2114,10 +2138,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def health(request: Request, nonce: str = ""):
         """Open without the key so a second launch can find the running app. Says nothing about the data.
         With a nonce it also answers `proof` (paths.health_proof), so the launcher can tell this app from
-        another program on the port before it sends a launch code."""
+        another program on the port before it sends a launch code. The proof is bound to the port this
+        request really arrived on (the socket's, not a header), so a relay on another port can't use it."""
         out: dict[str, Any] = {"ok": True, "version": __version__}
-        if nonce and len(nonce) <= 128:
-            out["proof"] = paths.health_proof(key, nonce)
+        server = request.scope.get("server") or ()
+        if nonce and len(nonce) <= 128 and len(server) == 2 and isinstance(server[1], int):
+            out["proof"] = paths.health_proof(key, nonce, server[1])
         if request.state.unlocked:
             out.update(search=search.engine, candidates=store.count_candidates())
         return out

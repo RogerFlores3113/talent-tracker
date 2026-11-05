@@ -178,11 +178,12 @@ def use_launch_code(code: str) -> bool:
     return fresh
 
 
-def health_proof(key: str, nonce: str) -> str:
-    """What /api/health answers for a nonce: an HMAC of it under this install's key. Only the real app (or
-    another process that can read app.key) can make it, so a second launch never hands a launch code to an
-    impostor listening on the port."""
-    return hmac.new(key.encode(), b"talent-health:" + nonce.encode(), "sha256").hexdigest()
+def health_proof(key: str, nonce: str, port: int) -> str:
+    """What /api/health answers for a nonce: an HMAC of it and the port the request came in on, under this
+    install's key. Only the real app (or another process that can read app.key) can make it, so a second
+    launch never hands a launch code to an impostor listening on the port. The port is in it so a program
+    that passes the nonce on to the real app on another port gets a proof for that port, not its own."""
+    return hmac.new(key.encode(), f"talent-health:{int(port)}:".encode() + nonce.encode(), "sha256").hexdigest()
 
 
 def launch_url(port: int | None = None) -> str:
