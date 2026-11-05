@@ -912,6 +912,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += shortlist_items(store)
     from .reports import today_items as update_items  # here: reports imports this module
     items += update_items(store, now)  # client (or hiring manager) updates due today or earlier this week
+    from .offers import today_items as offer_items  # here: offers imports this module
+    items += offer_items(store, now)  # answers due, answers to act on, offer stages with no offer
     stuck_more = 0
     if on("flag_stuck"):
         rows, n_hidden, stuck_more = _stuck_items(store, now, _int(cfg, "stuck_days", 7), snoozed, label)
@@ -1321,6 +1323,10 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     if upcoming:
         lines += ["", "Next interviews:"]
         lines += [interview_line(names[cid], ivs) for _, cid, ivs in upcoming]
+    from .offers import shared_lines  # only the offers the recruiter chose to share, status words only
+    shared = shared_lines(store, [job_id], titles=False)
+    if shared:
+        lines += ["", "Offers:", *shared]
     return "\n".join(lines)
 
 

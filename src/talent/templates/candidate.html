@@ -59,6 +59,7 @@
         </select>
       </form>
       <span class="fine">since {{ p.stage_changed_at | ago }}</span>
+      {% with on = offers_of(c.id).get(p.job_id) %}{% include "_offer_note.html" %}{% endwith %}
     </li>
     {% endfor %}
   </ul>

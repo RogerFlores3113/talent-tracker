@@ -52,7 +52,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','interview_result':'Interview result','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings','offer':'Offer'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -85,6 +85,11 @@
           {% elif i.kind == 'ai_change' and i.confirm_id %}
           <form method="post" action="/changes/ai/{{ i.confirm_id }}/confirm"><button class="btn small" type="submit">Yes</button></form>
           <form method="post" action="/changes/ai/{{ i.confirm_id }}/undo"><button class="btn small" type="submit">Undo</button></form>
+          {% elif i.kind == 'offer' and i.move_to %}
+          <form method="post" action="{{ i.move_url }}"><input type="hidden" name="to" value="{{ i.move_kind }}"><input type="hidden" name="next" value="/"><button class="btn small" type="submit">Move to {{ i.move_to }}</button></form>
+          <a class="link small" href="{{ i.href }}">Open offer</a>
+          {% elif i.kind == 'offer' %}
+          <a class="btn small" href="{{ i.href }}">{{ i.button }}</a>
           {% elif i.kind == 'ai_change' and i.button %}
           <a class="btn small" href="{{ i.href }}">{{ i.button }}</a>
           {% elif i.kind == 'interview_out' %}
