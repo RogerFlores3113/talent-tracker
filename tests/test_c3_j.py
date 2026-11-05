@@ -184,7 +184,9 @@ def test_import_maps_close_stages_and_offers_missing_ones(store):
     header, rows = importers.read_csv(AGENCY)
     mapping = importers.guess_mapping(header, rows)
     p = importers.preview_import(store, header, rows, mapping)
-    assert p["missing_stages"] == [{"job": "Staff Backend Engineer (Acme)", "stage": "Submitted"}]
+    # Cycle 4: the tickbox adds every Status the job has no stage for, near ones too.
+    assert p["missing_stages"] == [{"job": "Staff Backend Engineer (Acme)", "stage": s}
+                                   for s in ("Submitted", "Phone screen", "Client Interview")]
     assert "Row 2: will be put in Sourced, since Staff Backend Engineer (Acme) has no stage called 'Submitted'" \
         in p["stage_fallbacks"]
     assert "Row 3: will be put in Screening, the closest stage to 'Phone screen' on Staff Backend Engineer (Acme)" \
@@ -197,7 +199,8 @@ def test_import_maps_close_stages_and_offers_missing_ones(store):
     names = [s["name"] for s in store.job_stages(job["id"])]
     assert names.index("Submitted") < names.index("Hired")
     stages = {a["candidate_name"]: a["stage"] for a in store.pipeline(job["id"])}
-    assert stages == {"Priya Raman": "Submitted", "Marcus Lee": "Screening", "Dana Okafor": "Interviewing"}
+    # With the box ticked, near stages become their own instead of merging (cycle 4).
+    assert stages == {"Priya Raman": "Submitted", "Marcus Lee": "Phone screen", "Dana Okafor": "Client Interview"}
     assert r["merged_rows"] == ["Rows 2 and 5 are the same person (Priya Raman), so they were saved as one"]
 
 
