@@ -19,10 +19,10 @@
     <span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ digest_text }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy status for all open jobs</button><span class="fine" role="status"></span></span></div>
   {% if rollup | length > 1 %}
   <table class="dense">
-    <thead><tr><th>Company</th><th>Open jobs</th><th>In process</th><th>Openings filled</th><th></th></tr></thead>
+    <thead><tr><th>{{ 'Hiring manager' if by_manager else 'Company' }}</th><th>Open jobs</th><th>In process</th><th>Openings filled</th><th></th></tr></thead>
     <tbody>{% for r in rollup %}
-    <tr><td>{{ r.company or 'No company' }}</td><td>{{ r.jobs | length }}</td><td>{{ r.active }}</td><td>{{ [r.filled, r.openings] | min }} of {{ r.openings }}</td>
-      <td>{% for c in companies if c.company == r.company %}<span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ c.text }}" data-copy-note="next" data-copy-msg="Copied.">Copy status for {{ r.company }}</button><span class="fine" role="status"></span></span>{% endfor %}</td></tr>
+    <tr><td>{{ r.label or ('No hiring manager' if by_manager else 'No company') }}</td><td>{{ r.jobs | length }}</td><td>{{ r.active }}</td><td>{{ [r.filled, r.openings] | min }} of {{ r.openings }}</td>
+      <td>{% for c in companies if c.label == r.label %}<span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ c.text }}" data-copy-note="next" data-copy-msg="Copied.">Copy status for {{ r.label }}</button><span class="fine" role="status"></span></span>{% endfor %}</td></tr>
     {% endfor %}</tbody>
   </table>
   <p class="fine">Counts and names leave out each job's internal stages (like Sourced), as the copied text does.</p>

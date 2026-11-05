@@ -138,12 +138,12 @@ function render(d){
    c.next_interview?el("div",{class:"small"},"Interview "+when(c.next_interview)):null)):el("div",{class:"muted small"},"Empty")))}
  wrap.append(board);return wrap}""",
     "today": r"""
-const LABEL={interview:"Interview",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
+const LABEL={interview:"Interview",interview_out:"Interview still on",suggestion:"Suggestion",stuck:"Stuck",thin:"Needs more candidates",stale:"May be out of date",ai_change:"AI change",shortlist:"Shortlist"};
 function render(d){
  const wrap=el("div",{});
  wrap.append(el("div",{class:"row"},el("h1",{},d.items.length?d.items.length+" thing"+(d.items.length===1?"":"s")+" to do":"Nothing needs you today"),appLink(d.app_url)));
  const card=i=>el("div",{class:"card"},el("div",{class:"kind"},LABEL[i.kind]||i.kind),el("div",{},i.title),
-  (i.kind==="interview"&&i.when)?el("div",{class:"small"},when(i.when)):null,i.due_text?el("div",{class:"small"+(i.overdue?"":" muted")},i.due_text):null,
+  ((i.kind==="interview"||i.kind==="interview_out")&&i.when)?el("div",{class:"small"},when(i.when)):null,i.due_text?el("div",{class:"small"+(i.overdue?"":" muted")},i.due_text):null,
   i.detail?el("div",{class:"small muted"},i.detail):null);
  for(const i of d.items)wrap.append(card(i));
  if(d.next_week&&d.next_week.length){wrap.append(el("h2",{},"Next week"));for(const i of d.next_week)wrap.append(card(i))}

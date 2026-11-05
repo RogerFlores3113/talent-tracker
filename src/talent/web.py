@@ -81,13 +81,16 @@ class CandidateIn(BaseModel):
     last_contacted_at: str | None = None
 
 
-def _ago(iso: str | None) -> str:
+def _ago(iso: str | None, now: datetime | None = None) -> str:
+    """'today', 'yesterday', '3 days ago'... counted in calendar days on this computer's clock, so something
+    from 11 PM last night is 'yesterday' at 1 AM, not 'today'."""
     dt = to_dt(iso)
     if not dt:
         return "never"
-    days = (datetime.now(timezone.utc) - dt).days
-    if days < 0:
+    now = now or datetime.now(timezone.utc)
+    if dt > now + timedelta(minutes=1):
         return "upcoming"
+    days = max(0, actions.local_days(dt, now))
     if days == 0:
         return "today"
     if days == 1:
@@ -99,6 +102,9 @@ def _ago(iso: str | None) -> str:
     return f"{days // 365} years ago"
 
 
+IV_TIME = actions.IV_TIME  # interview times say their zone
+
+
 def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
     dt = to_dt(iso)
     if not dt:
@@ -108,6 +114,15 @@ def _local(iso: str | None, fmt: str = "%a %b %-d, %-I:%M %p") -> str:
         return local.strftime(fmt)
     except ValueError:  # Windows strftime has no %-d
         return local.strftime(fmt.replace("%-", "%#"))
+
+
+def _local_date(iso: str | None) -> str:
+    """'2026-11-04': a timestamp's day on this computer's clock (a plain day stays as it is)."""
+    v = iso or ""
+    if "T" not in v:
+        return v[:10]
+    dt = to_dt(v)
+    return dt.astimezone().date().isoformat() if dt else v[:10]
 
 
 def _shown(field: str, value: Any) -> str:
@@ -246,9 +261,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     templates = Jinja2Templates(directory=str(res / "templates"))
     env = templates.env
     env.filters["snippet"] = snippet_html
-    env.filters["date"] = lambda iso: (iso or "")[:10]
+    env.filters["date"] = _local_date
     env.filters["ago"] = _ago
     env.filters["local"] = _local
+    env.globals["IV_TIME"] = IV_TIME
+    env.globals["local_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
@@ -596,7 +613,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     raise ValueError("Pick the new date and time.")
                 reason = str(form.get("reason") or "").strip()
                 iv = store.update_interview(entry_id, at=at, reason=reason or None, candidate_id=candidate_id)
-                notice = f"Moved the interview to {_local(iv['at'])}."
+                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}."
             elif op == "cancel":
                 store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
                 notice = "Interview cancelled. It stays on the timeline, marked cancelled."
@@ -878,11 +895,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def jobs_page(request: Request, status: str = ""):
         jobs = store.list_jobs(status if status in JOB_STATUSES else None)
         hints = actions.twin_hints(jobs)
-        rollup = actions.company_rollup(store)
-        companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
+        by_manager = actions.by_manager(store)  # in-house: one row and one update per hiring manager
+        if by_manager:
+            rollup = actions.manager_rollup(store)
+            companies = [{**r, "text": actions.status_digest(store, hiring_manager=r["manager"])}
+                         for r in rollup if r["manager"]]
+        else:
+            rollup = [{**r, "label": r["company"]} for r in actions.company_rollup(store)]
+            companies = [{**r, "text": actions.status_digest(store, r["company"])} for r in rollup if r["company"]]
         held = actions.held_jobs(store)
         return page(request, "jobs.html", jobs=[{**j, "hint": hints.get(j["id"])} for j in jobs], status=status,
-                    rollup=rollup, companies=companies, held=held,
+                    rollup=rollup, companies=companies, held=held, by_manager=by_manager,
                     digest_text=actions.status_digest(store) if rollup or held else "",
                     hidden_notes=actions.digest_hidden_notes(store) if rollup else [])
 
@@ -1286,6 +1309,26 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
     # ------------------------------------------------------- dashboard acts
+    @app.post("/actions/interviews/out")
+    async def exit_interviews_form(request: Request):
+        """Today's "Dana is out of Backend but still has an interview" row: Cancel interview, or Keep it."""
+        form = await request.form()
+        cid, jid, op = (str(form.get(k) or "") for k in ("candidate_id", "job_id", "op"))
+        group = next((g for g in actions.exit_prompts(store) if str(g["candidate_id"]) == cid
+                      and str(g["job_id"]) == jid), None) if cid.isdigit() and jid.isdigit() else None
+        if group is None or op not in ("cancel", "keep"):
+            return back(request, notice="Nothing to change. That interview may already be cancelled or kept.")
+        ids = [i["id"] for i in group["interviews"]]
+        for iv in ids:
+            if op == "cancel":
+                store.update_interview(iv, cancel=True, candidate_id=int(cid), by="app")
+            else:
+                store.update_interview(iv, keep=True, candidate_id=int(cid), by="app")
+        n = "the interview" if len(ids) == 1 else f"{len(ids)} interviews"
+        notice = (f"Cancelled {n}. It stays on the timeline, marked cancelled." if op == "cancel"
+                  else f"Kept {n}. It shows on Today as usual.")
+        return back(request, notice=notice)
+
     @app.post("/actions/snooze")
     async def snooze(request: Request):
         form = await request.form()
