@@ -39,3 +39,16 @@ def store(tmp_path):
 @pytest.fixture
 def client(store):
     return local_client(store)
+
+
+def flash_of(response, key: str = "notice") -> str:
+    """The one-line message (notice, flash_error or error) the app sent after a form. It travels in
+    a short-lived signed cookie, not the address, so names never land in browser history."""
+    from talent.web import decode_flash
+
+    for r in [response, *getattr(response, "history", [])]:
+        for raw in r.headers.get_list("set-cookie"):
+            name, _, rest = raw.partition("=")
+            if name.startswith("talent_flash_"):
+                return decode_flash(rest.split(";", 1)[0]).get(key, "")
+    return ""

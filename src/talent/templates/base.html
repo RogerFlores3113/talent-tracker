@@ -23,7 +23,7 @@
     </nav>
   </header>
   <main>
-    {% set fq = request.query_params %}
+    {% set fq = request.state.flash or {} %}
     {% if fq.get('flash_error') %}<p class="flash warn" role="alert">{{ fq.get('flash_error') }}</p>{% endif %}
     {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}</p>{% endif %}
     {% block body %}{% endblock %}

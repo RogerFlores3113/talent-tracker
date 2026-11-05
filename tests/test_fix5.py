@@ -13,7 +13,7 @@ from talent.mcp_server import DATA_NOTE, build_server
 from talent.store import DuplicateValue, IdentityConflict, same_person_name
 from talent.web import change_lines, profile_label
 
-from conftest import local_client
+from conftest import flash_of, local_client
 
 
 def call(server, tool, **args):
@@ -32,7 +32,7 @@ def text(result):
 
 
 def notice(response):
-    return parse_qs(urlsplit(response.headers["location"]).query).get("notice", [""])[0]
+    return flash_of(response)
 
 
 # ----------------------------------------------------------- 1. wrong person

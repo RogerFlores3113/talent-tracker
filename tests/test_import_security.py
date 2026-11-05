@@ -192,7 +192,7 @@ def test_import_result_page_mentions_backup(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name\nZed\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name"})
-    assert "Added 1" in r.text and "backed up everything" in r.text and "before-import-" in r.text
+    assert "Added 1" in r.text and "backed up before this import" in r.text and "Undo this import" in r.text
     assert "—" not in r.text
 
 

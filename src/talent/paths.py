@@ -41,6 +41,18 @@ def private_dir(path: Path, tighten: bool = True) -> Path:
     return path
 
 
+# What the app itself keeps in its data folder.
+OUR_FILES = ("talent.db", "backups", "imports", "app.key", "app.port", "app.log", "launch.code", ".DS_Store")
+
+
+def _only_ours(path: Path) -> bool:
+    """True when the folder holds nothing but the app's own files (or nothing at all)."""
+    try:
+        return all(entry.name.startswith(OUR_FILES) for entry in path.iterdir())
+    except OSError:
+        return False
+
+
 def data_dir() -> Path:
     override = os.environ.get("TALENT_DATA_DIR")
     if override:
@@ -51,8 +63,20 @@ def data_dir() -> Path:
         base = Path(user_data_dir(APP_NAME, appauthor=False))
     else:
         base = Path("data")
-    # A folder someone pointed us at with TALENT_DATA_DIR is only locked down if we create it.
-    return private_dir(base, tighten=not override)
+    # The data folder is made owner-only (0700) on start, also one that already exists. A folder someone
+    # pointed TALENT_DATA_DIR at that also holds other files keeps its permissions (the privacy page says so).
+    tighten = not override or not base.exists() or not base.stat().st_mode & 0o077 or _only_ours(base)
+    return private_dir(base, tighten=tighten)
+
+
+def data_dir_private() -> bool:
+    """Only this user account can open the data folder (always reported True where there are no POSIX modes)."""
+    if os.name == "nt":
+        return True
+    try:
+        return not data_dir().stat().st_mode & 0o077
+    except OSError:
+        return False
 
 
 def db_path() -> Path:

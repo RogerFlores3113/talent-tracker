@@ -675,11 +675,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
         Opening it sends nothing; the recruiter reviews and submits it on GitHub (they need a GitHub account).
         Describe the problem only: never include candidate names, emails or notes. Anything that looks
-        like an email, phone number or link is taken out of the report before the link is made.
+        like an email, phone number, link or a saved candidate's name is taken out before the link is made.
         """
-        return {"url": recipes.issue_url(summary, details, where="MCP / AI app"),
+        names = [r["name"] for r in store._rows("SELECT name FROM candidates")]
+        return {"url": recipes.issue_url(summary, details, where="MCP / AI app", names=names),
                 "tell_the_user": "Open this link to review and submit the report on GitHub. Nothing is sent until you "
-                                 "do. Emails, phone numbers and links were taken out; check for names too."}
+                                 "do. Emails, phone numbers, links and saved candidates' names were taken out; "
+                                 "check for anything else private."}
 
     # --------------------------------------------------------------- prompts
     @mcp.prompt(title="Plan my day")

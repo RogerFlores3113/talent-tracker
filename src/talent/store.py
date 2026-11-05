@@ -101,6 +101,8 @@ FIELD_LIMITS = {
     "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
     "tags": 3000,  # all skills joined into one text
 }
+# Longest timeline entry (a note, a call summary, an email summary) one log call takes.
+NOTE_LIMIT = 20000
 # Where the next new candidate and job id must start, so a deleted id is never handed out again
 # (an old AI chat that says "candidate 3" must not reach someone new). Kept in the settings table.
 ID_MARKS = {"candidates": "last_candidate_id", "jobs": "last_job_id"}
@@ -897,6 +899,10 @@ class Store:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._open()
+
+    def _open(self) -> None:
+        """Connect to the database file and bring its schema up to date."""
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -978,6 +984,34 @@ class Store:
                 self._conn.backup(target)
             finally:
                 target.close()
+
+    def restore_from(self, source: str | Path) -> None:
+        """Put a backup's data in place of this database's. The file itself stays where it is (so its
+        owner-only permissions and other open connections, like the AI app's, keep working): SQLite
+        copies the backup into it in one step, then the connection is reopened to update an older
+        schema and the write-ahead log is emptied. Ids used since the backup are never handed out again."""
+        if self.path == ":memory:":
+            raise ValueError("There's no database file to restore into.")
+        uri = Path(source).resolve().as_uri() + "?immutable=1"
+        with self._lock:
+            marks = dict(self._conn.execute("SELECT key, value FROM settings WHERE key IN (?, ?)",
+                                            tuple(ID_MARKS.values())).fetchall())
+            tops = {t: self._conn.execute(f"SELECT coalesce(max(id), 0) FROM {t}").fetchone()[0] for t in ID_MARKS}
+            src = sqlite3.connect(uri, uri=True)
+            try:
+                src.backup(self._conn)
+            finally:
+                src.close()
+            self._conn.close()
+            self._open()
+            with self._conn:
+                for table, key in ID_MARKS.items():
+                    mark = str(marks.get(key) or "0")
+                    keep = max(int(mark) if mark.isdigit() else 0, int(tops[table]))
+                    self._conn.execute(
+                        "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value ="
+                        " CAST(max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)", (key, str(keep)))
+        self.checkpoint()
 
     def _next_id(self, table: str) -> int:
         """A fresh id for a new candidate or job, above every id ever used (deleted ones too).
@@ -1525,6 +1559,9 @@ class Store:
         body = _clean(body)
         if kind == "note" and not body:
             raise ValueError("A note needs some text.")
+        if body and len(body) > NOTE_LIMIT:
+            raise ValueError(f"That {kind} is too long ({len(body):,} characters). The limit is {NOTE_LIMIT:,}, "
+                             "so nothing was saved. Shorten it or split it into a few entries.")
         self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)

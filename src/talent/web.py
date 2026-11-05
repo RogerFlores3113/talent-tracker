@@ -1,9 +1,11 @@
 """The app window: a local web UI on 127.0.0.1 opened in the user's browser."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,6 +17,8 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
@@ -22,12 +26,12 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from . import __version__, actions, importers, integrations, paths, recipes
+from . import __version__, actions, backups, importers, integrations, paths, recipes
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS,
                     INTERVIEW_OUTCOME_LABELS, JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
-                    Store, _labels, dropped_text, snippet_html, split_tags, to_dt)
+                    HL_END, HL_START, Store, _labels, dropped_text, snippet_html, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -43,6 +47,14 @@ KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock this window."
+LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
+# One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
+# address, so names never land in browser history or logs. The cookie is signed with the app key.
+FLASH_KEYS = ("notice", "flash_error", "error")
+FLASH_MAX_AGE = 120  # seconds
+FLASH_CHARS = 700  # longest message kept
+REDIRECTS = {301, 302, 303, 307, 308}
+log = logging.getLogger(__name__)
 CHANGE_WHO = {"ai": "Your AI app", "import": "CSV import", "app": "You, in the app"}
 CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
 CHANGES_SHOWN = 300
@@ -155,6 +167,37 @@ def key_cookie_name(key: str) -> str:
     return "talent_key_" + hashlib.sha256(key.encode()).hexdigest()[:10]
 
 
+def flash_cookie_name(key: str) -> str:
+    return "talent_flash_" + hashlib.sha256(key.encode()).hexdigest()[:10]
+
+
+def _flash_sig(key: str, raw: str) -> str:
+    return hmac.new(key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def encode_flash(key: str, messages: dict[str, str]) -> str:
+    kept = {k: (v if len(v) <= FLASH_CHARS else v[:FLASH_CHARS - 3].rstrip() + "...") for k, v in messages.items()}
+    raw = base64.urlsafe_b64encode(json.dumps(kept).encode()).decode().rstrip("=")
+    return raw + "." + _flash_sig(key, raw)
+
+
+def decode_flash(value: str, key: str | None = None) -> dict[str, str]:
+    """The messages in a flash cookie. With key, only when the signature is ours; {} otherwise."""
+    raw, _, sig = (value or "").strip('"').partition(".")
+    if key is not None and not (sig and hmac.compare_digest(sig.encode(), _flash_sig(key, raw).encode())):
+        return {}
+    try:
+        data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    except (ValueError, TypeError):
+        return {}
+    return {k: str(v) for k, v in data.items() if k in FLASH_KEYS and v} if isinstance(data, dict) else {}
+
+
+def plain_snippet(snippet: str | None) -> str | None:
+    """A search snippet without the highlight markers, for JSON."""
+    return snippet.replace(HL_START, "").replace(HL_END, "") if snippet else snippet
+
+
 def safe_local_path(path: str) -> bool:
     """A path on this server: not '//host', '/\\host' or anything a browser could read as another site."""
     return (path.startswith("/") and not path.startswith(("//", "/\\")) and "\\" not in path
@@ -165,6 +208,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     search = search or SearchService(store, TypesenseIndex.from_env())
     key = key or paths.app_key()
     cookie_name = key_cookie_name(key)
+    flash_name = flash_cookie_name(key)
+    locked_logged = [0.0]
     app = FastAPI(title="Talent Search", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     res = resource_dir()
     templates = Jinja2Templates(directory=str(res / "templates"))
@@ -196,6 +241,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         path = request.url.path
         if not request.state.unlocked and path not in OPEN_PATHS and not path.startswith("/static/"):
             return locked(request)
+        request.state.flash = decode_flash(request.cookies.get(flash_name, ""), key)
         fetch_site = (request.headers.get("sec-fetch-site") or "").lower()
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
@@ -211,11 +257,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         elif request.url.path in DOWNLOADS and fetch_site in ("cross-site", "same-site"):
             return PlainTextResponse("Forbidden", status_code=403)
         response = await call_next(request)
+        flash_to_cookie(request, response)
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Content-Security-Policy", CSP)
+        if not path.startswith("/static/"):  # pages, the API, the export and backups: never kept in the browser cache
+            response.headers["Cache-Control"] = "no-store"
         return response
+
+    def flash_to_cookie(request: Request, response: Response) -> None:
+        """A redirect's ?notice= (or error) moves into the flash cookie; a page that showed it clears it."""
+        if response.status_code in REDIRECTS and "location" in response.headers:
+            target = urlsplit(response.headers["location"])
+            pairs = parse_qsl(target.query, keep_blank_values=True)
+            messages = {k: v for k, v in pairs if k in FLASH_KEYS and v}
+            if messages or any(k in FLASH_KEYS for k, _ in pairs):
+                rest = urlencode([(k, v) for k, v in pairs if k not in FLASH_KEYS])
+                response.headers["location"] = target._replace(query=rest).geturl()
+            if messages:
+                response.set_cookie(flash_name, encode_flash(key, messages), max_age=FLASH_MAX_AGE, httponly=True,
+                                    samesite="strict", path="/")
+                return
+        shown = (request.method == "GET" and not is_htmx(request) and response.status_code not in REDIRECTS
+                 and response.headers.get("content-type", "").startswith("text/html"))
+        if request.cookies.get(flash_name) and shown:
+            response.delete_cookie(flash_name, path="/", httponly=True, samesite="strict")
 
     def has_key(request: Request) -> bool:
         given = request.cookies.get(cookie_name) or request.headers.get(KEY_HEADER) or ""
@@ -224,10 +291,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def locked(request: Request) -> Response:
         if request.url.path.startswith("/api/"):
             resp: Response = JSONResponse({"detail": LOCKED}, status_code=401)
-        else:
-            resp = page(request, "message.html", status_code=401, title="This window is locked", message=LOCKED)
+        else:  # only the way to unlock: every other link would land on this page again
+            resp = templates.TemplateResponse(request, "locked.html", {"message": LOCKED}, status_code=401)
+            if time.monotonic() - locked_logged[0] > 60:  # the same hint in the serve log, once a minute at most
+                locked_logged[0] = time.monotonic()
+                log.info(LOCKED_LOG)
         for k, v in (("X-Frame-Options", "DENY"), ("X-Content-Type-Options", "nosniff"),
-                     ("Referrer-Policy", "same-origin"), ("Content-Security-Policy", CSP)):
+                     ("Referrer-Policy", "same-origin"), ("Content-Security-Policy", CSP), ("Cache-Control", "no-store")):
             resp.headers[k] = v
         return resp
 
@@ -636,7 +706,33 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
+        if result.get("backup"):
+            backups.remember_import(store, result["backup"])
+            result["backup_name"] = Path(result["backup"]).name
         return page(request, "import.html", step="done", result=result)
+
+    @app.post("/import/undo")
+    async def import_undo(request: Request):
+        """Put back the backup taken before an import, only while nothing else has changed since."""
+        form = await request.form()
+        name = str(form.get("backup") or "")
+        state = backups.import_undo_state(store, name)
+        if state == "changed":
+            return RedirectResponse("/settings?" + urlencode({"flash_error": (
+                "Something changed after that import (an edit, a note, a stage move or your AI app), so undoing it "
+                "here would lose that too. To go back anyway, restore the backup from before the import below.")})
+                + "#backups", status_code=303)
+        if state != "ok":
+            return RedirectResponse("/settings?" + urlencode({"flash_error": (
+                "That import can't be undone here any more. Its backup may still be in the list below.")})
+                + "#backups", status_code=303)
+        try:
+            _, saved = restore_backup(name)
+        except ValueError as exc:
+            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
+        return RedirectResponse("/candidates?" + urlencode({"notice": (
+            "Undid the import. Your data is back to how it was just before it. A copy with the import in it was "
+            f"saved first as {saved.name}, in Settings under Automatic backups.")}), status_code=303)
 
     def _sweep_uploads() -> None:
         """Uploads nobody finished importing are deleted after an hour."""
@@ -1040,10 +1136,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
                     sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
-                    typesense=env_status())
+                    backup_list=backups.list_backups(), typesense=env_status())
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
+
+    def restore_backup(name: str) -> tuple[dict[str, Any], Path]:
+        """Restore a backup (a fresh one is taken first), then let Typesense catch up if it's in use."""
+        r = backups.restore(store, name)
+        if search.index is not None:
+            try:
+                search.index.rebuild(store)
+            except Exception as exc:  # built-in search already has the restored data
+                log.warning("Typesense rebuild after a restore failed: %s", exc)
+        return r["restored"], r["saved"]
+
+    @app.post("/settings/backups/restore")
+    async def restore_from_settings(request: Request):
+        """App window only (the AI has no restore tool). Saves the data as it is now, then swaps the backup in."""
+        form = await request.form()
+        try:
+            info, saved = restore_backup(str(form.get("name") or ""))
+        except ValueError as exc:
+            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
+        people, jobs = info["people"], info["jobs"]
+        msg = (f"Restored the backup from {_local(info['when'])} ({info['why'].lower()}): {people} "
+               f"{'person' if people == 1 else 'people'} and {jobs} job{'' if jobs == 1 else 's'}. Your data from "
+               f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it.")
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#backups", status_code=303)
 
     @app.post("/settings/backups/delete")
     def delete_backups(request: Request):
@@ -1093,7 +1213,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy(request: Request):
-        return page(request, "privacy.html", data_folder=str(data_dir().resolve()), typesense=env_status())
+        return page(request, "privacy.html", data_folder=str(data_dir().resolve()), typesense=env_status(),
+                    folder_private=paths.data_dir_private())
 
     @app.get("/report", response_class=HTMLResponse)
     def report_page(request: Request, where: str = ""):
@@ -1107,8 +1228,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "report.html", link=None, error="Say in a few words what went wrong.",
                         env_line=recipes.environment_line(), where=str(form.get("where") or ""))
         details, where = str(form.get("details") or ""), str(form.get("where") or "app")
-        link = recipes.issue_url(summary, details, where=where)
-        title, body = recipes.issue_text(summary, details, where=where)
+        names = [r["name"] for r in store._rows("SELECT name FROM candidates")]
+        link = recipes.issue_url(summary, details, where=where, names=names)
+        title, body = recipes.issue_text(summary, details, where=where, names=names)
         return page(request, "report.html", link=link, summary=summary, env_line=recipes.environment_line(),
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
@@ -1152,7 +1274,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                           offset=max(0, offset))
         return {"total": r.total, "engine": r.engine, "exact_total": r.exact_total, "suggestion": r.suggestion,
                 "corrected": r.corrected,
-                "results": [{**h.candidate, "snippet": h.snippet, "closest": h.closest, "reason": h.reason}
+                "results": [{**h.candidate, "snippet": plain_snippet(h.snippet), "closest": h.closest, "reason": h.reason}
                             for h in r.hits]}
 
     @app.post("/api/candidates", status_code=201)
@@ -1190,6 +1312,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         detail = getattr(exc, "detail", None)
         return page(request, "message.html", status_code=404, title="Not found",
                     message=detail if detail and detail != "Not Found" else "That page doesn't exist.")
+
+    @app.exception_handler(RequestValidationError)
+    async def bad_request(request: Request, exc: RequestValidationError):
+        """The API keeps FastAPI's 422 details. In the app window a bad id in the address is Not found."""
+        if request.url.path.startswith("/api/"):
+            return await request_validation_exception_handler(request, exc)
+        if any((e.get("loc") or ("",))[0] == "path" for e in exc.errors()):
+            return page(request, "message.html", status_code=404, title="Not found", message="That page doesn't exist.")
+        return page(request, "message.html", status_code=400, title="That link isn't right",
+                    message="Something in that address isn't right. Go back and try again.")
 
     for route in app.routes:  # HEAD works wherever GET does (link checkers, curl -I)
         if isinstance(route, APIRoute) and "GET" in route.methods and route.path != "/launch":  # HEAD never spends a code

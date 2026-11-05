@@ -44,8 +44,11 @@
 </form>
 {% else %}
 <p class="flash">Added {{ result.added }}, updated {{ result.updated }}, unchanged {{ result.unchanged }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
-{% if result.backup %}<p class="fine">We backed up everything from before this import first. To undo it, that backup is here:</p>
-<pre class="code">{{ result.backup }}</pre>{% endif %}
+{% if result.backup_name %}<form class="actions-inline" method="post" action="/import/undo" data-confirm="Undo this import? Your data goes back to how it was just before it. A copy with the import in it is backed up first.">
+  <input type="hidden" name="backup" value="{{ result.backup_name }}">
+  <p class="fine">Everything was backed up before this import. Changed your mind? <button class="btn" type="submit">Undo this import</button></p>
+</form>
+<p class="fine">Undo works until something else changes. After that, the backup is under Automatic backups in <a href="/settings#backups">Settings</a>.</p>{% endif %}
 {% if result.skipped %}<details class="panel"><summary>Skipped rows ({{ result.skipped | length }})</summary><ul class="plain">{% for s in result.skipped[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 {% if result.warnings %}<details class="panel"><summary>Imported, with a cell left blank ({{ result.warnings | length }})</summary><ul class="plain">{% for s in result.warnings[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}
 {% if result.changes %}<details class="panel"><summary>What changed on updated people ({{ result.changes | length }})</summary><ul class="plain">{% for s in result.changes[:200] %}<li>{{ s }}</li>{% endfor %}</ul></details>{% endif %}

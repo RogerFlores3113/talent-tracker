@@ -12,7 +12,7 @@ from talent.mcp_views import view_html
 from talent.sample_data import load_sample_data, sample_ids
 from talent.store import Store
 
-from conftest import local_client
+from conftest import flash_of, local_client
 from test_mcp import call, structured, text
 
 
@@ -21,7 +21,7 @@ def _at(days=2, hours=0):
 
 
 def _msg(r, key="notice"):
-    return parse_qs(urlsplit(r.headers["location"]).query).get(key, [""])[0]
+    return flash_of(r, key)
 
 
 def _setup(store, stages=None):
