@@ -6,6 +6,8 @@
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
+//   data-add-step             on a button in the follow-up steps form: show the next empty step row
+//   data-check-all            on a checkbox: tick or untick every person (name candidate_ids) in its form
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
 //                             (a submit button's own data-busy wins when that button sent it)
@@ -69,6 +71,20 @@
 
   document.addEventListener("click", e => {
     if (e.target.closest && e.target.closest("button[data-print]")) window.print();
+  });
+
+  // Follow-up steps form: "Add a step" shows the next empty row; a box with data-check-all ticks every person in its form.
+  document.addEventListener("click", e => {
+    const add = e.target.closest && e.target.closest("button[data-add-step]");
+    if (!add) return;
+    const next = add.form.querySelector(".seq-step[hidden]");
+    if (next) { next.hidden = false; const f = next.querySelector("input"); if (f) f.focus(); }
+    if (!add.form.querySelector(".seq-step[hidden]")) add.hidden = true;
+  });
+  document.addEventListener("change", e => {
+    const all = e.target.closest && e.target.closest("input[data-check-all]");
+    if (!all) return;
+    all.form.querySelectorAll("input[name=candidate_ids]").forEach(b => { b.checked = all.checked; });
   });
 
   // The time zone banner: suggest the zone this browser is in, so saving it is one click.

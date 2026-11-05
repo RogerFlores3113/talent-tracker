@@ -89,7 +89,9 @@ except what you read.
   directly (save_candidate, or save_candidates for several) only when the recruiter asks you to save someone.
 - Outreach: log a batch of the same message with one log_activity call (candidate_ids); it moves people still
   in Sourced to Contacted. When a job has a follow-up sequence, list_followups gives what's due with text to
-  paste (nothing is sent by the app); log a reply with kind reply.
+  paste (nothing is sent by the app); log a reply with kind reply. set_followup_sequence sets a job's steps
+  (enroll_existing=true brings in people already messaged), and list_outreach shows who was messaged, who
+  replied and which step or source works.
 - If a tool fails or the app misbehaves, tell the recruiter, and if they have a GitHub account offer them the
   link from report_problem (it opens a prefilled issue they review; never include candidate details).
 """
@@ -1706,6 +1708,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes = None
         was_filled = actions.job_numbers(store, job_id)["filled"]
         out = _slim(store.move_stage(candidate_id, job_id, stage, notes, by="ai"))
+        out.pop("notes", None)  # an older note saved on the job isn't this call's; only a note sent now is echoed
+        if (notes or "").strip():
+            out["notes"] = notes.strip()
         if note_text and notes is None:  # queued only once the move was made
             held_note = review.queue_note(store, candidate_id, "note", note_text, None, job_id, session)
         if held_note:
@@ -1902,9 +1907,77 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                  "by the app. Log each one with log_activity once the recruiter has sent it.", DATA_NOTE]
         for p in out:
             lines.append(f"- {quoted(p['name'])} [candidate_id {p['candidate_id']}] for {p['job']} [job_id "
-                         f"{p['job_id']}]: {p['label']} (step {p['step']} of {p['steps']}), {p['due']}.")
+                         f"{p['job_id']}]: {p['label']} ({outreach.follow_up_words(p)}), {p['due']}.")
             lines.append(f"  Text: {p['draft']}")
         return _result("\n".join(lines), {"followups": out, "data_note": DATA_NOTE, "app_url": app_url("/")})
+
+    OUTREACH_ROWS = 50  # people list_outreach names before it says how many more there are
+
+    @mcp.tool(annotations=READ)
+    def list_outreach(job_id: int) -> CallToolResult:
+        """Everyone messaged on a job, in one table: first message date, how many messages went out, the current
+        step, when the next follow-up is due, replied or not, where they were found, plus reply rates per step and
+        per source. Use it to see who to nudge, who went quiet and which step or source gets replies. status is
+        due, waiting, paused, replied, finished (no reply after every step), moved_on, not_following (messaged
+        before the follow-up steps were set: set_followup_sequence with enroll_existing=true enrolls them) or
+        no_sequence. Shows at most 50 people; the totals cover everyone."""
+        job = store.get_job(job_id)
+        t = outreach.table(store, job_id)
+        shown = t["people"][:OUTREACH_ROWS]
+        more = len(t["people"]) - len(shown)
+        tot = t["totals"]
+        lines = [f"{_job_name(job)}: {tot['contacted']} messaged, {tot['replied']} replied ({tot['rate']}), "
+                 f"{tot['due']} follow-up{'' if tot['due'] == 1 else 's'} due"
+                 + (f", {tot['not_following']} not following the steps" if tot["not_following"] else "")
+                 + (f", {tot['paused']} paused" if tot["paused"] else "") + "."]
+        if not t["has_sequence"]:
+            lines.append("No follow-up steps are set. set_followup_sequence sets them.")
+        if t["people"]:
+            lines.append(DATA_NOTE)
+        for r in shown:
+            bit = (f"replied {r['replied_on']}" if r["replied"] else
+                   f"next: {r['next_label']}, {r['next_due_text'] or r['next_due']}" if r["next_label"] else r["status"])
+            lines.append(f"- {quoted(r['name'])} [candidate_id {r['candidate_id']}], {r['stage']}: first message "
+                         f"{r['first_on']}, {r['sent']} sent, {bit}" + (f", from {quoted(r['source'])}" if r["source"] else "")
+                         + ".")
+        if more:
+            lines.append(f"And {more} more. Ask the recruiter to open the Outreach tab for the rest.")
+        data = {**t, "people": shown, "more": more, "data_note": DATA_NOTE, "app_url": app_url(f"/jobs/{job_id}/outreach")}
+        return _result("\n".join(lines), data)
+
+    @mcp.tool(annotations=EDIT)
+    def set_followup_sequence(job_id: int, steps: list[dict[str, Any]], enroll_existing: bool = False) -> CallToolResult:
+        """Set a job's follow-up steps: up to 5, each {"label": "Follow-up", "day": 4, "text": "Hi {first_name}, ..."}.
+        The first step is the first message, on day 0; day is days after it and rises. In text, {first_name},
+        {job} and {company} fill in. The app sends nothing: follow-ups come due on Today and in list_followups.
+        This replaces the job's steps (the recruiter can undo it on Changes) and can't remove them. People
+        messaged before the steps were set don't follow them unless enroll_existing is true, which enrolls the
+        ones still in Sourced or Contacted who haven't replied, counting from their first message."""
+        try:
+            job = store.get_job(job_id)
+            if review.cautious(store):
+                waiting = review.queue_sequence(store, job_id, steps, bool(enroll_existing), session)
+                return _said(_wait_text(waiting), {"job_id": job_id, "pending_review": _waiting(waiting)})
+            _check_cap(store, 1 if outreach.sequence(store, job_id) else 0)
+            got = outreach.ai_set_sequence(store, job_id, steps, bool(enroll_existing))
+        except ValueError as exc:
+            msg = str(exc)
+            raise ValueError(msg if msg.startswith("No change made") else f"No change made. {msg}") from None
+        n = len(got["steps"])
+        sentence = (f"Set {n} follow-up steps for {_job_name(job)}"
+                    + (f" and enrolled {len(got['enrolled'])} already messaged" if got["enrolled"] else "") + ".")
+        out: dict[str, Any] = {"job_id": job_id, "steps": got["steps"], "enrolled": got["enrolled"],
+                               "not_following": got["not_following"], "action_id": got["action_id"],
+                               "app_url": app_url(f"/jobs/{job_id}/outreach")}
+        notes = []
+        if got["replaced"]:
+            notes.append("This replaced the steps the job had. The recruiter can undo it on Changes.")
+        if got["not_following"]:
+            notes.append(f"{got['not_following']} people messaged earlier don't follow the steps yet. Call again with "
+                         "enroll_existing=true if the recruiter wants them to.")
+        if notes:
+            out["note"] = " ".join(notes)
+        return _plain(sentence, out)
 
     # Keep and Pass on the in-chat Shortlist card. The host hides these from the model (visibility "app"), and a
     # call without a key that only the card received (from the app-only shortlist_card_key) is refused, so only a

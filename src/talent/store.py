@@ -622,6 +622,7 @@ AI_ACTION_KINDS = {
     "card_keep": "Kept someone from a Shortlist card", "card_pass": "Passed on someone on a Shortlist card",
     "outreach_batch": "Logged outreach in one batch",
     "interview_job": "Said which job an interview is for",
+    "sequence_set": "Set a job's follow-up steps",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -658,6 +659,8 @@ def _overwrite_count(kind: str, old: dict[str, Any], new: dict[str, Any]) -> int
     if kind.startswith("offer_"):
         from .offers import overwrite_count  # here: offers imports this module
         return overwrite_count(kind, old, new)
+    if kind == "sequence_set":  # replacing steps that were saved counts; a first sequence doesn't
+        return 1 if (old or {}).get("sequence") else 0
     if kind == "stages_edit":
         was = {s.get("id"): s for s in old.get("stages") or [] if isinstance(s, dict)}
         now = [s for s in new.get("stages") or [] if isinstance(s, dict)]
@@ -1564,6 +1567,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Changed {job}: {r.get('body') or 'details'}"
     if kind == "stages_edit":
         return f"Changed the stages of {job}: {r.get('body') or 'stages'}"
+    if kind == "sequence_set":
+        return f"Set the follow-up steps of {job}: {r.get('body') or 'steps'}"
     if kind == "todo_added":
         return f"Added a to-do: {r.get('todo_text') or 'a to-do'}"
     if kind == "todo_done":
@@ -1668,7 +1673,7 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("job", jid), ("stage", cid, jid))
     if kind == "job_created":
         return (("job", jid),)
-    if kind in ("job_edit", "stages_edit"):
+    if kind in ("job_edit", "stages_edit", "sequence_set"):
         return (("job", jid), (kind, jid))
     if kind.startswith("interview_"):
         return (("person", cid), ("interview", r.get("target_id")))
@@ -2418,6 +2423,9 @@ class Store:
                                                                          key=lambda s: s["position"])]
                 now = [(s["id"], s["name"], s["outcome"]) for s in self.job_stages(a["job_id"])]
                 return None if now == shape else "its stages were changed again since"
+            if kind == "sequence_set":
+                from .outreach import ai_blocker  # here: outreach imports this module
+                return ai_blocker(self, a)
             if kind in ("todo_added", "todo_done"):
                 s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
                 if kind == "todo_added":
@@ -2527,7 +2535,7 @@ class Store:
                 n, last = n + hit, max(last or "", r["created_at"])
                 people.add(r["candidate_id"])
         for r in self._rows("SELECT kind, candidate_id, job_id, old_data, new_data, at FROM ai_actions WHERE at >= ?"
-                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'interview_cancel',"
+                            " AND (kind IN ('job_edit', 'client_edit', 'client_sent', 'stages_edit', 'sequence_set', 'interview_cancel',"
                             " 'interview_move', 'interview_outcome', 'offer_terms', 'offer_answer', 'card_keep')"
                             " OR (kind = 'stage_move' AND json_valid(new_data)"
                             " AND json_extract(new_data, '$.submit') = 1))"  # a submit to a client, and card presses
@@ -2727,6 +2735,9 @@ class Store:
         if kind.startswith("offer_"):
             from .offers import ai_undo  # here: offers imports this module
             return ai_undo(self, a)
+        if kind == "sequence_set":
+            from .outreach import ai_undo as sequence_undo  # here: outreach imports this module
+            return sequence_undo(self, a)
         if kind == "interview_job":
             from .chase import ai_job_undo  # here: chase imports this module
             return ai_job_undo(self, a)

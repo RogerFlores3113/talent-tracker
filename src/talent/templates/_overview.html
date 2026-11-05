@@ -64,6 +64,13 @@
           <div class="fine">{% if i.kind in ('interview', 'interview_out', 'interview_outcome') %}{{ i.when | local(IV_TIME) }}{% if i.detail %} · {% endif %}{% endif %}{{ i.detail }}</div>
           {% endif %}
           {% if i.sessions %}{{ loop_sessions(i) }}{% endif %}
+          {% if i.kind == 'followup' and i.batch %}
+          <details class="fine"><summary>Text to paste</summary>
+            <p class="about">{{ i.draft }}</p>
+            <button class="btn small" type="button" data-copy-text="{{ i.draft }}">Copy for step {{ i.step }}</button>
+            <ul class="sessions">{% for b in i.batch %}<li><a href="/candidates/{{ b.candidate_id }}">{{ b.name }}</a> <button type="button" class="link small" data-copy-text="{{ b.draft }}">Copy for {{ b.name.split()[0] if b.name.split() else 'them' }}</button></li>{% endfor %}</ul>
+          </details>
+          {% endif %}
           {% if i.kind == 'feedback_owed' %}
           <ul class="sessions">
           {% for o in i.owed %}
@@ -93,6 +100,9 @@
           <button class="btn small" type="button" data-copy-text="{{ i.draft }}" title="{{ i.draft }}">Copy text</button>
           <form method="post" action="/jobs/{{ i.job_id }}/followups/{{ i.candidate_id }}/sent"><button class="btn small" type="submit">I sent it</button></form>
           <form method="post" action="/jobs/{{ i.job_id }}/followups/{{ i.candidate_id }}/replied"><button class="link small" type="submit">They replied</button></form>
+          {% elif i.kind == 'followup' and i.batch %}
+          <form method="post" action="/jobs/{{ i.job_id }}/followups/batch" data-confirm="Log this follow-up as sent to all {{ i.batch | length }}? Nothing is sent by the app.">{% for b in i.batch %}<input type="hidden" name="candidate_ids" value="{{ b.candidate_id }}">{% endfor %}<button class="btn small" type="submit">I sent them all</button></form>
+          <a class="link small" href="{{ i.href }}">See them</a>
           {% elif i.kind == 'followup' %}
           <a class="btn small" href="{{ i.href }}">See them</a>
           {% elif i.kind == 'openings' %}

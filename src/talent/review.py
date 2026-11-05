@@ -37,7 +37,8 @@ CANDIDATE_CONTACT_FIELDS = ("email", "phone")
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
          "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
-         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done"}
+         "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done",
+         "sequence": "Follow-up steps"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
@@ -434,6 +435,21 @@ def queue_stages(store: Store, job_id: int, args: dict[str, Any], session: str |
                   {"args": args, "before": _stage_shape(store, job_id)}, job_id=job_id, session=session)
 
 
+def queue_sequence(store: Store, job_id: int, steps: list[dict[str, Any]], enroll: bool,
+                   session: str | None) -> dict[str, Any]:
+    """Hold the AI app's follow-up steps for a job (and enrolling the people already messaged, if it asked)."""
+    from . import outreach
+    j = store.get_job(job_id)
+    clean = outreach.clean_steps(steps)
+    if not clean:
+        raise ValueError("Send at least two steps: the first message on day 0, then a follow-up on a later day.")
+    job = j["title"] + (f" ({j['company']})" if j.get("company") else "")
+    return _queue(store, "sequence", f"Set the follow-up steps of {job}: {len(clean)} steps"
+                  + (", and enroll the people already messaged" if enroll else ""),
+                  {"steps": clean, "enroll": enroll, "before": outreach.sequence(store, job_id)},
+                  job_id=job_id, session=session)
+
+
 def queue_todo(store: Store, row: dict[str, Any], session: str | None) -> dict[str, Any]:
     """Hold the AI app's Mark done of one of the recruiter's own to-dos."""
     return _queue(store, "todo", f"Mark the to-do {quoted(row.get('text'))} done",
@@ -680,6 +696,15 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
     if kind == "offer":
         from .offers import apply_review  # here: offers imports this module
         return apply_review(store, r)
+    if kind == "sequence":
+        from . import outreach
+        jid = r.get("job_id")
+        if jid is None:
+            raise ValueError("That job is gone.")
+        if outreach.sequence(store, jid) != p.get("before"):
+            raise ValueError("The job's follow-up steps were changed since, so nothing was changed.")
+        out = outreach.ai_set_sequence(store, jid, p["steps"], bool(p.get("enroll")))
+        return r["summary"] + (f" (enrolled {len(out['enrolled'])})" if out["enrolled"] else "")
     if kind == "todo":
         s = store._row("SELECT done_at FROM suggestions WHERE id = ?", (p.get("suggestion_id"),))
         if s is None:
@@ -819,5 +844,5 @@ __all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOL
            "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
-           "queue_interview", "queue_job", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_stages",
+           "queue_interview", "queue_job", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_sequence", "queue_stages",
            "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]
