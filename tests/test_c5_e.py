@@ -221,8 +221,8 @@ def test_keep_and_pass_tools_are_app_only_and_refuse_the_model(store):
     assert "Nothing changed" in NOT_FROM_VIEW
     # A key is per job. Cycle 6 F: after a restart the card asks the new session for a key (an old one is refused).
     other = store.add_job("Platform")
-    other_key = key_of(server, call(server, "list_prospects", job_id=other["id"]))
-    assert call(server, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=other_key).isError
+    nothing = call(server, "shortlist_card_key", job_id=other["id"], prospect_ids=[pid])  # F: no key for ids it never showed there
+    assert nothing.isError and "hasn't shown that Shortlist" in text(nothing)
     fresh = build_server(store)
     assert call(fresh, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(server, res)).isError
     assert not call(fresh, "keep_prospect", job_id=job["id"], prospect_id=pid, view_key=key_of(fresh, res)).isError

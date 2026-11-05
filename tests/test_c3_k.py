@@ -130,7 +130,7 @@ def test_today_drops_out_moves_the_recruiter_moved_back(store):
     jid = store.add_job("Data Lead")["id"]
     cid = store.add_candidate(name="Lee Chen")["id"]
     store.add_to_pipeline(cid, jid, "Screening")
-    call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Rejected")
+    call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Rejected", notes="Not a fit")
     assert "Your AI app moved 1 person out of Data Lead. Review or undo." in _ai_titles(store)
     store.move_stage(cid, jid, "Screening", by="app")
     store.move_stage(cid, jid, "Rejected", by="app")  # the recruiter agreed: their own move, no AI line

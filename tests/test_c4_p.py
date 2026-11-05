@@ -129,11 +129,12 @@ def test_problem_report_leaves_out_clients_jobs_names_and_notes(store):
         assert private not in page, private
     assert "[company removed]" in page and "[note removed]" in page and "Then the board went blank" in page
     server = build_server(store)
-    data = structured(call(server, "report_problem", summary=summary, details=details))
+    data = structured(call(server, "report_problem", summary=summary))  # F: no free-text details from the AI
     assert "Nimbus" not in data["url"] and "Priya" not in data["url"] and "180k" not in data["url"]
     assert data["preview"]["title"].startswith("Pipeline for [company removed] broke for [name removed]")
-    assert recipes.issue_url(summary, details, where="MCP / AI app",
-                             private=recipes.report_private(store)) == data["url"]
+    text = summary + "\n\nArea: other"
+    assert recipes.issue_url(summary, text, where="MCP / AI app", private=recipes.report_private(store),
+                             strict=True) == data["url"]
 
 
 # --------------------------------------------- 4. undoing a move keeps the date
@@ -145,7 +146,7 @@ def test_undoing_a_stage_move_puts_back_the_old_date(store):
     with store._lock, store._conn:
         store._conn.execute("UPDATE applications SET stage_changed_at = ? WHERE candidate_id = ?", (old, cid))
     server = build_server(store)
-    call(server, "move_stage", candidate_id=cid, job_id=job["id"], stage="Rejected")
+    call(server, "move_stage", candidate_id=cid, job_id=job["id"], stage="Rejected", notes="Not a fit")
     move = store.ai_actions()[0]
     store.undo_ai_action(move["id"])
     app = store.pipeline(job["id"])[0]

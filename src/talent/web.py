@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions
+from . import ai_caps, trust
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, offers, plan
@@ -2208,7 +2209,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     ai_waiting=ai_waiting, ai_sessions=sessions.listing(store) if who in ("", "ai") else [],
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
-                    undo_last=last_undo_ai(),
+                    undo_last=last_undo_ai(), ai_allowance=ai_caps.allowance(store),
                     ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
                     undo_window={"1": "24", "7": "168", "30": "720"}.get(since, "24"))
 
@@ -2461,6 +2462,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             msg += review.extra_holds_text(store)
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
 
+    @app.post("/settings/ai-apps")
+    async def set_ai_apps(request: Request):
+        """How far each AI app that has connected is trusted, and what a new one starts as."""
+        form = await request.form()
+        trust.set_new_apps(store, "suggest" if form.get("new_apps") == "suggest" else "trusted")
+        changed = 0
+        for a in trust.apps(store):
+            level = str(form.get(f"trust_{a['id']}") or "")
+            if level in trust.LEVELS and level != a["trust"]:
+                trust.set_trust(store, a["id"], level)
+                changed += 1
+        msg = ("Saved. " + (f"{changed} AI app{'' if changed == 1 else 's'} changed. " if changed else "")
+               + ("New AI apps start at Suggest only." if trust.new_apps_level(store) == "suggest"
+                  else "New AI apps start as Trusted."))
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
+
     @app.post("/settings/time-zone")
     async def set_time_zone(request: Request):
         """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
@@ -2489,7 +2506,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
                     sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
-                    backup_list=backups.list_backups(), typesense=env_status())
+                    backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
+                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN)
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
@@ -2515,7 +2533,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         people, jobs = info["people"], info["jobs"]
         msg = (f"Restored the backup from {_local(info['when'])} ({info['why'].lower()}): {people} "
                f"{'person' if people == 1 else 'people'} and {jobs} job{'' if jobs == 1 else 's'}. Your data from "
-               f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it.")
+               f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it. "
+               "Your Cautious mode and AI app settings stayed as they are now.")
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#backups", status_code=303)
 
     @app.post("/settings/backups/delete")
