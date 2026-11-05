@@ -67,13 +67,14 @@
     <select name="kind" aria-label="Kind">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
     <input type="text" name="body" placeholder="What happened? (for an interview, add the date)" aria-label="Note">
     <input type="datetime-local" name="at" aria-label="When (leave blank for now)" title="When (leave blank for now)">
-    {% if c.pipelines %}<select name="job_id" aria-label="Job"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ p.job_title }}</option>{% endfor %}</select>{% endif %}
+    {% if c.pipelines %}<select name="job_id" aria-label="Job"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ job_label(p.job_title, p.job_company) }}</option>{% endfor %}</select>{% endif %}
+    <label class="followup">Follow up on <input type="date" name="follow_up" aria-label="Follow up on (optional)" title="Optional. Adds a follow-up to Today on this day."></label>
     <button class="btn small primary" type="submit">Add</button>
   </form>
   {% if c.timeline %}
   <ul class="timeline">
     {% for t in c.timeline %}
-    <li class="t-{{ t.kind }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+    <li class="t-{{ t.kind }}"><span class="kind">{{ t.kind }}</span> <span class="when" title="{{ t.at | local }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
       {% if t.body %}<div>{{ t.body }}</div>{% endif %}{% if t.source and t.source not in ('App',) %}<div class="fine">from {{ t.source }}</div>{% endif %}
       {% if t.kind == 'change' and t.undoable %}<form method="post" action="/candidates/{{ c.id }}/undo/{{ t.id }}" class="inline"><button class="btn small" type="submit">Undo</button></form>{% elif t.kind == 'change' and t.data and t.data.undone_at %}<div class="fine">Undone</div>{% endif %}</li>
     {% endfor %}

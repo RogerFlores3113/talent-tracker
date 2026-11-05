@@ -2,7 +2,10 @@
 
 Product decisions live in the Claude Doc "Talent Tracker: Product Decisions".
 
-Status: v0.0.1 slice built (candidate store, search page, MCP server, desktop packaging).
+Status: v0.0.2 in progress. Built: candidate store with skills, work history and timeline; jobs with
+custom stages, board and table; Today page (interviews, follow-ups, stuck, thin pipelines, out-of-date
+profiles); CSV import and export, backups, paste-a-resume; removable sample data; MCP server with in-chat
+views; desktop packaging for Mac and Windows.
 Last updated: 2026-11-04.
 
 ## 1. What it is

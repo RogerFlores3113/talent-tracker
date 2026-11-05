@@ -6,7 +6,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, importers, integrations, recipes
+from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from .paths import data_dir, db_path, resource_dir
 from .store import (CANDIDATE_FIELDS, DEFAULT_SETTINGS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     Store, snippet_html, split_tags, to_dt)
@@ -23,6 +24,7 @@ from .typesense_index import SearchService, TypesenseIndex
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}
 MAX_UPLOAD = 10 * 1024 * 1024
+ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
@@ -102,6 +104,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     env.filters["local"] = _local
     env.filters["claude_link"] = recipes.claude_link
     env.globals["version"] = __version__
+    env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["job_label"] = actions.job_label
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
     imports_dir = Path(tempfile.gettempdir()) / "talent-search-imports"
 
@@ -131,11 +135,15 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     def is_htmx(request: Request) -> bool:
         return bool(request.headers.get("HX-Request"))
 
-    def back(request: Request, default: str = "/") -> RedirectResponse:
+    def back(request: Request, default: str = "/", notice: str = "", error: str = "") -> RedirectResponse:
+        """Redirect to the page the form was on, with an optional one-line message (shown by base.html)."""
         ref = request.headers.get("referer") or ""
         target = urlsplit(ref)
-        dest = (target.path + ("?" + target.query if target.query else "")) if target.hostname in LOCAL_HOSTS else default
-        return RedirectResponse(dest or default, status_code=303)
+        path, query = (target.path, target.query) if target.hostname in LOCAL_HOSTS and target.path else \
+            (urlsplit(default).path, urlsplit(default).query)
+        params = [(k, v) for k, v in parse_qsl(query) if k not in ONE_SHOT_PARAMS]
+        params += [(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v]
+        return RedirectResponse(path + ("?" + urlencode(params) if params else ""), status_code=303)
 
     def cand_or_404(candidate_id: int) -> dict[str, Any]:
         try:
@@ -163,8 +171,10 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         return page(request, "index.html", **ctx, **overview_ctx())
 
     def overview_ctx() -> dict[str, Any]:
+        people, sample_jobs = sample_ids(store)
         return {"today": actions.action_items(store), "jobs": store.list_jobs("open"),
-                "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day()}
+                "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
+                "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
     @app.get("/search", response_class=HTMLResponse)
     def search_fragment(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
@@ -254,14 +264,22 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         cand_or_404(candidate_id)
         form = await request.form()
         job = str(form.get("job_id") or "")
+        job_id = int(job) if job.isdigit() else None
+        kind, body = str(form.get("kind") or "note"), str(form.get("body") or "")
+        follow_up = str(form.get("follow_up") or "").strip()
+        notice = ""
         try:
-            store.log(candidate_id, str(form.get("kind") or "note"), str(form.get("body") or ""),
-                      at=str(form.get("at") or "") or None, job_id=int(job) if job.isdigit() else None,
-                      source="App")
-        except ValueError as exc:
+            day = actions.parse_day(follow_up) if follow_up else None
+            if body.strip() or kind != "note" or not day:  # a follow-up date alone needs no note
+                store.log(candidate_id, kind, body, at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+            if day:
+                actions.schedule_followup(store, candidate_id, day, job_id=job_id)
+                notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
+        except (ValueError, NotFound) as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
                                     status_code=303)
-        return RedirectResponse(f"/candidates/{candidate_id}#timeline", status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}{'?' + urlencode({'notice': notice}) if notice else ''}#timeline",
+                                status_code=303)
 
     @app.post("/candidates/{candidate_id}/undo/{timeline_id}")
     def undo_change_form(candidate_id: int, timeline_id: int):
@@ -367,15 +385,20 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
 
     @app.post("/sample-data")
     def sample_data():
-        from .sample_data import load_sample_data
-
         load_sample_data(store)
         return RedirectResponse("/?sample=1", status_code=303)
+
+    @app.post("/sample-data/remove")
+    def sample_data_remove(request: Request):
+        people, jobs = remove_sample_data(store)
+        msg = (f"Removed the sample data: {people} candidate{'' if people == 1 else 's'} and "
+               f"{jobs} job{'' if jobs == 1 else 's'}." if people or jobs else "There was no sample data to remove.")
+        return back(request, notice=msg)
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs_page(request: Request, status: str = ""):
-        jobs = store.list_jobs(status or None)
+        jobs = store.list_jobs(status if status in JOB_STATUSES else None)
         return page(request, "jobs.html", jobs=jobs, status=status)
 
     @app.get("/jobs/new", response_class=HTMLResponse)
@@ -404,7 +427,8 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
             in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
-                   q=q, add_results=add_results, prompt=recipes.source_for_job(job))
+                   q=q, add_results=add_results, prompt=recipes.source_for_job(job),
+                   next_iv=actions.next_interviews(store, job_id), status_text=actions.job_status_text(store, job_id))
         if is_htmx(request) and request.headers.get("HX-Target") == "add-results":
             return page(request, "_add_results.html", **ctx)
         return page(request, "job.html", **ctx)
@@ -466,8 +490,17 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
         if is_htmx(request):
             view = str(form.get("view") or store.setting("pipeline_view"))
             return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
-                        stages=store.job_stages(job_id), view=view, error=error)
-        return back(request, f"/jobs/{job_id}")
+                        stages=store.job_stages(job_id), view=view, error=error,
+                        next_iv=actions.next_interviews(store, job_id))
+        return back(request, f"/jobs/{job_id}", error=error or "")
+
+    @app.post("/jobs/{job_id}/delete")
+    def delete_job_form(job_id: int):
+        """App window only. The AI has no tool to delete a job."""
+        job = job_or_404(job_id)
+        store.delete_job(job_id)
+        return RedirectResponse("/jobs?" + urlencode({"notice": f"Deleted {actions.job_label(job['title'], job.get('company'))}. "
+                                                      "The candidates are still saved."}), status_code=303)
 
     @app.post("/jobs/{job_id}/add")
     async def add_existing(request: Request, job_id: int):
@@ -483,45 +516,64 @@ def create_app(store: Store, search: SearchService | None = None) -> FastAPI:
     async def snooze(request: Request):
         form = await request.form()
         key = str(form.get("key") or "")
-        if key:
-            store.snooze(key, int(str(form.get("days") or "7")))
-        return back(request)
+        days = str(form.get("days") or "7")
+        if not key or not days.isdigit() or not 0 < int(days) < 3650:
+            return back(request, error="Couldn't snooze that. Reload the page and try again.")
+        store.snooze(key, int(days))
+        return back(request, notice=f"Snoozed for {days} day{'' if days == '1' else 's'}.")
 
     @app.post("/actions/suggestions/{suggestion_id}/done")
     def suggestion_done(request: Request, suggestion_id: int):
         try:
-            store.complete_suggestion(suggestion_id)
+            actions.complete_followup(store, suggestion_id)
         except NotFound:
-            raise HTTPException(404)
-        return back(request)
+            return back(request, error="That follow-up is already gone.")
+        return back(request, notice="Marked done.")
 
     @app.post("/actions/advance")
     async def advance(request: Request):
         form = await request.form()
+        cid, jid, stage = (str(form.get(k) or "") for k in ("candidate_id", "job_id", "stage"))
+        if not (cid.isdigit() and jid.isdigit() and stage):
+            return back(request, error="Couldn't move that candidate. Reload the page and try again.")
         try:
-            store.move_stage(int(str(form.get("candidate_id"))), int(str(form.get("job_id"))), str(form.get("stage")))
-        except (ValueError, NotFound, TypeError):
-            pass
-        return back(request)
+            app_row = store.move_stage(int(cid), int(jid), stage)
+        except (ValueError, NotFound) as exc:
+            return back(request, error=str(exc))
+        return back(request, notice=f"Moved {app_row['candidate_name']} to {app_row['stage']}.")
 
     # ---------------------------------------------------------- settings etc
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, saved: bool = False):
-        return page(request, "settings.html", s=store.settings(), flags=actions.FLAGS, saved=saved,
-                    data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()))
+        return render_settings(request, saved=saved)
 
-    @app.post("/settings")
+    def render_settings(request: Request, saved: bool = False, s: dict[str, str] | None = None,
+                        errors: dict[str, str] | None = None, status_code: int = 200) -> HTMLResponse:
+        people, jobs = sample_ids(store)
+        return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
+                    thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {}, sample_people=len(people),
+                    sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()))
+
+    @app.post("/settings", response_class=HTMLResponse)
     async def save_settings(request: Request):
         form = await request.form()
         values: dict[str, str] = {}
+        errors: dict[str, str] = {}
         for key, _, _ in actions.FLAGS:
             values[key] = "1" if form.get(key) else "0"
-        for key in ("stuck_days", "thin_min", "stale_days"):
+        for key, _ in actions.THRESHOLDS:
             raw = str(form.get(key) or "").strip()
+            if not raw:
+                continue  # left blank: keep what was there
             if raw.isdigit() and 0 < int(raw) < 10000:
+                values[key] = str(int(raw))
+            else:
                 values[key] = raw
+                errors[key] = "Use a whole number from 1 to 9999."
         if form.get("pipeline_view") in ("board", "table"):
             values["pipeline_view"] = str(form.get("pipeline_view"))
+        if errors:
+            return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
         store.set_settings(**values)
         return RedirectResponse("/settings?saved=1", status_code=303)
 

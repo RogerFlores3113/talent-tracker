@@ -21,7 +21,12 @@
       <a href="/settings" class="{{ 'on' if path == '/settings' }}">Settings</a>
     </nav>
   </header>
-  <main>{% block body %}{% endblock %}</main>
+  <main>
+    {% set fq = request.query_params %}
+    {% if fq.get('flash_error') %}<p class="flash warn" role="alert">{{ fq.get('flash_error') }}</p>{% endif %}
+    {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}</p>{% endif %}
+    {% block body %}{% endblock %}
+  </main>
   <footer class="foot">
     Everything stays on this computer. Talent Search uses none of your data and has no telemetry.
     <a href="/privacy">Privacy</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a> · v{{ version }}

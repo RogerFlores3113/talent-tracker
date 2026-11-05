@@ -1,9 +1,10 @@
 """Made-up candidates so a new user can try search before adding real people."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
-from .store import Store
+from .store import NotFound, Store
 
 SAMPLES = [
     ("Maya Okafor", "Senior Backend Engineer", "Ledgerline", "Austin, TX",
@@ -70,6 +71,8 @@ def load_sample_data(store: Store) -> int:
     """
     added = 0
     ids: dict[str, int] = {}
+    new_people: list[int] = []
+    new_jobs: list[int] = []
     for name, title, company, location, about, tags in SAMPLES:
         slug = name.lower().replace(" ", ".").replace("'", "")
         history = [{"title": t, "company": c, "start": a, "end": b} for t, c, a, b in HISTORY.get(name, [])]
@@ -79,6 +82,8 @@ def load_sample_data(store: Store) -> int:
         )
         ids[name] = cand["id"]
         added += created
+        if created:
+            new_people.append(cand["id"])
     if not added:
         return 0
 
@@ -92,6 +97,7 @@ def load_sample_data(store: Store) -> int:
         if title in existing:
             continue
         job = store.add_job(title, company=company, location=location, description=description)
+        new_jobs.append(job["id"])
         for name, stage, days in people:
             store.add_to_pipeline(ids[name], job["id"])
             if stage != "Sourced":
@@ -110,4 +116,59 @@ def load_sample_data(store: Store) -> int:
             store.add_suggestion("Follow up with Noah Williams about the backend role", candidate_id=ids["Noah Williams"],
                                  job_id=job["id"], source="Sample data")
     db.commit()
+    people, jobs = sample_ids(store)
+    _save_ids(store, people | set(new_people), jobs | set(new_jobs))
     return added
+
+
+# Which rows are sample data, so the app can badge them and remove exactly those.
+# Kept in the settings table as JSON lists of ids.
+CANDIDATE_KEY, JOB_KEY = "sample_candidate_ids", "sample_job_ids"
+
+
+def _ids(raw: str | None) -> set[int]:
+    try:
+        return {int(i) for i in json.loads(raw or "[]")}
+    except (ValueError, TypeError):
+        return set()
+
+
+def _save_ids(store: Store, people: set[int], jobs: set[int]) -> None:
+    with store._lock, store._conn:
+        for key, ids in ((CANDIDATE_KEY, people), (JOB_KEY, jobs)):
+            if ids:
+                store._conn.execute(
+                    "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(sorted(ids))))
+            else:
+                store._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+
+def sample_ids(store: Store) -> tuple[set[int], set[int]]:
+    """(candidate ids, job ids) that came from the sample data and still exist."""
+    cfg = store.settings()
+    people, jobs = _ids(cfg.get(CANDIDATE_KEY)), _ids(cfg.get(JOB_KEY))
+    if people:
+        marks = ",".join("?" * len(people))
+        people = {r["id"] for r in store._rows(f"SELECT id FROM candidates WHERE id IN ({marks})", sorted(people))}
+    if jobs:
+        marks = ",".join("?" * len(jobs))
+        jobs = {r["id"] for r in store._rows(f"SELECT id FROM jobs WHERE id IN ({marks})", sorted(jobs))}
+    return people, jobs
+
+
+def remove_sample_data(store: Store) -> tuple[int, int]:
+    """Delete exactly the sample candidates and jobs. Returns (candidates, jobs) removed."""
+    people, jobs = sample_ids(store)
+    for cid in people:
+        try:
+            store.delete_candidate(cid)
+        except NotFound:
+            pass
+    for jid in jobs:
+        try:
+            store.delete_job(jid)
+        except NotFound:
+            pass
+    _save_ids(store, set(), set())
+    return len(people), len(jobs)

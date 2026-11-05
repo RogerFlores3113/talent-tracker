@@ -12,8 +12,9 @@ for you in plain English.
   Then ask things like *"Save this person to Talent Search"* (paste a LinkedIn link)
   or *"Who do I have in Austin with Rust experience?"* In Claude, results show up
   as cards and a pipeline board right in the chat.
-- **Today page.** Upcoming interviews, candidates stuck in a stage, thin pipelines,
-  stale profiles and follow-ups your AI suggested. Turn each one on or off.
+- **Today page.** Upcoming interviews and follow-ups first, then candidates stuck in a
+  stage, jobs that need more candidates and profiles that may be out of date. Set a
+  follow-up date when you log a call. Turn each kind on or off.
 - **Jobs with your own stages.** Rename and add stages per job, then drag people
   across a board or work in a table grouped by stage.
 - **Ready-made AI recipes.** One click copies a prompt like "Source candidates for
@@ -31,10 +32,31 @@ for you in plain English.
    - Windows: if SmartScreen appears, choose **More info**, then **Run anyway** (not code-signed yet).
 3. Go to **Connect AI**, press **Connect Claude**, **Connect Codex** or
    **Connect LM Studio**, then quit and reopen that app.
-4. No candidates yet? Press **Try it with sample data**.
+4. No candidates yet? Press **Try it with sample data**. Sample people and jobs are
+   marked Sample, and **Remove sample data** (on Today and in Settings) deletes exactly those.
 
 Your data is in `~/Library/Application Support/Talent Search` (Mac) or
 `%LOCALAPPDATA%\Talent Search` (Windows).
+
+## Admin and rollout
+
+- **Where data lives.** One SQLite file, `talent.db`, plus `app.log`, in
+  `~/Library/Application Support/Talent Search` (Mac) or `%LOCALAPPDATA%\Talent Search`
+  (Windows). Settings shows the exact path.
+- **Backups.** Settings > **Download a backup** saves a complete copy of the
+  database while the app is running. Keep a recent one somewhere safe, such as a
+  company drive. **Export candidates as CSV** gives a spreadsheet copy too.
+- **Moving to a new computer.** Install the app there and open it once, then quit
+  it. Copy your backup into the data folder above and rename it to `talent.db`,
+  replacing the empty one. Open the app again and press **Connect** for each AI app.
+- **Uninstalling.** Quit the app and delete it. To remove your data too, delete the
+  data folder above (take a backup first if you might want it back). If you
+  connected an AI app, remove the `talent-search` entry from its MCP settings:
+  `claude_desktop_config.json` (Claude Desktop), `~/.codex/config.toml` (Codex) or
+  `~/.lmstudio/mcp.json` (LM Studio).
+- **Nothing is sent anywhere.** The app listens only on 127.0.0.1, has no accounts,
+  no telemetry and no update checks. The only data that leaves the computer is
+  what your AI app sends to its own model when you ask it to use Talent Search.
 
 ## For developers
 

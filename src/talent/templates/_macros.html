@@ -13,3 +13,7 @@
 {% macro sub(c) -%}
 {{ c.current_title or '' }}{% if c.current_company %}{{ ' at ' if c.current_title else '' }}{{ c.current_company }}{% endif %}{% if c.location %}{{ ' · ' if c.current_title or c.current_company }}{{ c.location }}{% endif %}
 {%- endmacro %}
+
+{% macro sample_badge(is_sample) -%}
+{% if is_sample %}<span class="badge sample" title="Made-up sample data. Remove it in Settings.">Sample</span>{% endif %}
+{%- endmacro %}

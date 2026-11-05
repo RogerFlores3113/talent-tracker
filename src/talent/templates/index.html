@@ -2,7 +2,8 @@
 {% block body %}
 {% set qp = request.query_params %}
 {% if qp.get('deleted') %}<p class="flash">Candidate deleted.</p>{% endif %}
-{% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab.</p>{% endif %}
+{% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab. You can remove it any time.</p>{% endif %}
+{% if total_all or jobs or searching %}
 <form class="searchbar" action="/" method="get" role="search"
       hx-get="/" hx-target="#results" hx-push-url="true"
       hx-trigger="input delay:150ms, search, submit">
@@ -16,5 +17,6 @@
     </div>
   </details>
 </form>
+{% endif %}
 <section id="results" aria-live="polite">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>
 {% endblock %}
