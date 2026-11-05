@@ -40,7 +40,7 @@
     {% for i in today['items'] %}
       <li class="item kind-{{ i.kind }}">
         <div class="item-main">
-          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date'}[i.kind] }}</span>
+          <span class="kind">{{ {'interview':'Interview','interview_out':'Interview still on','interview_outcome':'How did it go','suggestion':'Follow-up','ai_change':'AI change','update_due':'Update due','shortlist':'Shortlist','stuck':'Stuck','thin':'Needs more candidates','stale':'May be out of date','openings':'Openings'}[i.kind] }}</span>
           <a class="item-title" href="{{ i.href }}">{{ i.title }}</a> {{ sample_badge((i.candidate_id and i.candidate_id in sample[0]) or (not i.candidate_id and i.job_id and i.job_id in sample[1])) }}
           {% if i.kind == 'suggestion' and i.due_text %}{% if i.overdue %}<span class="badge overdue">Overdue</span> <span class="fine">due {{ i.due_day }}</span>{% else %}<span class="fine">{{ i.due_text }}</span>{% endif %}{% endif %}
           {% if i.kind == 'interview' and i.on_hold %}<span class="badge">job on hold</span>{% endif %}
@@ -65,6 +65,10 @@
           <a class="btn small" href="{{ i.href }}">Send updates</a>
           {% elif i.kind == 'shortlist' %}
           <a class="btn small" href="{{ i.href }}">Review</a>
+          {% elif i.kind == 'openings' %}
+          <a class="btn small" href="{{ i.href }}">Set openings</a>
+          {% elif i.kind == 'stuck' and i.count %}
+          <a class="btn small" href="{{ i.href }}">See the job</a>
           {% elif i.kind == 'interview_out' %}
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="cancel"><button class="btn small" type="submit" title="It stays on the timeline, marked cancelled">Cancel interview{{ 's' if i.interview_ids | length > 1 }}</button></form>
           <form method="post" action="/actions/interviews/out"><input type="hidden" name="candidate_id" value="{{ i.candidate_id }}"><input type="hidden" name="job_id" value="{{ i.job_id }}"><input type="hidden" name="op" value="keep"><button class="link small" type="submit" title="Stop asking. It shows on Today as a normal interview.">Keep it</button></form>
@@ -77,6 +81,9 @@
           {% endif %}
           {% if i.kind not in ('suggestion', 'interview_out') %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
+          {% endif %}
+          {% if i.kind == 'stuck' and i.import_run %}
+          <form method="post" action="/actions/snooze-import"><input type="hidden" name="run" value="{{ i.import_run }}"><button class="link small" type="submit" title="Hide stuck reminders for everyone this import brought in, for 30 days">Snooze all from this import</button></form>
           {% endif %}
         </div>
       </li>
@@ -109,6 +116,7 @@
       <label class="inline-label">from <input type="date" name="due" aria-label="Show from (optional)" title="Optional. Shows on Today from this day."></label>
       <button class="btn small" type="submit">Add to-do</button>
     </form>
+    {% if today.stuck_more %}<p class="fine">And {{ today.stuck_more }} more stuck reminder{{ '' if today.stuck_more == 1 else 's' }} not shown. Snooze some, or raise the days in <a href="/settings">Settings</a>.</p>{% endif %}
     {% if today.hidden or today.scheduled_later %}<p class="fine">
       {%- if today.hidden %}{{ today.hidden }} snoozed.{% endif %}
       {%- if today.scheduled_later %} {{ today.scheduled_later }} more follow-up{{ '' if today.scheduled_later == 1 else 's' }} scheduled for later.{% endif %}</p>{% endif %}
