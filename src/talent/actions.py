@@ -629,6 +629,7 @@ def recent_changes(store: Store, job_id: int, now: datetime | None = None, days:
            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = t.job_id
            LEFT JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
            WHERE t.job_id = ? AND t.kind = 'stage' AND t.at >= ?
+             AND coalesce(json_extract(CASE WHEN json_valid(t.data) THEN t.data END, '$.imported'), 0) = 0
            GROUP BY t.candidate_id ORDER BY at""", (job_id, cutoff))
     kinds: dict[str, list[str]] = {"hired": [], "out": [], "moved": [], "new": []}
     word = hire_word(store, job_id)
@@ -683,6 +684,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     if job.get("target_date"):
         lines.append(f"Target date: {local_time(job['target_date'] + 'T12:00:00', '%a %b %-d, %Y')}")
     lines += [headline(nums, job["status"]), ""]
+    from .importers import imported_placements  # placed by an import with no stage date: "(imported)"
+    imported = imported_placements(store, job_id)
     total = shown = 0
     for g in groups:
         total += len(g["candidates"])
@@ -692,7 +695,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
         lost = g["outcome"] == "lost"
         people = [f"{a['candidate_name']} ("
                   + ("position filled, " if lost and _out_reason(a) == "position filled" else "")
-                  + f"{_in_stage(_days_ago(a['stage_changed_at'], now))})"
+                  + ("imported" if a["candidate_id"] in imported else _in_stage(_days_ago(a['stage_changed_at'], now)))
+                  + ")"
                   for a in sorted(g["candidates"], key=lambda a: a["stage_changed_at"])]
         lines.append(f"{g['name']} ({len(g['candidates'])}): {_capped(people)}")
     if not shown:

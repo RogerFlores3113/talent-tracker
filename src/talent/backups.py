@@ -12,9 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .importers import backup_before_import
+from .importers import backup_before_import, backup_label_path
 from .paths import backups_dir
-from .store import Store
+from .store import Store, now_iso
 
 # backup_before_import names files "before-<reason>-YYYY-mm-dd-HHMMSS[-n].db".
 NAME_RE = re.compile(r"^before-(?P<reason>[a-z0-9]+(?:-[a-z0-9]+)*?)-(?P<stamp>\d{4}-\d{2}-\d{2}-\d{6})(?:-\d+)?\.db$")
@@ -58,9 +58,21 @@ def read_counts(path: Path) -> dict[str, Any]:
         conn.close()
 
 
+def _label(path: Path) -> str | None:
+    """'Before importing Connections.csv (4,000 rows)', from the label saved next to an import's backup."""
+    try:
+        rec = json.loads(backup_label_path(path).read_text(encoding="utf-8"))
+        rows = int(rec.get("rows") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    file = str(rec.get("file") or "").strip()[:120]
+    counted = f"{rows:,} row{'' if rows == 1 else 's'}"
+    return f"Before importing {file} ({counted})" if file else f"Before an import ({counted})"
+
+
 def describe(path: Path) -> dict[str, Any]:
     when = _when(path)
-    return {"name": path.name, "path": path, "why": _reason(path.name), "when": when.isoformat(),
+    return {"name": path.name, "path": path, "why": _label(path) or _reason(path.name), "when": when.isoformat(),
             **read_counts(path)}
 
 
@@ -135,3 +147,51 @@ def import_undo_state(store: Store, name: str) -> str:
     if not rec or rec.get("backup") != name or backup_file(name) is None:
         return "gone"
     return "ok" if rec.get("digest") == content_digest(store) else "changed"
+
+
+# ------------------------------------------------------- imports on Changes
+IMPORT_LOG_KEY = "import_log"  # settings row: the newest imports, each one line on Changes
+IMPORT_LOG_KEPT = 50
+
+
+def record_import(store: Store, result: dict[str, Any], file_name: str | None, total: int) -> dict[str, Any]:
+    """After an import (app or command line): one entry on Changes, and Undo for it while nothing else changed."""
+    backup = Path(result["backup"]).name if result.get("backup") else None
+    if backup:
+        remember_import(store, result["backup"])
+    entry = {"at": now_iso(), "file": (file_name or "").strip()[:120], "rows": total, "added": result.get("added", 0),
+             "updated": result.get("updated", 0), "unchanged": result.get("unchanged", 0),
+             "skipped": result.get("skipped_rows", 0), "pipelines": result.get("pipelines_added", 0),
+             "notes": result.get("notes", 0), "changed": bool(backup), "backup": backup}
+    log = [entry] + import_log(store)
+    value = json.dumps(log[:IMPORT_LOG_KEPT])
+    with store._lock, store._conn:
+        store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (IMPORT_LOG_KEY, value))
+    return entry
+
+
+def import_log(store: Store) -> list[dict[str, Any]]:
+    """The imports recorded here, newest first."""
+    row = store._row("SELECT value FROM settings WHERE key = ?", (IMPORT_LOG_KEY,))
+    try:
+        log = json.loads(row["value"]) if row else []
+    except ValueError:
+        return []
+    return [e for e in log if isinstance(e, dict) and e.get("at")] if isinstance(log, list) else []
+
+
+def import_text(entry: dict[str, Any]) -> str:
+    """'Imported Connections.csv: 4,000 rows, 3,950 new, 50 updated'."""
+    rows = int(entry.get("rows") or 0)
+    parts = [f"{rows:,} row{'' if rows == 1 else 's'}"]
+    for key, word in (("added", "new"), ("updated", "updated"), ("skipped", "skipped")):
+        if entry.get(key):
+            parts.append(f"{int(entry[key]):,} {word}")
+    if entry.get("pipelines"):
+        parts.append(f"{int(entry['pipelines']):,} put in job pipelines")
+    if entry.get("notes"):
+        parts.append(f"{int(entry['notes']):,} note{'' if entry['notes'] == 1 else 's'} added")
+    if not entry.get("changed"):
+        parts.append("nothing changed")
+    return f"Imported {entry.get('file') or 'a CSV file'}: " + ", ".join(parts)

@@ -39,6 +39,7 @@ MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
+BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
 OPEN_PATHS = {"/launch", "/api/health"}  # everything else needs the app window's key
@@ -691,7 +692,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         mapping = importers.guess_mapping(header, rows)
-        return map_step(request, token, header, rows, mapping, importers.default_source(header), upload.filename)
+        return map_step(request, token, header, rows, mapping, importers.default_source(header),
+                        _file_name(upload.filename))
+
+    def _file_name(name: Any) -> str:
+        """The uploaded file's own name, without any folder, for Changes and the backup list."""
+        return re.split(r"[\\/]", str(name or ""))[-1].strip()[:120]
+
+    def _save_lists(token: str, which: str, result: dict[str, Any]) -> None:
+        """Keep an import's (or a dry run's) detail lists for an hour, for "Download the full list"."""
+        lists = {k: result.get(k) or [] for k, _ in importers.PANELS}
+        path = imports_dir() / f"{token}.{which}.json"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(lists, f)
+        except OSError:
+            pass  # the panels still show their first lines
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
@@ -703,10 +720,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
+        if preview:
+            _save_lists(token, "preview", preview)
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     preview_lines=importers.preview_lines(preview) if preview else [],
+                    panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages)
 
     def _upload(form: Any) -> tuple[str, Path] | None:
@@ -728,7 +748,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
         header, rows = importers.read_csv(importers.decode(up[1].read_bytes()))
         return map_step(request, up[0], header, rows, _form_mapping(form, header),
-                        str(form.get("source") or "CSV import"), add_stages=form.get("add_stages") == "1")
+                        str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
+                        add_stages=form.get("add_stages") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -741,25 +762,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
+        filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
-            return map_step(request, token, header, rows, mapping, source, error="Pick which column holds the name.",
-                            add_stages=add_stages)
+            return map_step(request, token, header, rows, mapping, source, filename,
+                            error="Pick which column holds the name.", add_stages=add_stages)
         try:
-            result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages)
+            result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
+                                           file_name=filename or None)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
             path.unlink(missing_ok=True)  # our own private copy of the upload
+        backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
-            backups.remember_import(store, result["backup"])
             result["backup_name"] = Path(result["backup"]).name
-        return page(request, "import.html", step="done", result=result)
+        _save_lists(token, "result", result)
+        return page(request, "import.html", step="done", result=result, token=token,
+                    panels=importers.result_panels(result))
+
+    @app.get("/import/{token}/{which}.csv")
+    def import_list_csv(token: str, which: str, panel: str = ""):
+        """One result panel in full, as a CSV. Kept for an hour after the import or dry run."""
+        titles = dict(importers.PANELS)
+        path = imports_dir() / f"{token}.{which}.json"
+        if not token.isalnum() or which not in ("result", "preview") or panel not in titles or not path.is_file():
+            raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.")
+        try:
+            lines = [str(x) for x in json.loads(path.read_text(encoding="utf-8")).get(panel) or []]
+        except (OSError, ValueError, AttributeError):
+            raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.") from None
+        name = f"import-{titles[panel].lower().replace(' ', '-').replace(',', '')}.csv"
+        return Response(importers.panel_csv(titles[panel], lines), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.post("/import/undo")
     async def import_undo(request: Request):
         """Put back the backup taken before an import, only while nothing else has changed since."""
         form = await request.form()
-        name = str(form.get("backup") or "")
+        return undo_import(str(form.get("backup") or ""))
+
+    @app.post("/changes/import/{name}/undo")
+    def undo_import_from_changes(name: str):
+        return undo_import(name)
+
+    def undo_import(name: str) -> RedirectResponse:
         state = backups.import_undo_state(store, name)
         if state == "changed":
             return RedirectResponse("/settings?" + urlencode({"flash_error": (
@@ -781,7 +827,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def _sweep_uploads() -> None:
         """Uploads nobody finished importing are deleted after an hour."""
         cutoff = time.time() - UPLOAD_TTL
-        for f in imports_dir().glob("*.csv"):
+        for f in [*imports_dir().glob("*.csv"), *imports_dir().glob("*.json")]:
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
@@ -1157,6 +1203,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              # newest first, so every newer AI change is already in this list
                              "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undoable"]),
                              "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
+        if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
+            rows.extend(import_change_rows(since)[:limit])
         if who in ("", "app"):  # a web close-out: one row for the whole batch, with its own undo
             for b in actions.close_out_batches(store, since)[:limit]:
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
@@ -1164,6 +1212,26 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
+
+    def import_change_rows(since: str | None) -> list[dict[str, Any]]:
+        out = []
+        for e in backups.import_log(store):
+            if since and e["at"] < since:
+                continue
+            name = e.get("backup") or ""
+            state = backups.import_undo_state(store, name) if name else "none"
+            hint = None
+            if state == "changed":
+                hint = ("Something changed since, so it can't be undone here. Its backup is under Automatic backups "
+                        "in Settings.")
+            elif state == "gone" and backups.backup_file(name):
+                hint = "Its backup is under Automatic backups in Settings."
+            out.append({"at": e["at"], "who": "import", "name": "CSV import", "href": "/settings#backups",
+                        "text": backups.import_text(e), "undoable": state == "ok", "undone": False, "hint": hint,
+                        "undo_url": f"/changes/import/{name}/undo", "undo_label": "Undo this import",
+                        "confirm": "Undo this import? Your data goes back to how it was just before it. A copy with "
+                                   "the import in it is backed up first."})
+        return out
 
     def since_iso(since: str) -> str | None:
         """A start time from the Changes form: 1, 7 or 30 (days back), epoch seconds, or ISO with a zone
