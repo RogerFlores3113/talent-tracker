@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import unquote, urlsplit
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
 # candidate is still in play; "hired" and "lost" close the application.
@@ -537,7 +538,14 @@ AI_ACTION_KINDS = {
     "stage_move": "Moved a stage", "job_created": "Created a job", "job_edit": "Edited a job",
     "stages_edit": "Edited a job's stages", "todo_added": "Added a to-do", "todo_done": "Marked a to-do done",
     "prospects_proposed": "Proposed people for a Shortlist",
+    "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
+    "interview_outcome": "Recorded how an interview went",
 }
+# AI actions listed on Changes as a record only: there is nothing to put back.
+AI_RECORD_KINDS = frozenset({"interview_outcome"})
+# How many saved values (cleared or replaced) the AI app may change on one person in an hour.
+AI_EDIT_BUDGET = 3
+AI_EDIT_WINDOW_MINUTES = 60
 AI_SOURCE = "AI app"
 
 
@@ -921,11 +929,63 @@ def stored_tags(text: str | None) -> list[str]:
     return split_tags(text)
 
 
+def _linkedin_parts(url: str) -> tuple[str, str] | None:
+    """(host, path) of a linkedin.com address (any subdomain), else None. A bare "linkedin.com/in/x" works."""
+    text = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+        text = "https://" + text.lstrip("/")
+    try:
+        parts = urlsplit(text)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not (host == "linkedin.com" or host.endswith(".linkedin.com")):
+        return None
+    return host, parts.path
+
+
+# Sales Navigator and Recruiter links point at a seat-only page, not the person's public profile.
+LINKEDIN_LEAD_PATHS = {"/sales/": "Sales Navigator", "/talent/": "LinkedIn Recruiter", "/recruiter/": "LinkedIn Recruiter"}
+
+
+def linkedin_lead_tool(url: str | None) -> str | None:
+    """'Sales Navigator' or 'LinkedIn Recruiter' for a link from those tools (it won't dedupe), else None."""
+    got = _linkedin_parts(url or "") if _clean(url) else None
+    if not got:
+        return None
+    path = got[1].lower()
+    return next((tool for prefix, tool in LINKEDIN_LEAD_PATHS.items() if path.startswith(prefix)), None)
+
+
+def linkedin_problem(url: str | None) -> str | None:
+    """Why this can't be saved as someone's LinkedIn URL, or None when it can (or it's blank)."""
+    if not _clean(url):
+        return None
+    if _linkedin_parts(url) is None:
+        return ("That LinkedIn URL isn't a linkedin.com address, so nothing was saved. Use a link like "
+                "https://www.linkedin.com/in/their-name, and put any other site in Website.")
+    tool = linkedin_lead_tool(url)
+    if tool:
+        return (f"That is a {tool} link, which only works inside {tool}, so nothing was saved. Use their profile "
+                "link instead, like https://www.linkedin.com/in/their-name.")
+    return None
+
+
 def normalize_linkedin(url: str | None) -> str | None:
-    """Canonical form so the same profile pasted two ways dedupes."""
+    """Canonical form so the same profile pasted two ways dedupes: https://linkedin.com/in/<slug>, without the
+    www or country subdomain, any /details/, /overlay/ or /recent-activity/ tail, query or fragment. The slug is
+    lower case and percent-decoded. (No "www": every URL saved before this has that form, so they still match.)"""
     url = _clean(url)
     if not url:
         return None
+    got = _linkedin_parts(url)
+    if got:
+        path = re.sub(r"/{2,}", "/", got[1])
+        path = re.sub(r"^/mwlite(?=/)", "", path, flags=re.I)
+        m = re.match(r"^/in/([^/]+)", path, re.I)
+        if m:
+            return "https://linkedin.com/in/" + unquote(m.group(1)).strip().lower()
+        return "https://linkedin.com" + path.lower().rstrip("/")
     u = url.lower()
     u = re.sub(r"^https?://", "", u)
     u = re.sub(r"^(www\.|[a-z]{2}\.)linkedin\.com", "linkedin.com", u)
@@ -1213,7 +1273,13 @@ def _job_change_body(job: dict[str, Any], fields: dict[str, Any]) -> str:
     parts = []
     for k, v in fields.items():
         label = JOB_FIELD_LABELS.get(k, k)
-        parts.append(f"{label} changed" if k == "description" else f"{label} {shown(k, job.get(k))} to {shown(k, v)}")
+        was, now = job.get(k), v
+        if was in (None, "") and now not in (None, ""):
+            parts.append(f"added {label}" if k == "description" else f"added {label} {shown(k, now)}")
+        elif now in (None, ""):
+            parts.append(f"{label} cleared (was {shown(k, was)})")
+        else:
+            parts.append(f"{label} changed" if k == "description" else f"{label} {shown(k, was)} to {shown(k, now)}")
     return ", ".join(parts)
 
 
@@ -1260,7 +1326,33 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "prospects_proposed":
         n = len(new.get("prospect_ids") or [])
         return f"Proposed {n} {'person' if n == 1 else 'people'} for the Shortlist of {job}"
+    what = f": {new['summary']}" if new.get("summary") else ""
+    if kind == "interview_cancel":
+        return f"Cancelled an interview with {name}{what}"
+    if kind == "interview_move":
+        return f"Moved an interview with {name} to a new time{what}"
+    if kind == "interview_outcome":
+        label = INTERVIEW_OUTCOME_LABELS.get((new.get("data") or {}).get("outcome") or "", "")
+        return f"Recorded how an interview with {name} went" + (f": {label}" if label else "")
     return AI_ACTION_KINDS.get(kind, "A change")
+
+
+def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    """What an AI action changed, so a newer action on the same thing can be found (see Store.ai_actions)."""
+    kind, cid, jid = r["kind"], r.get("candidate_id"), r.get("job_id")
+    if kind == "candidate":
+        return (("person", cid),)
+    if kind == "profile":
+        return (("person", cid), ("profile", cid))
+    if kind in ("pipeline_add", "stage_move"):
+        return (("person", cid), ("job", jid), ("stage", cid, jid))
+    if kind == "job_created":
+        return (("job", jid),)
+    if kind in ("job_edit", "stages_edit"):
+        return (("job", jid), (kind, jid))
+    if kind.startswith("interview_"):
+        return (("person", cid), ("interview", r.get("target_id")))
+    return (("todo", r.get("target_id")),)
 
 
 class Store:
@@ -1285,6 +1377,7 @@ class Store:
         self._conn.execute("PRAGMA secure_delete = ON")
         self._conn.create_function("fold_name", 1, fold_name, deterministic=True)
         self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
+        self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
@@ -1462,6 +1555,9 @@ class Store:
                 raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
                                  f"The limit is {limit:,}, so nothing was saved.")
         if "linkedin_url" in out:
+            problem = linkedin_problem(out["linkedin_url"])
+            if problem:
+                raise ValueError(problem)
             out["linkedin_url"] = normalize_linkedin(out["linkedin_url"])
         if "last_contacted_at" in out and out["last_contacted_at"]:
             out["last_contacted_at"] = parse_when(out["last_contacted_at"])
@@ -1519,13 +1615,14 @@ class Store:
             if hit:
                 return self._hydrate(hit)
         li = normalize_linkedin(linkedin_url)
-        if li:
-            return self._hydrate(self._row("SELECT * FROM candidates WHERE linkedin_url = ?", (li,)))
+        if li:  # a URL saved before links were cut to /in/<slug> (with a /details/ tail) still matches
+            return self._hydrate(self._row("SELECT * FROM candidates WHERE linkedin_url = ? OR li_key(linkedin_url) = ?"
+                                           " ORDER BY linkedin_url = ? DESC, id LIMIT 1", (li, li, li)))
         return None
 
     def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
         """The first prepared email or LinkedIn value in `fields` that someone else already has."""
-        for f, sql in (("email", "lower(email) = lower(?)"), ("linkedin_url", "linkedin_url = ?")):
+        for f, sql in (("email", "lower(email) = lower(?)"), ("linkedin_url", "li_key(linkedin_url) = li_key(?)")):
             if fields.get(f):
                 owner = self._row(f"SELECT id, name FROM candidates WHERE {sql} AND id <> ?",
                                   (fields[f], candidate_id or 0))
@@ -1564,7 +1661,7 @@ class Store:
             """SELECT * FROM candidates WHERE id <> ? AND (
                    (? <> '' AND fold_name(name) = ?)
                    OR (? IS NOT NULL AND lower(email) = lower(?))
-                   OR (? IS NOT NULL AND linkedin_url = ?)
+                   OR (? IS NOT NULL AND li_key(linkedin_url) = li_key(?))
                    OR (? IS NOT NULL AND phone_key(phone) = ?))
                ORDER BY updated_at DESC LIMIT 10""",
             (candidate_id, key, key, c.get("email"), c.get("email"), c.get("linkedin_url"), c.get("linkedin_url"),
@@ -1622,7 +1719,8 @@ class Store:
             elif cur != v:
                 kept.append(k)
         history = work_history or self._history_for_new_role(existing["id"], row, merged)
-        cand = self._update(existing["id"], merged, history, by=by, merge=True)
+        cand = self._update(existing["id"], merged, history, by=by, merge=True,
+                            derived=() if work_history or history is None else ("work_history",))
         cand["_kept"] = kept
         return cand, False
 
@@ -1678,7 +1776,7 @@ class Store:
         return self._update(candidate_id, fields, work_history, by=by)
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
-                *, by: str, merge: bool = False) -> dict[str, Any]:
+                *, by: str, merge: bool = False, derived: tuple[str, ...] = ()) -> dict[str, Any]:
         with self._lock, self._conn:
             old, new = self._diff(candidate_id, fields, work_history)
             clash = self._clash(candidate_id, new)
@@ -1687,7 +1785,8 @@ class Store:
             if new:
                 self._apply(candidate_id, new)
                 body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
-                self._record_change(candidate_id, old, new, by, body)
+                self._record_change(candidate_id, old, new, by, body,
+                                    derived=tuple(k for k in derived if k in new))
         cand = self.get_candidate(candidate_id)
         cand["_changed"] = list(new)
         return cand
@@ -1719,12 +1818,14 @@ class Store:
             self._write_history(candidate_id, new["work_history"] or [])
 
     def _record_change(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str,
-                       body: str, undo_of: int | None = None) -> int:
+                       body: str, undo_of: int | None = None, derived: tuple[str, ...] = ()) -> int:
         by = by if by in CHANGE_SOURCES else "app"
         ts = now_iso()
         data: dict[str, Any] = {"by": by, "old": old, "new": new}
         if undo_of:
             data["undo_of"] = undo_of
+        if derived:  # changed only because another field did (work history following a new title)
+            data["derived"] = list(derived)
         tid = self._conn.execute(
             "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by], json.dumps(data)),
@@ -1812,9 +1913,9 @@ class Store:
         if app is None or app["stage"].lower() != (move["new"] or "").lower():
             raise ValueError("They were moved again since, so there is nothing to undo.")
         ts = now_iso()
-        if move.get("old"):
+        if move.get("old"):  # back to the stage they were in, and since when, so "stuck for 20 days" stays right
             self._conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ? WHERE id = ?",
-                               (move["old"], ts, app["id"]))
+                               (move["old"], data.get("old_since") or ts, app["id"]))
             self._conn.execute(
                 "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
                 " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)",
@@ -1864,8 +1965,113 @@ class Store:
                 except ValueError:
                     r[k] = None
             r["summary"] = _ai_summary(r)
-            r["undoable"] = not r["undone_at"]
+            r["record"] = r["kind"] in AI_RECORD_KINDS
+            r["blocked"] = None if r["undone_at"] or r["record"] else self._ai_blocker(r)
+            r["undoable"] = not r["undone_at"] and not r["record"] and not r["blocked"]
+        # Something the AI app changed again later comes back once that newer change is undone, so Undo all
+        # and "Undo this and everything after" still count it; its own Undo waits for the newer one.
+        later: dict[tuple[Any, ...], int] = {}
+        for r in sorted(rows, key=lambda r: r["id"], reverse=True):
+            keys = _ai_keys(r)  # the last one is the thing itself; the others are what it belongs to
+            chained = r["kind"] not in ("candidate", "job_created") or "pipeline" in (r["blocked"] or "")
+            if r["blocked"] and chained and later.get(keys[-1], 0) > r["id"]:
+                r["after_newer"] = True
+                r["blocked"] = "your AI app changed it again later. Undo that first"
+            if not r["undone_at"] and not r["record"]:
+                for k in keys:
+                    later[k] = max(later.get(k, 0), r["id"])
+        for r in rows:
+            r["undo_pending"] = r["undoable"] or bool(r.get("after_newer"))
         return rows
+
+    def _ai_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why one AI change can't be undone any more (short, for Changes), or None if it still can."""
+        kind, old, new = a["kind"], a.get("old_data") or {}, a.get("new_data") or {}
+        try:
+            if kind == "profile":
+                d = a.get("change_data") or {}
+                if d.get("undone_at"):
+                    return "already undone on the timeline"
+                if not d.get("old"):
+                    return "nothing to put back"
+                row = self._row("SELECT * FROM candidates WHERE id = ?", (a["candidate_id"],)) or {}
+                hist = self.work_history(a["candidate_id"]) if "work_history" in d["new"] else None
+                same = [k for k in d["old"] if (hist if k == "work_history" else row.get(k)) == d["new"].get(k)]
+                return None if same else "those details were changed again since"
+            if kind in ("pipeline_add", "stage_move"):
+                app = self._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?",
+                                (a["candidate_id"], a["job_id"]))
+                if app is None:
+                    return "they were taken out of that job since"
+                return None if app["stage"].lower() == (new.get("stage") or "").lower() else "they were moved again since"
+            if kind == "candidate":
+                reason = self._candidate_touched(a["candidate_id"])
+                return reason.split(".")[0].lower() if reason else None
+            if kind == "job_created":
+                reason = self._job_touched(a["job_id"], new)
+                return reason.split(".")[0].lower() if reason else None
+            if kind == "job_edit":
+                job = self._row("SELECT * FROM jobs WHERE id = ?", (a["job_id"],)) or {}
+                fields = [k for k in new if not k.startswith("_")]
+                return None if any(job.get(k) == new[k] for k in fields) else "those details were changed again since"
+            if kind == "stages_edit":
+                shape = [(s["id"], s["name"], s["outcome"]) for s in sorted(new.get("stages") or [],
+                                                                         key=lambda s: s["position"])]
+                now = [(s["id"], s["name"], s["outcome"]) for s in self.job_stages(a["job_id"])]
+                return None if now == shape else "its stages were changed again since"
+            if kind in ("todo_added", "todo_done"):
+                s = self._row("SELECT done_at FROM suggestions WHERE id = ?", (a["target_id"],))
+                if kind == "todo_added":
+                    return "that to-do is done" if s is None or s["done_at"] else None
+                return None if s is not None and s["done_at"] == new.get("done_at") else "that to-do was changed since"
+            if kind in ("interview_cancel", "interview_move"):
+                reason = self._interview_blocker(a)
+                return reason.rstrip(".").lower() if reason else None
+        except (NotFound, ValueError):
+            return "it is gone"
+        return None
+
+    def _interview_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why an AI interview cancel or reschedule can't be put back: the interview changed again since."""
+        new = a.get("new_data") or {}
+        t = self._row("SELECT at, data FROM timeline WHERE id = ? AND kind = 'interview'", (a["target_id"],))
+        if t is None:
+            return "That interview is gone from the timeline."
+        data = json.loads(t["data"]) if t.get("data") else {}
+        if t["at"] != new.get("at") or data != (new.get("data") or {}):
+            return "That interview was changed again since."
+        return None
+
+    def ai_edits_this_hour(self, candidate_id: int, minutes: int = AI_EDIT_WINDOW_MINUTES) -> int:
+        """How many saved values the AI app cleared or replaced on this person in the last hour (filling an
+        empty field doesn't count, nor does a work history that only followed a new title or company)."""
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+        n = 0
+        for r in self._rows("SELECT data FROM timeline WHERE candidate_id = ? AND kind = ? AND source = ?"
+                            " AND created_at >= ?", (candidate_id, CHANGE_KIND, CHANGE_SOURCES["ai"], since)):
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            derived = set(data.get("derived") or ())
+            n += sum(1 for k, v in (data.get("old") or {}).items() if k not in derived and v not in (None, "", []))
+        return n
+
+    def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
+                      work_history: list[dict[str, Any]] | None = None) -> list[str]:
+        """The saved (non-empty) fields this update would clear or replace."""
+        old, _new = self._diff(candidate_id, self._prepare(data), work_history)
+        return [k for k, v in old.items() if v not in (None, "", [])]
+
+    def ai_edit_budget_left(self, candidate_id: int, overwrites: Iterable[str]) -> bool:
+        """Whether the AI app may also clear or replace these saved values on this person now. The first
+        change in an hour always may (a refresh replaces several at once); after that, at most
+        AI_EDIT_BUDGET saved values in the hour."""
+        n = len(list(overwrites))
+        if not n:
+            return True
+        done = self.ai_edits_this_hour(candidate_id)
+        return not done or done + n <= AI_EDIT_BUDGET
 
     def ai_action(self, action_id: int) -> dict[str, Any]:
         rows = self.ai_actions(action_id=action_id)
@@ -1945,6 +2151,14 @@ class Store:
                 self._conn.execute("UPDATE suggestions SET done_at = NULL WHERE id = ?", (a["target_id"],))
             elif kind == "prospects_proposed":
                 note = self._undo_proposed(action_id, new)
+            elif kind in ("interview_cancel", "interview_move"):
+                reason = self._interview_blocker(a)
+                if reason:
+                    raise ValueError(reason)
+                self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
+                                   (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
+            elif kind in AI_RECORD_KINDS:
+                raise ValueError("How an interview went stays on the timeline as a record.")
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -2343,6 +2557,13 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
+            if by == "ai":  # on Changes: a cancel or a new time can be undone, an outcome is listed as a record
+                kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
+                        else "interview_outcome" if outcome is not None or note is not None else None)
+                if kind:
+                    self._log_ai(kind, candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), target_id=entry_id,
+                                 old={"at": iv["at"], "data": iv["data"]},
+                                 new={"at": new_at, "data": data, "summary": iv.get("body")})
             if outcome is not None and data["outcome"] != "no_show" and new_at <= ts:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
@@ -2909,6 +3130,15 @@ class Store:
         if changed:
             raise ValueError(f"No change made. Ask the recruiter to change what {prior[changed[0]['id']]['name']} "
                              "counts as in the app.")
+        # A new name that reads as another outcome ("Hired" to "Sourced2") would mislead everyone who reads the
+        # board or a status update, though the stage still counts as before.
+        for s in after:
+            was = prior.get(s["id"])
+            if was and s["name"] != was["name"] and stage_outcome(s["name"]) != s["outcome"]:
+                raise ValueError(
+                    f"No change made. {s['name']} reads as {_OUTCOME_WORDS.get(stage_outcome(s['name']))}, but "
+                    f"{was['name']} counts as {_OUTCOME_WORDS.get(s['outcome'], s['outcome'])}. Ask the recruiter "
+                    f"to rename {was['name']} in the app, or pick a name that reads the same way.")
 
     def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""
@@ -2986,8 +3216,8 @@ class Store:
                 source = data = None
                 if by in CHANGE_SOURCES:
                     source = CHANGE_SOURCES[by]
-                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"],
-                                                              "new": s["name"]}})
+                    data = json.dumps({"by": by, "pipeline": {"job_id": job_id, "old": app["stage"], "new": s["name"]},
+                                       "old_since": app["stage_changed_at"]})
                 tid = self._conn.execute(
                     "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source, data)"
                     " VALUES (?, ?, 'stage', ?, ?, ?, ?, ?)", (candidate_id, job_id, s["name"], ts, ts, source, data),

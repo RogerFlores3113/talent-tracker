@@ -76,7 +76,10 @@ def test_every_ai_write_is_listed_on_changes(store):
                 "Moved Lee Chen from Sourced to Screening", "renamed Offer to Offer out, added Take-home",
                 "status Open to Closed", "openings 1 to 2", "Added a to-do: Ping Lee", "Marked a to-do done: Call the HM"):
         assert bit in page, bit
-    assert "Undo all AI changes since" in page and page.count(">Undo</button>") >= 9
+    # Cycle 4 P: the add, the job and the person each wait for the newer AI change, so they show the reason
+    # instead of an Undo that would fail (Undo all still puts them back).
+    assert "Undo all AI changes since" in page and page.count(">Undo</button>") >= 6
+    assert page.count("Can't undo: your AI app changed it again later. Undo that first.") == 3
     since = re.search(r'name="since" value="(\d+)"', page).group(1)  # epoch, so a hand-built post can't fail
     assert int(since) > 1_000_000_000
     zone = datetime.now().astimezone().tzname()

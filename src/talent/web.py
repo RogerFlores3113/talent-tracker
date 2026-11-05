@@ -180,10 +180,20 @@ def change_lines(data: Any) -> list[str]:
         elif not now:
             out.append(f"Cleared {label}" + (f" (was {was})" if was else ""))
         elif not was:
-            out.append(f"{cap}: {now} (was empty)")
+            out.append(f"Added {label}: {now}")
         else:
             out.append(f"{cap}: {was} to {now}")
     return out
+
+
+def ai_change_text(a: dict[str, Any]) -> str:
+    """An AI action's line on Changes; interview moves and cancels say when, in local time."""
+    old, new = a.get("old_data") or {}, a.get("new_data") or {}
+    if a["kind"] == "interview_move" and old.get("at") and new.get("at"):
+        return f"{a['summary']} (was {_local(old['at'])}, now {_local(new['at'])})"
+    if a["kind"] == "interview_cancel" and old.get("at"):
+        return f"{a['summary']} (it was set for {_local(old['at'])})"
+    return a["summary"]
 
 
 def profile_label(url: str | None) -> str:
@@ -1415,11 +1425,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
                 rows.append({"at": a["at"], "who": "ai", "name": name, "href": href,
-                             "text": "; ".join(lines) if lines else a["summary"], "undoable": a["undoable"],
+                             "text": "; ".join(lines) if lines else ai_change_text(a), "undoable": a["undoable"],
                              "undone": bool(a["undone_at"]), "note": a.get("undo_note"),
+                             "blocked": a.get("blocked"), "record": a.get("record"),
                              "undo_url": f"/changes/ai/{a['id']}/undo",
                              # newest first, so every newer AI change is already in this list
-                             "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undoable"]),
+                             "from_count": sum(1 for b in ai if b["id"] >= a["id"] and b["undo_pending"])
+                             if a["undo_pending"] else 0,
                              "undo_from_url": f"/changes/ai/{a['id']}/undo-from"})
         if who in ("", "import"):  # each import is one row, with Undo while its backup can still put it back
             rows.extend(import_change_rows(since)[:limit])
@@ -1478,7 +1490,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         start = since_iso(since)
         rows = change_rows(who, start)
         ai_since = start or since_iso("1")
-        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undoable"])
+        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
                     ai_since_epoch=int(to_dt(ai_since).timestamp()))
@@ -1510,7 +1522,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         undone, skipped = [], []
         backup = ai_backup()
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
-            if a["undone_at"]:
+            if a["undone_at"] or a.get("record"):
                 continue
             try:
                 undone.append(store.undo_ai_action(a["id"], by="app", before_delete=backup))
@@ -1681,9 +1693,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "report.html", link=None, error="Say in a few words what went wrong.",
                         env_line=recipes.environment_line(), where=str(form.get("where") or ""))
         details, where = str(form.get("details") or ""), str(form.get("where") or "app")
-        names = [r["name"] for r in store._rows("SELECT name FROM candidates")]
-        link = recipes.issue_url(summary, details, where=where, names=names)
-        title, body = recipes.issue_text(summary, details, where=where, names=names)
+        private = recipes.report_private(store)
+        link = recipes.issue_url(summary, details, where=where, private=private)
+        title, body = recipes.issue_text(summary, details, where=where, private=private)
         return page(request, "report.html", link=link, summary=summary, env_line=recipes.environment_line(),
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 

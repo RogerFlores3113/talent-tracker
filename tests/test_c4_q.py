@@ -29,6 +29,17 @@ def chicago(monkeypatch):
     time.tzset()
 
 
+@pytest.fixture
+def utc_clock(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset isn't available on Windows")
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
 def _dana(store, stages=None, openings=None):
     job = store.add_job("Backend Engineer", company="Acme", stages=stages,
                         **({"openings": openings} if openings else {}))
@@ -125,7 +136,7 @@ def test_mcp_logs_an_interview_with_a_zone_name(store):
 
 
 # --------------------------------------------------- 4. calendar days
-def test_ago_counts_calendar_days():
+def test_ago_counts_calendar_days(utc_clock):
     now = datetime(2026, 11, 5, 1, 20, tzinfo=timezone.utc)
     assert _ago("2026-11-04T23:00:00+00:00", now) == "yesterday"
     assert _ago("2026-11-05T00:10:00+00:00", now) == "today"
