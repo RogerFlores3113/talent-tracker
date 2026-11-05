@@ -98,7 +98,8 @@ BACKUPS_KEPT = 10
 _RELATIVE_DATE = re.compile(
     r"^(?:today|tonight|now|yesterday|tomorrow|(?:last|next|this) \w+|(?:a|an|\d+|a few|few) "
     r"(?:min(?:ute)?s?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?) ago|"
-    r"(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?)\.?$", re.I)
+    r"(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?)\.?"
+    r"(?:,?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?(?:\s+[a-z/_]+)?)?$", re.I)  # 'yesterday 3pm CT'
 
 
 def decode(data: bytes) -> str:

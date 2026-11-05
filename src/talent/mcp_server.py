@@ -30,8 +30,8 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from . import __version__, actions, recipes, shortlist, reports
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import (INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES, TIMELINE_KINDS, IdentityConflict,
-                    NotFound, Store, _labels, linkedin_lead_tool, normalize_linkedin, now_iso, same_person_name,
+from .store import (CHANGE_SOURCES, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES, TIMELINE_KINDS,
+                    IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool, normalize_linkedin, now_iso, same_person_name,
                     snippet_text, split_tags, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
@@ -353,17 +353,27 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
             for w in c["work_history"]))
     for p in c.get("pipelines", []):
         out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} (job id {p['job_id']})")
-    if c.get("timeline"):
+    recent = c.get("timeline", [])[:10]
+    # What the recruiter typed in the app is theirs, not candidate-provided, so it is listed after its own heading.
+    theirs = [t for t in recent if t.get("by_recruiter")]
+    rest = [t for t in recent if not t.get("by_recruiter")]
+    if rest:
         out.append("Recent activity:")
-    for t in c.get("timeline", [])[:10]:
-        job = f" ({_job_name(t)})" if t.get("job_title") else ""
-        if t["kind"] == "stage":
-            line = f"moved to {t.get('body') or 'a stage'}{job}"
-        else:
-            line = t["kind"] + job + (f" (interview id {t['id']}, {t['status']})" if t["kind"] == "interview" else "")
-            line += f": {t['body']}" if t.get("body") else ""
-        out.append(f"- {_local(t['at'])} {line}")
+    out += [f"- {_timeline_line(t)}" for t in rest]
+    if theirs:
+        out.append("Typed by the recruiter in the app (their own words, not candidate-provided):")
+        out += [f"- {_timeline_line(t)}" for t in theirs]
     return "\n".join(out)
+
+
+def _timeline_line(t: dict[str, Any]) -> str:
+    job = f" ({_job_name(t)})" if t.get("job_title") else ""
+    if t["kind"] == "stage":
+        line = f"moved to {t.get('body') or 'a stage'}{job}"
+    else:
+        line = t["kind"] + job + (f" (interview id {t['id']}, {t['status']})" if t["kind"] == "interview" else "")
+        line += f": {t['body']}" if t.get("body") else ""
+    return f"{_local(t['at'])} {line}"
 
 
 def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
@@ -462,6 +472,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                  "stage": a["stage"], "stage_changed_at": a["stage_changed_at"]}) for a in c["pipelines"]]
         c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "at_local": _local(t["at"]),
                                 "job_title": t.get("job_title"), "job_company": t.get("job_company"),
+                                "by_recruiter": t.get("source") == CHANGE_SOURCES["app"] or None,
                                 **({"id": t["id"], "status": t.get("status")} if t["kind"] == "interview" else {})})
                          for t in c["timeline"]]
         return {**_slim(c), "app_url": app_url(f"/candidates/{candidate_id}")}
@@ -1177,13 +1188,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
         def row(i: dict[str, Any]) -> str:
             return (f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")
-                    + (f" at {_local(i['when'])}" if i["kind"] in ("interview", "interview_out") and i.get("when") else "")
+                    + (f" at {_local(i['when'])}" if i["kind"] in ("interview", "interview_out", "interview_outcome")
+                       and i.get("when") else "")
                     + (f" [{i['due_text']}]" if i.get("due_text") else "")
                     + "".join(f" [{k} {i[k]}]" for k in ("candidate_id", "job_id", "suggestion_id", "interview_id")
                               if i.get(k) and not (k == "interview_id" and i.get("interview_ids")))
                     + (f" [interview_ids {', '.join(map(str, i['interview_ids']))}]" if i.get("interview_ids") else "")
                     + (" Ask the recruiter: cancel it (update_interview cancel) or keep it (update_interview keep)."
-                       if i["kind"] == "interview_out" else ""))
+                       if i["kind"] == "interview_out" else "")
+                    + (" Ask the recruiter how it went, then record it with update_interview outcome."
+                       if i["kind"] == "interview_outcome" else ""))
 
         if not items and not later:
             text = "Nothing needs attention right now."

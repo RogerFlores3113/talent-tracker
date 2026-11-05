@@ -185,8 +185,8 @@ def test_status_update_text_and_board_next_interview(store):
     store.log(maya["id"], "interview", "Systems design", at=when, job_id=job["id"])
     text = actions.job_status_text(store, job["id"])
     assert text.splitlines()[0] == "Senior Backend Engineer, Acme Payments · Austin, TX"
-    assert "Interviewing (1): Maya Okafor (today)" in text and "Kenji Watanabe" not in text  # Sourced is internal
-    assert "Sourced (1): Kenji Watanabe (today)" in actions.job_status_text(store, job["id"], omit_stages=[])
+    assert "Interviewing (1): Maya Okafor (new today)" in text and "Kenji Watanabe" not in text  # Sourced is internal
+    assert "Sourced (1): Kenji Watanabe (new today)" in actions.job_status_text(store, job["id"], omit_stages=[])
     assert "Offer" not in text  # empty stages left out
     assert "Next interviews:" in text and actions.local_time(when.isoformat(), "%a %b %-d") in text
     assert "id" not in text.replace("Kenji", "").lower().split()  # no ids
