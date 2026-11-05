@@ -27,6 +27,7 @@
     <pre class="code wrap" id="{{ tid }}">{{ s.text }}</pre>
     {% if s.notes %}<p class="fine no-print recruiter-only" role="note">For you only, not part of the update: {{ s.notes | join('; ') }}.</p>{% endif %}
     {% if s.rep.manager is none and s.email %}{% set ck = c.key %}{% include "_ai_contacts.html" %}{% endif %}
+    {% if s.email %}{% set jx_ids = s.rep.jobs | map(attribute='id') | list %}{% include "_ai_job_email.html" %}{% endif %}
     <div class="actions-inline no-print">
     {% if s.email %}{% set e = s.email %}<a class="btn small" href="{{ e.href }}">Email this update to {{ e.to }}{% if e.cc %} (Cc {{ e.cc | join(', ') }}){% endif %}</a>{% if e.long %} <span class="fine">It's too long to fill in by link, so the email opens empty: copy the update first, then paste it in.</span>{% elif e.trimmed %} <span class="fine">The email gets a shorter version to fit the link; Copy gives the full one.</span>{% endif %}{% endif %}
     {% if s.rep.manager_key is not none %}<form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="Mark {% if s.rep.manager %}{{ s.rep.manager }}'s update{% else %}the update for jobs with no hiring manager{% endif %} as sent? A copy is kept, and their next update covers what happens from now.{% if s.rep.ai_moves %} {{ s.rep.ai_moves | length }} AI move{{ 's' if s.rep.ai_moves | length != 1 }} in it {{ 'are' if s.rep.ai_moves | length != 1 else 'is' }} not reviewed yet.{% endif %}">

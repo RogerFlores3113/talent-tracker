@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
+from . import sessions
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
@@ -236,7 +237,7 @@ def flash_cookie_name(key: str) -> str:
 
 
 def _flash_sig(key: str, raw: str) -> str:
-    return hmac.new(key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.new(paths.subkey(key, "flash"), raw.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def encode_flash(key: str, messages: dict[str, str]) -> str:
@@ -316,6 +317,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
+    env.globals["ai_email_changes"] = lambda job_ids=None: review.email_changes(store, job_ids)  # job emails it set
     env.globals["job_label"] = actions.job_label
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
@@ -1765,7 +1767,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
         if who in ("", "app"):  # a Keep or Keep all on a Shortlist: one row each, with its own undo
+            by_card = {r["target_id"] for r in store._rows("SELECT target_id FROM ai_actions WHERE kind = 'card_keep'")}
             for b in shortlist.keep_batches(store, since)[:limit]:
+                if b["id"] in by_card:  # pressed on the card in Claude: listed as your AI app's, with Undo
+                    continue
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}/shortlist",
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "note": b.get("note"), "undo_url": f"/changes/shortlist-keep/{b['id']}/undo",
@@ -1832,8 +1837,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         start = since_iso(since)
         rows = change_rows(who, start)
         ai_since = start or since_iso("1")
-        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000) if a["undo_pending"])
+        ai_pending = sum(1 for a in store.ai_actions(ai_since, limit=1_000_000)
+                         if a["undo_pending"] and not a.get("confirmed_at"))
+        ai_waiting = store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending' AND created_at >= ?",
+                                (ai_since,))["n"]
         return page(request, "changes.html", rows=rows, who=who, since=since, who_options=CHANGE_WHO,
+                    ai_waiting=ai_waiting, ai_sessions=sessions.listing(store) if who in ("", "ai") else [],
                     since_options=CHANGE_SINCE, ai_since=ai_since, ai_pending=ai_pending, limit=CHANGES_SHOWN,
                     undo_last=last_undo_ai(),
                     ai_since_epoch=int(to_dt(ai_since).timestamp()), undo_windows=UNDO_WINDOWS,
@@ -1861,17 +1870,25 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 done.append(importers.backup_before_import(store, reason="delete"))
         return run
 
-    def undo_ai_batch(request: Request, todo: list[dict[str, Any]], none_left: str):
-        """Undo these AI changes, newest first, skipping ones already undone, and say what happened."""
+    def undo_ai_batch(request: Request, todo: list[dict[str, Any]], none_left: str, waiting_since: str | None = None,
+                      include_kept: bool = False):
+        """Undo these AI changes, newest first, skipping ones already undone, and say what happened. With
+        waiting_since, what the AI app left waiting on Review since then is passed too. Changes the recruiter
+        kept (on Review, or with Yes on Today) stay unless include_kept."""
         undone, skipped = [], []
-        backup = ai_backup()
+        kept = [a for a in todo if a.get("confirmed_at") and a["undo_pending"]]
+        if not include_kept:
+            todo = [a for a in todo if not a.get("confirmed_at")]
+        queued = (store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending' AND created_at >= ?",
+                             (waiting_since,))["n"] if waiting_since else 0)
         saved = None
-        if any(a["undo_pending"] for a in todo):  # several changes at once: keep a copy from just before
+        if any(a["undo_pending"] for a in todo) or queued:  # always keep a copy from just before
             try:
                 saved = importers.backup_before_import(store, reason="undo-ai")
             except ValueError as exc:
                 return back(request, "/changes", error=str(exc))
-            backup = lambda: None  # noqa: E731 (that copy also covers people and jobs it takes out)
+        backup = lambda: None  # noqa: E731 (that copy also covers people and jobs it takes out)
+        passed = review.pass_since(store, waiting_since) if queued else 0
         for a in sorted(todo, key=lambda a: a["id"], reverse=True):  # newest first, so older values come back last
             if a["undone_at"] or a.get("record") or a["kind"] == "save_batch":  # a batch's saves are undone one by one
                 continue
@@ -1881,13 +1898,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 continue  # went with a person or job taken out just before
             except ValueError as exc:
                 skipped.append(f"{a['summary']} ({str(exc).rstrip('.')})")
-        if not undone and not skipped:
+        if not undone and not skipped and not passed:
             return back(request, "/changes", notice=none_left)
         notice = f"Undid {len(undone)} AI change{'' if len(undone) == 1 else 's'}" + (
             ": " + _listed(undone) if undone else "") + "."
+        if passed:
+            notice += f" Passed {passed} change{'' if passed == 1 else 's'} that waited on Review."
         if skipped:
             notice += f" Left {len(skipped)} as {'it is' if len(skipped) == 1 else 'they are'}: {_listed(skipped)}."
-        if saved is not None and undone:
+        if kept and not include_kept:
+            notice += (f" Left {len(kept)} you kept on Review or on Today as {'it is' if len(kept) == 1 else 'they are'}.")
+        if saved is not None:
             notice += " A backup from just before is under Automatic backups in Settings."
         remember_undo_ai(notice)
         return back(request, "/changes", notice=notice)
@@ -1956,7 +1977,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except NotFound:
             return back(request, "/changes", error="That change is gone. Reload the page.")
         todo = [a for a in store.ai_actions(limit=1_000_000) if a["id"] >= action_id]
-        return undo_ai_batch(request, todo, "Those AI changes were already undone.")
+        return undo_ai_batch(request, todo, "Those AI changes were already undone.",
+                             waiting_since=store.ai_action(action_id)["at"])
 
     @app.post("/changes/undo-ai")
     async def undo_ai_since(request: Request):
@@ -1969,7 +1991,35 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not start:
             return back(request, "/changes", error="Couldn't tell which changes to undo. Reload the page and try again.")
         return undo_ai_batch(request, store.ai_actions(start, limit=1_000_000),
-                             "There were no AI changes to undo in that time.")
+                             "There were no AI changes to undo in that time.", waiting_since=start,
+                             include_kept=form.get("include_kept") == "1")
+
+    @app.post("/changes/session/roll-back")
+    async def roll_back_session(request: Request):
+        """App window only (the AI app has no tool for it): undo one AI session's writes and pass what it left
+        waiting on Review."""
+        form = await request.form()
+        sid = str(form.get("session") or "")
+        try:
+            res = sessions.roll_back(store, sid)
+        except NotFound as exc:
+            return back(request, "/changes", error=str(exc))
+        except ValueError as exc:  # the backup failed, so nothing changed
+            return back(request, "/changes", error=str(exc))
+        notice = sessions.notice(res, _listed)
+        remember_undo_ai(notice)
+        return back(request, "/changes", notice=notice)
+
+    @app.post("/jobs/{job_id}/ai-email/{action_id}/keep")
+    def keep_ai_email(request: Request, job_id: int, action_id: int):
+        """Keep on "Set by your AI app" next to a job's hiring manager email: it stays, and nothing asks again."""
+        try:
+            review.keep_email(store, action_id)
+        except NotFound as exc:
+            return back(request, f"/jobs/{job_id}", error=str(exc))
+        except ValueError as exc:
+            return back(request, f"/jobs/{job_id}", error=str(exc))
+        return back(request, f"/jobs/{job_id}", notice="Kept the hiring manager email.")
 
     @app.post("/changes/ai/{action_id}/confirm")
     def confirm_ai_action(request: Request, action_id: int):
@@ -2027,6 +2077,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         session = str(form.get("session") or "")
         ids = [r["id"] for r in review.pending(store, session=session)] if session else \
             [r["id"] for r in review.pending(store) if not r.get("session")]
+        if op == "keep" and ids:  # many changes at once: keep a copy from just before
+            try:
+                importers.backup_before_import(store, reason="keep-all")
+            except ValueError as exc:
+                return back(request, "/review", error=str(exc))
         return _review_done(request, review.decide_many(store, ids, op == "keep"), op == "keep",
                             "Nothing from that session waits for review.")
 
@@ -2035,6 +2090,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         on = form.get("ai_cautious") == "1"
         review.set_cautious(store, on)
+        review.set_options(store, **{k: form.get(k) == "1" for k in review.OPTIONS})
         msg = ("Cautious mode is on. Your AI app's overwrites, moves into Hired or out, job, client and interview "
                "changes, and notes now wait on Review." if on else "Cautious mode is off. Your AI app's changes apply straight away again.")
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#cautious", status_code=303)
@@ -2141,8 +2197,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy(request: Request):
-        return page(request, "privacy.html", data_folder=str(data_dir().resolve()), typesense=env_status(),
-                    folder_private=paths.data_dir_private())
+        ts = env_status()
+        remote = None
+        if ts and not ts["refused"] and ts["has_key"]:  # candidates leave this computer when the index is elsewhere
+            from .typesense_index import _loopback
+            host = (urlsplit(os.environ.get("TYPESENSE_URL", "").strip()).hostname or "").lower()
+            remote = host if host and not _loopback(host) else None
+        return page(request, "privacy.html", data_folder=str(data_dir().resolve()), typesense=ts,
+                    folder_private=paths.data_dir_private(), search_remote=remote)
 
     @app.get("/report", response_class=HTMLResponse)
     def report_page(request: Request, where: str = ""):

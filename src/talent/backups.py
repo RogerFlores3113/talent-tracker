@@ -20,7 +20,8 @@ from .store import Store, now_iso
 NAME_RE = re.compile(r"^before-(?P<reason>[a-z0-9]+(?:-[a-z0-9]+)*?)-(?P<stamp>\d{4}-\d{2}-\d{2}-\d{6})(?:-\d+)?\.db$")
 REASONS = {"import": "Before an import", "delete": "Before a delete", "merge": "Before a merge",
            "sample-removal": "Before removing sample data", "restore": "Before a restore",
-           "undo-ai": "Before undoing AI changes"}
+           "undo-ai": "Before undoing AI changes", "ai-session": "At the start of an AI session",
+           "session-rollback": "Before rolling back an AI session", "keep-all": "Before Keep all on Review"}
 UNDO_KEY = "last_import_undo"  # settings row: which backup undoes the newest import, and the data right after it
 LISTED = 60
 

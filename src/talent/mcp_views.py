@@ -159,8 +159,9 @@ function render(d){
  return wrap}""",
     "shortlist": r"""
 const KEY="talent-search/shortlist";
-function viewKey(){const k=META&&META[KEY];return k&&k.key?k:null}
+function viewKey(){const k=META&&META[KEY];return k&&k.job_id?k:null}
 function canAct(){return !!(HOST&&HOST.serverTools&&viewKey())}
+function cardKey(p){return req("tools/call",{name:"shortlist_card_key",arguments:{job_id:viewKey().job_id,prospect_ids:[p.id]}})}
 function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ").replace(/^Error executing tool [\w-]+: /,"")}
 let countsLine=null;
 function countText(c){c=c||{};return(c.proposed||0)+" waiting · "+(c.kept||0)+" kept · "+(c.passed||0)+" passed on"}
@@ -168,7 +169,8 @@ function act(card,p,tool,args){
  const k=viewKey();const status=card.querySelector(".status");
  card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=true);
  status.textContent="Working on it…";
- req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,prospect_id:p.id,view_key:k.key},args)}).then(r=>{
+ cardKey(p).then(kr=>{const key=kr&&!kr.isError&&kr.structuredContent&&kr.structuredContent.key;if(!key)return kr;
+  return req("tools/call",{name:tool,arguments:Object.assign({job_id:k.job_id,prospect_id:p.id,view_key:key},args)})}).then(r=>{
   const d=(r&&r.structuredContent)||null;
   if(r&&r.isError||!d){status.textContent=said(r)||"That didn't work. Try again in Talent Search.";card.querySelectorAll("button.btn,input.reason").forEach(b=>b.disabled=false);return}
   if(d.counts&&countsLine)countsLine.textContent=countText(d.counts);

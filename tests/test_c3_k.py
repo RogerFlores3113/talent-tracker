@@ -38,7 +38,7 @@ def test_more_write_tools_lead_with_a_plain_sentence(store):
     assert "Stages now: Sourced, Contacted, Screening, Take-home," in first
     assert structured(res)["stages"][3] == "Take-home"
 
-    todo = store.add_suggestion("Send the offer", candidate_id=cid, job_id=job["id"])
+    todo = store.add_suggestion("Send the offer", candidate_id=cid, job_id=job["id"], source="AI app")  # c6 A: its own
     res = call(server, "complete_suggestion", suggestion_id=todo["id"])
     assert text(res).splitlines()[0] == ('Marked the to-do done: "Send the offer" (about Priya Raman, '
                                          'Staff Backend Engineer (Acme Fintech)).')
