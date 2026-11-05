@@ -8,6 +8,7 @@ import re
 import sqlite3
 import unicodedata
 from collections import Counter
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -242,6 +243,7 @@ def _cell(v: str) -> str:
     return v
 
 
+@lru_cache(maxsize=65536)  # an import folds the same job, company and stage names thousands of times
 def _fold(s: str | None) -> str:
     """Lower case, no accents, single spaces: 'José  Álvarez' -> 'jose alvarez'."""
     s = unicodedata.normalize("NFKD", (s or "").casefold())
@@ -1311,7 +1313,8 @@ def _date_placement(store: Store, candidate_id: int, job_id: int, stage_at: str 
     import json
 
     with store._lock, store._conn:
-        entry = ("(SELECT max(id) FROM timeline WHERE candidate_id = ? AND job_id = ? AND kind = 'stage')")
+        # +kind: look up by the person (timeline_candidate_idx), not by kind, which scans every stage entry
+        entry = ("(SELECT max(id) FROM timeline WHERE candidate_id = ? AND job_id = ? AND +kind = 'stage')")
         if stage_at:
             store._conn.execute("UPDATE applications SET stage_changed_at = ?, created_at = min(created_at, ?)"
                                 " WHERE candidate_id = ? AND job_id = ?", (stage_at, stage_at, candidate_id, job_id))
@@ -1565,6 +1568,27 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
         lines.append("Also: " + "; ".join(extra) + ".")
     lines += closed_job_lines(result)
     return lines
+
+
+def stage_fold_lines(result: dict[str, Any], limit: int = 20) -> list[str]:
+    """For the command line: the stages an import added, or the ones it folded into another stage, with counts
+    ("Submitted to Client to Screening on Engineer (Acme): 33"), so no stage of the file goes missing unsaid."""
+    out: list[str] = []
+    will = result.get("dry_run")
+    if result.get("stages_added") and result.get("missing_stages") and not will:  # a dry run's headline says it
+        made = result["missing_stages"]
+        out.append(f"Added {_plural(len(made), 'new stage')}: " + ", ".join(
+            f"{m['stage']} on {m['job']}" for m in made[:5]) + (f", and {len(made) - 5} more" if len(made) > 5 else "")
+                   + ".")
+    moves = result.get("stage_moves") or {}
+    if moves:
+        n = sum(moves.values())
+        out.append(f"{'Will put' if will else 'Put'} {_plural(n, 'person', 'people')} in a different stage, since "
+                   "their job has no stage by that name (run without --fold-stages to add them as their own):")
+        out += [f"  {k}: {v:,}" for k, v in list(moves.items())[:limit]]
+        if len(moves) > limit:
+            out.append(f"  and {len(moves) - limit} more")
+    return out
 
 
 def closed_job_lines(result: dict[str, Any]) -> list[str]:

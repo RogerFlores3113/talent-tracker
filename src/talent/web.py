@@ -2326,11 +2326,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     async def set_time_zone(request: Request):
         """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
         form = await request.form()
+        home = str(form.get("next") or "") == "/"  # the banner on Today: back there
         try:
             name = reports.save_user_zone(store, str(form.get("time_zone") or ""))
         except ValueError as exc:
+            if home:
+                return back(request, "/", error=str(exc))
             return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#time-zone", status_code=303)
         msg = f"Times now show in {name}." if name else "Times now show in this computer's time zone."
+        if home:
+            return RedirectResponse("/?" + urlencode({"notice": msg}), status_code=303)
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#time-zone", status_code=303)
 
     # ---------------------------------------------------------- settings etc

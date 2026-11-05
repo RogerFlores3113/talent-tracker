@@ -13,6 +13,7 @@
 //                             passed on (radio offer and ticked pass boxes, each with data-name; data-ahead counts
 //                             their interviews still to come, which get cancelled; data-open their sessions
 //                             with no outcome yet, named as still open)
+//   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -69,6 +70,16 @@
   document.addEventListener("click", e => {
     if (e.target.closest && e.target.closest("button[data-print]")) window.print();
   });
+
+  // The time zone banner: suggest the zone this browser is in, so saving it is one click.
+  function prefillZones() {
+    let zone = "";
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
+    if (!zone) return;
+    document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
+  else prefillZones();
 
   // The Decide form: say exactly who gets the offer and who is passed on before anything moves.
   function decideQuestion(form) {

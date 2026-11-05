@@ -11,7 +11,7 @@ def test_empty_state_then_sample_data(store):
     r = c.post("/sample-data", follow_redirects=False)
     assert r.status_code == 303
     page = c.get("/?q=rust").text
-    assert "Maya Okafor" in page and "Daniel Reyes" not in page
+    assert "Maya Example" in page and "Daniel Example" not in page
 
 
 def test_htmx_returns_fragment_only(store):
@@ -93,7 +93,7 @@ def test_every_page_renders_with_sample_data(store):
         assert r.status_code == 200, path
         assert "—" not in r.text, f"em-dash on {path}"
     home = c.get("/").text
-    assert "Interview with Maya Okafor" in home and "Stuck" in home and "uses none of your data" in home
+    assert "Interview with Maya Example" in home and "Stuck" in home and "uses none of your data" in home
     assert c.get("/nope").status_code == 404 and c.get("/candidates/9999").status_code == 404
 
 

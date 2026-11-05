@@ -93,6 +93,8 @@ select { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid 
 .nowrap { white-space: nowrap; }
 .flash { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; padding: 10px 14px; }
 .flash.warn { border-left-color: #c98a00; }
+.tz-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border-left-color: var(--accent, #3b6fd8); }
+.tz-banner input[type=text] { min-width: 14em; }
 .badge { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--line); color: var(--muted); text-transform: capitalize; vertical-align: middle; }
 .sec-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: 24px 0 8px; }
 .sec-head:first-child { margin-top: 0; }
