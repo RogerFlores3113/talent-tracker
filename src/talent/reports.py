@@ -37,6 +37,10 @@ GROUP_LABELS = dict(GROUPS)
 IN_PLAY = ("sourcing", "screening", "submitted", "interview", "offer")
 # How far along each group is, for "reached at least" counts.
 FUNNEL = (("submitted", "Submitted or presented"), ("interview", "Interviewed"), ("offer", "Offer"), ("hired", "Hired"))
+# Groups the client has seen: a stage in one of these is never left out of their update.
+SEEN = ("submitted", "interview", "offer", "hired")
+# In-house there's no submitting to a client: those words go, and the first group is the recruiter's sourcing.
+INHOUSE_LABELS = {**GROUP_LABELS, "sourcing": "Sourcing"}
 _RANK = {"submitted": 1, "interview": 2, "offer": 3, "hired": 4}
 SUBMIT_WORDS = frozenset({"submitted", "submittal", "submit", "presented", "present", "presentation"})
 INTERVIEW_WORDS = frozenset({"interview", "interviews", "interviewing", "interviewed", "onsite", "panel", "final"})
@@ -144,8 +148,9 @@ def _data(raw: Any) -> dict[str, Any]:
 
 
 def _is_import(entry: dict[str, Any]) -> bool:
-    """A stage entry an import wrote, when the import marked it (source CSV import or by import)."""
-    return entry.get("source") == "CSV import" or _data(entry.get("data")).get("by") == "import"
+    """A stage entry an import wrote, when the import marked it (source CSV import, by import, or imported)."""
+    d = _data(entry.get("data"))
+    return entry.get("source") == "CSV import" or d.get("by") == "import" or d.get("imported") is True
 
 
 def _plural(n: int, word: str, many: str | None = None) -> str:
@@ -234,6 +239,32 @@ def find_clients(store: Store, query: str | None) -> list[str]:
 def _contact_email(contacts: str | None) -> str | None:
     m = _EMAIL.search(contacts or "")
     return m.group(0) if m else None
+
+
+def manager_key(name: str | None) -> str:
+    """A hiring manager's name for grouping: any case and spacing. '' for jobs that name none."""
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def managers(store: Store, key: str) -> list[tuple[str, str]]:
+    """In-house, the hiring managers of this company's open and on-hold jobs, as (manager_key, name), with
+    ('', '') last for jobs that name none. Empty when no job names one, or in agency wording."""
+    if not actions.inhouse(store):
+        return []
+    jobs = [j for j in client(store, key)["jobs"] if j["status"] in ("open", "on_hold")]
+    names: dict[str, str] = {}
+    for j in jobs:
+        names.setdefault(manager_key(j.get("hiring_manager")), (j.get("hiring_manager") or "").strip())
+    if not any(names):
+        return []
+    return sorted(names.items(), key=lambda kv: (kv[0] == "", kv[0]))
+
+
+def find_manager(store: Store, key: str, query: str | None) -> list[str]:
+    """The manager keys a name means among this company's hiring managers, matched as in status_digest."""
+    names = [n for _, n in managers(store, key) if n] or [
+        (j.get("hiring_manager") or "").strip() for j in client(store, key)["jobs"]]
+    return sorted({manager_key(n) for n in actions.match_companies(names, query)})
 
 
 def _upcoming(store: Store, job_ids: set[int], app_pairs: set[tuple[int, int]], days: int,
@@ -331,20 +362,36 @@ def _history(store: Store, job_ids: list[int]) -> dict[tuple[int, int], list[dic
     return out
 
 
+def _omit(store: Store, job_id: int) -> set[str]:
+    """The stage keys a client update leaves out on this job: its status update's Leave out choice, but never a
+    stage the client has seen (named like Submitted, an interview, an offer, or a hire stage)."""
+    keys = actions._omitted(store, job_id, None)
+    return {_stage_key(s["name"]) for s in store.job_stages(job_id)
+            if _stage_key(s["name"]) in keys and stage_group(s["name"], s["outcome"]) not in SEEN}
+
+
 def report(store: Store, key: str, since: str | datetime | None = None, until: str | datetime | None = None,
-           now: datetime | None = None) -> dict[str, Any]:
-    """Everything a client update says, as data. report_text turns it into the paste-ready text."""
+           now: datetime | None = None, manager: str | None = None) -> dict[str, Any]:
+    """Everything a client update says, as data. report_text turns it into the paste-ready text.
+
+    manager (a manager_key, '' for none) keeps only that hiring manager's jobs, for in-house updates. Counts are
+    of people: someone on two of the client's jobs counts once."""
     now = now or datetime.now(timezone.utc)
     c = client(store, key)
+    own = actions.inhouse(store)
     start, end, why = _range(store, c, since, until, now)
-    jobs = c["jobs"]
+    jobs = c["jobs"] if manager is None else [j for j in c["jobs"] if manager_key(j.get("hiring_manager")) == manager]
     ids = [j["id"] for j in jobs]
     by_id = {j["id"]: j for j in jobs}
     outcome = {j["id"]: {s["name"].lower(): s["outcome"] for s in store.job_stages(j["id"])} for j in jobs}
-    omit = {j["id"]: actions._omitted(store, j["id"], None) for j in jobs}
+    omit = {j["id"]: _omit(store, j["id"]) for j in jobs}
+    live = [j for j in jobs if j["status"] in ("open", "on_hold")]
+    booked = {j["id"]: actions.booked_hidden(store, j["id"], omit[j["id"]], None, now)
+              for j in jobs if j["status"] == "open"}
 
     def group(job_id: int, stage: str) -> str:
-        return stage_group(stage, outcome[job_id].get((stage or "").lower()))
+        g = stage_group(stage, outcome[job_id].get((stage or "").lower()))
+        return "screening" if own and g == "submitted" else g
 
     def hidden(job_id: int, stage: str) -> bool:
         return _stage_key(stage) in omit[job_id]
@@ -353,19 +400,22 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
         return (start < at if why == "last_update" else start <= at) and at <= end
 
     hist = _history(store, ids)
-    shown_jobs = [j for j in jobs if j["status"] in ("open", "on_hold")]
     # Where people stand now, on open and on-hold jobs.
-    now_counts = {g: 0 for g, _ in GROUPS}
+    standing: dict[str, set[int]] = {g: set() for g, _ in GROUPS}
     not_shown: dict[str, int] = {}
+    booked_names: dict[int, str] = {}
     people: list[dict[str, Any]] = []
-    for j in shown_jobs:
+    for j in live:
         for a in store.pipeline(j["id"]):
             if hidden(j["id"], a["stage"]):
-                not_shown[a["stage"]] = not_shown.get(a["stage"], 0) + 1
+                if a["candidate_id"] in booked.get(j["id"], {}):  # their interview is listed; told to the recruiter apart
+                    booked_names[a["candidate_id"]] = a["candidate_name"]
+                else:
+                    not_shown[a["stage"]] = not_shown.get(a["stage"], 0) + 1
                 continue
             g = group(j["id"], a["stage"])
             if j["status"] == "open":
-                now_counts[g] += 1
+                standing[g].add(a["candidate_id"])
             entries = hist.get((a["candidate_id"], j["id"]), [])
             subs = [e["at"] for e in entries if is_submittal(e["body"])]
             people.append({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "job_id": j["id"],
@@ -375,9 +425,11 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                            "submitted_at": subs[-1] if subs else None,
                            "imported": bool(entries and entries[-1]["imported"]
                                             and entries[-1]["body"].lower() == a["stage"].lower())})
-    # Funnel: how far everyone got, and who moved in the period.
-    reached = {g: 0 for g, _ in FUNNEL}
-    period = {g: set() for g, _ in GROUPS}
+    now_counts = {g: len(v) for g, v in standing.items()}
+    in_play = len(set().union(*(standing[g] for g in IN_PLAY)))
+    # Funnel: how far everyone got (each person once, at their furthest on any of these jobs), and who moved.
+    best: dict[int, int] = {}
+    period: dict[str, set[int]] = {g: set() for g, _ in GROUPS}
     moves: list[dict[str, Any]] = []
     spans: dict[str, list[float]] = {g: [] for g in IN_PLAY}
     current = {(p["candidate_id"], p["job_id"]): p["stage"] for j in jobs for p in store.pipeline(j["id"])}
@@ -385,10 +437,7 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
         stages = [e["body"] for e in entries]
         if (cid, jid) in current:
             stages.append(current[(cid, jid)])
-        best = max((_RANK.get(group(jid, s), 0) for s in stages), default=0)
-        for g, _ in FUNNEL:
-            if best >= _RANK[g]:
-                reached[g] += 1
+        best[cid] = max(best.get(cid, 0), max((_RANK.get(group(jid, s), 0) for s in stages), default=0))
         for i, e in enumerate(entries):
             g = group(jid, e["body"])
             nxt = entries[i + 1]["at"] if i + 1 < len(entries) else None
@@ -398,31 +447,66 @@ def report(store: Store, key: str, since: str | datetime | None = None, until: s
                 spans[g].append((to_dt(nxt) - to_dt(e["at"])).total_seconds() / 86400)
             if not in_range(e["at"]) or e["imported"] or hidden(jid, e["body"]):
                 continue
-            period[g].add((cid, jid))
+            period[g].add(cid)
             moves.append({"at": e["at"], "candidate_id": cid, "name": e["candidate_name"], "job_id": jid,
                           "job": by_id[jid]["title"], "stage": e["body"], "group": g,
                           "from": entries[i - 1]["body"] if i else None})
+    reached = {g: sum(1 for b in best.values() if b >= _RANK[g]) for g, _ in FUNNEL}
+    # Back and forth to the same stage on one job is one move: the latest.
+    seen_moves: set[tuple[int, int, str]] = set()
+    for m in reversed(moves):
+        mk = (m["candidate_id"], m["job_id"], _stage_key(m["stage"]))
+        m["repeat"] = mk in seen_moves
+        seen_moves.add(mk)
+    moves = [{k: v for k, v in m.items() if k != "repeat"} for m in moves if not m["repeat"]]
     imported = sum(1 for es in hist.values() for e in es if e["imported"] and in_range(e["at"]))
     medians = {g: round(statistics.median(v), 1) for g, v in spans.items() if v}
     open_ids = {j["id"] for j in jobs if j["status"] == "open"}
-    pairs = {(p["candidate_id"], p["job_id"]) for p in people if p["job_id"] in open_ids and p["group"] in IN_PLAY}
+    # Everyone still in the running on an open job, whatever their stage: an interview booked while they sit in
+    # Sourced is still an interview with the client.
+    pairs = _in_play_pairs(store, sorted(open_ids))
     upcoming = [{"interview_id": r["id"], "at": r["at"], "at_client": in_zone(r["at"], c.get("time_zone")),
                  "candidate_id": r["candidate_id"], "name": r["candidate_name"], "job": r.get("job_title"),
                  "summary": r.get("body")}
                 for r in _upcoming(store, open_ids, pairs, INTERVIEW_DAYS, now)
                 if (r["candidate_id"], r["job_id"]) in pairs]
-    openings = sum(j.get("openings") or 1 for j in jobs if j["status"] == "open")
-    filled = sum(min(actions.job_numbers(store, j["id"])["filled_seats"], j.get("openings") or 1)
-                 for j in jobs if j["status"] == "open")
+    still_hidden = [{"candidate_id": cid, "name": booked_names.get(cid, ""), "stage": stage, "job": by_id[jid]["title"]}
+                    for jid, b in booked.items() for cid, stage in b.items()]
+    open_jobs = [j for j in jobs if j["status"] == "open"]
+    openings = sum(j.get("openings") or 1 for j in open_jobs)
+    hires = {j["id"]: sum(len(g["candidates"]) for g in store.pipeline_by_stage(j["id"]) if g["outcome"] == "hired")
+             for j in open_jobs}
+    filled = sum(min(hires[j["id"]], j.get("openings") or 1) for j in open_jobs)
+    overfilled = [{"job_id": j["id"], "title": j["title"], "hired": hires[j["id"]], "openings": j.get("openings") or 1,
+                   "over": hires[j["id"]] - (j.get("openings") or 1)}
+                  for j in open_jobs if hires[j["id"]] > (j.get("openings") or 1)]
+    words = {actions.hire_word(store, j["id"]) for j in open_jobs}
+    label = None if manager is None else next((j["hiring_manager"].strip() for j in jobs
+                                               if (j.get("hiring_manager") or "").strip()), "")
+    hm_email = next((j["hiring_manager_email"].strip() for j in jobs if (j.get("hiring_manager_email") or "").strip()),
+                    None) if manager else None
     return {"client": {k: c.get(k) for k in ("id", "name", "key", "slug", "contacts", "time_zone", "update_day",
                                              "last_update_sent_at")},
+            "inhouse": own, "manager": label, "booked_hidden": still_hidden, "overfilled": overfilled,
+            "hired": sum(hires.values()), "hire_word": "placed" if words == {"placed"} else "hired",
             "since": start, "until": end, "range_from": why, "now": now.isoformat(),
             "jobs": [{"id": j["id"], "title": j["title"], "status": j["status"], "location": j.get("location"),
                       "openings": j.get("openings") or 1} for j in jobs],
-            "in_play": sum(now_counts[g] for g in IN_PLAY), "stand": now_counts, "not_shown": not_shown,
+            "in_play": in_play, "stand": now_counts, "not_shown": not_shown,
             "reached": reached, "period": {g: len(v) for g, v in period.items()}, "moves": moves,
             "imported_moves": imported, "median_days": medians, "upcoming": upcoming, "people": people,
-            "openings": openings, "filled": filled, "email": _contact_email(c.get("contacts"))}
+            "openings": openings, "filled": filled, "email": hm_email or _contact_email(c.get("contacts"))}
+
+
+def reports_for(store: Store, key: str, since: str | datetime | None = None, until: str | datetime | None = None,
+                now: datetime | None = None) -> list[dict[str, Any]]:
+    """The updates to send: in-house once jobs name hiring managers, one per manager with only their jobs (so a
+    manager never reads another's pipeline); otherwise the one client report."""
+    now = now or datetime.now(timezone.utc)
+    hms = managers(store, key)
+    if not hms:
+        return [report(store, key, since, until, now)]
+    return [report(store, key, since, until, now, manager=k) for k, _ in hms]
 
 
 def _day(iso: str, tz: str | None = None) -> str:
@@ -430,12 +514,44 @@ def _day(iso: str, tz: str | None = None) -> str:
 
 
 def title(rep: dict[str, Any]) -> str:
-    return f"{rep['client']['name']}: hiring update, {_day(rep['since'])} to {_day(rep['until'])}"
+    who = ""
+    if rep.get("manager") is not None:
+        who = f" for {rep['manager']}" if rep["manager"] else " for jobs with no hiring manager"
+    return f"{rep['client']['name']}: hiring update{who}, {_day(rep['since'])} to {_day(rep['until'])}"
+
+
+def seats_text(rep: dict[str, Any]) -> str:
+    """'1 of 2 openings filled', or with more hires than openings '2 hired, 1 opening (over by 1)'."""
+    over = rep.get("overfilled") or []
+    if not over:
+        return actions.filled_text(rep["filled"], rep["openings"])
+    seats = _plural(rep["openings"], "opening")
+    if len(rep["jobs"]) == 1 or len([j for j in rep["jobs"] if j["status"] == "open"]) == 1:
+        return f"{rep['hired']} {rep['hire_word']}, {seats} (over by {over[0]['over']})"
+    return (f"{rep['hired']} {rep['hire_word']}, {seats} ("
+            + ", ".join(f"{o['title']} over by {o['over']}" for o in over) + ")")
+
+
+def recruiter_notes(rep: dict[str, Any]) -> list[str]:
+    """What the recruiter should know and the client shouldn't read: who the update leaves out, people listed
+    though their stage is left out, and jobs with more hires than openings. Never part of the paste text."""
+    notes = []
+    if rep["not_shown"]:
+        notes.append("Not shown: " + ", ".join(f"{s} ({n})" for s, n in rep["not_shown"].items()))
+    if rep.get("booked_hidden"):
+        notes.append("In Upcoming interviews though their stage is left out, since an interview is booked: " + ", ".join(
+            f"{b['name']} ({b['stage']}, {b['job']})" for b in rep["booked_hidden"]))
+    for o in rep.get("overfilled") or []:
+        notes.append(f"{o['title']} has {o['hired']} {rep.get('hire_word', 'hired')} for "
+                     f"{_plural(o['openings'], 'opening')} (over by {o['over']}). Check those hires before you send this")
+    return notes
 
 
 def report_text(rep: dict[str, Any]) -> str:
     """The paste-ready update: no ids, times in the client's time zone, internal stages left out."""
     tz = rep["client"].get("time_zone")
+    own = rep.get("inhouse")
+    labels = INHOUSE_LABELS if own else GROUP_LABELS
     lines = [title(rep)]
     if rep["range_from"] == "last_update":
         lines.append(f"Changes since the last update on {_day(rep['since'])}.")
@@ -443,21 +559,19 @@ def report_text(rep: dict[str, Any]) -> str:
     held = [j for j in rep["jobs"] if j["status"] == "on_hold"]
     if live:
         lines.append(f"{_plural(len(live), 'open job')}: " + ", ".join(j["title"] for j in live)
-                     + f". {actions.filled_text(rep['filled'], rep['openings'])}.")
+                     + f". {seats_text(rep)}.")
     else:
         lines.append("No open jobs right now.")
     if held:
         lines.append("On hold: " + ", ".join(j["title"] for j in held) + ".")
     lines += ["", f"In process now: {rep['in_play']}"]
-    lines += [f"- {GROUP_LABELS[g]}: {rep['stand'][g]}" for g in IN_PLAY if rep["stand"][g]]
-    if rep["not_shown"]:
-        lines.append("Not shown: " + ", ".join(f"{s} ({n})" for s, n in rep["not_shown"].items()))
+    lines += [f"- {labels[g]}: {rep['stand'][g]}" for g in IN_PLAY if rep["stand"][g]]
     p = rep["period"]
     lines += ["", "This period:"]
-    bits = [f"{GROUP_LABELS[g]} {p[g]}" for g in ("submitted", "interview", "offer", "hired", "out")]
-    lines.append("- Moved into " + ", ".join(bits))
+    moved = ("interview", "offer", "hired", "out") if own else ("submitted", "interview", "offer", "hired", "out")
+    lines.append("- Moved into " + ", ".join(f"{labels[g]} {p[g]}" for g in moved))
     r = rep["reached"]
-    lines.append("- All time on these jobs: " + ", ".join(f"{label} {r[g]}" for g, label in FUNNEL))
+    lines.append("- All time on these jobs: " + ", ".join(f"{label} {r[g]}" for g, label in funnel(rep)))
     if rep["moves"]:
         lines += ["", "Moves this period:"]
         for m in rep["moves"][:MOVES_SHOWN]:
@@ -468,11 +582,16 @@ def report_text(rep: dict[str, Any]) -> str:
         lines += ["", "Moves this period: none."]
     if rep["median_days"]:
         lines += ["", "Median days in stage: " + ", ".join(
-            f"{GROUP_LABELS[g]} {_num(v)}" for g, v in rep["median_days"].items())]
+            f"{labels[g]} {_num(v)}" for g, v in rep["median_days"].items())]
     if rep["upcoming"]:
         lines += ["", "Upcoming interviews:"]
         lines += [f"- {u['at_client']}: {u['name']} ({u['job']})" for u in rep["upcoming"]]
     return "\n".join(lines)
+
+
+def funnel(rep: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The all-time funnel steps: in-house there's no Submitted or presented step."""
+    return FUNNEL[1:] if rep.get("inhouse") else FUNNEL
 
 
 def _num(v: float) -> str:
@@ -486,18 +605,20 @@ def pipeline_csv(rep: dict[str, Any]) -> str:
     tz = rep["client"].get("time_zone")
     buf = io.StringIO()
     w = csv.writer(buf)
+    own = rep.get("inhouse")
+    labels = INHOUSE_LABELS if own else GROUP_LABELS
     w.writerow(["Job", "Candidate", "Current title", "Current company", "Stage", "Stage group", "In stage since",
-                "Days in stage", "Last submitted", "Next interview"])
+                "Days in stage", *([] if own else ["Last submitted"]), "Next interview"])
     nxt: dict[tuple[int, str], str] = {}
     for u in rep["upcoming"]:
         nxt.setdefault((u["candidate_id"], u["job"]), u["at_client"])
     for p in sorted(rep["people"], key=lambda p: (p["job"].lower(), [g for g, _ in GROUPS].index(p["group"]),
                                                   p["name"].lower())):
+        sub = [] if own else [in_zone(p["submitted_at"], tz, "%Y-%m-%d") if p["submitted_at"] else ""]
         w.writerow([_safe_cell(v) for v in (
-            p["job"], p["name"], p.get("title") or "", p.get("company") or "", p["stage"], GROUP_LABELS[p["group"]],
+            p["job"], p["name"], p.get("title") or "", p.get("company") or "", p["stage"], labels[p["group"]],
             "imported" if p["imported"] else in_zone(p["since"], tz, "%Y-%m-%d"), "" if p["imported"] else p["days"],
-            in_zone(p["submitted_at"], tz, "%Y-%m-%d") if p["submitted_at"] else "",
-            nxt.get((p["candidate_id"], p["job"]), ""))])
+            *sub, nxt.get((p["candidate_id"], p["job"]), ""))])
     return buf.getvalue()
 
 
@@ -515,8 +636,9 @@ def mark_sent(store: Store, key: str, since: str | None = None, until: str | Non
               now: datetime | None = None) -> dict[str, Any]:
     """Keep a copy of the update and start the next one from now."""
     now = now or datetime.now(timezone.utc)
-    rep = report(store, key, since, until, now)
-    text = report_text(rep)
+    reps = reports_for(store, key, since, until, now)
+    rep = reps[0]
+    text = "\n\n".join(report_text(r) for r in reps)
     c = ensure_client(store, key)
     ts = now.replace(microsecond=0).isoformat()
     with store._lock, store._conn:
@@ -590,6 +712,6 @@ def submittal_note(store: Store, candidate_id: int, job_id: int, now: datetime |
     return note
 
 
-__all__ = ["GROUPS", "client", "ensure_client", "find_clients", "is_submittal", "mailto", "mark_sent", "overview",
-           "pipeline_csv", "report", "report_text", "save_client", "stage_group", "submittal_note", "submittals",
-           "undo_sent", "updates"]
+__all__ = ["GROUPS", "client", "ensure_client", "find_clients", "find_manager", "is_submittal", "mailto", "managers",
+           "mark_sent", "overview", "pipeline_csv", "recruiter_notes", "report", "report_text", "reports_for",
+           "save_client", "stage_group", "submittal_note", "submittals", "undo_sent", "updates"]

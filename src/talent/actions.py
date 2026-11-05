@@ -37,6 +37,9 @@ BOARD_CARDS = 50  # cards per board column before "Show more"
 INTERNAL_STAGE_WORDS = frozenset({"sourced", "contacted", "new", "lead", "leads", "prospect", "prospects"})
 # A stage named like this is where people are first shown to the client; in-play stages before it are internal.
 SUBMIT_STAGE_WORDS = frozenset({"submitted", "submittal", "submittals", "presented", "shortlist", "shortlisted"})
+# A stage named like this is past the client's door (an interview or an offer), wherever it sits in the list.
+LATE_STAGE_WORDS = frozenset({"offer", "interview", "interviews", "interviewing", "interviewed", "onsite", "panel",
+                              "final"})
 OUT_STAGES = ("Rejected", "Withdrawn")
 CLOSE_REASON = "Reason: Position filled"
 INHOUSE_KEY = "inhouse_wording"
@@ -704,13 +707,20 @@ def submit_like(name: str | None) -> bool:
     return bool(set(_stage_key(name).split()) & SUBMIT_STAGE_WORDS)
 
 
+def late_like(name: str | None) -> bool:
+    """A stage named like an interview, an onsite, an HM screen or an offer: the client has seen these people."""
+    words = _stage_key(name).split()
+    return bool(set(words) & LATE_STAGE_WORDS) or words[:1] == ["hm"] or words[:2] == ["hiring", "manager"]
+
+
 def default_omit(store: Store, job_id: int) -> list[str]:
     """The job's in-play stages named like internal ones, and every in-play stage before its first Submitted-like
-    stage (Screened, in the agency set), left out of status updates until the recruiter chooses."""
+    stage (Screened, in the agency set), left out of status updates until the recruiter chooses. A stage named
+    like an interview or an offer is never left out for its place: imported stages can land after Offer."""
     stages = store.job_stages(job_id)
     first = next((i for i, s in enumerate(stages) if s["outcome"] == "open" and submit_like(s["name"])), 0)
-    return [s["name"] for i, s in enumerate(stages)
-            if s["outcome"] == "open" and (i < first or internal_like(s["name"]))]
+    return [s["name"] for i, s in enumerate(stages) if s["outcome"] == "open" and (
+        internal_like(s["name"]) or (i < first and not late_like(s["name"]) and not submit_like(s["name"])))]
 
 
 def has_saved_omit(store: Store, job_id: int) -> bool:
@@ -753,9 +763,34 @@ def _omitted(store: Store, job_id: int, omit_stages: list[str] | None) -> set[st
     return out
 
 
+def booked_hidden(store: Store, job_id: int, omit: set[str], groups: list[dict[str, Any]] | None = None,
+                  now: datetime | None = None) -> dict[int, str]:
+    """{candidate_id: stage} for people in a left-out stage who have an interview booked for this job. A status
+    update lists them anyway: a booked interview is never hidden from the client or hiring manager."""
+    if not omit:
+        return {}
+    groups = groups if groups is not None else store.pipeline_by_stage(job_id)
+    if not any(g["candidates"] and g["outcome"] == "open" and _stage_key(g["name"]) in omit for g in groups):
+        return {}
+    booked = next_interview_days(store, job_id, now)
+    return {a["candidate_id"]: g["name"] for g in groups if g["outcome"] == "open" and _stage_key(g["name"]) in omit
+            for a in g["candidates"] if a["candidate_id"] in booked}
+
+
+def shown_numbers(store: Store, job_id: int, omit: set[str], groups: list[dict[str, Any]] | None = None,
+                  now: datetime | None = None) -> dict[str, Any]:
+    """job_numbers for the people a status update shows: not the left-out stages, but people there with an
+    interview booked do count."""
+    groups = groups if groups is not None else store.pipeline_by_stage(job_id)
+    nums = job_numbers(store, job_id, omit, groups)
+    nums["active"] += len(booked_hidden(store, job_id, omit, groups, now))
+    return nums
+
+
 def status_numbers(store: Store, job_id: int, omit_stages: list[str] | None = None) -> dict[str, Any]:
-    """job_numbers for the people a status update shows (its left-out stages don't count)."""
-    return job_numbers(store, job_id, _omitted(store, job_id, omit_stages))
+    """job_numbers for the people a status update shows (its left-out stages don't count, except people there
+    with an interview booked)."""
+    return shown_numbers(store, job_id, _omitted(store, job_id, omit_stages))
 
 
 def omitted_stages(store: Store, job_id: int, omit_stages: list[str] | None = None) -> list[str]:
@@ -827,7 +862,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     job = store.get_job(job_id)
     groups = store.pipeline_by_stage(job_id)
     omit = _omitted(store, job_id, omit_stages)
-    nums = job_numbers(store, job_id, omit, groups)
+    booked = booked_hidden(store, job_id, omit, groups, now)
+    nums = shown_numbers(store, job_id, omit, groups, now)
     head = job_label(job["title"], job.get("company"))
     if job.get("location"):
         head += f" · {job['location']}"
@@ -845,23 +881,26 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
     own = inhouse(store)
     for g in groups:
         total += len(g["candidates"])
-        if not g["candidates"] or _stage_key(g["name"]) in omit:
+        # A left-out stage still lists the people in it who have an interview booked.
+        cands = ([a for a in g["candidates"] if a["candidate_id"] in booked] if _stage_key(g["name"]) in omit
+                 else g["candidates"])
+        if not cands:
             continue
-        shown += len(g["candidates"])
+        shown += len(cands)
         lost = g["outcome"] == "lost"
         people = [f"{a['candidate_name']} ("
                   + ("position filled, " if lost and _out_reason(a) == "position filled" else "")
                   + ("imported" if a["candidate_id"] in imported else _in_stage(_days_ago(a['stage_changed_at'], now)))
                   + ")"
-                  for a in sorted(g["candidates"], key=lambda a: a["stage_changed_at"])]
+                  for a in sorted(cands, key=lambda a: a["stage_changed_at"])]
         label = "Hiring team passed" if own and lost and _stage_key(g["name"]) in _CLIENT_EXITS else g["name"]
-        lines.append(f"{label} ({len(g['candidates'])}): {_capped(people)}")
+        lines.append(f"{label} ({len(cands)}): {_capped(people)}")
     if not shown:
         lines.append("No one to share yet." if total else "No one in the pipeline yet.")
     changes = recent_changes(store, job_id, now, omit=omit)
     lines += ["", "Changes since last week:", *changes] if changes else ["", "Changes since last week: none."]
-    names = {a["candidate_id"]: a["candidate_name"] for g in groups
-             if g["outcome"] == "open" and _stage_key(g["name"]) not in omit for a in g["candidates"]}
+    names = {a["candidate_id"]: a["candidate_name"] for g in groups if g["outcome"] == "open"
+             for a in g["candidates"] if _stage_key(g["name"]) not in omit or a["candidate_id"] in booked}
     upcoming = sorted((ivs[0]["at"], cid, ivs) for cid, ivs in next_interview_days(store, job_id, now).items()
                       if cid in names)
     if upcoming:
@@ -874,9 +913,17 @@ def hidden_note(store: Store, job_id: int, omit_stages: list[str] | None = None)
     """'Not shown: Sourced (3), Contacted (1)': who the status update leaves out, for the recruiter's eyes only.
     It sits outside the text they copy, so the client never reads it. Empty when nothing is left out."""
     omit = _omitted(store, job_id, omit_stages)
-    hidden = [f"{g['name']} ({len(g['candidates'])})" for g in store.pipeline_by_stage(job_id)
-              if g["candidates"] and _stage_key(g["name"]) in omit]
-    return "Not shown: " + ", ".join(hidden) if hidden else ""
+    groups = store.pipeline_by_stage(job_id)
+    booked = booked_hidden(store, job_id, omit, groups)
+    hidden = [f"{g['name']} ({n})" for g in groups if _stage_key(g["name"]) in omit
+              and (n := sum(1 for a in g["candidates"] if a["candidate_id"] not in booked))]
+    parts = ["Not shown: " + ", ".join(hidden)] if hidden else []
+    if booked:
+        names = {a["candidate_id"]: a["candidate_name"] for g in groups for a in g["candidates"]}
+        parts.append("listed though their stage is left out, since an interview is booked: "
+                     + _capped([f"{names[cid]} ({stage})" for cid, stage in booked.items()]))
+    out = "; ".join(parts)
+    return out[:1].upper() + out[1:]
 
 
 def digest_hidden_notes(store: Store, company: str | None = None,
@@ -951,12 +998,14 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
         omit = _omitted(store, j["id"], omit_stages)
         groups = store.pipeline_by_stage(j["id"])
         nums = job_numbers(store, j["id"], omit, groups)
+        booked = booked_hidden(store, j["id"], omit, groups)
         r = rows.setdefault(company_key(co), {"company": co or None, "jobs": [], "active": 0, "hired": 0,
                                               "openings": 0, "filled": 0, "_people": set(), "_hired": set()})
         r["jobs"].append(j)
         for g in groups:  # people, not applications: one person in two of a client's jobs counts once
             if _stage_key(g["name"]) not in omit and g["outcome"] in ("open", "hired"):
                 r["_people" if g["outcome"] == "open" else "_hired"].update(a["candidate_id"] for a in g["candidates"])
+        r["_people"].update(booked)  # left out by stage, but an interview is booked
         r["active"] = len(r["_people"])
         r["hired"] = len(r["_hired"])
         r["openings"] += nums["openings"]
@@ -998,7 +1047,7 @@ def manager_rollup(store: Store, manager: str | None = None, omit_stages: list[s
         if not keep(j):
             continue
         hm = (j.get("hiring_manager") or "").strip()
-        nums = job_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
+        nums = shown_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
         r = rows.setdefault(re.sub(r"\s+", " ", hm.lower()), {
             "manager": hm or None, "label": hm or None, "jobs": [], "active": 0, "hired": 0, "openings": 0,
             "filled": 0, "words": set()})
