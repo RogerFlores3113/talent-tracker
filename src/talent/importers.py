@@ -1991,7 +1991,9 @@ def quick_parse(text: str) -> dict[str, Any]:
             elif len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]):
                 out["location"] = rest[1].split(" · ")[0]
     marks = _linkedin_marks(text)
-    if marks >= 2:
+    # A resume carries a LinkedIn link next to an email or phone; a profile paste (or its link alone) doesn't.
+    resume_like = out.get("email") or out.get("phone") or re.search(r"(?i)\b(resume|curriculum vitae)\b", text)
+    if marks >= 2 or (out.get("linkedin_url") and (marks or not resume_like)):
         out["source"] = "LinkedIn"
     elif marks == 0:
         out["source"] = "Resume"
@@ -2008,5 +2010,9 @@ def quick_parse(text: str) -> dict[str, Any]:
             out["current_title"] = now["title"]
             if now.get("company"):
                 out["current_company"] = now["company"]
-    out["about"] = _about_section(raw) or text[:1500]
+    about = _about_section(raw)
+    if about:
+        out["about"] = about
+    elif out.get("source") != "LinkedIn":  # a resume or a note: the text itself; a profile's About only
+        out["about"] = text[:1500]
     return out

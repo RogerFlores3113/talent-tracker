@@ -910,6 +910,8 @@ def action_items(store: Store, now: datetime | None = None) -> dict[str, Any]:
     items += review_items(store)
     from .shortlist import today_items as shortlist_items  # here: shortlist imports this module
     items += shortlist_items(store)
+    from .outreach import today_items as followup_items  # here: outreach imports this module
+    items += followup_items(store, now)  # follow-ups of a job's outreach sequence that are due
     from .reports import today_items as update_items  # here: reports imports this module
     items += update_items(store, now)  # client (or hiring manager) updates due today or earlier this week
     stuck_more = 0

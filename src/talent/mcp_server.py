@@ -84,6 +84,9 @@ except what you read.
   passes each one, in the app or with the buttons on the Shortlist card; you can't keep or pass anyone
   (keep_prospect and pass_prospect answer only those buttons). Check list_prospects first, so you don't research people already proposed or passed on. Save people
   directly (save_candidate, or save_candidates for several) only when the recruiter asks you to save someone.
+- Outreach: log a batch of the same message with one log_activity call (candidate_ids); it moves people still
+  in Sourced to Contacted. When a job has a follow-up sequence, list_followups gives what's due with text to
+  paste (nothing is sent by the app); log a reply with kind reply.
 - If a tool fails or the app misbehaves, tell the recruiter, and if they have a GitHub account offer them the
   link from report_problem (it opens a prefilled issue they review; never include candidate details).
 """
@@ -1633,6 +1636,33 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                              "keep_stages": shortlist.keep_stages(store, job_id)}),
                               job_id, [p["id"] for p in rows if p.get("status") == "proposed"])
 
+    @mcp.tool(annotations=READ)
+    def list_followups(job_id: int | None = None, days_ahead: int = 0) -> CallToolResult:
+        """Follow-ups due today or earlier, from each job's outreach sequence (set on the job page in the app),
+        with the text to paste for each. days_ahead: also list the ones due in the next N days. The app sends
+        nothing: show the recruiter the text, and once they've sent one, log it with log_activity (kind message,
+        with the job_id). A reply (log_activity kind reply) ends that person's follow-ups."""
+        if job_id is not None:
+            job = store.get_job(job_id)
+            if not outreach.sequence(store, job_id):
+                return _result(f"{_job_name(job)} has no follow-up sequence. The recruiter sets one on the job page "
+                               "in Talent Search.", {"job_id": job_id, "followups": [], "has_sequence": False})
+        ahead = max(0, min(int(days_ahead or 0), 30))
+        rows = outreach.due(store, job_id, days_ahead=ahead)
+        out = [{"candidate_id": p["candidate_id"], "name": p["name"], "job_id": p["job_id"], "job": p["job"],
+                "step": p["step"], "steps": p["steps"], "label": p["label"], "due_on": p["due_on"],
+                "due": outreach.due_text(p), "draft": p["draft"]} for p in rows]
+        if not out:
+            return _result("No follow-ups due" + (f" in the next {ahead} days" if ahead else " today") + ".",
+                           {"followups": [], "app_url": app_url("/")})
+        lines = [f"{len(out)} follow-up{'' if len(out) == 1 else 's'} due. Paste-ready text below; nothing is sent "
+                 "by the app. Log each one with log_activity once the recruiter has sent it.", DATA_NOTE]
+        for p in out:
+            lines.append(f"- {quoted(p['name'])} [candidate_id {p['candidate_id']}] for {p['job']} [job_id "
+                         f"{p['job_id']}]: {p['label']} (step {p['step']} of {p['steps']}), {p['due']}.")
+            lines.append(f"  Text: {p['draft']}")
+        return _result("\n".join(lines), {"followups": out, "data_note": DATA_NOTE, "app_url": app_url("/")})
+
     # Keep and Pass on the in-chat Shortlist card. The host hides these from the model (visibility "app"), and a
     # call without the key that only the card received (in the result's _meta) is refused, so only a press acts.
     # The key comes from this install's own key file, so a card still works after Claude or the app restarts. It
@@ -2177,7 +2207,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     + (f" Ask the recruiter whether to move them to {i['next_stage']} (move_stage)."
                        if i["kind"] == "interview_result" and i.get("next_stage") else "")
                     + (" Mixed: help the recruiter weigh it with compare_finalists."
-                       if i["kind"] == "interview_result" and i.get("verdict") == "mixed" else ""))
+                       if i["kind"] == "interview_result" and i.get("verdict") == "mixed" else "")
+                    + (" list_followups has the text to paste." if i["kind"] == "followup" else ""))
 
         if not items and not later:
             text = "Nothing needs attention right now."

@@ -319,6 +319,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["job_label"] = actions.job_label
+    env.globals["followups"] = lambda job_id: followups_for(job_id)
     env.globals["elsewhere_badges"] = lambda job_id: outreach.board_badges(store, job_id)  # "In play at 1 other client"
     env.globals["interview_outcomes"] = INTERVIEW_OUTCOME_LABELS
     env.globals["interview_choices"] = INTERVIEW_RESULT_CHOICES  # Today's buttons: the interviewer's word
@@ -790,6 +791,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         guess = importers.quick_parse(text)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
         dupe = store.find_duplicate(guess.get("email"), guess.get("linkedin_url"))
+        if dupe and len(text.split()) == 1 and guess.get("linkedin_url"):  # just their link: open who has it
+            return RedirectResponse(f"/candidates/{dupe['id']}?{urlencode({'notice': f'Already saved: {dupe['name']}.'})}",
+                                    status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
                     from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text))
 
@@ -1428,6 +1432,49 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except (ValueError, NotFound) as exc:
             return to_shortlist(job_id, error=str(exc))
         return to_shortlist(job_id, notice=f"Put {p['name']} back on the Shortlist.")
+
+    # ------------------------------------------------------------ follow-ups
+    def followups_for(job_id: int) -> dict[str, Any]:
+        """A job's follow-up sequence and where each person is in it, for the job page."""
+        seq = outreach.sequence(store, job_id) or {}
+        people = outreach.progress(store, job_id)
+        for p in people:
+            if p["status"] in ("due", "waiting"):
+                p["due_text"] = outreach.due_text(p)
+        contact = outreach.contact_stage(store, job_id)
+        return {"steps": seq.get("steps") or [], "since": seq.get("since"), "people": people,
+                "defaults": list(outreach.DEFAULT_STEPS), "contact": contact["name"] if contact else None}
+
+    @app.post("/jobs/{job_id}/sequence")
+    async def save_sequence(request: Request, job_id: int):
+        job_or_404(job_id)
+        form = await request.form()
+        try:
+            steps = outreach.save_sequence(store, job_id, [] if form.get("remove") else outreach.steps_from_form(form))
+        except ValueError as exc:
+            return RedirectResponse(f"/jobs/{job_id}?{urlencode({'flash_error': str(exc), 'sequence': '1'})}#followups",
+                                    status_code=303)
+        notice = (f"Saved {len(steps)} steps. Follow-ups show on Today when they come due." if steps
+                  else "Follow-ups are off for this job.")
+        return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#followups", status_code=303)
+
+    @app.post("/jobs/{job_id}/followups/{candidate_id}/{op}")
+    def followup_done(request: Request, job_id: int, candidate_id: int, op: str):
+        """I sent it (logs the follow-up as a message on this job) or They replied (ends their follow-ups)."""
+        job_or_404(job_id)
+        cand = cand_or_404(candidate_id)
+        if op not in ("sent", "replied"):
+            raise HTTPException(404, "Not found")
+        step = next((p for p in outreach.progress(store, job_id) if p["candidate_id"] == candidate_id), None)
+        if op == "replied":
+            entry = store.log(candidate_id, "message", "Replied", job_id=job_id, source="App")
+            outreach.mark_reply(store, entry["id"])
+            notice = f"Logged a reply from {cand['name']}. Their follow-ups for this job stop."
+        else:
+            label = step["label"] if step and step.get("label") else "Follow-up"
+            store.log(candidate_id, "message", f"{label} sent", job_id=job_id, source="App")
+            notice = f"Logged the {label.lower()} to {cand['name']}."
+        return back(request, f"/jobs/{job_id}#followups", notice=notice)
 
     # ------------------------------------------------------------ clients
     @app.get("/clients", response_class=HTMLResponse)
