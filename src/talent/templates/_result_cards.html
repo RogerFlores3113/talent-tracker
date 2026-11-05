@@ -1,0 +1,21 @@
+{% from "_macros.html" import chips, sub, sample_badge %}
+{% set sample = sample_ids() %}
+{% set start = offset or 0 %}
+{% for h in result.hits %}{% set c = h.candidate %}
+  {% if h.closest and not result.closest and start + loop.index0 == result.exact_total %}
+  <li class="divider">Closest matches, with some of the words</li>
+  {% endif %}
+  <li>
+    <a class="card{{ ' closest' if h.closest }}" href="/candidates/{{ c.id }}">
+      <div class="row1"><strong>{{ c.name }} {{ sample_badge(c.id in sample[0]) }}</strong><span class="when">{% if c.last_contacted_at %}Contacted {{ c.last_contacted_at | ago }}{% else %}Never contacted{% endif %}</span></div>
+      <div class="row2">{{ sub(c) }}</div>
+      {% if h.reason %}<div class="why">{{ h.reason }}</div>{% endif %}
+      {% if h.snippet %}<div class="snip">{{ h.snippet | snippet | safe }}</div>
+      {% elif c.about and not h.reason %}<div class="snip">{{ c.about[:180] }}{{ '…' if c.about | length > 180 }}</div>{% endif %}
+      {{ chips(c.tags[:8], link=False) }}
+    </a>
+  </li>
+{% endfor %}
+{% if result.total > start + result.hits | length %}
+  <li class="more"><button type="button" class="btn" hx-get="/search?{{ {'q': result.suggestion if result.corrected else q, 'location': location or '', 'title': title or '', 'tag': tag or '', 'offset': start + result.hits | length} | urlencode }}" hx-target="closest li" hx-swap="outerHTML">Show more</button> <span class="fine">{{ start + result.hits | length }} of {{ result.total }}</span></li>
+{% endif %}

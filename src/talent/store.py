@@ -143,6 +143,40 @@ def _fts_triggers() -> str:
     """
 
 
+def _words_index() -> str:
+    """Unstemmed copy of the index, kept only for its word list (candidates_words_vocab).
+
+    Its own triggers, so a later migration that recreates the main ones leaves it alone."""
+    new = ", ".join(f"new.{c.strip()}" for c in _FTS_COLS.split(","))
+    old = ", ".join(f"old.{c.strip()}" for c in _FTS_COLS.split(","))
+    return f"""
+    DROP TRIGGER IF EXISTS candidates_words_ai;
+    DROP TRIGGER IF EXISTS candidates_words_ad;
+    DROP TRIGGER IF EXISTS candidates_words_au;
+    DROP TABLE IF EXISTS candidates_words_vocab;
+    DROP TABLE IF EXISTS candidates_words;
+    CREATE VIRTUAL TABLE candidates_words USING fts5(
+        {_FTS_COLS}, content='candidates', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+    );
+    CREATE VIRTUAL TABLE candidates_words_vocab USING fts5vocab(candidates_words, 'row');
+    CREATE TRIGGER candidates_words_ai AFTER INSERT ON candidates BEGIN
+        INSERT INTO candidates_words(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+    END;
+    CREATE TRIGGER candidates_words_ad AFTER DELETE ON candidates BEGIN
+        INSERT INTO candidates_words(candidates_words, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+    END;
+    CREATE TRIGGER candidates_words_au AFTER UPDATE ON candidates BEGIN
+        INSERT INTO candidates_words(candidates_words, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO candidates_words(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+    END;
+    """
+
+
+def _migrate_v5_data(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
+    conn.execute("INSERT INTO candidates_words(candidates_words) VALUES('rebuild')")
+
+
 def _migrate_v2_data(conn: sqlite3.Connection) -> None:
     # Fill the new index first: the update trigger below expects it to match the rows.
     conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
@@ -364,6 +398,23 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v4_data,
     ),
+    # v5: search finds word forms ("engineers" finds "engineer") with the porter stemmer, and a second,
+    # unstemmed index gives the list of real words used for "Did you mean". Needs only the candidates
+    # columns from v2, so it runs the same whether or not v4 came first.
+    (
+        """
+        DROP TRIGGER IF EXISTS candidates_ai;
+        DROP TRIGGER IF EXISTS candidates_ad;
+        DROP TRIGGER IF EXISTS candidates_au;
+        DROP TABLE IF EXISTS candidates_fts;
+        CREATE VIRTUAL TABLE candidates_fts USING fts5(
+            """ + _FTS_COLS + """,
+            content='candidates', content_rowid='id',
+            tokenize='porter unicode61 remove_diacritics 2'
+        );
+        """ + _fts_triggers() + _words_index(),
+        _migrate_v5_data,
+    ),
 )
 
 
@@ -554,6 +605,8 @@ class SearchHit:
     candidate: dict[str, Any]
     snippet: str | None = None
     score: float | None = None
+    closest: bool = False  # matches some of the words, not all of them
+    reason: str | None = None  # why it matched when it wasn't the profile text ("In pipeline: ...")
 
 
 @dataclass
@@ -565,6 +618,13 @@ class SearchResult:
     filters: dict[str, str] = field(default_factory=dict)
     closest: bool = False  # no hit had every word, so these match some of them
     exact: bool = False  # the query was an email or LinkedIn URL that matched one person
+    exact_total: int | None = None  # hits with every word; the rest of total are closest matches
+    suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
+    corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
+
+    def __post_init__(self) -> None:
+        if self.exact_total is None:
+            self.exact_total = 0 if self.closest else self.total
 
 
 def _clean(value: Any) -> Any:
@@ -603,12 +663,15 @@ def normalize_linkedin(url: str | None) -> str | None:
 
 
 # Shorthand recruiters type for places and titles. Each expands to an OR group.
+BAY_AREA = ("san francisco", "oakland", "san jose", "palo alto", "berkeley", "mountain view", "sunnyvale",
+            "menlo park", "redwood city", "santa clara", "fremont")
 ALIASES: dict[str, tuple[str, ...]] = {
     "sfo": ("san francisco",),
     "ny": ("new york",),
     "la": ("los angeles",),
     "dc": ("washington",),
-    "bay": ("bay area",),
+    "bay": ("bay area", *BAY_AREA),
+    "bay area": BAY_AREA,
     "swe": ("software engineer",),
     "sde": ("software engineer",),
     "pm": ("product manager",),
@@ -627,6 +690,10 @@ ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("k8s", "kubernetes"),
     ("sf", "san francisco"),
     ("nyc", "new york"),
+    ("golang", "go"),
+    ("postgres", "postgresql"),
+    ("node", "nodejs"),
+    ("react", "reactjs"),
 )
 for _group in ALIAS_GROUPS:
     for _form in _group:
@@ -640,13 +707,31 @@ STOPWORDS = frozenset(
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _LINKEDIN_RE = re.compile(r"^(https?://)?([a-z]{2,3}\.)?linkedin\.com/", re.I)
+# Timeline kinds whose text search reads ("Dana", "140k"). Stage moves and change entries are left out.
+_SEARCHED_KINDS = ("note", "call", "email", "message", "meeting", "interview")
 
 
-def _query_groups(text: str) -> list[str]:
-    """Free text -> one FTS5 group per meaningful word (or alias phrase), all syntax quoted."""
+@dataclass(frozen=True)
+class _Term:
+    form: str  # one word, or an alias phrase like "san francisco"
+    prefix: bool  # the last word while typing: "pyth" finds "Python"
+    expansions: tuple[str, ...] = ()
+
+    @property
+    def forms(self) -> tuple[str, ...]:
+        return (self.form, *self.expansions)
+
+    def fts(self) -> str:
+        term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
+        if self.expansions:
+            term = "(" + " OR ".join([term, *(f'"{e}"' for e in self.expansions)]) + ")"
+        return term
+
+
+def _query_terms(text: str) -> list[_Term]:
     words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
     kept = [w for w in words if w not in STOPWORDS] or words
-    groups: list[str] = []
+    terms: list[_Term] = []
     i = 0
     while i < len(kept):
         pair = " ".join(kept[i:i + 2]) if i + 1 < len(kept) else ""
@@ -655,13 +740,14 @@ def _query_groups(text: str) -> list[str]:
         else:
             form, step = kept[i], 1
         last = i + step >= len(kept)
-        term = f'"{form}"*' if last and step == 1 else f'"{form}"'
-        expansions = ALIASES.get(form)
-        if expansions:
-            term = "(" + " OR ".join([term, *(f'"{e}"' for e in expansions)]) + ")"
-        groups.append(term)
+        terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
         i += step
-    return groups
+    return terms
+
+
+def _query_groups(text: str) -> list[str]:
+    """Free text -> one FTS5 group per meaningful word (or alias phrase), all syntax quoted."""
+    return [t.fts() for t in _query_terms(text)]
 
 
 def fts_query(text: str, *, any_word: bool = False) -> str | None:
@@ -672,11 +758,79 @@ def fts_query(text: str, *, any_word: bool = False) -> str | None:
     words (the, who, people...) are dropped, and known shorthand (sf, nyc,
     frontend / front end...) also matches its other forms. any_word=True
     joins the words with OR instead, for a "closest matches" fallback.
+    The index stems words, so "engineers" also finds "engineer".
     """
     groups = _query_groups(text)
     if not groups:
         return None
     return (" OR " if any_word else " AND ").join(groups)
+
+
+def fold(text: str | None) -> str:
+    """Lowercase with accents removed, so 'José' and 'jose' compare equal."""
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch)).casefold()
+
+
+def _has(text: str | None, needle: str | None, whole: int) -> int:
+    """SQL function tt_has: does text contain needle (ignoring case and accents)? whole=1 needs a whole word,
+    so the filter "la" finds "LA" but not "Atlanta"."""
+    if not text or not needle:
+        return 0
+    t, n = fold(text), fold(needle)
+    if not whole:
+        return int(n in t)
+    return int(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", t) is not None)
+
+
+def _filter_forms(value: str, *, singular: bool = False) -> list[str]:
+    """A filter value plus its shorthand forms: 'sf' -> sf, san francisco; 'Bay Area' -> the cities."""
+    v = re.sub(r"\s+", " ", value.strip().lower())
+    forms = [v, *ALIASES.get(v, ())]
+    if singular and len(v) > 3 and v.endswith("s"):
+        forms.append(v[:-1])  # "engineers" finds "Engineer"
+    return list(dict.fromkeys(forms))
+
+
+def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
+    """Regex for a query word inside free text (notes, job titles), on whole words."""
+    base = form[:-1] if not prefix and len(form) > 3 and form.endswith("s") else form
+    body = r"\s+".join(re.escape(p) for p in base.split())
+    tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
+    return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _excerpt(body: str, pattern: re.Pattern[str], width: int = 60) -> str:
+    text = re.sub(r"\s+", " ", body).strip()
+    m = pattern.search(text)
+    if not m:
+        return text[:width * 2]
+    start, end = max(0, m.start() - width), min(len(text), m.end() + width)
+    return (("…" if start else "") + text[start:m.start()] + HL_START + text[m.start():m.end()] + HL_END
+            + text[m.end():end] + ("…" if end < len(text) else ""))
+
+
+def _distance(a: str, b: str, cap: int) -> int:
+    """Edit distance with swaps counted as one ("pyhton" -> "python" is 1). Stops early past cap."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _typo_cap(word: str) -> int:
+    """How many edits a spelling fix may make: none for short words, 1 up to 5 letters, then 2."""
+    return 0 if len(word) < 4 else 1 if len(word) <= 5 else 2
 
 
 def _history_text(entries: list[dict[str, Any]]) -> str | None:
@@ -744,6 +898,7 @@ class Store:
         self._conn.execute("PRAGMA secure_delete = ON")
         self._conn.create_function("fold_name", 1, fold_name, deterministic=True)
         self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
+        self._conn.create_function("tt_has", 3, _has, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -1447,6 +1602,36 @@ class Store:
             return True, self.find_duplicate(linkedin_url=q)
         return False, None
 
+    def candidate_filters(self, *, location: str | None = None, title: str | None = None,
+                          tag: str | None = None, source: str | None = None) -> tuple[list[str], list[Any], dict]:
+        """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
+        bay area, swe) and ignore case and accents; tag and source ignore case."""
+        where: list[str] = []
+        params: list[Any] = []
+        filters: dict[str, str] = {}
+        for col, value, singular in (("location", location, False), ("current_title", title, True)):
+            if value and value.strip():
+                forms = _filter_forms(value, singular=singular)
+                where.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
+                for f in forms:
+                    params += [f, int(len(f) <= 3)]
+                filters["title" if col == "current_title" else col] = value
+        if tag and tag.strip():
+            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
+            params.append(tag.strip())
+            filters["tag"] = tag
+        if source and source.strip():
+            where.append("lower(trim(c.source)) = lower(?)")
+            params.append(source.strip())
+            filters["source"] = source
+        return where, params, filters
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        """Where people came from ("LinkedIn", "Referral"), most common first, for the Candidates filter."""
+        return self._rows("SELECT trim(source) AS source, count(*) AS count FROM candidates"
+                          " WHERE source IS NOT NULL AND trim(source) <> ''"
+                          " GROUP BY lower(trim(source)) ORDER BY count DESC, source LIMIT 50")
+
     def search_candidates(
         self,
         query: str = "",
@@ -1454,33 +1639,25 @@ class Store:
         location: str | None = None,
         title: str | None = None,
         tag: str | None = None,
+        source: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        fix_typos: bool = True,
     ) -> SearchResult:
-        """Ranked full-text search, best matches first; empty query lists most recent."""
-        where: list[str] = []
-        params: list[Any] = []
-        filters = {}
-        if location:
-            where.append("c.location LIKE ?")
-            params.append(f"%{location.strip()}%")
-            filters["location"] = location
-        if title:
-            where.append("c.current_title LIKE ?")
-            params.append(f"%{title.strip()}%")
-            filters["title"] = title
-        if tag:
-            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ?)")
-            params.append(tag.strip())
-            filters["tag"] = tag
+        """Ranked search, best matches first; empty query lists most recent.
 
+        Order: people with every word in their profile (ranked), then people who have every word once
+        their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
+        matches with some of the words. A word nobody has gets a spelling fix from the saved words.
+        """
+        where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
             return SearchResult(hits=hits, total=len(hits), query=query, filters=filters, exact=bool(person))
 
-        match = fts_query(query or "")
-        if match is None:
+        terms = _query_terms(query or "")
+        if not terms:
             clause = ("WHERE " + " AND ".join(where)) if where else ""
             total = self._row(f"SELECT count(*) AS n FROM candidates c {clause}", params)["n"]
             rows = self._rows(
@@ -1490,33 +1667,175 @@ class Store:
             hits = [SearchHit(candidate=self._hydrate(r)) for r in rows]
             return SearchResult(hits=hits, total=total, query=query, filters=filters)
 
-        clause = " AND ".join(["candidates_fts MATCH ?", *where])
-        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {clause}"
-        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
-        closest = False
-        if total == 0 and len(_query_groups(query)) > 1:
-            # Nobody has every word: show the people who have the most of them.
-            match, closest = fts_query(query, any_word=True), True
-            total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
-        rows = self._rows(
-            # column weights: name, title, company, location, about, tags, past roles
-            f"""SELECT c.*,
-                       snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
-                       snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
-                       bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
-                {base}
-                ORDER BY _score LIMIT ? OFFSET ?""",
-            (match, *params, limit, offset),
-        )
-        hits = []
-        for r in rows:
-            about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
-            if HL_START in (about_snip or ""):
-                snippet = about_snip  # the About text is the most useful context to show
-            score = r.pop("_score")
-            hits.append(SearchHit(candidate=self._hydrate(r), snippet=snippet if HL_START in (snippet or "") else None,
-                                  score=score))
-        return SearchResult(hits=hits, total=total, query=query, filters=filters, closest=closest and total > 0)
+        extras_by_term = [self._extra_matches(t) for t in terms]
+        if fix_typos:
+            fixes = self._spelling_fixes(terms, extras_by_term)
+            if fixes:
+                fixed = query
+                for word, fix in fixes.items():
+                    fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+                res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
+                                             limit=limit, offset=offset, fix_typos=False)
+                if res.exact_total:
+                    res.query, res.suggestion, res.corrected = query, fixed, True
+                    return res
+                res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
+                                             limit=limit, offset=offset, fix_typos=False)
+                res.suggestion = fixed
+                return res
+
+        and_match = " AND ".join(t.fts() for t in terms)
+        cond = " AND ".join(["candidates_fts MATCH ?", *where])
+        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
+        fts_total = self._row(f"SELECT count(*) AS n {base}", (and_match, *params))["n"]
+        extra = self._extra_ids(terms, extras_by_term, where, params)
+
+        def extra_hits(off: int, k: int) -> list[SearchHit]:
+            out = []
+            for cid in extra[off:off + k]:
+                reason, body, pattern = next(e[cid] for e in extras_by_term if cid in e)
+                out.append(SearchHit(candidate=self.get_candidate(cid), reason=reason,
+                                     snippet=_excerpt(body, pattern) if body else None))
+            return out
+
+        def ranked(match: str, exclude: list[int], closest: bool) -> tuple[int, Callable[[int, int], list]]:
+            ex = " AND c.id NOT IN (SELECT value FROM json_each(?))" if exclude else ""
+            args = (match, *params, *([json.dumps(exclude)] if exclude else []))
+            n = self._row(f"SELECT count(*) AS n {base}{ex}", args)["n"]
+
+            def fetch(off: int, k: int) -> list[SearchHit]:
+                rows = self._rows(
+                    # column weights: name, title, company, location, about, tags, past roles
+                    f"""SELECT c.*,
+                               snippet(candidates_fts, 4, char(2), char(3), '…', 16) AS _about_snip,
+                               snippet(candidates_fts, -1, char(2), char(3), '…', 16) AS _snippet,
+                               bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                        {base}{ex}
+                        ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+                    (*args, k, off),
+                )
+                out = []
+                for r in rows:
+                    about_snip, snippet = r.pop("_about_snip"), r.pop("_snippet")
+                    if HL_START in (about_snip or ""):
+                        snippet = about_snip  # the About text is the most useful context to show
+                    score = r.pop("_score")
+                    out.append(SearchHit(candidate=self._hydrate(r), score=score, closest=closest,
+                                         snippet=snippet if HL_START in (snippet or "") else None))
+                return out
+            return n, fetch
+
+        segments: list[tuple[int, Callable[[int, int], list[SearchHit]]]] = [
+            ranked(and_match, [], False),
+            (len(extra), extra_hits),
+        ]
+        exact_total = fts_total + len(extra)
+        if exact_total < 3 and len(terms) > 1:
+            # Fewer than 3 people have every word: add the people who have the most of them.
+            exact_ids = [r["id"] for r in self._rows(f"SELECT c.id {base}", (and_match, *params))]
+            exact_ids += extra
+            segments.append(ranked(" OR ".join(t.fts() for t in terms), exact_ids, True))
+        total = sum(n for n, _ in segments)
+        hits: list[SearchHit] = []
+        skip = max(0, offset)
+        for n, fetch in segments:
+            if skip >= n:
+                skip -= n
+                continue
+            hits += fetch(skip, min(limit - len(hits), n - skip))
+            skip = 0
+            if len(hits) >= limit:
+                break
+        return SearchResult(hits=hits, total=total, query=query, filters=filters,
+                            closest=exact_total == 0 and total > 0, exact_total=exact_total)
+
+    def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
+
+        A job they're in whose title or company has the word, or a note, call, email or interview
+        on their timeline that mentions it. Read at query time, so nothing extra is stored."""
+        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
+        patterns = [_word_pattern(f, term.prefix) for f in term.forms]
+        likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
+        any_like = " OR ".join("{col} LIKE ? ESCAPE '\\'" for _ in likes)
+
+        def first(text: str) -> re.Pattern[str] | None:
+            folded = None if text.isascii() else fold(text)
+            return next((p for p in patterns if p.search(text) or (folded and p.search(folded))), None)
+
+        for r in self._rows(
+                "SELECT a.candidate_id, j.title, j.company FROM applications a JOIN jobs j ON j.id = a.job_id"
+                f" WHERE {any_like.format(col='j.title')} OR {any_like.format(col='j.company')} ORDER BY a.id",
+                (*likes, *likes)):
+            if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
+                job = r["title"] + (f" ({r['company']})" if r["company"] else "")
+                found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+        marks = ", ".join("?" for _ in _SEARCHED_KINDS)
+        for r in self._rows(
+                f"SELECT candidate_id, body FROM timeline WHERE kind IN ({marks}) AND ({any_like.format(col='body')})"
+                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes)):
+            if r["candidate_id"] not in found:
+                hit = first(r["body"])
+                if hit:
+                    found[r["candidate_id"]] = ("Matched a note", r["body"], hit)
+        return found
+
+    def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
+                   where: list[str], params: list[Any]) -> list[int]:
+        """People who have every word once pipeline jobs and notes count, but not in their profile alone,
+        most recently updated first."""
+        pool = set().union(*extras_by_term)
+        if not pool:
+            return []
+        # Whole-index rowid lists are fast; an IN filter inside MATCH re-runs the match per id.
+        in_profile = [pool & {r["rowid"] for r in self._rows(
+            "SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?", (t.fts(),))} for t in terms]
+        keep = [cid for cid in pool
+                if all(cid in extras or cid in prof for extras, prof in zip(extras_by_term, in_profile))
+                and not all(cid in prof for prof in in_profile)]
+        if not keep:
+            return []
+        clause = " AND ".join(["c.id IN (SELECT value FROM json_each(?))", *where])
+        return [r["id"] for r in self._rows(
+            f"SELECT c.id FROM candidates c WHERE {clause} ORDER BY c.updated_at DESC, c.id DESC",
+            (json.dumps(keep), *params))]
+
+    def _spelling_fixes(self, terms: list[_Term], extras_by_term: list[dict]) -> dict[str, str]:
+        """Query words nobody has -> the closest saved word, when one is close enough."""
+        fixes: dict[str, str] = {}
+        vocab: list[tuple[str, int]] | None = None
+        for t, extras in zip(terms, extras_by_term):
+            word = t.form
+            cap = _typo_cap(word)
+            if not cap or t.expansions or not word.isalpha() or extras:
+                continue
+            if self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1", (t.fts(),)):
+                continue
+            if vocab is None:
+                vocab = self._vocabulary()
+            best: tuple[int, int, str] | None = None
+            for known, docs in vocab:
+                if abs(len(known) - len(word)) > cap or known == word:
+                    continue
+                d = _distance(word, known, cap)
+                if d <= cap and (best is None or (d, -docs, known) < best):
+                    best = (d, -docs, known)
+            if best:
+                fixes[word] = best[2]
+        return fixes
+
+    def _vocabulary(self) -> list[tuple[str, int]]:
+        """Every word in saved profiles and job titles/companies, with how many records use it."""
+        try:
+            rows = self._rows("SELECT term, doc FROM candidates_words_vocab WHERE length(term) >= 4")
+        except sqlite3.OperationalError:
+            rows = []
+        counts = {r["term"]: r["doc"] for r in rows if r["term"].isalpha() and r["term"] not in STOPWORDS}
+        for r in self._rows("SELECT title, company FROM jobs"):
+            for w in re.findall(r"\w+", fold(f"{r['title']} {r['company'] or ''}")):
+                if len(w) >= 4 and w.isalpha():
+                    counts[w] = counts.get(w, 0) + 1
+        return list(counts.items())
 
     # ------------------------------------------------------------------ jobs
     def add_job(self, title: str, company: str | None = None, location: str | None = None,

@@ -6,21 +6,18 @@
   <p class="actions"><a class="btn primary" href="/connect">Connect an AI app</a> <a class="btn" href="/candidates/new">Add one yourself</a></p>
 </div>
 {% else %}
-<p class="meta">{{ result.total }} match{{ '' if result.total == 1 else 'es' }}{% if result.total > result.hits | length %}, showing the best {{ result.hits | length }}{% endif %} · <a href="/candidates?{{ {'q': q} | urlencode }}">Open in table</a></p>
+{% set shown_q = result.suggestion if result.corrected else q %}
+{% if result.corrected %}
+<p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ result.suggestion }}</strong>.</p>
+{% endif %}
+<p class="meta">{% if result.closest %}No one has every word. Closest matches:{% else %}{{ result.exact_total }} match{{ '' if result.exact_total == 1 else 'es' }}{% if result.total > result.exact_total %}, plus {{ result.total - result.exact_total }} closest{% endif %}{% if result.total > result.hits | length %}, showing {{ result.hits | length }}{% endif %}{% endif %} · <a href="/candidates?{{ {'q': shown_q, 'location': location or '', 'tag': tag or ''} | urlencode }}">Open in table</a></p>
+{% if result.suggestion and not result.corrected %}
+<p class="suggest">Did you mean <a href="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-get="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-target="#results" hx-push-url="true">{{ result.suggestion }}</a>?</p>
+{% endif %}
 {% if not result.hits %}
 <p class="none">No one matches that yet. Try fewer words, or a skill like “python”.</p>
 {% endif %}
 <ul class="cards">
-  {% for h in result.hits %}{% set c = h.candidate %}
-  <li>
-    <a class="card" href="/candidates/{{ c.id }}">
-      <div class="row1"><strong>{{ c.name }}</strong><span class="when">{% if c.last_contacted_at %}Contacted {{ c.last_contacted_at | ago }}{% else %}Never contacted{% endif %}</span></div>
-      <div class="row2">{{ sub(c) }}</div>
-      {% if h.snippet %}<div class="snip">{{ h.snippet | snippet | safe }}</div>
-      {% elif c.about %}<div class="snip">{{ c.about[:180] }}{{ '…' if c.about | length > 180 }}</div>{% endif %}
-      {{ chips(c.tags[:8], link=False) }}
-    </a>
-  </li>
-  {% endfor %}
+  {% include "_result_cards.html" %}
 </ul>
 {% endif %}
