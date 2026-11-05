@@ -65,9 +65,9 @@
           {% endif %}
           {% if i.sessions %}{{ loop_sessions(i) }}{% endif %}
           {% if i.kind == 'followup' and i.batch %}
-          <details class="fine"><summary>Text to paste</summary>
+          <details class="fine"><summary>Template and a copy for each person</summary>
+            <p class="fine">Template, step {{ i.step }}: the same text for everyone, with <code>{first_name}</code> to swap for each name. The buttons below fill it in for each person.</p>
             <p class="about">{{ i.draft }}</p>
-            <button class="btn small" type="button" data-copy-text="{{ i.draft }}">Copy for step {{ i.step }}</button>
             <ul class="sessions">{% for b in i.batch %}<li><a href="/candidates/{{ b.candidate_id }}">{{ b.name }}</a> <button type="button" class="link small" data-copy-text="{{ b.draft }}">Copy for {{ b.name.split()[0] if b.name.split() else 'them' }}</button></li>{% endfor %}</ul>
           </details>
           {% endif %}

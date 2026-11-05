@@ -7,7 +7,7 @@ paste-ready text and either a Mark done form (a POST the app already has) or a l
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import actions, chase, interviews, offers, outreach, reports
@@ -66,6 +66,30 @@ def _chase_items(store: Store, c: dict[str, Any], now: datetime) -> list[dict[st
                                for p in g["people"][:chase.PAGE_SHOWN]],
                     "done": _done("Mark as chased", f"/clients/{c['slug']}/chased", manager=g["manager_key"],
                                   manager_name=who)})
+    if not out:  # nothing is overdue: say who is still waiting on the client, and when the nudge comes due
+        out = _waiting_items(store, c, now)
+    return out
+
+
+def _waiting_items(store: Store, c: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """People waiting on the client whose nudge isn't due yet: one item per hiring manager, with the day count and the
+    day the nudge becomes due. Not work to do, so they don't count toward the desk's to-do total."""
+    after = chase.chase_days(store)
+    today = as_local(now).date()
+    out = []
+    for g in chase.chase_list(store, c["key"], now=now, days=0):
+        n = len(g["people"])
+        who = g["manager"] or c["name"]
+        left = max(0, after - min(p["days"] for p in g["people"]))
+        on = today + timedelta(days=left)
+        shown = ", ".join(f"{p['name']} ({p['job']}, " + ("date not known" if p["date_unknown"] else f"day {p['days']}") + ")"
+                          for p in g["people"][:4]) + (f" and {n - 4} more" if n > 4 else "")
+        when = "today" if left == 0 else "tomorrow" if left == 1 else f"in {left} days ({actions.day_text(on)})"
+        out.append({"kind": "chase", "not_due": True, "nudge_on": on.isoformat(),
+                    "title": f"Waiting on {who}: {n} {'person' if n == 1 else 'people'}",
+                    "detail": f"{shown}. The nudge comes due {when}, after {after} days.",
+                    "people": [{k: p[k] for k in ("candidate_id", "name", "job_id", "job", "stage", "days")}
+                               for p in g["people"][:chase.PAGE_SHOWN]]})
     return out
 
 
@@ -130,7 +154,7 @@ def desk(store: Store, key: str, now: datetime | None = None) -> dict[str, Any]:
         sections.append({"kind": kind, "label": label, "items": items[:MAX_ITEMS], "count": len(items),
                          "more": max(0, len(items) - MAX_ITEMS)})
     # An update that is only a draft (not due) is not work to do, so it doesn't count toward what is open.
-    todo = sum(s["count"] for s in sections if s["kind"] != "update") + sum(
+    todo = sum(1 for k, v in built.items() if k != "update" for i in v if not i.get("not_due")) + sum(
         1 for i in built["update"] if i["due"])
     return {"client": c["name"], "key": c["key"], "slug": c["slug"], "sections": sections, "count": todo,
             "own": actions.inhouse(store), "now": now.isoformat()}
@@ -157,7 +181,7 @@ def desk_text(d: dict[str, Any]) -> str:
 def tool_data(d: dict[str, Any], app_url: str) -> dict[str, Any]:
     """The structured result: items without the form details (the tool only reads)."""
     keep = ("kind", "title", "detail", "text", "to", "subject", "candidate_id", "job_id", "overdue", "due", "owed",
-            "people", "answer_by", "due_on", "last_chased_at")
+            "people", "answer_by", "due_on", "last_chased_at", "not_due", "nudge_on")
     return {"client": d["client"], "to_do": d["count"], "app_url": app_url,
             "sections": [{"kind": s["kind"], "label": s["label"], "count": s["count"], "more": s["more"],
                           "items": [{k: i[k] for k in keep if k in i} for i in s["items"]]} for s in d["sections"]]}

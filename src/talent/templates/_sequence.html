@@ -7,7 +7,7 @@
   <div class="flash warn" id="not-following">
     <p><strong>{{ fu.not_following | length }} {{ 'person' if fu.not_following | length == 1 else 'people' }} you already messaged {% if fu.not_following | length == 1 %}isn't{% else %}aren't{% endif %} following these steps.</strong> They were first messaged before the steps were saved, so no follow-up comes due for them.</p>
     <ul class="fine">{% for p in fu.not_following %}<li><a href="/candidates/{{ p.candidate_id }}">{{ p.name }}</a> · last message {{ p.last_on | date }}{% if p.sent > 1 %} ({{ p.sent }} sent){% endif %}</li>{% endfor %}</ul>
-    <form method="post" action="/jobs/{{ job.id }}/sequence/enroll" class="inline" data-confirm="Enroll {{ fu.not_following | length }} already messaged? Their next follow-up counts from their first message, so some may be due right away. Nothing is sent."><button class="btn small primary" type="submit">Enroll people already in {{ fu.contact or 'Contacted' }}</button></form>
+    <form method="post" action="/jobs/{{ job.id }}/sequence/enroll" class="inline" data-confirm="Enroll {{ fu.not_following | length }} already messaged? Nothing is sent."><span class="fine">Count from: <label><input type="radio" name="start" value="today" checked> Start counting from today</label> <label><input type="radio" name="start" value="first_message"> From their first message (some may be due now)</label></span> <button class="btn small primary" type="submit">Enroll people already in {{ fu.contact or 'Contacted' }}</button></form>
   </div>
   {% endif %}
   {% if fu.people %}

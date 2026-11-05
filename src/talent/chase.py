@@ -447,7 +447,7 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
     from .importers import imported_placements
 
     now = now or datetime.now(timezone.utc)
-    days = days or chase_days(store)
+    days = chase_days(store) if days is None else days
     own = actions.inhouse(store)
     cutoff = now - timedelta(days=days)
     oldest = chase_max_days(store)

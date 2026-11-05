@@ -57,7 +57,7 @@ def test_people_already_messaged_are_listed_and_can_be_enrolled(store):
     page = c.get(f"/jobs/{job['id']}").text
     assert "2 people you already messaged aren't following" in page and "Enroll people already in Contacted" in page
     assert "last message" in page
-    r = c.post(f"/jobs/{job['id']}/sequence/enroll", follow_redirects=False)
+    r = c.post(f"/jobs/{job['id']}/sequence/enroll", data={"start": "first_message"}, follow_redirects=False)
     assert "Enrolled 2 people" in flash_of(r)
     assert outreach.not_following(store, job["id"]) == []
     due = outreach.due(store)
@@ -125,7 +125,8 @@ def test_ai_sets_steps_and_enrolls_existing_and_it_can_be_undone(store):
     assert text(res).startswith("Set 2 follow-up steps for ML Engineer (Northwind).")
     assert "replaced the steps" in text(res) and "1 people messaged earlier don't follow" in text(res)
     assert [s["label"] for s in outreach.sequence(store, job["id"])["steps"]] == ["InMail", "Nudge"]
-    res = call(server, "set_followup_sequence", job_id=job["id"], steps=STEPS, enroll_existing=True)
+    res = call(server, "set_followup_sequence", job_id=job["id"], steps=STEPS, enroll_existing=True,
+               enroll_from="first_message")
     assert "enrolled 1 already messaged" in text(res) and res.structuredContent["enrolled"][0]["name"] == "Ana Ruiz"
     assert outreach.due(store)[0]["label"] == "Nudge"
     acts = [a for a in store.ai_actions() if a["kind"] == "sequence_set"]
@@ -218,7 +219,7 @@ def test_bulk_actions_log_sent_mark_replied_pause_and_enroll(store):
     c = local_client(store)
     url = f"/jobs/{job['id']}/outreach/bulk"
     assert "Tick the people" in flash_of(c.post(url, data={"action": "sent"}, follow_redirects=False), "flash_error")
-    r = c.post(url, data={"action": "enroll", "candidate_ids": [str(ana), str(bo), str(cy)]}, follow_redirects=False)
+    r = c.post(url, data={"action": "enroll", "start": "first_message", "candidate_ids": [str(ana), str(bo), str(cy)]}, follow_redirects=False)
     assert "Enrolled 3 people" in flash_of(r)
     r = c.post(url, data={"action": "pause", "candidate_ids": [str(ana)]}, follow_redirects=False)
     assert "Paused follow-ups for 1 person" in flash_of(r)
