@@ -288,9 +288,13 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
             if found:
                 break
         if not found:
-            who = ", ".join(eligible) or "anyone"
-            row["warnings"].append(f"No time in the next {HORIZON_DAYS} working days when {cand['name']} and {who} "
-                                   "are all free. Add an interviewer for this session, or start later.")
+            if not eligible and dropped:
+                row["warnings"].append(f"{', '.join(dropped)} {'is' if len(dropped) == 1 else 'are'} out and no one else "
+                                       f"is listed for {spec['name']}. Add an interviewer for this session.")
+            else:
+                who = ", ".join(eligible) or "anyone"
+                row["warnings"].append(f"No time in the next {HORIZON_DAYS} working days when {cand['name']} and {who} "
+                                       "are all free. Add an interviewer for this session, or start later.")
             sessions.append(row)
             continue
         s, e, who, others = found
@@ -400,6 +404,12 @@ def check_slot(store: Store, candidate_id: int, at: str, minutes: int, interview
 def session_summary(name: str, minutes: int) -> str:
     """The summary an interview is logged with; the '(60 min)' is how its length is remembered."""
     return f"{name} ({minutes} min)"
+
+
+def unplaced_from(p: dict[str, Any]) -> list[dict[str, Any]]:
+    """The sessions plan() could not place (not the ones already booked): [{"session", "reason"}]."""
+    return [{"session": s["name"], "reason": (s["warnings"] or ["no free time"])[0]}
+            for s in p["sessions"] if not s["placed"] and not s["already"]]
 
 
 def slots_from(p: dict[str, Any]) -> list[dict[str, Any]]:

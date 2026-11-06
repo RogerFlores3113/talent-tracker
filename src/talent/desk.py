@@ -56,6 +56,14 @@ def _chase_items(store: Store, c: dict[str, Any], now: datetime) -> list[dict[st
     for g in chase.chase_list(store, c["key"], now=now, days=chase.chase_days(store)):
         n = len(g["people"])
         who = g["manager"] or c["name"]
+        if g["next_on"]:  # chased lately: say so, don't draft the nudge again
+            out.append({"kind": "chase", "not_due": True, "snoozed": True, "last_chased_at": g["chased_at"],
+                        "nudge_on": as_local(g["next_on"]).date().isoformat(),
+                        "title": f"Waiting on {who}: {n} {'person' if n == 1 else 'people'}",
+                        "detail": chase.chased_line(g["chased_at"], g["next_on"]) + ". The nudge isn't drafted again until then.",
+                        "people": [{k: p[k] for k in ("candidate_id", "name", "job_id", "job", "stage", "days")}
+                                   for p in g["people"][:chase.PAGE_SHOWN]]})
+            continue
         out.append({"kind": "chase", "title": f"Chase {who}: {n} {'person' if n == 1 else 'people'} waiting",
                     "detail": ", ".join(f"{p['name']} ({p['job']}, {p['stage']}"
                                         + ("" if p["date_unknown"] else f", {p['days']} days") + ")"
