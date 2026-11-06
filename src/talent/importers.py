@@ -1242,7 +1242,7 @@ def _missing_from_file(store: Store, seen: set[tuple[int, int]]) -> list[str]:
     for job_id in sorted({j for _, j in seen}):
         job = store.get_job(job_id)
         closed = {s["name"].casefold() for s in store.job_stages(job_id) if s["outcome"] != "open"}
-        for a in store.pipeline(job_id):
+        for a in sorted(store.pipeline(job_id), key=lambda a: (a["candidate_name"] or "").casefold()):  # stable order
             if (a["candidate_id"], job_id) not in seen and a["stage"].casefold() not in closed:
                 out.append(f"{a['candidate_name']} is at {a['stage']} on {job_label(job)} here, but isn't in the "
                            "file, so they were left as they are")
