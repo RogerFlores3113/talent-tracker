@@ -10,7 +10,7 @@ import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
-from talent import actions, chase, reports
+from talent import actions, chase, interviews, reports
 from talent.mcp_server import build_server
 
 from conftest import flash_of, local_client
@@ -94,7 +94,8 @@ def test_a_jobless_interview_on_one_open_job_still_counts(store):
 
 def test_interviews_page_shows_no_job_with_a_pick_link(store):
     _hfl, _acme, lena = _two_clients(store)
-    iv = store.log(lena, "interview", "Client interview", at=_at(0.2))
+    wed = interviews.week_start() + timedelta(days=2)  # a weekday in the week the page shows, any day it runs
+    iv = store.log(lena, "interview", "Client interview", at=f"{wed}T10:00")
     page = local_client(store).get("/interviews").text
     assert "No job" in page and f"/interviews/{iv['id']}/job" in page
 

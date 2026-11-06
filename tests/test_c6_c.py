@@ -225,8 +225,11 @@ def test_feedback_chase_today_item_mailto_and_mcp(store):
 
 def test_interviews_page_shows_needs_outcome_and_who_owes(store):
     jid, cid = _job(store)
-    store.log(cid, "interview", "Panel", at=_ago(3), job_id=jid, interviewer="Kim Lee, Alex Ruiz")
-    w = interviews.week(store, as_local(datetime.now(timezone.utc) - timedelta(hours=3)).date())
+    day = as_local(datetime.now(timezone.utc)).date() - timedelta(days=1)
+    while day.weekday() >= 5:  # the last weekday before today, so the week shown holds it on any day it runs
+        day -= timedelta(days=1)
+    store.log(cid, "interview", "Panel", at=f"{day}T10:00", job_id=jid, interviewer="Kim Lee, Alex Ruiz")
+    w = interviews.week(store, day)
     assert w["owed"] and w["owed"][0]["feedback"] == ["Kim Lee", "Alex Ruiz"] and w["owed"][0]["outcome"]
     assert "feedback owed by Kim Lee, Alex Ruiz" in interviews.week_text(w)
 
