@@ -30,19 +30,24 @@ NEW_KEY = "ai_new_apps_trust"  # settings row: "suggest" when new apps start at 
 UNNAMED = "Unnamed app"
 LEGACY_UNNAMED = "(no name given)"
 RANK = {"read_only": 0, "suggest": 1, "trusted": 2}
-SUGGEST_PRESS_CAP = 10  # Keep and Pass presses a Suggest only app may make per session
 SHOW_CHARS = 200  # held arguments longer than this fold behind Show all on Review
 WRITES_PREFIX = "ai_app_writes:"  # settings rows: how many writes each app has made
 # While a kept request runs: skip the trust check, and Cautious mode (the recruiter just said yes).
 REPLAY: ContextVar[bool] = ContextVar("talent_trust_replay", default=False)
 REPLAY_SESSION: ContextVar[str | None] = ContextVar("talent_trust_replay_session", default=None)
 # Tools the recruiter's presses on the Shortlist card use (they carry their own key), never held here. A Read only
-# app is refused them; a Suggest only app may press (the Shortlist is the review) up to SUGGEST_PRESS_CAP a session.
+# app is refused them, and so is a Suggest only app (it could take its own key and keep its own proposals).
 CARD_TOOLS = frozenset({"keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects", "shortlist_card_key"})
 # The one write a Suggest only app may still make: it puts people on the Shortlist, where the recruiter decides.
 SUGGEST_OK = frozenset({"propose_candidates"})
 READ_ONLY_TEXT = ("No change made. The recruiter has set this AI app to read only in Talent Search, so it can search "
                   "and read but not change anything. Tell them what you wanted to change and let them do it.")
+SUGGEST_CARD_TEXT = ("No change made. This AI app is set to Suggest only in Talent Search, so it can't use Keep or Pass. "
+                     "The recruiter keeps or passes people on the Shortlist page, or can set this app to Trusted in "
+                     "Settings > AI apps.")
+HOLD_CAP_CHARS = 20_000  # the most a held request may carry, as JSON
+SUGGEST_WAIT = ("Nothing changed yet: this app is set to Suggest only, so the recruiter keeps or passes it in the app "
+                "(Review). Don't send it again.")
 _seen: dict[str, float] = {}
 _LOCK = threading.Lock()
 
@@ -149,6 +154,23 @@ def set_trust(store: Store, app_id: int, level: str) -> dict[str, Any]:
     return {**row, "trust": level}
 
 
+def wait_note(store: Store) -> str:
+    """Why a Suggest only request is waiting: the app's level, plus Cautious mode only when that is on too."""
+    return review.WAIT_NOTE if review.cautious(store) else SUGGEST_WAIT
+
+
+def size_problem(args: dict[str, Any]) -> str | None:
+    """A plain sentence when a held request is too big to put on Review, else None."""
+    try:
+        size = len(json.dumps(args, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return "No change made. That request could not be read."
+    if size > HOLD_CAP_CHARS:
+        return (f"No change made. That request is too long for the recruiter to review ({size:,} characters; the limit "
+                f"is {HOLD_CAP_CHARS:,}). Send less text, or ask the recruiter to add it in the app.")
+    return None
+
+
 def _summary(tool: str, args: dict[str, Any]) -> str:
     bits = []
     for k, v in list(args.items())[:3]:
@@ -160,7 +182,9 @@ def _summary(tool: str, args: dict[str, Any]) -> str:
 
 
 def hold(store: Store, tool: str, args: dict[str, Any], session: str | None, app: str | None = None) -> dict[str, Any]:
-    """Queue one write from a Suggest only app. Returns the Review row."""
+    """Queue one write from a Suggest only app. Returns the Review row. ValueError when it is too big."""
+    if (bad := size_problem(args)):
+        raise ValueError(bad)
     cid = args.get("candidate_id") if isinstance(args.get("candidate_id"), int) else None
     jid = args.get("job_id") if isinstance(args.get("job_id"), int) else None
     payload = {"tool": tool, "args": args, **({"app": app} if app else {})}

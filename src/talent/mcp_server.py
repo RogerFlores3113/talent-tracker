@@ -3321,13 +3321,47 @@ def _check_arguments(mcp: FastMCP) -> None:
     manager.call_tool = call_tool  # type: ignore[method-assign]
 
 
+def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> str | None:
+    """Why a Suggest only app's request would fail (or is too big), as a plain sentence, or None. Runs the tool's own
+    argument check (unknown names, missing or wrongly shaped values) plus the id, steps and template checks that
+    set_followup_sequence and book_loop make before they change anything, so nothing doomed waits on Review."""
+    bad = trust.size_problem(args)
+    if bad:
+        return bad
+    try:
+        meta = tool.fn_metadata
+        fields = set(meta.arg_model.model_fields)
+        extra = sorted(k for k in args if k not in fields)
+        if extra:
+            return f"No change made: {name} has no {', '.join(extra)}. It takes: {', '.join(sorted(fields)) or 'nothing'}."
+        try:
+            meta.arg_model.model_validate(meta.pre_parse_json(args))
+        except Exception as exc:  # pydantic: say which value is wrong, plainly
+            errs = getattr(exc, "errors", lambda: [])()
+            what = "; ".join(f"{'.'.join(str(x) for x in e.get('loc', ()))} {str(e.get('msg', 'is not valid')).lower()}"
+                             for e in errs[:3]) or "an argument is not valid"
+            return f"No change made: {what}."
+        if isinstance(args.get("job_id"), int):
+            store.get_job(args["job_id"])
+        if isinstance(args.get("candidate_id"), int):
+            store.get_candidate(args["candidate_id"])
+        if name == "set_followup_sequence":
+            outreach.clean_start(args.get("enroll_from", "today"))
+            outreach.clean_steps(args.get("steps"))  # names wrong keys and too few steps
+        elif name == "book_loop":
+            loops.plan(store, args["job_id"], args["candidate_id"], args.get("start"), args.get("unavailable"))
+    except (ValueError, NotFound) as exc:
+        msg = str(exc)
+        return msg if msg.startswith("No change made") else f"No change made: {msg}"
+    return None
+
+
 def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> None:
     """Every tool call runs in this server's AI session, so what it writes lands in the session's ledger. Before
     the session's first write the app takes a backup (sessions.before_write)."""
     manager = mcp._tool_manager
     original = manager.call_tool
     bound: dict[str, Any] = {}  # this process's app: the first name it says binds, a later name can't escape its level
-    presses = [0]  # Keep and Pass presses a Suggest only app has made in this session
 
     async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
         tool = manager.get_tool(name)
@@ -3336,22 +3370,22 @@ def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> No
         try:
             writes = tool is not None and not getattr(tool.annotations, "readOnlyHint", False)
             app = None if replay else trust.touch(store, _client_name(mcp), bound)
-            if app and name in trust.CARD_TOOLS:  # the card's presses: Read only is refused, Suggest only is capped
+            if app and name in trust.CARD_TOOLS:  # the card's presses: only a Trusted app may use them
                 if app["trust"] == "read_only":
                     raise ToolError(trust.READ_ONLY_TEXT)
-                if app["trust"] == "suggest" and name != "shortlist_card_key":
-                    if presses[0] >= trust.SUGGEST_PRESS_CAP:
-                        raise ToolError(f"Nothing changed. This AI app is set to Suggest only, so it can press Keep or "
-                                        f"Pass {trust.SUGGEST_PRESS_CAP} times a session. Do the rest in Talent Search.")
-                    presses[0] += 1
+                if app["trust"] == "suggest":
+                    raise ToolError(trust.SUGGEST_CARD_TEXT)
             elif writes and app:  # how far this AI app is trusted (Settings)
                 if app["trust"] == "read_only":
                     raise ToolError(trust.READ_ONLY_TEXT)
                 if app["trust"] == "suggest" and name not in trust.SUGGEST_OK:
+                    bad = _hold_problem(store, tool, name, dict(arguments or {}))  # same checks the tool runs, before queuing
+                    if bad:
+                        raise ToolError(bad)
                     held = trust.hold(store, name, dict(arguments or {}), session, app["name"])
                     trust.count_write(store, app["id"])
-                    return _plain(_wait_text(held) + " Your AI app is set to Suggest only in Settings, so every "
-                                  "change waits for the recruiter.", {"pending_review": _waiting(held)})
+                    return _plain(f"Waiting for the recruiter's review: {held['summary']}. " + trust.wait_note(store),
+                                  {"pending_review": _waiting(held)})
             if writes and app:
                 trust.count_write(store, app["id"])
             if writes and not replay:
