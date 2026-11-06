@@ -44,9 +44,11 @@ IMPORT_DAY_KEY = "chase_from_import"
 
 
 def from_import_day(store: Store) -> bool:
-    """Count waits from the import day for people an import put in a stage with an older date (default on)."""
+    """Count waits from the import day for people an import put in a stage with an older date. Default off: a stage
+    date in the file is the day they reached it, so the wait starts there (very old waits are folded, see
+    IMPORT_OLD_DAYS)."""
     raw = store._row("SELECT value FROM settings WHERE key = ?", (IMPORT_DAY_KEY,))
-    return not raw or str(raw["value"]) != "0"
+    return bool(raw) and str(raw["value"]) == "1"
 
 
 def set_from_import_day(store: Store, on: bool) -> bool:
@@ -66,6 +68,7 @@ def set_chase_days(store: Store, value: Any) -> int:
 
 
 MAX_KEY = "chase_max_days"
+IMPORT_OLD_DAYS = 60  # with no limit set, imported waits longer than this are folded away from the chase, not listed
 STAGES_KEY = "chase_stages"
 PAGE_SHOWN = 25  # people per manager on the chase page (then "Show all"), and per nudge in client_chase's data
 TOOL_GROUPS = 30  # nudges client_chase gives at most; the page has the rest
@@ -452,26 +455,32 @@ def _waiting_groups(store: Store, job_id: int, own: bool) -> set[str]:
 
 
 def chase_list(store: Store, key: str | None = None, now: datetime | None = None,
-               days: int | None = None, left_out: dict[str, int] | None = None) -> list[dict[str, Any]]:
+               days: int | None = None, left_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Everyone in a client-facing stage (Submitted, Client review, a hiring manager interview) for at least `days`
     by their stage date, with no interview booked on that job, one group per client and hiring manager:
     [{"client", "key", "slug", "manager", "manager_key", "to", "people": [...], "chased_at", "text", "email"}].
     Oldest first within a group; groups with the longest wait first. Stages the chase doesn't count (Onsite and
     reference checks by default) and waits past the optional upper limit are left out, counted in `left_out`
-    ({"stages", "too_old"}) when given."""
+    ({"stages", "too_old", "max", "older"}) when given: "max" is the limit used, "older" the folded waits as one
+    row per client, job and stage. With no limit set, waits an import dated more than IMPORT_OLD_DAYS ago are folded
+    the same way, so a first import of old history doesn't flood the list."""
     from .importers import file_entries, imported_placements
 
     now = now or datetime.now(timezone.utc)
     days = chase_days(store) if days is None else days
     own = actions.inhouse(store)
-    from_file = file_entries(store) if from_import_day(store) else {}  # (candidate, job) -> when the app got them
+    entries = file_entries(store)  # (candidate, job) -> when the app got them
+    from_file = entries if from_import_day(store) else {}
     cutoff = now - timedelta(days=days)
-    oldest = chase_max_days(store)
-    too_old = now - timedelta(days=oldest) if oldest else None
+    own_limit = chase_max_days(store)
+    oldest = own_limit or IMPORT_OLD_DAYS
+    too_old = now - timedelta(days=oldest)
+    older: dict[tuple[int, str], dict[str, Any]] = {}
     picks = _stage_picks(store)
     left = left_out if left_out is not None else {}
     left.setdefault("stages", 0)
     left.setdefault("too_old", 0)
+    left["max"] = oldest
     booked = {(r["candidate_id"], r.get("job_id")) for r in store.upcoming_interviews(days=60, now=now)}
     booked_any = {cid for cid, jid in booked if jid is None}
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -500,8 +509,14 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                 if not counts_stage(store, a["stage"], picks):
                     left["stages"] += 1
                     continue
-                if too_old and since < too_old and a["candidate_id"] not in undated:
+                if (own_limit or (a["candidate_id"], j["id"]) in entries) and since < too_old \
+                        and a["candidate_id"] not in undated:
                     left["too_old"] += 1
+                    o = older.setdefault((j["id"], a["stage"]), {"client": reports._spelling(jobs), "job": j["title"],
+                                                                 "job_id": j["id"], "stage": a["stage"], "count": 0,
+                                                                 "longest": 0})
+                    o["count"] += 1
+                    o["longest"] = max(o["longest"], (now - since).days)
                     continue
                 c = c or reports.client(store, ck)
                 mk = reports.manager_key(j.get("hiring_manager"))
@@ -514,6 +529,7 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                                       "job_id": j["id"], "job": j["title"], "stage": a["stage"],
                                       "since": a["stage_changed_at"], "days": (now - since).days,
                                       "date_unknown": a["candidate_id"] in undated, "imported": bool(entry)})
+    left["older"] = sorted(older.values(), key=lambda o: (o["client"].lower(), -o["count"]))
     out = []
     for (ck, mk), grp in groups.items():
         c = grp.pop("_c")

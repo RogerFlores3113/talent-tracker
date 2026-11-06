@@ -156,7 +156,11 @@ def desk(store: Store, key: str, now: datetime | None = None) -> dict[str, Any]:
     # An update that is only a draft (not due) is not work to do, so it doesn't count toward what is open.
     todo = sum(1 for k, v in built.items() if k != "update" for i in v if not i.get("not_due")) + sum(
         1 for i in built["update"] if i["due"])
+    keep = {j["id"] for j in c["jobs"]}
+    over = [{**o, "href": f"/jobs/{o['job_id']}/edit"} for o in actions.over_openings(store, c["name"])
+            if o["job_id"] in keep]
     return {"client": c["name"], "key": c["key"], "slug": c["slug"], "sections": sections, "count": todo,
+            "over_openings": over,
             "own": actions.inhouse(store), "now": now.isoformat()}
 
 
@@ -165,6 +169,8 @@ def desk_text(d: dict[str, Any]) -> str:
     lines = [f"Client desk for {d['client']}: " + (f"{d['count']} thing{'' if d['count'] == 1 else 's'} to do."
                                                     if d["count"] else "nothing to do right now.")
              + " Nothing is sent by Talent Search; the recruiter sends each message from their own mail."]
+    for o in d.get("over_openings") or []:
+        lines.append(f"Check openings: {o['title']} has {o['text']}. Offer to update the openings if the number is wrong.")
     for s in d["sections"]:
         if not s["count"]:
             continue
@@ -183,5 +189,7 @@ def tool_data(d: dict[str, Any], app_url: str) -> dict[str, Any]:
     keep = ("kind", "title", "detail", "text", "to", "subject", "candidate_id", "job_id", "overdue", "due", "owed",
             "people", "answer_by", "due_on", "last_chased_at", "not_due", "nudge_on")
     return {"client": d["client"], "to_do": d["count"], "app_url": app_url,
+            "hired_over_openings": [{k: o[k] for k in ("job_id", "title", "hired", "openings")}
+                                    for o in d.get("over_openings") or []],
             "sections": [{"kind": s["kind"], "label": s["label"], "count": s["count"], "more": s["more"],
                           "items": [{k: i[k] for k in keep if k in i} for i in s["items"]]} for s in d["sections"]]}

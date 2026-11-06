@@ -6,7 +6,12 @@
   <a class="btn small no-print" href="/clients">All {{ 'reports' if own else 'clients' }}</a></div>
 <p class="lead">{% if groups %}{% set n = groups | sum(attribute='people', start=[]) | length %}{{ n }} {{ 'person has' if n == 1 else 'people have' }} waited {% if max_days %}{{ days }} to {{ max_days }} days{% else %}{{ days }} days or more{% endif %} in a {{ 'hiring manager' if own else 'client' }} stage with no interview booked. One nudge per hiring manager: copy or email it, then mark them as chased.{% else %}Nobody has waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage. Nothing to chase.{% endif %}</p>
 
-{% if left_out.stages or left_out.too_old %}<p class="fine">Left out: {% if left_out.stages %}{{ left_out.stages }} in stages the chase doesn't count{% endif %}{% if left_out.stages and left_out.too_old %}, {% endif %}{% if left_out.too_old %}{{ left_out.too_old }} waiting more than {{ max_days }} days{% endif %}. Change it below.</p>{% endif %}
+{% if left_out.stages %}<p class="fine">Left out: {{ left_out.stages }} in stages the chase doesn't count. Change it below.</p>{% endif %}
+{% if left_out.too_old %}<details class="panel"><summary>{{ left_out.too_old }} waiting more than {{ left_out.max }} days, kept out of the nudges. Show them.</summary>
+  <p class="fine">These waits started before you imported, so they are history, not news. Move or close them when you get to them, or change the limit below.</p>
+  <table class="dense"><thead><tr><th>Client</th><th>Job</th><th>Stage</th><th>People</th><th>Longest wait</th><th></th></tr></thead>
+    <tbody>{% for o in left_out.older %}<tr><td>{{ o.client }}</td><td><a href="/jobs/{{ o.job_id }}">{{ o.job }}</a></td><td>{{ o.stage }}</td><td>{{ o.count }}</td><td class="nowrap">{{ o.longest }} days</td>
+      <td class="no-print"><a class="small" href="/candidates?{{ {'job': o.job_id, 'stage': o.stage} | urlencode }}">See them</a></td></tr>{% endfor %}</tbody></table></details>{% endif %}
 
 {% for g in groups %}{% set tid = 'chase-text-' ~ loop.index %}{% set anchor = 'chase-' ~ slug(g.key) ~ '-' ~ (slug(g.manager_key) or 'none') %}{% set all_here = show_all == anchor %}
 <section class="panel report" id="{{ anchor }}">

@@ -5,6 +5,8 @@
   <span class="no-print"><a class="btn small" href="/clients/{{ c.slug }}">{{ 'Report' if d.own else 'Client' }} page</a> <a class="btn small" href="/clients">All {{ 'reports' if d.own else 'clients' }}</a></span></div>
 <p class="lead">{% if d.count %}{{ d.count }} {{ 'thing' if d.count == 1 else 'things' }} to do, in the order to do them. Nothing is sent from here: copy or email each message, then mark it done.{% else %}Nothing to do for {{ d.client }} right now.{% endif %}</p>
 
+{% for o in d.over_openings %}<p class="flash warn no-print" role="alert"><a href="/jobs/{{ o.job_id }}">{{ o.title }}</a> has {{ o.text }}. <a href="{{ o.href }}">Update openings</a> if that number is wrong.</p>
+{% endfor %}
 {% for s in d.sections %}
 <section class="panel report" id="desk-{{ s.kind }}">
   <div class="sec-head"><h2>{{ s.label }}{% if s.count %} <span class="badge">{{ s.count }}</span>{% endif %}</h2></div>
