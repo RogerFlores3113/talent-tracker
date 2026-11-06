@@ -19,14 +19,14 @@
   <thead><tr><th>Job</th><th>{{ 'Company' if inhouse() else 'Client' }}</th>{% for p in pipes %}<th>{{ labels[p] }}{% if p == 'stuck' %} over {{ data.stuck_days }} days{% endif %}</th>{% endfor %}<th>Days since client update</th></tr></thead>
   <tbody>{% for r in data.rows %}
   <tr>
-    <td><a href="/jobs/{{ r.job_id }}">{{ r.title }}</a></td>
+    <td><a href="/jobs/{{ r.job_id }}">{{ r.title }}</a>{% if r.over_openings %}<br><span class="fine">{{ r.over_text[:1] | upper }}{{ r.over_text[1:] }}. <a href="/jobs/{{ r.job_id }}/edit">Update openings</a></span>{% endif %}</td>
     <td>{% if r.client_slug %}<a href="/clients/{{ r.client_slug }}">{{ r.client }}</a>{% endif %}</td>
     {% for p in pipes %}<td>{% if r.counts[p] %}<a href="{{ r.links[p] }}">{{ r.counts[p] }}</a>{% else %}0{% endif %}</td>{% endfor %}
     <td class="nowrap">{% if r.days_since_update is not none %}{% if r.update_tone %}<span class="badge {{ r.update_tone }}">{{ r.days_since_update }}</span>{% else %}{{ r.days_since_update }}{% endif %}{% elif r.client %}never{% endif %}</td>
   </tr>{% endfor %}</tbody>
   <tfoot><tr><th>All {{ data.rows | length }} jobs</th><th></th>{% for p in pipes %}<th>{{ data.totals[p] }}</th>{% endfor %}<th></th></tr></tfoot>
 </table></div>
-<p class="fine">In process is everyone not yet hired or out. Stuck is in process and in the same stage longer than the number of days above. Offers out are offers recorded as out with the candidate. Days since client update counts from the last update you marked as sent. It turns amber after 7 days and red after 14.</p>
+<p class="fine">In process is everyone not yet hired or out. Stuck is in process and in the same stage longer than the number of days above. Offers out are offers recorded as out with the candidate, plus people sitting in an Offer stage with no offer recorded. Days since client update counts from the last update you marked as sent. It turns amber after 7 days and red after 14.</p>
 {% else %}
 <div class="empty"><h2>No open jobs yet</h2><p>Open jobs show up here as soon as you add them.</p>
 <p class="actions"><a class="btn" href="/jobs">Go to jobs</a></p></div>

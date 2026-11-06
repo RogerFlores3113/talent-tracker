@@ -8,6 +8,7 @@ Settings rows only (no new tables): the days before someone counts as waiting, a
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -44,9 +45,11 @@ IMPORT_DAY_KEY = "chase_from_import"
 
 
 def from_import_day(store: Store) -> bool:
-    """Count waits from the import day for people an import put in a stage with an older date (default on)."""
+    """Count waits from the import day for people an import put in a stage with an older date. Default off: a stage
+    date in the file is the day they reached it, so the wait starts there (very old waits are folded, see
+    IMPORT_OLD_DAYS)."""
     raw = store._row("SELECT value FROM settings WHERE key = ?", (IMPORT_DAY_KEY,))
-    return not raw or str(raw["value"]) != "0"
+    return bool(raw) and str(raw["value"]) == "1"
 
 
 def set_from_import_day(store: Store, on: bool) -> bool:
@@ -66,6 +69,7 @@ def set_chase_days(store: Store, value: Any) -> int:
 
 
 MAX_KEY = "chase_max_days"
+IMPORT_OLD_DAYS = 60  # with no limit set, imported waits longer than this are folded away from the chase, not listed
 STAGES_KEY = "chase_stages"
 PAGE_SHOWN = 25  # people per manager on the chase page (then "Show all"), and per nudge in client_chase's data
 TOOL_GROUPS = 30  # nudges client_chase gives at most; the page has the rest
@@ -207,6 +211,64 @@ def snoozed(store: Store, key: str, manager: str, now: datetime) -> bool:
     if until:
         return now < until
     return bool(last and now - last < timedelta(days=chase_days(store)))
+
+
+def next_nudge(store: Store, key: str, manager: str, now: datetime) -> datetime | None:
+    """When a snoozed nudge comes due again (the snooze end, or the last chase plus the chase days), or None when it
+    isn't snoozed."""
+    if not snoozed(store, key, manager, now):
+        return None
+    raw = reports._get_json(store, _chased_key(key, manager)) or {}
+    return to_dt(raw.get("until")) or (to_dt(raw.get("at")) or now) + timedelta(days=chase_days(store))
+
+
+def chased_line(chased_at: str | None, next_on: datetime | None) -> str:
+    """'Chased Nov 6, next Nov 11' in this computer's zone (the user's), no nudge drafted."""
+    return (f"Chased {reports.in_zone(chased_at, None, '%b %-d')}" if chased_at else "Chased lately") + (
+        f", next {reports.in_zone(next_on.isoformat(), None, '%b %-d')}" if next_on else "")
+
+
+def ai_mark_chased(store: Store, key: str, snooze_days: int | None = None, now: datetime | None = None) -> dict[str, Any]:
+    """mark_client_chased for the AI app, logged on Changes so the recruiter can take it back."""
+    now = now or datetime.now(timezone.utc)
+    managers = {g["manager_key"] for g in chase_list(store, key, now=now)} or {""}
+    old = {mk: reports._get_json(store, _chased_key(key, mk)) for mk in managers}
+    n = mark_client_chased(store, key, snooze_days, now)
+    new = {mk: reports._get_json(store, _chased_key(key, mk)) for mk in managers}
+    c = reports.client(store, key)
+    with store._write():
+        aid = store._log_ai("client_chased", body=c["name"], old={"rows": old},
+                            new={"_client": c["name"], "_key": c["key"], "rows": new, "snooze_days": snooze_days})
+    first = next(iter(new.values()), None) or {}
+    return {"client": c["name"], "key": c["key"], "slug": c["slug"], "nudges": n, "action_id": aid,
+            "chased_at": first.get("at"), "until": first.get("until"),
+            "next_on": (next_nudge(store, key, next(iter(new)), now) if new else None)}
+
+
+def ai_chased_blocker(store: Store, a: dict[str, Any]) -> str | None:
+    new = (a.get("new_data") or {}).get("rows") or {}
+    for mk, row in new.items():
+        if reports._get_json(store, _chased_key((a.get("new_data") or {}).get("_key") or "", mk)) != row:
+            return "it was marked as chased again since"
+    return None
+
+
+def ai_chased_undo(store: Store, a: dict[str, Any]) -> str:
+    """Put the chase rows back as they were before the AI app marked them."""
+    reason = ai_chased_blocker(store, a)
+    if reason:
+        raise ValueError(reason[:1].upper() + reason[1:] + ".")
+    key = (a.get("new_data") or {}).get("_key") or ""
+    with store._write():
+        for mk, prior in ((a.get("old_data") or {}).get("rows") or {}).items():
+            k = _chased_key(key, mk)
+            if prior is None:
+                store._conn.execute("DELETE FROM settings WHERE key = ?", (k,))
+            else:
+                store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
+                                    " SET value = excluded.value", (k, json.dumps(prior)))
+        store._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), a["id"]))
+    return a["summary"]
 
 
 # ------------------------------------------------------------------ helpers
@@ -371,7 +433,7 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     texts = [*notes, cand.get("about") or ""]
     comp, avail = _found(texts, _COMP), _found(texts, _AVAIL)
     hist = store.work_history(candidate_id)[:3]
-    lines = [f"Hi {_first(manager) or 'there'},", "",
+    lines = [f"Hi {_first(manager) or _first(reports.contact_name(c.get('contacts'))) or 'there'},", "",
              f"I'd like to put {cand['name']} forward for {job['title']}.", ""]
     now_role = ", ".join(x for x in (
         " at ".join(x for x in (cand.get("current_title"), cand.get("current_company")) if x), cand.get("location")) if x)
@@ -452,26 +514,32 @@ def _waiting_groups(store: Store, job_id: int, own: bool) -> set[str]:
 
 
 def chase_list(store: Store, key: str | None = None, now: datetime | None = None,
-               days: int | None = None, left_out: dict[str, int] | None = None) -> list[dict[str, Any]]:
+               days: int | None = None, left_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Everyone in a client-facing stage (Submitted, Client review, a hiring manager interview) for at least `days`
     by their stage date, with no interview booked on that job, one group per client and hiring manager:
     [{"client", "key", "slug", "manager", "manager_key", "to", "people": [...], "chased_at", "text", "email"}].
     Oldest first within a group; groups with the longest wait first. Stages the chase doesn't count (Onsite and
     reference checks by default) and waits past the optional upper limit are left out, counted in `left_out`
-    ({"stages", "too_old"}) when given."""
+    ({"stages", "too_old", "max", "older"}) when given: "max" is the limit used, "older" the folded waits as one
+    row per client, job and stage. With no limit set, waits an import dated more than IMPORT_OLD_DAYS ago are folded
+    the same way, so a first import of old history doesn't flood the list."""
     from .importers import file_entries, imported_placements
 
     now = now or datetime.now(timezone.utc)
     days = chase_days(store) if days is None else days
     own = actions.inhouse(store)
-    from_file = file_entries(store) if from_import_day(store) else {}  # (candidate, job) -> when the app got them
+    entries = file_entries(store)  # (candidate, job) -> when the app got them
+    from_file = entries if from_import_day(store) else {}
     cutoff = now - timedelta(days=days)
-    oldest = chase_max_days(store)
-    too_old = now - timedelta(days=oldest) if oldest else None
+    own_limit = chase_max_days(store)
+    oldest = own_limit or IMPORT_OLD_DAYS
+    too_old = now - timedelta(days=oldest)
+    older: dict[tuple[int, str], dict[str, Any]] = {}
     picks = _stage_picks(store)
     left = left_out if left_out is not None else {}
     left.setdefault("stages", 0)
     left.setdefault("too_old", 0)
+    left["max"] = oldest
     booked = {(r["candidate_id"], r.get("job_id")) for r in store.upcoming_interviews(days=60, now=now)}
     booked_any = {cid for cid, jid in booked if jid is None}
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -500,8 +568,14 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                 if not counts_stage(store, a["stage"], picks):
                     left["stages"] += 1
                     continue
-                if too_old and since < too_old and a["candidate_id"] not in undated:
+                if (own_limit or (a["candidate_id"], j["id"]) in entries) and since < too_old \
+                        and a["candidate_id"] not in undated:
                     left["too_old"] += 1
+                    o = older.setdefault((j["id"], a["stage"]), {"client": reports._spelling(jobs), "job": j["title"],
+                                                                 "job_id": j["id"], "stage": a["stage"], "count": 0,
+                                                                 "longest": 0})
+                    o["count"] += 1
+                    o["longest"] = max(o["longest"], (now - since).days)
                     continue
                 c = c or reports.client(store, ck)
                 mk = reports.manager_key(j.get("hiring_manager"))
@@ -514,6 +588,7 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
                                       "job_id": j["id"], "job": j["title"], "stage": a["stage"],
                                       "since": a["stage_changed_at"], "days": (now - since).days,
                                       "date_unknown": a["candidate_id"] in undated, "imported": bool(entry)})
+    left["older"] = sorted(older.values(), key=lambda o: (o["client"].lower(), -o["count"]))
     out = []
     for (ck, mk), grp in groups.items():
         c = grp.pop("_c")
@@ -521,6 +596,8 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
         grp["to"] = manager_email(c, grp["jobs"], grp["manager"], own)
         grp["job_ids"] = [j["id"] for j in grp.pop("jobs")]
         grp["chased_at"] = chased_at(store, ck, mk)
+        grp["next_on"] = next_nudge(store, ck, mk, now)
+        grp["contact_name"] = reports.contact_name(c.get("contacts"))
         grp["text"] = nudge_text(grp, own, c.get("time_zone"))
         grp["subject"] = ("Feedback on " + ("candidates" if len(grp["people"]) > 1 else grp["people"][0]["name"])
                           + (f" for {c['name']}" if not own else ""))
@@ -545,7 +622,7 @@ def by_job_stage(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
     """The paste-ready nudge to one hiring manager: who is waiting, since when, and the ask."""
     people = grp["people"]
-    lines = [f"Hi {_first(grp.get('manager')) or 'there'},", "",
+    lines = [f"Hi {_first(grp.get('manager')) or _first(grp.get('contact_name')) or 'there'},", "",
              ("A quick check on the people in your interview stages that I haven't heard back on yet:" if own else
               "A quick check on the people I sent over that I haven't heard back on yet:")]
     for p in people[:SHOWN]:
@@ -571,8 +648,9 @@ def chase_text(groups: list[dict[str, Any]], days: int) -> str:
     for i, g in enumerate(groups, 1):
         who = g["client"] + (f", {g['manager']}" if g["manager"] else "")
         lines.append(f"\nNudge {i}: {who}" + (f" (email {g['to']})" if g["to"] else " (no email saved)")
-                     + (f". Last chased {reports.in_zone(g['chased_at'], None, '%b %-d')}" if g["chased_at"] else ""))
-        lines.append(g["text"])
+                     + (f". Last chased {reports.in_zone(g['chased_at'], None, '%b %-d')}" if g["chased_at"] and not g.get("next_on") else ""))
+        lines.append(chased_line(g["chased_at"], g["next_on"]) + ". Not drafting the nudge again until then."
+                     if g.get("next_on") else g["text"])
     return "\n".join(lines)
 
 

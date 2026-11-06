@@ -950,7 +950,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             result["backup_name"] = Path(result["backup"]).name
         _save_lists(token, "result", result)
         ask = set(importers.openings_to_ask(store))
-        new_jobs = [store.get_job(i) for i in result.get("new_job_ids") or [] if i in ask]
+        new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
+                    for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
                     closed_lines=importers.closed_job_lines(result))
@@ -961,7 +962,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         jobs = []
         for i in importers.openings_to_ask(store):
             try:
-                jobs.append(store.get_job(i))
+                jobs.append({**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]})
             except LookupError:
                 continue
         return page(request, "import.html", step="openings", new_jobs=jobs[:50])
@@ -1643,8 +1644,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def chase_page(request: Request):
         """Everyone waiting on a client's feedback, per client and hiring manager, with a nudge for each."""
         days = chase.chase_days(store)
-        left: dict[str, int] = {}
+        left: dict[str, Any] = {}
         groups = chase.chase_list(store, days=days, left_out=left)
+        for g in groups:  # a snoozed nudge says when it was chased and when it's next due, and isn't drafted again
+            if g.get("next_on"):
+                g["chased_line"] = chase.chased_line(g.get("chased_at"), g["next_on"])
         return page(request, "chase.html", groups=groups, days=days, slug=reports.slug, left_out=left,
                     shown=chase.PAGE_SHOWN, show_all=str(request.query_params.get("all") or "")[:200],
                     max_days=chase.chase_max_days(store), stage_choices=chase.stage_choices(store))

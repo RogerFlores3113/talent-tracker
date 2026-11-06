@@ -760,7 +760,7 @@ def job_numbers(store: Store, job_id: int, omit: set[str] | None = None,
     all_hired = sum(len(g["candidates"]) for g in groups if g["outcome"] == "hired")
     openings = job.get("openings") or 1
     return {"active": n["open"], "hired": n["hired"], "out": n["lost"], "openings": openings,
-            "filled": all_hired >= openings, "filled_seats": min(all_hired, openings), "word": hire_word(store, job_id)}
+            "filled": all_hired >= openings, "filled_seats": min(all_hired, openings), "hired_all": all_hired, "word": hire_word(store, job_id)}
 
 
 def thin_target(job: dict[str, Any], cap: int = 5) -> int:
@@ -778,6 +778,36 @@ def hired_text(hired: int, openings: int, word: str = "hired") -> str:
     return f"none {word} yet" + (f", {seats}" if openings > 1 else "")
 
 
+def against_text(hired: int, openings: int, word: str = "hired") -> str:
+    """'8 hired against 3 openings': more hires than openings is never shown as '3 of 3 filled'."""
+    return f"{hired} {word} against {openings} opening{'' if openings == 1 else 's'}"
+
+
+def over_openings(store: Store, company: str | None = None, manager: str | None = None) -> list[dict[str, Any]]:
+    """Open jobs with more hires than openings: [{job_id, title, company, hired, openings, text}]. Often the openings
+    number was never set after an import, so the recruiter is offered a chance to correct it."""
+    from .importers import openings_to_ask
+
+    keep = _job_filter(store, company, manager)
+    unset = set(openings_to_ask(store))
+    out = []
+    for j in store.list_jobs("open"):
+        if not keep(j):
+            continue
+        n = job_numbers(store, j["id"])
+        if n["hired_all"] > n["openings"]:
+            out.append({"job_id": j["id"], "title": j["title"], "company": j.get("company"), "hired": n["hired_all"],
+                        "openings": n["openings"], "unset": j["id"] in unset,
+                        "text": over_text(n["hired_all"], n["openings"], n["word"], j["id"] in unset)})
+    return out
+
+
+def over_text(hired: int, openings: int, word: str = "hired", unset: bool = False) -> str:
+    """'8 hired against 3 openings', or '8 hired, openings not set yet' while openings are still an import's guess,
+    so the desk, the digest and the ops review tell the same story."""
+    return f"{hired} {word}, openings not set yet" if unset else against_text(hired, openings, word)
+
+
 def filled_text(filled: int, openings: int) -> str:
     """'1 of 2 openings filled' (filled never counts past the openings)."""
     return f"{min(filled, openings)} of {openings} opening{'' if openings == 1 else 's'} filled"
@@ -787,7 +817,9 @@ def headline(nums: dict[str, Any], status: str = "open") -> str:
     """'2 candidates in process, none placed yet. 1 out.', '1 candidate in process, 1 hired, 2 openings.' or,
     once every opening is taken, '3 candidates in process, 1 of 1 opening filled.' / '1 of 1 opening filled.'"""
     a, h, word, o = nums["active"], nums["hired"], nums["word"], nums["openings"]
-    if nums["filled"]:
+    if nums["filled"] and nums.get("hired_all", 0) > o:
+        hires = against_text(nums["hired_all"], o, word)
+    elif nums["filled"]:
         seats = filled_text(nums["filled_seats"], o)
         hires = f"{h} {word}, {seats}" if h > nums["filled_seats"] else seats
     else:
@@ -1466,6 +1498,14 @@ def _company_names(store: Store) -> list[str | None]:
     return [r["company"] for r in store._rows("SELECT DISTINCT company FROM jobs WHERE status IN ('open', 'on_hold')")]
 
 
+def _rollup_seats(r: dict[str, Any]) -> str:
+    """'1 of 3 openings filled', or 'N hired against M openings' when the hires outnumber all the openings (one
+    job over while another is still open stays '1 of 3', and the over-filled job is flagged on its own)."""
+    if r["hired_all"] > r["openings"]:
+        return against_text(r["hired_all"], r["openings"], r.get("word", "hired"))
+    return filled_text(r["filled"], r["openings"])
+
+
 def company_rollup(store: Store, company: str | None = None, omit_stages: list[str] | None = None,
                    ) -> list[dict[str, Any]]:
     """[{company, jobs, active, hired, openings, filled, word}] for open jobs, one row per company (None for no
@@ -1482,7 +1522,8 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
         nums = job_numbers(store, j["id"], omit, groups)
         booked = booked_hidden(store, j["id"], omit, groups)
         r = rows.setdefault(company_key(co), {"company": co or None, "jobs": [], "active": 0, "hired": 0,
-                                              "openings": 0, "filled": 0, "_people": set(), "_hired": set()})
+                                              "openings": 0, "filled": 0, "hired_all": 0, "_people": set(),
+                                              "_hired": set()})
         r["jobs"].append(j)
         for g in groups:  # people, not applications: one person in two of a client's jobs counts once
             if _stage_key(g["name"]) not in omit and g["outcome"] in ("open", "hired"):
@@ -1492,11 +1533,12 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
         r["hired"] = len(r["_hired"])
         r["openings"] += nums["openings"]
         r["filled"] += nums["filled_seats"]
+        r["hired_all"] += nums["hired_all"]
         r.setdefault("words", set()).add(nums["word"])
     for r in rows.values():
         r.pop("_people"), r.pop("_hired")
         r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"  # the jobs' own word, when they agree
-        r["filled_text"] = filled_text(r["filled"], r["openings"])
+        r["filled_text"] = _rollup_seats(r)
     return sorted(rows.values(), key=lambda r: (r["company"] is None, (r["company"] or "").lower()))
 
 
@@ -1532,14 +1574,15 @@ def manager_rollup(store: Store, manager: str | None = None, omit_stages: list[s
         nums = shown_numbers(store, j["id"], _omitted(store, j["id"], omit_stages))
         r = rows.setdefault(re.sub(r"\s+", " ", hm.lower()), {
             "manager": hm or None, "label": hm or None, "jobs": [], "active": 0, "hired": 0, "openings": 0,
-            "filled": 0, "words": set()})
+            "filled": 0, "hired_all": 0, "words": set()})
         r["jobs"].append(j)
-        for k, n in (("active", "active"), ("hired", "hired"), ("openings", "openings"), ("filled", "filled_seats")):
+        for k, n in (("active", "active"), ("hired", "hired"), ("openings", "openings"), ("filled", "filled_seats"),
+                     ("hired_all", "hired_all")):
             r[k] += nums[n]
         r["words"].add(nums["word"])
     for r in rows.values():
         r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"
-        r["filled_text"] = filled_text(r["filled"], r["openings"])
+        r["filled_text"] = _rollup_seats(r)
     return sorted(rows.values(), key=lambda r: (r["manager"] is None, (r["manager"] or "").lower()))
 
 

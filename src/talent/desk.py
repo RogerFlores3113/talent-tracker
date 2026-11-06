@@ -56,6 +56,14 @@ def _chase_items(store: Store, c: dict[str, Any], now: datetime) -> list[dict[st
     for g in chase.chase_list(store, c["key"], now=now, days=chase.chase_days(store)):
         n = len(g["people"])
         who = g["manager"] or c["name"]
+        if g["next_on"]:  # chased lately: say so, don't draft the nudge again
+            out.append({"kind": "chase", "not_due": True, "snoozed": True, "last_chased_at": g["chased_at"],
+                        "nudge_on": as_local(g["next_on"]).date().isoformat(),
+                        "title": f"Waiting on {who}: {n} {'person' if n == 1 else 'people'}",
+                        "detail": chase.chased_line(g["chased_at"], g["next_on"]) + ". The nudge isn't drafted again until then.",
+                        "people": [{k: p[k] for k in ("candidate_id", "name", "job_id", "job", "stage", "days")}
+                                   for p in g["people"][:chase.PAGE_SHOWN]]})
+            continue
         out.append({"kind": "chase", "title": f"Chase {who}: {n} {'person' if n == 1 else 'people'} waiting",
                     "detail": ", ".join(f"{p['name']} ({p['job']}, {p['stage']}"
                                         + ("" if p["date_unknown"] else f", {p['days']} days") + ")"
@@ -156,7 +164,11 @@ def desk(store: Store, key: str, now: datetime | None = None) -> dict[str, Any]:
     # An update that is only a draft (not due) is not work to do, so it doesn't count toward what is open.
     todo = sum(1 for k, v in built.items() if k != "update" for i in v if not i.get("not_due")) + sum(
         1 for i in built["update"] if i["due"])
+    keep = {j["id"] for j in c["jobs"]}
+    over = [{**o, "href": f"/jobs/{o['job_id']}/edit"} for o in actions.over_openings(store, c["name"])
+            if o["job_id"] in keep]
     return {"client": c["name"], "key": c["key"], "slug": c["slug"], "sections": sections, "count": todo,
+            "over_openings": over,
             "own": actions.inhouse(store), "now": now.isoformat()}
 
 
@@ -165,6 +177,8 @@ def desk_text(d: dict[str, Any]) -> str:
     lines = [f"Client desk for {d['client']}: " + (f"{d['count']} thing{'' if d['count'] == 1 else 's'} to do."
                                                     if d["count"] else "nothing to do right now.")
              + " Nothing is sent by Talent Search; the recruiter sends each message from their own mail."]
+    for o in d.get("over_openings") or []:
+        lines.append(f"Check openings: {o['title']} has {o['text']}. Offer to update the openings if the number is wrong.")
     for s in d["sections"]:
         if not s["count"]:
             continue
@@ -183,5 +197,7 @@ def tool_data(d: dict[str, Any], app_url: str) -> dict[str, Any]:
     keep = ("kind", "title", "detail", "text", "to", "subject", "candidate_id", "job_id", "overdue", "due", "owed",
             "people", "answer_by", "due_on", "last_chased_at", "not_due", "nudge_on")
     return {"client": d["client"], "to_do": d["count"], "app_url": app_url,
+            "hired_over_openings": [{k: o[k] for k in ("job_id", "title", "hired", "openings")}
+                                    for o in d.get("over_openings") or []],
             "sections": [{"kind": s["kind"], "label": s["label"], "count": s["count"], "more": s["more"],
                           "items": [{k: i[k] for k in keep if k in i} for i in s["items"]]} for s in d["sections"]]}

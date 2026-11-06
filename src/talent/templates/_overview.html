@@ -139,6 +139,9 @@
           {% elif i.kind == 'feedback_owed' %}
           <a class="btn small" href="{{ i.href }}">{{ 'Add feedback' if i.candidate_id else 'See interviews' }}</a>
           {% endif %}
+          {% if i.dismiss %}
+          <form method="post" action="/actions/snooze" data-confirm="Stop asking about these {{ i.count }} people? They stay in their stage, and you can still record an offer from their card."><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="3600"><button class="link small" type="submit" title="Hide this for good">These are old, don't ask again</button></form>
+          {% endif %}
           {% if i.kind not in ('suggestion', 'interview_out') %}
           <form method="post" action="/actions/snooze"><input type="hidden" name="key" value="{{ i.key }}"><input type="hidden" name="days" value="7"><button class="link small" type="submit" title="Hide this for a week">Snooze</button></form>
           {% endif %}

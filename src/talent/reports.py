@@ -419,6 +419,18 @@ def _contact_email(contacts: str | None) -> str | None:
     return m.group(0) if m else None
 
 
+def contact_name(contacts: str | None) -> str:
+    """The first named person on a client's contact lines ('Priya Rao <priya@x.com>' -> 'Priya Rao'), or ''.
+    A line that is only an email names nobody."""
+    for line in (contacts or "").splitlines():
+        text = _EMAIL.sub(" ", line).replace("<", " ").replace(">", " ")
+        text = re.split(r"[,;|(\u2013\u2014]| - ", text)[0]
+        words = re.findall(r"[^\W\d_][\w'.-]*", text)
+        if words and len(words) <= 4 and not any(w.lower() in ("team", "info", "hr", "recruiting", "talent") for w in words):
+            return " ".join(words)
+    return ""
+
+
 def manager_key(name: str | None) -> str:
     """A hiring manager's name for grouping: any case and spacing. '' for jobs that name none."""
     return re.sub(r"\s+", " ", (name or "").strip().lower())
@@ -1677,6 +1689,9 @@ def ai_mark_sent(store: Store, key: str, manager: str | None = None, since: str 
 def ai_client_blocker(store: Store, a: dict[str, Any]) -> str | None:
     """Why an AI client change can't be undone any more, or None."""
     new = a.get("new_data") or {}
+    if a["kind"] == "client_chased":
+        from .chase import ai_chased_blocker  # here: chase imports this module
+        return ai_chased_blocker(store, a)
     row = store._row("SELECT * FROM clients WHERE key = ?", (new.get("_key") or "",))
     if row is None:
         return "that client is gone"
@@ -1701,6 +1716,9 @@ def ai_client_undo(store: Store, a: dict[str, Any], by: str = "app") -> str:
     if reason:
         raise ValueError(reason[:1].upper() + reason[1:] + ".")
     new = a.get("new_data") or {}
+    if a["kind"] == "client_chased":
+        from .chase import ai_chased_undo  # here: chase imports this module
+        return ai_chased_undo(store, a)
     if a["kind"] == "client_sent":
         undo_sent(store, new["_key"], a["target_id"], note=None)  # marks this action undone too
         return a["summary"]

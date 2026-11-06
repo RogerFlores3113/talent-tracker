@@ -5,7 +5,7 @@
   <h1>Review AI changes</h1>
   <a class="small" href="/changes?who=ai">All AI changes</a>
 </div>
-<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes apply straight away. These were sent while it was on.{% endif %} Your AI app's overwrites, moves into Hired or out, job and stage changes, notes, interview changes and feedback, client contacts, job hiring manager emails, to-dos it marks done and Mark as sent wait here until you keep or pass them. Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling other empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
+<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes from Trusted apps apply straight away. What waits here came from an app set to Suggest only in Settings > AI apps, or was sent while Cautious mode was on.{% endif %} Your AI app's overwrites, moves into Hired or out, job and stage changes, notes, interview changes and feedback, client contacts, job hiring manager emails, to-dos it marks done and Mark as sent wait here until you keep or pass them. Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling other empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
 
 {% if not groups %}
 <p class="none">Nothing waits for your review.</p>

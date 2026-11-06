@@ -6,12 +6,17 @@
   <a class="btn small no-print" href="/clients">All {{ 'reports' if own else 'clients' }}</a></div>
 <p class="lead">{% if groups %}{% set n = groups | sum(attribute='people', start=[]) | length %}{{ n }} {{ 'person has' if n == 1 else 'people have' }} waited {% if max_days %}{{ days }} to {{ max_days }} days{% else %}{{ days }} days or more{% endif %} in a {{ 'hiring manager' if own else 'client' }} stage with no interview booked. One nudge per hiring manager: copy or email it, then mark them as chased.{% else %}Nobody has waited {{ days }} days or more in a {{ 'hiring manager' if own else 'client' }} stage. Nothing to chase.{% endif %}</p>
 
-{% if left_out.stages or left_out.too_old %}<p class="fine">Left out: {% if left_out.stages %}{{ left_out.stages }} in stages the chase doesn't count{% endif %}{% if left_out.stages and left_out.too_old %}, {% endif %}{% if left_out.too_old %}{{ left_out.too_old }} waiting more than {{ max_days }} days{% endif %}. Change it below.</p>{% endif %}
+{% if left_out.stages %}<p class="fine">Left out: {{ left_out.stages }} in stages the chase doesn't count. Change it below.</p>{% endif %}
+{% if left_out.too_old %}<details class="panel"><summary>{{ left_out.too_old }} waiting more than {{ left_out.max }} days, kept out of the nudges. Show them.</summary>
+  <p class="fine">These waits started before you imported, so they are history, not news. Move or close them when you get to them, or change the limit below.</p>
+  <table class="dense"><thead><tr><th>Client</th><th>Job</th><th>Stage</th><th>People</th><th>Longest wait</th><th></th></tr></thead>
+    <tbody>{% for o in left_out.older %}<tr><td>{{ o.client }}</td><td><a href="/jobs/{{ o.job_id }}">{{ o.job }}</a></td><td>{{ o.stage }}</td><td>{{ o.count }}</td><td class="nowrap">{{ o.longest }} days</td>
+      <td class="no-print"><a class="small" href="/candidates?{{ {'job': o.job_id, 'stage': o.stage} | urlencode }}">See them</a></td></tr>{% endfor %}</tbody></table></details>{% endif %}
 
 {% for g in groups %}{% set tid = 'chase-text-' ~ loop.index %}{% set anchor = 'chase-' ~ slug(g.key) ~ '-' ~ (slug(g.manager_key) or 'none') %}{% set all_here = show_all == anchor %}
 <section class="panel report" id="{{ anchor }}">
   <div class="sec-head"><h2><a href="/clients/{{ g.slug }}">{{ g.client }}</a>{% if g.manager %}: {{ g.manager }}{% endif %}</h2>
-    <span class="copy-status no-print">{% if g.chased_at %}<span class="fine">Last chased {{ g.chased_at | ago }}</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span></span></div>
+    <span class="copy-status no-print">{% if g.chased_line %}<span class="fine">{{ g.chased_line }}</span>{% else %}{% if g.chased_at %}<span class="fine">Last chased {{ g.chased_at | ago }}</span> {% endif %}<button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span>{% endif %}</span></div>
   <table class="dense">
     <thead><tr><th>Person</th><th>Job</th><th>Stage</th><th>Waiting</th></tr></thead>
     <tbody>{% for p in (g.people if all_here else g.people[:shown]) %}
@@ -25,7 +30,8 @@
       <td class="no-print"><a class="small" href="/candidates?{{ {'job': r.job_id, 'stage': r.stage} | urlencode }}">See them</a></td></tr>{% endfor %}</tbody>
   </table>{% if g.by_job_stage | length > 12 %}<p class="fine">And {{ g.by_job_stage | length - 12 }} more jobs and stages.</p>{% endif %}{% endif %}
   {% if g.people | length > shown %}<p class="fine no-print">{% if all_here %}Showing all {{ g.people | length }}. <a href="/clients/chase#{{ anchor }}">Show fewer</a>{% else %}Showing the {{ shown }} longest waits. <a href="/clients/chase?all={{ anchor | urlencode }}#{{ anchor }}">Show all {{ g.people | length }}</a>{% endif %}</p>{% endif %}
-  <pre class="code wrap" id="{{ tid }}">{{ g.text }}</pre>
+  {% if g.chased_line %}<p class="fine">Chased already. The nudge isn't drafted again until then.</p>
+  {% else %}<pre class="code wrap" id="{{ tid }}">{{ g.text }}</pre>
   <div class="actions-inline no-print">
     {% if g.email %}<a class="btn small" href="{{ g.email.href }}">Email {{ g.email.to }}</a>{% if g.email.long %} <span class="fine">Too long to fill in by link: copy it first, then paste it in.</span>{% endif %}
     {% else %}<span class="fine">No email saved for {{ g.manager or 'this client' }}. Add it on <a href="/clients/{{ g.slug }}#details">the client's page</a> or on the job.</span>{% endif %}
@@ -33,7 +39,7 @@
       <button class="btn small primary" type="submit">Mark as chased</button></form>
     <form method="post" action="/clients/{{ g.slug }}/chased-all" class="inline"><label class="inline-label">Snooze <input type="number" name="snooze" min="1" max="365" value="{{ days }}" aria-label="Days to snooze"> days</label>
       <button class="btn small" type="submit">Mark this client chased</button></form>
-  </div>
+  </div>{% endif %}
 </section>
 {% endfor %}
 

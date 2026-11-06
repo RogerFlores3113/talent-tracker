@@ -78,11 +78,8 @@ def test_card_tools_refuse_a_read_only_app_and_cap_a_suggest_only_app(store, nam
                        ("keep_prospect", {"job_id": job["id"], "prospect_id": 1, "view_key": "k"})):
         with pytest.raises(ToolError, match="read only"):
             call(server, tool, **args)
-    trust.set_trust(store, trust.apps(store)[0]["id"], "suggest")
-    for _ in range(trust.SUGGEST_PRESS_CAP):
-        res = call(server, "pass_prospect", job_id=job["id"], prospect_id=1, view_key="k")  # refused by the key, not the cap
-        assert res.isError
-    with pytest.raises(ToolError, match="times a session"):
+    trust.set_trust(store, trust.apps(store)[0]["id"], "suggest")  # Suggest only is refused them too (cycle 8)
+    with pytest.raises(ToolError, match="Suggest only"):
         call(server, "pass_prospect", job_id=job["id"], prospect_id=1, view_key="k")
 
 

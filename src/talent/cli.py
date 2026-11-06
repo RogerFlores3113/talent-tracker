@@ -220,6 +220,8 @@ def _sync(args: argparse.Namespace) -> None:
     backups.record_import(store, r, path.name, len(rows))
     print(f"Added {r['added']}, updated {r['updated']}, moved {len(r['moved'])}, unchanged {r['unchanged']}, "
           f"skipped {r['skipped_rows']}.")
+    if r.get("date_note"):
+        print(r["date_note"])
     if r["backup"]:
         print("Saved as one row on Changes. Undo it there while nothing else has changed.")
     else:
@@ -360,6 +362,8 @@ def main(argv: list[str] | None = None) -> None:
                     print(f"Put {r['pipelines_added']} in job pipelines"
                           + (f", made {len(r['jobs_created'])} new job(s): " + ", ".join(r["jobs_created"])
                              if r["jobs_created"] else "") + ".")
+                if r.get("date_note"):
+                    print(r["date_note"])
                 for line in importers.stage_fold_lines(r):
                     print(line)
                 for p in importers.result_panels(r):

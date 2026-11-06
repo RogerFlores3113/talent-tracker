@@ -640,7 +640,7 @@ AI_ACTION_KINDS = {
     "interview_cancel": "Cancelled an interview", "interview_move": "Moved an interview",
     "interview_outcome": "Recorded how an interview went", "save_batch": "Saved people in one batch",
     "client_sent": "Marked a client update as sent", "client_edit": "Changed a client's details",
-    "client_create": "Added a client",
+    "client_create": "Added a client", "client_chased": "Marked a client's nudges as chased",
     "interview_feedback": "Added interview feedback",
     "note_logged": "Logged activity",
     "offer_terms": "Recorded an offer", "offer_answer": "Recorded an answer to an offer",
@@ -1632,6 +1632,9 @@ def _ai_summary(r: dict[str, Any]) -> str:
     if kind == "client_sent":
         return f"Marked the update to {quoted(new.get('_client'))} as sent" + (
             f" ({new['manager']})" if new.get("manager") else "")
+    if kind == "client_chased":
+        return f"Marked the nudges to {quoted(new.get('_client'))} as chased" + (
+            f", snoozed {new['snooze_days']} days" if new.get("snooze_days") else "")
     if kind == "client_edit":
         return f"Changed {quoted(new.get('_client'))}'s client details: {(r.get('body') or 'details').replace('_', ' ')}"
     if kind == "client_create":
@@ -4116,8 +4119,6 @@ class Store:
                 ).lastrowid
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, None, s["name"])
-                if s["name"].lower() == "contacted":
-                    self._stamp_contacted(candidate_id, ts)
                 if _clean(notes):
                     self._conn.execute(
                         "INSERT INTO timeline(candidate_id, job_id, kind, body, at, created_at, source)"
@@ -4126,14 +4127,9 @@ class Store:
                     )
         return self.get_application(app_id)
 
-    def _stamp_contacted(self, candidate_id: int, ts: str) -> None:
-        """Someone went into Contacted. Last contacted comes from logged outreach; with none logged yet,
-        the move itself counts once. Call inside a transaction."""
-        self._conn.execute("UPDATE candidates SET last_contacted_at = ? WHERE id = ? AND last_contacted_at IS NULL",
-                           (ts, candidate_id))
-
     def _contact_from_stamp(self, candidate_id: int) -> bool:
-        """Whether last contacted is only the time of a move into Contacted, with no logged outreach behind it."""
+        """Whether last contacted is only the time of a move into Contacted, with no logged outreach behind it. Moves no
+        longer set it (only a logged message does), but older data can still hold one."""
         row = self._conn.execute("SELECT last_contacted_at AS at FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
         if not row or not row["at"]:
             return False
@@ -4171,8 +4167,6 @@ class Store:
                 ).lastrowid
                 if by == "ai":
                     self._log_stage(tid, candidate_id, job_id, app["stage"], s["name"])
-                if s["name"].lower() == "contacted":
-                    self._stamp_contacted(candidate_id, ts)
             if _clean(notes):
                 self._conn.execute("UPDATE applications SET notes = ? WHERE id = ?", (_clean(notes), app["id"]))
                 self._conn.execute(
