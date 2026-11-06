@@ -36,7 +36,7 @@ JOB_CONTACT_FIELDS = ("hiring_manager_email",)
 CANDIDATE_CONTACT_FIELDS = ("email", "phone")
 QUEUE_CAP = 200  # changes that may wait at once; past this the AI app is told to stop and ask
 KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "Job change", "note": "Logged activity",
-         "client_edit": "Client change", "client_sent": "Update marked as sent", "interview": "Interview change",
+         "client_edit": "Client change", "client_sent": "Update marked as sent", "client_chased": "Nudge marked as chased", "interview": "Interview change",
          "feedback": "Interview feedback", "job_stages": "Stage change", "offer": "Offer change", "todo": "To-do done",
          "sequence": "Follow-up steps", "plan": "Hiring plan change", "loop_template": "Loop template", "tool_call": "AI request"}
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
@@ -349,6 +349,14 @@ def queue_sent(store: Store, key: str, manager: str | None, manager_name: str | 
     return _queue(store, "client_sent", f"Mark {who} as sent",
                   {"key": c["key"], "client": c["name"], "manager": manager, "manager_name": manager_name,
                    "last": _last_sent_id(store, c["key"], manager)}, session=session)
+
+
+def queue_chased(store: Store, key: str, snooze_days: int | None, session: str | None) -> dict[str, Any]:
+    """Hold the AI app's Mark as chased of a client's nudges."""
+    c = reports.client(store, key)
+    return _queue(store, "client_chased", f"Mark the nudges to {quoted(c['name'])} as chased"
+                  + (f", snoozed {snooze_days} days" if snooze_days else ""),
+                  {"key": c["key"], "client": c["name"], "snooze_days": snooze_days}, session=session)
 
 
 def _last_sent_id(store: Store, key: str, manager: str | None) -> int | None:
@@ -674,6 +682,12 @@ def _apply_more(store: Store, r: dict[str, Any]) -> str:
         _confirm_action(store, out.get("action_id"))  # kept on Review: the recruiter has seen it
         skipped = [CLIENT_LABELS.get(k, k) for k in (p.get("fields") or {}) if k not in fields]
         return r["summary"] + (f" (left the {', '.join(skipped)} as changed since)" if skipped else "")
+    if kind == "client_chased":
+        from . import chase  # here: chase imports this module
+        if reports.get_row(store, p["key"]) is None and not reports._all_jobs(store).get(p["key"]):
+            raise ValueError("That client is gone.")
+        chase.ai_mark_chased(store, p["key"], p.get("snooze_days"))  # AI_KEPT marks it reviewed
+        return r["summary"]
     if kind == "client_sent":
         if reports.get_row(store, p["key"]) is None and p.get("last") is not None:
             raise ValueError("That client is gone.")
@@ -886,5 +900,5 @@ __all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOL
            "held_contacts", "keep_email", "pass_since", "queue_todo", "set_options", "todos_this_hour",
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
-           "queue_interview", "queue_job", "queue_loop_template", "queue_move", "queue_note", "queue_profile", "queue_sent", "queue_sequence", "queue_stages",
+           "queue_interview", "queue_job", "queue_loop_template", "queue_move", "queue_note", "queue_profile", "queue_chased", "queue_sent", "queue_sequence", "queue_stages",
            "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]

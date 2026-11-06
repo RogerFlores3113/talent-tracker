@@ -8,6 +8,7 @@ Settings rows only (no new tables): the days before someone counts as waiting, a
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -209,6 +210,64 @@ def snoozed(store: Store, key: str, manager: str, now: datetime) -> bool:
     return bool(last and now - last < timedelta(days=chase_days(store)))
 
 
+def next_nudge(store: Store, key: str, manager: str, now: datetime) -> datetime | None:
+    """When a snoozed nudge comes due again (the snooze end, or the last chase plus the chase days), or None when it
+    isn't snoozed."""
+    if not snoozed(store, key, manager, now):
+        return None
+    raw = reports._get_json(store, _chased_key(key, manager)) or {}
+    return to_dt(raw.get("until")) or (to_dt(raw.get("at")) or now) + timedelta(days=chase_days(store))
+
+
+def chased_line(chased_at: str | None, next_on: datetime | None) -> str:
+    """'Chased Nov 6, next Nov 11' in this computer's zone (the user's), no nudge drafted."""
+    return (f"Chased {reports.in_zone(chased_at, None, '%b %-d')}" if chased_at else "Chased lately") + (
+        f", next {reports.in_zone(next_on.isoformat(), None, '%b %-d')}" if next_on else "")
+
+
+def ai_mark_chased(store: Store, key: str, snooze_days: int | None = None, now: datetime | None = None) -> dict[str, Any]:
+    """mark_client_chased for the AI app, logged on Changes so the recruiter can take it back."""
+    now = now or datetime.now(timezone.utc)
+    managers = {g["manager_key"] for g in chase_list(store, key, now=now)} or {""}
+    old = {mk: reports._get_json(store, _chased_key(key, mk)) for mk in managers}
+    n = mark_client_chased(store, key, snooze_days, now)
+    new = {mk: reports._get_json(store, _chased_key(key, mk)) for mk in managers}
+    c = reports.client(store, key)
+    with store._write():
+        aid = store._log_ai("client_chased", body=c["name"], old={"rows": old},
+                            new={"_client": c["name"], "_key": c["key"], "rows": new, "snooze_days": snooze_days})
+    first = next(iter(new.values()), None) or {}
+    return {"client": c["name"], "key": c["key"], "slug": c["slug"], "nudges": n, "action_id": aid,
+            "chased_at": first.get("at"), "until": first.get("until"),
+            "next_on": (next_nudge(store, key, next(iter(new)), now) if new else None)}
+
+
+def ai_chased_blocker(store: Store, a: dict[str, Any]) -> str | None:
+    new = (a.get("new_data") or {}).get("rows") or {}
+    for mk, row in new.items():
+        if reports._get_json(store, _chased_key((a.get("new_data") or {}).get("_key") or "", mk)) != row:
+            return "it was marked as chased again since"
+    return None
+
+
+def ai_chased_undo(store: Store, a: dict[str, Any]) -> str:
+    """Put the chase rows back as they were before the AI app marked them."""
+    reason = ai_chased_blocker(store, a)
+    if reason:
+        raise ValueError(reason[:1].upper() + reason[1:] + ".")
+    key = (a.get("new_data") or {}).get("_key") or ""
+    with store._write():
+        for mk, prior in ((a.get("old_data") or {}).get("rows") or {}).items():
+            k = _chased_key(key, mk)
+            if prior is None:
+                store._conn.execute("DELETE FROM settings WHERE key = ?", (k,))
+            else:
+                store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
+                                    " SET value = excluded.value", (k, json.dumps(prior)))
+        store._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), a["id"]))
+    return a["summary"]
+
+
 # ------------------------------------------------------------------ helpers
 def _first(name: str | None) -> str:
     return (name or "").strip().split(" ")[0] if (name or "").strip() else ""
@@ -371,7 +430,7 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     texts = [*notes, cand.get("about") or ""]
     comp, avail = _found(texts, _COMP), _found(texts, _AVAIL)
     hist = store.work_history(candidate_id)[:3]
-    lines = [f"Hi {_first(manager) or 'there'},", "",
+    lines = [f"Hi {_first(manager) or _first(reports.contact_name(c.get('contacts'))) or 'there'},", "",
              f"I'd like to put {cand['name']} forward for {job['title']}.", ""]
     now_role = ", ".join(x for x in (
         " at ".join(x for x in (cand.get("current_title"), cand.get("current_company")) if x), cand.get("location")) if x)
@@ -521,6 +580,8 @@ def chase_list(store: Store, key: str | None = None, now: datetime | None = None
         grp["to"] = manager_email(c, grp["jobs"], grp["manager"], own)
         grp["job_ids"] = [j["id"] for j in grp.pop("jobs")]
         grp["chased_at"] = chased_at(store, ck, mk)
+        grp["next_on"] = next_nudge(store, ck, mk, now)
+        grp["contact_name"] = reports.contact_name(c.get("contacts"))
         grp["text"] = nudge_text(grp, own, c.get("time_zone"))
         grp["subject"] = ("Feedback on " + ("candidates" if len(grp["people"]) > 1 else grp["people"][0]["name"])
                           + (f" for {c['name']}" if not own else ""))
@@ -545,7 +606,7 @@ def by_job_stage(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def nudge_text(grp: dict[str, Any], own: bool, tz: str | None = None) -> str:
     """The paste-ready nudge to one hiring manager: who is waiting, since when, and the ask."""
     people = grp["people"]
-    lines = [f"Hi {_first(grp.get('manager')) or 'there'},", "",
+    lines = [f"Hi {_first(grp.get('manager')) or _first(grp.get('contact_name')) or 'there'},", "",
              ("A quick check on the people in your interview stages that I haven't heard back on yet:" if own else
               "A quick check on the people I sent over that I haven't heard back on yet:")]
     for p in people[:SHOWN]:
@@ -571,8 +632,9 @@ def chase_text(groups: list[dict[str, Any]], days: int) -> str:
     for i, g in enumerate(groups, 1):
         who = g["client"] + (f", {g['manager']}" if g["manager"] else "")
         lines.append(f"\nNudge {i}: {who}" + (f" (email {g['to']})" if g["to"] else " (no email saved)")
-                     + (f". Last chased {reports.in_zone(g['chased_at'], None, '%b %-d')}" if g["chased_at"] else ""))
-        lines.append(g["text"])
+                     + (f". Last chased {reports.in_zone(g['chased_at'], None, '%b %-d')}" if g["chased_at"] and not g.get("next_on") else ""))
+        lines.append(chased_line(g["chased_at"], g["next_on"]) + ". Not drafting the nudge again until then."
+                     if g.get("next_on") else g["text"])
     return "\n".join(lines)
 
 

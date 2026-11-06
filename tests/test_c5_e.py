@@ -55,17 +55,16 @@ def test_moving_to_contacted_keeps_the_logged_outreach_date(store):
     assert store.get_candidate(rafael["id"])["last_contacted_at"] == yesterday
 
 
-def test_adding_straight_into_contacted_stamps_last_contacted_once(store):
+def test_adding_straight_into_contacted_does_not_stamp_last_contacted_only_a_logged_message_does(store):
     job = store.add_job("Backend")
     ayesha = store.add_candidate(name="Ayesha Khan")
     store.add_to_pipeline(ayesha["id"], job["id"], "Contacted")
-    stamped = store.get_candidate(ayesha["id"])["last_contacted_at"]
-    assert stamped
-    # The real outreach, logged after the move with an earlier time, replaces the move's stamp.
+    assert store.get_candidate(ayesha["id"])["last_contacted_at"] is None  # c8: a stage move alone isn't a message
+    # The real outreach, logged after the move, is what sets it.
     earlier = iso(datetime.now(timezone.utc) - timedelta(days=2))
     store.log(ayesha["id"], "email", "Sent the role", at=earlier)
     assert store.get_candidate(ayesha["id"])["last_contacted_at"] == earlier
-    # Moving out and back in again doesn't stamp over logged outreach.
+    # Moving out and back in again doesn't change logged outreach.
     store.move_stage(ayesha["id"], job["id"], "Sourced")
     store.move_stage(ayesha["id"], job["id"], "Contacted")
     assert store.get_candidate(ayesha["id"])["last_contacted_at"] == earlier

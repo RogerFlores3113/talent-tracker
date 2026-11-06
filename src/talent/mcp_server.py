@@ -27,7 +27,7 @@ from urllib.parse import quote
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, WithJsonSchema
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, opsreview
@@ -1566,11 +1566,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def book_loop(job_id: int, candidate_id: int, start: str | None = None, unavailable: list[str] | None = None,
-                  slots: list[dict[str, str]] | None = None) -> CallToolResult:
+                  slots: list[Any] | None = None) -> CallToolResult:
         """Log a candidate's interview loop as interviews, once the recruiter has agreed to a plan_loop plan. With
         no `slots` it books exactly what plan_loop (same start and unavailable) proposes. To change a time or
         interviewer, send slots: a list of {session, at, interviewer}, session being a name from the template and
-        at an ISO time with offset. Each session is logged like log_activity does (summary "System design (60
+        at an ISO time with offset (the slots plan_loop returns work as they are; interviewers as a list is fine,
+        and other keys are ignored). Sessions plan_loop could not place are listed as "Not booked", with the next
+        step. Each session is logged like log_activity does (summary "System design (60
         min)", so the length counts for clashes), listed on Changes where the recruiter can undo each one, and
         held for review in Cautious mode. No calendar is written and nothing is sent."""
         p = loops.plan(store, job_id, candidate_id, start, unavailable)
@@ -1578,17 +1580,33 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         warn: list[str] = []
         if slots:
             chosen = []
+            shape = ("slots is a list of {session, at, interviewer}. It accepts: session, at, interviewer "
+                     "(or interviewers as a list). Other keys are ignored.")
+            if not isinstance(slots, list) or not all(isinstance(x, dict) for x in slots):
+                raise ValueError("Nothing booked. " + shape)
             for sl in slots[:loops.MAX_SESSIONS]:
+                if not isinstance(sl.get("at"), str) or not isinstance(sl.get("session"), str):
+                    raise ValueError("Nothing booked. Each slot needs a session name and an at time, both text. " + shape)
                 spec = tpl.get(str(sl.get("session") or "").strip().casefold())
                 if not spec:
                     raise ValueError("Nothing booked. session must be one of: "
                                      + ", ".join(x["name"] for x in tpl.values()) + ".")
                 at = parse_when(str(sl.get("at") or ""))
-                who = (sl.get("interviewer") or "").strip() or None
+                raw = sl.get("interviewer")
+                if raw in (None, "", []):
+                    raw = sl.get("interviewers")
+                if isinstance(raw, (list, tuple)):
+                    raw = ", ".join(str(x).strip() for x in raw if isinstance(x, str) and x.strip())
+                if raw is not None and not isinstance(raw, str):
+                    raise ValueError("Nothing booked. interviewer is a name (or interviewers a list of names). " + shape)
+                who = (raw or "").strip() or None
                 warn += [f"{spec['name']}: {w}" for w in loops.check_slot(store, candidate_id, at, spec["minutes"], who)]
                 chosen.append({"session": spec["name"], "at": at, "minutes": spec["minutes"], "interviewer": who})
         else:
             chosen = loops.slots_from(p)
+        skipped = [] if slots else [
+            {"session": u["session"], "reason": "no free interviewer" if tpl[u["session"].casefold()]["interviewers"]
+             else "no free time"} for u in loops.unplaced_from(p)]
         if not chosen:
             raise ValueError("Nothing booked: " + ("; ".join(w for x in p["sessions"] for w in x["warnings"])
                                                   or "the plan has no sessions to book") + ".")
@@ -1609,7 +1627,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             sentence = (f"Logged {len(done)} interview{'' if len(done) == 1 else 's'} for {name} on "
                         f"{_job_name(p['job'])}: {listing}. The recruiter can undo each under Changes. Nothing was "
                         "sent and no calendar was changed.")
-        data = {"data_note": DATA_NOTE, "booked": [_slim({"interview_id": (o.get("logged") or {}).get("id"),
+        if skipped:
+            nb = ("Not booked: " + ", ".join(f"{x['session']} ({x['reason']})" for x in skipped) + ". Next step: add an "
+                  "interviewer for it on the job's Loop page or try a later start, then call book_loop again with "
+                  "slots for just that session.")
+            sentence += " " + nb
+        data = {"data_note": DATA_NOTE, "not_booked": skipped or None,
+                "next_step": ("add an interviewer on the Loop page or use a later start, then book_loop with slots "
+                              "for the sessions not booked") if skipped else None,
+                "booked": [_slim({"interview_id": (o.get("logged") or {}).get("id"),
                                                           "session": sl["session"], "at_local": _local(sl["at"]),
                                                           "interviewer": sl["interviewer"]}) for sl, o in done],
                 "pending_review": [o["pending_review"] for _, o in waiting] or None,
@@ -3031,12 +3057,43 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data = {"days": days, "max_days": chase.chase_max_days(store), "app_url": app_url("/clients/chase"),
                 "nudge_count": len(groups), "nudges_shown": len(shown), "left_out": left, "nudges": [
             {"client": g["client"], "hiring_manager": g["manager"], "to": g["to"], "subject": g["subject"],
-             "text": g["text"], "last_chased_at": g["chased_at"],
+             "text": None if g["next_on"] else g["text"], "last_chased_at": g["chased_at"],
+             "snoozed_until": g["next_on"].isoformat() if g["next_on"] else None,
+             "status": chase.chased_line(g["chased_at"], g["next_on"]) if g["next_on"] else None,
              "people": [{k: p[k] for k in ("candidate_id", "name", "job_id", "job", "stage", "since", "days",
                                            "date_unknown")} for p in g["people"][:cap]],
              "count": len(g["people"]), "shown": min(cap, len(g["people"])),
              "by_job_stage": g["by_job_stage"][:chase.TABLE_ROWS]} for g in shown]}
         return _result(text, data)
+
+    @mcp.tool(annotations=WRITE)
+    def mark_chased(client: str | None = None, snooze_days: int | None = None,
+                    company: str | None = None) -> CallToolResult:
+        """Record that the recruiter sent a client's feedback nudges (the ones client_chase or client_desk drafted),
+        so they aren't drafted again until the next one is due: the chase days later, or snooze_days later (1 to 365).
+        Use it only after the recruiter says the nudge went out. It marks every hiring manager of that client. The
+        recruiter can take it back from Changes. Nothing is sent. `company` works in place of `client`."""
+        client = _either(client, company, "Not marked as chased.")
+        if not (client or "").strip():
+            raise ValueError("Not marked as chased. Say which client, as client (\"acme\") or company.")
+        key = _one_client(client)
+        try:
+            days = chase.snooze_days_from(snooze_days)
+        except ValueError as exc:
+            raise ValueError(f"Not marked as chased. {exc}") from None
+        c = reports.client(store, key)
+        if review.cautious(store):
+            waiting = review.queue_chased(store, key, days, session)
+            return _plain(_wait_text(waiting), {"client": c["name"], "pending_review": _waiting(waiting),
+                                               "app_url": app_url(f"/clients/{quote(c['slug'])}/desk")})
+        _check_cap(store, 1)
+        out = chase.ai_mark_chased(store, key, days)
+        line = chase.chased_line(out["chased_at"], out["next_on"])
+        return _plain(f"Marked the nudges to {quoted(out['client'])} as chased. {line}. They won't be drafted again "
+                      "until then. The recruiter can undo it under Changes. Nothing was sent.",
+                      _slim({"client": out["client"], "nudges": out["nudges"], "chased_at": out["chased_at"],
+                             "next_nudge_on": out["next_on"].isoformat() if out["next_on"] else None,
+                             "action_id": out["action_id"], "app_url": app_url(f"/clients/{quote(out['slug'])}/desk")}))
 
     @mcp.tool(annotations=READ)
     def client_desk(client: str | None = None, company: str | None = None) -> CallToolResult:
@@ -3257,6 +3314,7 @@ ARG_ALIASES = {
     "status_digest": {"client": "company"},
     "client_chase": {"company": "client"},
     "mark_update_sent": {"company": "client"},
+    "mark_chased": {"company": "client"},
     "update_client": {"company": "client"},
     "ops_review": {"company": "client"},
 }
@@ -3315,6 +3373,14 @@ def _check_arguments(mcp: FastMCP) -> None:
         token = _IGNORED.set(unknown)
         try:
             return await original(name, args, context=context, convert_result=convert_result)
+        except ToolError as exc:
+            if not isinstance(exc.__cause__, ValidationError):
+                raise
+            bad = list(dict.fromkeys(str(e["loc"][0]) for e in exc.__cause__.errors() if e.get("loc")))
+            read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
+            raise ToolError(("" if read_only else "No change made. ") + f"{name} couldn't use "
+                            + (", ".join(bad) if bad else "that input") + ": wrong kind of value."
+                            + (f" It accepts: {', '.join(accepted)}." if accepted else "")) from None
         finally:
             _IGNORED.reset(token)
 

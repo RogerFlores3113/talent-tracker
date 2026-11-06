@@ -11,7 +11,7 @@
   {% if not s['items'] %}<p class="fine">Nothing here.</p>{% endif %}
   {% for i in s['items'] %}{% set tid = 'desk-text-' ~ s.kind ~ '-' ~ loop.index %}
   <div class="report-part">
-    <p><strong>{{ i.title }}</strong>{% if i.not_due %} <span class="badge">Not due yet</span>{% endif %}{% if i.overdue %} <span class="badge overdue">Overdue</span>{% endif %}{% if i.due %} <span class="badge overdue">Due</span>{% endif %}<br><span class="fine">{{ i.detail }}</span></p>
+    <p><strong>{{ i.title }}</strong>{% if i.snoozed %} <span class="badge">Chased</span>{% elif i.not_due %} <span class="badge">Not due yet</span>{% endif %}{% if i.overdue %} <span class="badge overdue">Overdue</span>{% endif %}{% if i.due %} <span class="badge overdue">Due</span>{% endif %}<br><span class="fine">{{ i.detail }}</span></p>
     {% if i.ai_moves %}<p class="fine recruiter-only">{{ i.ai_moves }} AI move{{ 's' if i.ai_moves != 1 }} in it, not reviewed yet. Check them on the client page before you send.</p>{% endif %}
     {% if i.text %}<div class="sec-head"><span></span><span class="copy-status no-print"><button type="button" class="btn small" data-copy-from="{{ tid }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email.">Copy</button><span class="fine" role="status"></span></span></div>
     <pre class="code wrap" id="{{ tid }}">{{ i.text }}</pre>{% endif %}
