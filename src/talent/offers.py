@@ -512,19 +512,23 @@ def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any
             imported.append(a)
             continue
         items.append(_missing_item(a))
-    if len(imported) <= MISSING_SHOWN:
-        items += [_missing_item(a) for a in imported]
-    elif imported:
-        jobs = sorted({a["job_id"] for a in imported})
-        names = ", ".join(a["name"] for a in imported[:3]) + (f" and {len(imported) - 3} more" if len(imported) > 3
-                                                               else "")
-        items.append({"key": "offer_missing_import", "kind": "offer", "rank": 3,
-                      "when": max(a["stage_changed_at"] or "" for a in imported), "job_id": jobs[0] if len(jobs) == 1
-                      else None, "href": f"/jobs/{jobs[0]}" if len(jobs) == 1 else "/jobs?status=open",
-                      "button": "See the job" if len(jobs) == 1 else "See the jobs", "count": len(imported),
-                      "title": f"{len(imported)} people from an import are in an Offer stage with no offer recorded",
-                      "detail": f"{names}, on {len(jobs)} job{'' if len(jobs) == 1 else 's'}. "
-                                "Record an offer from their card when it matters."})
+    by_job: dict[int, list[dict[str, Any]]] = {}
+    for a in imported:
+        by_job.setdefault(a["job_id"], []).append(a)
+    one_job = len(by_job) == 1
+    for job_id, group in by_job.items():  # one folded line per job, so each can be dismissed on its own
+        if len(group) <= MISSING_SHOWN:
+            items += [_missing_item(a) for a in group]
+            continue
+        names = ", ".join(a["name"] for a in group[:3]) + (f" and {len(group) - 3} more" if len(group) > 3 else "")
+        key = "offer_missing_import" if one_job else f"offer_missing_import:{job_id}"
+        items.append({"key": key, "kind": "offer", "rank": 3, "dismiss": True,
+                      "when": max(a["stage_changed_at"] or "" for a in group), "job_id": job_id,
+                      "href": f"/jobs/{job_id}", "button": "See the job", "count": len(group),
+                      "title": f"{len(group)} people from an import are in an Offer stage with no offer recorded"
+                               + ("" if one_job else f" on {_job_name(group[0])}"),
+                      "detail": f"{names}. Record an offer from their card when it matters, or dismiss this if they are "
+                                "old history."})
     return items
 
 

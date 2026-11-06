@@ -920,6 +920,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
     moved: list[str] = []
     seen: set[tuple[int, int]] = set()
     added = updated = unchanged = skipped_rows = notes = conflicts = pipelines = dated = 0
+    read = {"stage": 0, "placed": 0}
     skipped: list[str] = []
     warned: list[str] = []
     changes: list[str] = []
@@ -1029,7 +1030,9 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                                     fallbacks=fallbacks, missing=missing, add_stages=add_stages, already=already,
                                     moves=moves, order=order, stage_at=rec["stage_at"].get(row),
                                     made=stages_made, move=move_stages, moved=moved, run=run, seen=seen,
-                                    closed=closed)
+                                    closed=closed, added_at=rec["created_at"])
+                read["stage"] += 1 if rec["stage_at"].get(row) else 0
+                read["placed"] += 1
             except Exception as exc:
                 warned.append(f"Row {row}: not added to {title} ({exc})")
     mapped_cols = {i for i, m in enumerate(mapping) if m}
@@ -1049,10 +1052,29 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             "moved": moved, "missing_from_file": gone, "move_stages": move_stages, "stage_order": order,
             "job_keys": jobs.keys if jobs else {}, "new_job_ids": [j["id"] for j in jobs.made] if jobs else [],
             "closed_jobs": sorted(closed.values(), key=lambda c: -c["rows"]),
+            "date_note": _date_note(read["stage"], read["placed"], dated),
             "reopened": jobs.reopened if jobs else [], "defaults_dropped": replaced, "run": run,
             "_changed": bool(added or updated or notes or pipelines or dated or jobs_created or stages_made
                              or moved or (jobs and jobs.reopened)),
             "dry_run": False}
+
+
+def _date_note(stage_dated: int, placed: int, created: int) -> str:
+    """One plain line on how the file's dates were read, for the import result."""
+    if not placed and not created:
+        return ""
+    bits = []
+    if stage_dated:
+        rest = placed - stage_dated
+        bits.append(f"{stage_dated} stage {'date was' if stage_dated == 1 else 'dates were'} read, so waiting clocks "
+                    "start from them" + (f" ({rest} had none and count from today)" if rest else ""))
+    elif placed:
+        bits.append("No stage dates were read, so everyone counts as reaching their stage today. Match a column like "
+                    "Stage Entered to date them")
+    if created:
+        bits.append(f"{created} created {'date' if created == 1 else 'dates'} read, so New this week counts from "
+                    "when they were added to your ATS")
+    return ". ".join(bits) + "."
 
 
 def _stage_words(name: str) -> list[str]:
@@ -1079,7 +1101,7 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
            already: list[str] | None = None, moves: Counter[str] | None = None, order: list[str] | None = None,
            stage_at: str | None = None, made: list[str] | None = None, move: bool = False,
            moved: list[str] | None = None, run: str | None = None, seen: set[tuple[int, int]] | None = None,
-           closed: dict[int, dict[str, Any]] | None = None) -> int:
+           closed: dict[int, dict[str, Any]] | None = None, added_at: str | None = None) -> int:
     """Put the person in that job's pipeline at that stage. 1 if they were added, 0 if already there.
     With move=True someone already there at another stage is moved, when the file may (see _file_wins).
     A job that's closed or on hold here is left alone: nobody is added or moved on it (counted in `closed`)."""
@@ -1144,7 +1166,7 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
                            f"{want['name']}){note} so they were left there")
         return 0
     store.add_to_pipeline(cand["id"], job["id"], stage=want["name"])
-    _date_placement(store, cand["id"], job["id"], stage_at, run)
+    _date_placement(store, cand["id"], job["id"], stage_at, run, added_at)
     return 1
 
 
@@ -1306,13 +1328,17 @@ def answer_openings(store: Store, answers: dict[int, int | None]) -> int:
 
 
 def _date_placement(store: Store, candidate_id: int, job_id: int, stage_at: str | None,
-                    run: str | None = None) -> None:
+                    run: str | None = None, added_at: str | None = None) -> None:
     """Date a new pipeline entry from the sheet's stage date. With no date, mark its stage entry as imported,
     so a status update says "(imported)" and doesn't count it as this week's news. Either way the entry
-    names the import it came from (import_run)."""
+    names the import it came from (import_run). The sheet's created date (added_at) dates when they joined the job
+    too, so "new this week" counts from it, not from the import day."""
     import json
 
     with store._lock, store._conn:
+        if added_at:
+            store._conn.execute("UPDATE applications SET created_at = min(created_at, ?)"
+                                " WHERE candidate_id = ? AND job_id = ?", (added_at, candidate_id, job_id))
         # +kind: look up by the person (timeline_candidate_idx), not by kind, which scans every stage entry
         entry = ("(SELECT max(id) FROM timeline WHERE candidate_id = ? AND job_id = ? AND +kind = 'stage')")
         if stage_at:

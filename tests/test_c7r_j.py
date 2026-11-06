@@ -72,9 +72,11 @@ def test_a_small_chase_keeps_its_names(store):
 
 def test_waits_count_from_the_import_day_unless_unticked(store):
     _crowd(store, 6, import_days=2)  # imported two days ago with a stage date 200 days old
-    assert chase.from_import_day(store) is True
+    assert chase.from_import_day(store) is False  # cycle 8: the file's stage date starts the wait unless ticked
+    chase.set_from_import_day(store, True)
     assert chase.chase_list(store, days=5) == []  # only two days since the import
     chase.set_from_import_day(store, False)
+    chase.set_chase_max_days(store, 3650)  # the 200 days of history is under the limit here
     g = chase.chase_list(store, days=5)
     assert len(g) == 1 and len(g[0]["people"]) == 6 and g[0]["people"][0]["days"] >= 199
     chase.set_from_import_day(store, True)
@@ -84,10 +86,10 @@ def test_waits_count_from_the_import_day_unless_unticked(store):
 def test_settings_page_saves_the_import_day_choice(store):
     c = local_client(store)
     assert "Count waits from my import day" in c.get("/settings").text
-    c.post("/settings", data={"flags_shown": "1"}, follow_redirects=False)
-    assert chase.from_import_day(store) is False
     c.post("/settings", data={"flags_shown": "1", "chase_from_import": "1"}, follow_redirects=False)
     assert chase.from_import_day(store) is True
+    c.post("/settings", data={"flags_shown": "1"}, follow_redirects=False)
+    assert chase.from_import_day(store) is False
 
 
 def test_same_name_with_nothing_to_compare_is_saved_as_new(store):
