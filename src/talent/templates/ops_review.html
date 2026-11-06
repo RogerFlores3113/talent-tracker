@@ -19,7 +19,7 @@
   <thead><tr><th>Job</th><th>{{ 'Company' if inhouse() else 'Client' }}</th>{% for p in pipes %}<th>{{ labels[p] }}{% if p == 'stuck' %} over {{ data.stuck_days }} days{% endif %}</th>{% endfor %}<th>Days since client update</th></tr></thead>
   <tbody>{% for r in data.rows %}
   <tr>
-    <td><a href="/jobs/{{ r.job_id }}">{{ r.title }}</a>{% if r.over_openings %}<br><span class="fine">{{ r.hired }} hired against {{ r.openings }} {{ 'opening' if r.openings == 1 else 'openings' }}. <a href="/jobs/{{ r.job_id }}/edit">Update openings</a></span>{% endif %}</td>
+    <td><a href="/jobs/{{ r.job_id }}">{{ r.title }}</a>{% if r.over_openings %}<br><span class="fine">{{ r.over_text[:1] | upper }}{{ r.over_text[1:] }}. <a href="/jobs/{{ r.job_id }}/edit">Update openings</a></span>{% endif %}</td>
     <td>{% if r.client_slug %}<a href="/clients/{{ r.client_slug }}">{{ r.client }}</a>{% endif %}</td>
     {% for p in pipes %}<td>{% if r.counts[p] %}<a href="{{ r.links[p] }}">{{ r.counts[p] }}</a>{% else %}0{% endif %}</td>{% endfor %}
     <td class="nowrap">{% if r.days_since_update is not none %}{% if r.update_tone %}<span class="badge {{ r.update_tone }}">{{ r.days_since_update }}</span>{% else %}{{ r.days_since_update }}{% endif %}{% elif r.client %}never{% endif %}</td>

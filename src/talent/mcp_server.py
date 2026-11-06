@@ -3394,6 +3394,9 @@ def _check_arguments(mcp: FastMCP) -> None:
     manager.call_tool = call_tool  # type: ignore[method-assign]
 
 
+HOLD_CLIENT_TOOLS = {"mark_chased", "mark_update_sent", "update_client"}  # an unknown client is refused before it waits
+
+
 def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> str | None:
     """Why a Suggest only app's request would fail (or is too big), as a plain sentence, or None. Runs the tool's own
     argument check (unknown names, missing or wrongly shaped values) plus the id, steps and template checks that
@@ -3423,6 +3426,11 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
             outreach.clean_steps(args.get("steps"))  # names wrong keys and too few steps
         elif name == "book_loop":
             loops.plan(store, args["job_id"], args["candidate_id"], args.get("start"), args.get("unavailable"))
+        if name in HOLD_CLIENT_TOOLS:
+            who = str(args.get("client") or args.get("company") or "").strip()
+            if who and not reports.find_clients(store, who):
+                return (f"No change made: no client matches {who!r}. A client is a company named on a job "
+                        "(list_jobs shows them) or one saved with create_client.")
     except (ValueError, NotFound) as exc:
         msg = str(exc)
         return msg if msg.startswith("No change made") else f"No change made: {msg}"

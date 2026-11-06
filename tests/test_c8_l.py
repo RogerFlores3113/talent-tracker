@@ -88,7 +88,7 @@ def test_hires_over_openings_never_read_as_filled(store):
     assert any("Check openings" in c.text and "update_job" in c.text for c in res.content)
     assert res.structuredContent["hired_over_openings"][0]["hired"] == 8
     c = local_client(store)
-    assert "8 hired against 3 openings" in c.get("/clients/review").text
+    assert "8 placed against 3 openings" in c.get("/clients/review").text  # same word as the desk
     slug = desk.reports.client(store, "acme")["slug"]
     assert "8 placed against 3 openings" in c.get(f"/clients/{slug}/desk").text
     assert "Check openings" in call(build_server(store), "client_desk", client="acme").content[0].text

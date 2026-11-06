@@ -786,7 +786,10 @@ def against_text(hired: int, openings: int, word: str = "hired") -> str:
 def over_openings(store: Store, company: str | None = None, manager: str | None = None) -> list[dict[str, Any]]:
     """Open jobs with more hires than openings: [{job_id, title, company, hired, openings, text}]. Often the openings
     number was never set after an import, so the recruiter is offered a chance to correct it."""
+    from .importers import openings_to_ask
+
     keep = _job_filter(store, company, manager)
+    unset = set(openings_to_ask(store))
     out = []
     for j in store.list_jobs("open"):
         if not keep(j):
@@ -794,8 +797,15 @@ def over_openings(store: Store, company: str | None = None, manager: str | None 
         n = job_numbers(store, j["id"])
         if n["hired_all"] > n["openings"]:
             out.append({"job_id": j["id"], "title": j["title"], "company": j.get("company"), "hired": n["hired_all"],
-                        "openings": n["openings"], "text": against_text(n["hired_all"], n["openings"], n["word"])})
+                        "openings": n["openings"], "unset": j["id"] in unset,
+                        "text": over_text(n["hired_all"], n["openings"], n["word"], j["id"] in unset)})
     return out
+
+
+def over_text(hired: int, openings: int, word: str = "hired", unset: bool = False) -> str:
+    """'8 hired against 3 openings', or '8 hired, openings not set yet' while openings are still an import's guess,
+    so the desk, the digest and the ops review tell the same story."""
+    return f"{hired} {word}, openings not set yet" if unset else against_text(hired, openings, word)
 
 
 def filled_text(filled: int, openings: int) -> str:

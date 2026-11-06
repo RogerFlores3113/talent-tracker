@@ -113,6 +113,9 @@ def review(store: Store, stuck_days: int = STUCK_DAYS, client: str | None = None
     rows = []
     jobs = [j for j in store._rows("SELECT * FROM jobs WHERE status = 'open'")
             if want is None or actions.company_key(j.get("company")) == want]
+    from .importers import openings_to_ask
+
+    unset = set(openings_to_ask(store))  # openings still an import's guess read "openings not set yet", as on the desk
     for j in sorted(jobs, key=lambda j: ((j.get("company") or "~").lower(), j["title"].lower(), j["id"])):
         key = actions.company_key(j.get("company"))
         if key and key not in sent:
@@ -126,6 +129,7 @@ def review(store: Store, stuck_days: int = STUCK_DAYS, client: str | None = None
         rows.append({
             "hired": nums["hired_all"], "openings": nums["openings"],
             "over_openings": nums["hired_all"] > nums["openings"],
+            "over_text": actions.over_text(nums["hired_all"], nums["openings"], nums["word"], j["id"] in unset),
             "job_id": j["id"], "title": j["title"], "client": (j.get("company") or "").strip(),
             "client_slug": reports.slug(key) if key else None, "hiring_manager": j.get("hiring_manager"),
             "counts": {p: counts[p].get(j["id"], 0) for p in PIPES},
@@ -153,7 +157,7 @@ def text(data: dict[str, Any]) -> str:
         c = r["counts"]
         upd = ("update sent " + (f"{r['days_since_update']} days ago" if r["days_since_update"] else "today")
                if r["days_since_update"] is not None else ("no update sent yet" if r["client"] else "no client"))
-        over = (f" ({actions.against_text(r['hired'], r['openings'])}: check openings)" if r.get("over_openings")
+        over = (f" ({r['over_text']}: check openings)" if r.get("over_openings")
                 else "")
         lines.append(f"- {r['title']}" + (f" ({r['client']})" if r["client"] else "") + f" [job_id {r['job_id']}]{over}: "
                      f"{c['process']} in process, {c['new']} new, {c['moved']} moved, {c['stuck']} stuck, "

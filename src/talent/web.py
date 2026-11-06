@@ -1646,6 +1646,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         days = chase.chase_days(store)
         left: dict[str, Any] = {}
         groups = chase.chase_list(store, days=days, left_out=left)
+        for g in groups:  # a snoozed nudge says when it was chased and when it's next due, and isn't drafted again
+            if g.get("next_on"):
+                g["chased_line"] = chase.chased_line(g.get("chased_at"), g["next_on"])
         return page(request, "chase.html", groups=groups, days=days, slug=reports.slug, left_out=left,
                     shown=chase.PAGE_SHOWN, show_all=str(request.query_params.get("all") or "")[:200],
                     max_days=chase.chase_max_days(store), stage_choices=chase.stage_choices(store))
