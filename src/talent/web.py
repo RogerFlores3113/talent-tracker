@@ -2383,7 +2383,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             try:
                 day = interviews.week_day(week)
             except ValueError:
-                day = None
+                day = None  # not a usable day: show this week
             return page(request, "interviews.html", w=interviews.week(store, day), calendar_prompt=calendar_prompt)
         try:
             first = interviews.month_first(month)
@@ -2392,14 +2392,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "interviews_month.html", m=interviews.month(store, first), calendar_prompt=calendar_prompt)
 
     @app.get("/interviews.ics")
-    def interviews_ics(month: str = ""):
+    def interviews_ics(month: str = "", cancelled: str = ""):
         """The month's interviews (or every upcoming one) as a calendar file for the recruiter's own calendar app."""
         try:
             first = interviews.month_first(month) if month.strip() else None
-        except ValueError:
-            raise HTTPException(400, "month is like 2026-11.")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         name = f"interviews-{first.strftime('%Y-%m')}.ics" if first else "interviews-upcoming.ics"
-        return Response(interviews.ics_for_month(store, first), media_type="text/calendar; charset=utf-8",
+        body = interviews.ics_for_month(store, first, True if cancelled == "1" else None)
+        return Response(body, media_type="text/calendar; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.get("/candidates/{candidate_id}/interviews/{entry_id:int}.ics")
