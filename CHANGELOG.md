@@ -4,7 +4,7 @@ All notable changes to Talent Search. Newest first.
 
 ## [0.1.0] - 2026-11-09
 
-The first release. Talent Search is a candidate database that lives on your own computer, with an app window for you and tools for your AI app.
+The first release. Talent Search is a candidate database that lives on your own computer, that opens in your web browser for you and tools for your AI app.
 
 ### Search and candidates
 - Fast search across names, titles, companies, locations and "about" text, with highlights. Shorthand like `sf`, `nyc` and `swe` works.

@@ -8,10 +8,11 @@
   <section class="panel" id="look">
     <h2>Look</h2>
     <p class="fine">Pick the colors. The page changes as you choose, and Save keeps it.</p>
+    <p class="fine">Sunset to forest and Classic go dark when your computer is in dark mode.</p>
     <div class="theme-grid" role="radiogroup" aria-label="Color theme">
       {% for value, name, blurb in themes %}
       <label class="theme-card" data-t="{{ value }}"><input type="radio" name="theme" value="{{ value }}" data-theme-pick {{ 'checked' if theme() == value }}>
-        <span class="sw"><span class="chip-bar"></span><strong>{{ name }}</strong><span class="fine">{{ blurb }}</span></span></label>
+        <span class="sw"><span class="chip-bar{{ ' split' if value in ('sunset', 'classic') }}"></span><strong>{{ name }}</strong><span class="fine">{{ blurb }}</span></span></label>
       {% endfor %}
     </div>
   </section>
