@@ -13,6 +13,7 @@ Design notes
 """
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import sqlite3
@@ -25,6 +26,8 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
+
+from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
 # candidate is still in play; "hired" and "lost" close the application.
@@ -184,6 +187,45 @@ def _fts_triggers() -> str:
         INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
     END;
     """
+
+
+def _sym_index() -> str:
+    """The search index again, now reading c#, c++, f# and .net as words of their own (tt_sym turns c# into
+    csharp, c++ into cplusplus and .net into dotnet before indexing). The index takes its text from a view that
+    applies tt_sym, and the triggers apply it to what they add, so a rebuild and a live write agree."""
+    cols = [c.strip() for c in _FTS_COLS.split(",")]
+    view = ", ".join(f"tt_sym({c}) AS {c}" for c in cols)
+    new = ", ".join(f"tt_sym(new.{c})" for c in cols)
+    old = ", ".join(f"tt_sym(old.{c})" for c in cols)
+    return f"""
+    DROP TRIGGER IF EXISTS candidates_ai;
+    DROP TRIGGER IF EXISTS candidates_ad;
+    DROP TRIGGER IF EXISTS candidates_au;
+    DROP TABLE IF EXISTS candidates_fts;
+    DROP VIEW IF EXISTS candidates_sym;
+    CREATE VIEW candidates_sym AS SELECT id, {view} FROM candidates;
+    CREATE VIRTUAL TABLE candidates_fts USING fts5(
+        {_FTS_COLS}, content='candidates_sym', content_rowid='id',
+        tokenize='porter unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER candidates_ai AFTER INSERT ON candidates BEGIN
+        INSERT INTO candidates_fts(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
+    END;
+    CREATE TRIGGER candidates_ad AFTER DELETE ON candidates BEGIN
+        INSERT INTO candidates_fts(candidates_fts, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (old.id, 'delete');
+    END;
+    CREATE TRIGGER candidates_au AFTER UPDATE ON candidates BEGIN
+        INSERT INTO candidates_fts(candidates_fts, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO candidates_fts(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
+    END;
+    """
+
+
+def _migrate_v10q_data(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
 
 
 def _words_index() -> str:
@@ -728,6 +770,8 @@ _MIGRATIONS: tuple[Any, ...] = (
         time_zone TEXT
     );
     """,
+    # v10q: c#, c++, f# and .net are words of their own in search (they used to be read as c and net).
+    (_sym_index(), _migrate_v10q_data),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1575,15 +1619,21 @@ class _Term:
         return (self.form, *self.expansions)
 
     def fts(self) -> str:
-        term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
-        alts = [*(f'"{e}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
+        form = _fts_words(self.form)
+        term = f'"{form}"*' if self.prefix else f'"{form}"'
+        alts = [*(f'"{_fts_words(e)}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
         if alts:
             term = "(" + " OR ".join([term, *alts]) + ")"
         return term
 
 
+def _fts_words(text: str) -> str:
+    """Words as the index holds them: c# is csharp, c++ is cplusplus, .net is dotnet (see searchquery.sym_text)."""
+    return " ".join(fts_token(t) for t in _search_tokens(text)) or text
+
+
 def _query_terms(text: str) -> list[_Term]:
-    words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
+    words = [w.lower() for w in _search_tokens(text)]
     kept = [w for w in words if w not in STOPWORDS] or words
     tail = (text or "").split()
     # Only a plain last word of 3+ letters is a prefix: "c++", "c#" or "go" must not spread to every word that starts so.
@@ -1612,16 +1662,16 @@ def _query_terms(text: str) -> list[_Term]:
 def _item_fts(text: str, phrase: bool) -> str:
     """One parsed word or phrase as FTS5 text, every piece quoted. A word keeps its shorthand ('sf' also finds
     San Francisco); a phrase must sit together. `text` holds only letters, digits and spaces."""
-    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    text = " ".join(_search_tokens(text)).lower()
     if phrase or " " in text:
-        return f'"{text}"'
+        return f'"{_fts_words(text)}"'
     return _Term(text, False, ALIASES.get(text, ())).fts()
 
 
 def _exact_fts(text: str, phrase: bool) -> str:
     """One word or phrase to leave out, as FTS5 text for the unstemmed word index: the exact word (and its plain
     plural and shorthand), so -recruiter does not drop a Recruiting Coordinator."""
-    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    text = " ".join(_search_tokens(text)).lower()
     if phrase or " " in text:
         return f'"{text}"'
     forms = [text, text + "s", *ALIASES.get(text, ())]
@@ -1677,10 +1727,48 @@ def _filter_forms(value: str, *, singular: bool = False) -> list[str]:
 
 def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     """Regex for a query word inside free text (notes, job titles), on whole words."""
+    if form.endswith(("#", "+")) or form == ".net":  # c#, c++, f#, .net: the symbol is part of the word
+        return re.compile(rf"(?<![\w.#+]){re.escape(form)}(?![\w#+])" if form != ".net" else r"(?<!\w)\.net(?!\w)", re.I)
     base = form[:-1] if not prefix and len(form) > 3 and form.endswith("s") else form
     body = r"\s+".join(re.escape(p) for p in base.split())
     tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
     return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _phrase_pattern(words: list[str]) -> re.Pattern[str]:
+    """Regex for words that sit together in free text (a note), with anything but letters between them."""
+    parts = [re.escape(w) for w in words]
+    tail = r"(?:e?s)?(?![\w#+])" if words and words[-1].isalnum() else r"(?![\w#+])"
+    return re.compile(r"(?<![\w.#+])" + r"[\W_]+".join(parts) + tail, re.I)
+
+
+def _near_ok(text: str, operands: list[list[str]], dist: int) -> bool:
+    """Do all the operands (each a word or a phrase, as lowercase tokens) sit within `dist` words of each other,
+    in any order? Like the index's NEAR: the words between them are counted, the operands themselves are not."""
+    toks = [t.lower() for t in _search_tokens(text)]
+
+    def same(a: str, b: str) -> bool:
+        return a == b or a == b + "s" or a == b + "es"
+
+    spots: list[list[tuple[int, int]]] = []
+    for op in operands:
+        n = len(op)
+        found = [(i, i + n) for i in range(len(toks) - n + 1) if all(same(toks[i + k], op[k]) for k in range(n))]
+        if not found:
+            return False
+        spots.append(found[:60])
+    own = sum(len(op) for op in operands)
+    budget = 4000
+    for combo in itertools.product(*spots):
+        budget -= 1
+        if budget < 0:
+            return False
+        ordered = sorted(combo)
+        if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
+            continue  # the same words can't count for two operands
+        if ordered[-1][1] - ordered[0][0] - own <= dist:
+            return True
+    return False
 
 
 # Index columns to quote a match from, most useful first: about, skills, title, company, location, past roles, name.
@@ -1694,6 +1782,7 @@ def _match_snippet(snippets: list[str | None], patterns: list[list[re.Pattern[st
     picked: list[str] = []
     covered: set[int] = set()
     seen: set[str] = set()
+    snippets = [unsym_text(x) for x in snippets]  # the index holds csharp for c#; show what the profile says
     for snip in snippets:
         marked = [fold(m) for m in _HL_RE.findall(snip or "")]
         if not marked:
@@ -2045,6 +2134,7 @@ class Store:
         self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
         self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
+        self._conn.create_function("tt_sym", 1, sym_text, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -4160,9 +4250,14 @@ class Store:
             where.append("(c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) <> '')")
             filters["has_linkedin"] = "yes"
         if exclude:
-            expr = " OR ".join(_exact_fts(text, phrase) for text, phrase in exclude)
-            where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
-            params.append(expr)
+            sym = [(t, ph) for t, ph in exclude if any(fts_token(w) != w.lower() for w in _search_tokens(t))]
+            plain = [(t, ph) for t, ph in exclude if (t, ph) not in sym]
+            if plain:  # the unstemmed word index: -recruiter does not drop a Recruiting Coordinator
+                where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
+                params.append(" OR ".join(_exact_fts(text, phrase) for text, phrase in plain))
+            if sym:  # -c#, -c++: only the main index reads those as words of their own
+                where.append("c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+                params.append(" OR ".join(_item_fts(text, phrase) for text, phrase in sym))
             filters["without"] = ", ".join(t for t, _ in exclude)
 
     def experience_years(self) -> dict[int, float | None]:
@@ -4381,8 +4476,9 @@ class Store:
         The query may use quotes ("machine learning"), OR (python OR go), a leading minus or NOT to leave
         people out, and field prefixes (title:, company:, location:, skill:, tag:, source:). See searchquery.py.
         Whatever is typed is parsed into pieces and the FTS5 text is built here from quoted pieces, so nothing
-        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase or an OR uses
-        the operator search (profile text only, no typo help or note matching).
+        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase, an OR or a NEAR uses
+        the operator search, which reads the same text (profile, pipeline jobs, Found via and timeline notes) but
+        gives "Did you mean" instead of fixing typos.
 
         `more` takes the newer filters of candidate_filters (company, skills, skill_mode, remote, exp_min,
         exp_max, contacted, contacted_days, added_days, added_since, has_email, has_linkedin).
@@ -4398,10 +4494,23 @@ class Store:
         pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
         if not pq.structured and not pq.operator_mode:
             return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
-        # Field prefixes fill the matching filter when the form did not set it; skills add to the skill list.
-        # the form's own Title, Company, Location or Found via filter stays; the prefix does not override it
-        field_any = {f: v for f, v in pq.fields.items()
-                     if f in ("title", "company", "location", "source") and v and not kw.get(f)}
+        # Field prefixes add to the form's own filters. A Title, Company, Location or Found via typed both ways
+        # counts as either one (OR), and the read-back says so; nothing typed is dropped.
+        notes: list[str] = []
+        field_any: dict[str, list[str]] = {}
+        names = {"title": "Title", "company": "Company", "location": "Location", "source": "Found via"}
+        for f, vals in pq.fields.items():
+            if f not in names or not vals:
+                continue
+            vals = list(vals)
+            form_value = (kw.get(f) or "").strip() if isinstance(kw.get(f), str) else ""
+            if form_value:
+                if form_value.lower() not in {v.lower() for v in vals}:
+                    vals.append(form_value)
+                    notes.append(f"You typed {f}:{vals[0]} and the {names[f]} filter says {form_value}, so people who "
+                                 f"match either one are shown (OR).")
+                kw[f] = None
+            field_any[f] = vals
         if field_any:
             kw["field_any"] = field_any
         if pq.not_fields:
@@ -4409,10 +4518,17 @@ class Store:
         if pq.fields.get("skill"):
             have = list(kw.get("skills") or [])
             kw["skills"] = [*have, *(x for x in pq.fields["skill"] if x.lower() not in {h.lower() for h in have})]
-            if pq.skill_any and not have:
+            if have:
+                notes.append(f"The Skills filter ({', '.join(have)}) and the typed skill: "
+                             f"({', '.join(pq.fields['skill'])}) were put together"
+                             + (", so a person needs every one of them." if kw.get("skill_mode") == "all"
+                                else ", so a person needs any one of them."))
+            elif pq.skill_any:
                 kw["skill_mode"] = "any"
-            elif not have:
+            else:
                 kw["skill_mode"] = "all"
+            if kw.get("tag"):
+                notes.append(f"The Skill filter ({kw['tag']}) and the typed skill: both apply: a person needs them all.")
         if pq.exclude:
             kw["exclude"] = [(i.text, i.phrase) for i in pq.exclude]
         if pq.operator_mode:
@@ -4431,7 +4547,7 @@ class Store:
             fixed = pq.fix_prefixes(res.suggestion or query)
             if fixed:
                 res.suggestion = fixed
-        res.notes = list(pq.notes)
+        res.notes = [*pq.notes, *notes]
         res.query = query
         return res
 
@@ -4491,38 +4607,72 @@ class Store:
         return fixed if fixes and fixed != query else None
 
     def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
-        """The search for a query with a phrase or an OR: every group must match (AND), a group matches when any
-        of its words or phrases does. Profile text only, ranked by bm25; the last bare word is still a prefix."""
+        """The search for a query with a phrase, an OR or a NEAR: every group must match (AND), a group matches when
+        any of its words or phrases does. It reads the same places a plain search does: the profile (ranked by
+        bm25, the last bare word still a prefix), then, after those, people whose pipeline job, Found via or
+        timeline notes match, newest update first. So an OR never finds fewer people than either side alone."""
         where, params, filters = self.candidate_filters(**kw)
-        groups = []
+        groups, group_conds, group_params, info = [], [], [], {}
+        any_extra = False
         for gi, g in enumerate(pq.groups):
-            parts = []
+            parts, sub, sub_params = [], [], []
             for ii, item in enumerate(g):
                 last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok
                 if item.near:  # NEAR("python" "django", 5): the same part of a profile, at most N words apart
-                    parts.append("NEAR(" + " ".join(f'"{o.text}"' for o in item.near) + f", {int(item.dist)})")
+                    expr = "NEAR(" + " ".join(f'"{_fts_words(o.text)}"' for o in item.near) + f", {int(item.dist)})"
                 elif last:
-                    parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
+                    expr = _Term(item.text, True, ALIASES.get(item.text, ())).fts()
                 else:
-                    parts.append(_item_fts(item.text, item.phrase))
+                    expr = _item_fts(item.text, item.phrase)
+                parts.append(expr)
+                sub.append("c.id IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+                sub_params.append(expr)
+                extra = self._extra_for_item(item, last)
+                if extra:
+                    any_extra = True
+                    sub.append("c.id IN (SELECT value FROM json_each(?))")
+                    sub_params.append(json.dumps(sorted(extra)))
+                    for cid, e in extra.items():
+                        info.setdefault(cid, e)
             groups.append("(" + " OR ".join(parts) + ")" if len(parts) > 1 else parts[0])
+            group_conds.append("(" + " OR ".join(sub) + ")")
+            group_params += sub_params
         match = " AND ".join(groups)
         cond = " AND ".join(["candidates_fts MATCH ?", *where])
         base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
-        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        n_profile = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        extra_where = ""
+        extra_args: list[Any] = []
+        n_extra = 0
+        if any_extra:  # people the profile text alone misses, but a note, a pipeline job or Found via gives
+            extra_where = " AND ".join([*group_conds, *where,
+                                        "c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)"])
+            extra_args = [*group_params, *params, match]
+            n_extra = self._row(f"SELECT count(*) AS n FROM candidates c WHERE {extra_where}", extra_args)["n"]
+        total = n_profile + n_extra
         patterns = [[_word_pattern(w, False) for w in i.text.split()] if i.phrase else [_word_pattern(i.text, False)]
                     for g in pq.groups for item in g for i in item.leaves]
         snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}" for i in _SNIPPET_ORDER)
-        rows = self._rows(
-            f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
-                {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
-            (match, *params, limit, max(0, offset)))
-        hits = []
-        for r in rows:
-            snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
-            score = r.pop("_score")
-            hits.append(SearchHit(candidate=self._hydrate(r), score=score,
-                                  snippet=snippet if HL_START in (snippet or "") else None))
+        skip = max(0, offset)
+        hits: list[SearchHit] = []
+        if skip < n_profile and limit > 0:
+            rows = self._rows(
+                f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                    {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+                (match, *params, limit, skip))
+            for r in rows:
+                snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
+                score = r.pop("_score")
+                hits.append(SearchHit(candidate=self._hydrate(r), score=score,
+                                      snippet=snippet if HL_START in (snippet or "") else None))
+        if n_extra and len(hits) < limit:
+            ids = [r["id"] for r in self._rows(
+                f"SELECT c.id FROM candidates c WHERE {extra_where} ORDER BY c.updated_at DESC, c.id DESC"
+                " LIMIT ? OFFSET ?", (*extra_args, limit - len(hits), max(0, skip - n_profile)))]
+            for cid in ids:
+                reason, body, pattern = info.get(cid, ("Matched a note", None, None))
+                hits.append(SearchHit(candidate=self.get_candidate(cid), reason=reason,
+                                      snippet=_excerpt(body, pattern) if body and pattern else None))
         return SearchResult(hits=hits, total=total, query="", filters=filters, exact_total=total)
 
     def _search_core(
@@ -4662,45 +4812,70 @@ class Store:
 
     def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
         """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
-
         A job they're in whose title or company has the word, where they were found (Found via), or a note,
         call, email or interview on their timeline that mentions it. Read at query time, so nothing extra is stored."""
-        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
         patterns = [_word_pattern(f, term.prefix) for f in term.forms]
-        likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
-        any_like = " OR ".join("{col} LIKE ? ESCAPE '\\'" for _ in likes)
 
         def first(text: str) -> re.Pattern[str] | None:
             folded = None if text.isascii() else fold(text)
             return next((p for p in patterns if p.search(text) or (folded and p.search(folded))), None)
 
+        return self._extra_scan([list(term.forms)], first)
+
+    def _extra_scan(self, like_groups: list[list[str]], find: Callable[[str], re.Pattern[str] | None]
+                    ) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """The scan behind _extra_matches. like_groups: every group needs one of its words somewhere in the text
+        (a cheap first cut in SQL); find(text) then decides for real and returns the pattern that matched."""
+        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
+        esc = [["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in g] for g in like_groups]
+
+        def cond(col: str) -> str:
+            return " AND ".join("(" + " OR ".join(f"{col} LIKE ? ESCAPE '\\'" for _ in g) + ")" for g in esc)
+
+        flat = [x for g in esc for x in g]
+        jobtext = "(coalesce(j.title, '') || ' ' || coalesce(j.company, ''))"
         for r in self._rows(
                 "SELECT a.candidate_id, j.title, j.company FROM applications a JOIN jobs j ON j.id = a.job_id"
-                f" WHERE {any_like.format(col='j.title')} OR {any_like.format(col='j.company')} ORDER BY a.id",
-                (*likes, *likes)):
-            if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
+                f" WHERE {cond(jobtext)} ORDER BY a.id", flat):
+            hit = find(f"{r['title']} {r['company'] or ''}")
+            if r["candidate_id"] not in found and hit:
                 job = r["title"] + (f" ({r['company']})" if r["company"] else "")
-                found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+                found[r["candidate_id"]] = (f"In pipeline: {job}", None, hit)
         for r in self._rows(  # where they came from ("Referral from Alex")
-                f"SELECT id, source FROM candidates WHERE {any_like.format(col='source')} ORDER BY id", likes):
-            if r["id"] not in found and first(r["source"]):
-                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, patterns[0])
+                f"SELECT id, source FROM candidates WHERE {cond('source')} ORDER BY id", flat):
+            hit = find(r["source"]) if r["source"] else None
+            if r["id"] not in found and hit:
+                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, hit)
         marks = ", ".join("?" for _ in _SEARCHED_KINDS)
         who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
+        both = f"(coalesce(body, '') || ' ' || coalesce(CASE WHEN kind = 'interview' THEN {who} END, ''))"
         for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
                 f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
                 "NOT (json_valid(data) AND json_extract(data, '$.struck_at') IS NOT NULL) AND "  # struck out: not found
-                f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
-                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
+                f"{cond(both)} ORDER BY at DESC", (*_SEARCHED_KINDS, *flat)):
             if r["candidate_id"] not in found:
                 text = r["body"] or ""
                 if r["kind"] == "interview" and isinstance(r["interviewer"], str) and r["interviewer"].strip():
                     text = (text + " " if text else "") + f"(interviewer: {r['interviewer'].strip()})"
-                hit = first(text)
+                hit = find(text)
                 if hit:
                     an = "an" if r["kind"][0] in "aeiou" else "a"
                     found[r["candidate_id"]] = (f"Matched {an} {r['kind']}", text, hit)
         return found
+
+    def _extra_for_item(self, item: Any, prefix: bool) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """People a word, a quoted phrase or a NEAR finds outside their profile: in a pipeline job, in Found via
+        or in a timeline note, so that an OR or a phrase covers the same text a plain search does."""
+        if item.near:
+            ops = [[w.lower() for w in _search_tokens(o.text)] for o in item.near]
+            groups = [[w] for w in dict.fromkeys(w for op in ops for w in op)]
+            first_rx = _phrase_pattern(ops[0])
+            return self._extra_scan(groups, lambda text: first_rx if _near_ok(text, ops, item.dist) else None)
+        words = [w.lower() for w in _search_tokens(item.text)]
+        if item.phrase or len(words) > 1:
+            rx = _phrase_pattern(words)
+            return self._extra_scan([[w] for w in dict.fromkeys(words)], lambda text: rx if rx.search(text) else None)
+        return self._extra_matches(_Term(item.text, prefix, ALIASES.get(item.text, ())))
 
     def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
                    where: list[str], params: list[Any]) -> list[int]:

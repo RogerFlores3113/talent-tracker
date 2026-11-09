@@ -127,7 +127,12 @@ profile can't blank out what the recruiter filled in.
   built from quoted pieces, so nothing typed is ever syntax; a lone OR, an unbalanced
   quote or `title:` with nothing after it is dropped or read as plain words. Parentheses
   are not supported (ignored). Plain words keep the everyday search (typo help, notes,
-  closest matches); a phrase or OR uses a simpler operator search on profile text only.
+  closest matches); a phrase, OR or NEAR uses the operator search, which reads the same places (profile, pipeline
+  jobs, Found via and timeline notes) but offers typo fixes as "Did you mean" only, so it never finds fewer people
+  than its parts. c#, c++, f# and .net are words of their own: the index reads them as csharp, cplusplus and dotnet
+  (SQL function `tt_sym`, applied through the `candidates_sym` view and the triggers; migration v10q), and the
+  excerpts show them back as typed. A prefix typed twice, or typed while the same More filters field is set, means
+  either value (OR), and the read-back line says so.
   Exclusions and prefixes work with both. A query that uses any of this, or any newer
   filter, is answered by FTS5 even when Typesense is on.
 - **Newer filters** (`candidate_filters`, the Candidates "More filters", `search_candidates`):

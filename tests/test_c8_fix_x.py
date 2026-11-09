@@ -94,7 +94,7 @@ def test_short_or_punctuated_last_words_are_not_prefixes(store):
     store.add_candidate(name="Cora Cain", about="Loves cooking and cats")
     store.add_candidate(name="Max Sys", about="C++ developer")
     assert names(store.search_candidates("c++")) == ["Max Sys"]
-    assert names(store.search_candidates("c")) == ["Max Sys"]  # one letter is a word, not "starts with c"
+    assert names(store.search_candidates("c")) == []  # one letter is a word, not "starts with c"; and C++ is its own word now (cycle 10, Q)
     assert names(store.search_candidates("cook")) == ["Cora Cain"]  # three letters still complete as you type
 
 

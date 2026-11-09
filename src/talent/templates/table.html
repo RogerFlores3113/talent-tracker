@@ -8,11 +8,8 @@
   <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" href="/export.csv">Export CSV</a> <a class="btn primary" href="/candidates/new">Add</a></div>
 </div>
 <form class="tablebar" id="tablebar-form" method="get" action="/candidates">
-  <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search candidates">
-  <select name="tag" aria-label="Filter by skill" data-autosubmit>
-    <option value="">Any skill</option>
-    {% for t in tags %}<option value="{{ t.tag }}" {{ 'selected' if t.tag | lower == tag | lower }}>{{ t.tag }} ({{ t.count }})</option>{% endfor %}
-  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Search: python OR go, &quot;machine learning&quot;, title:engineer" aria-label="Search candidates">
+  <input type="text" name="tag" value="{{ tag }}" list="skill-list" placeholder="Any skill (type to find one)" aria-label="Filter by skill, type to find one" autocomplete="off">
   <input type="text" name="location" value="{{ location }}" placeholder="Location (sf, nyc, bay area)" aria-label="Filter by location">
   {% if sources %}<select name="source" aria-label="Filter by Found via" data-autosubmit>
     <option value="">Found via: Any source</option>
@@ -57,10 +54,12 @@
         <label class="check"><input type="checkbox" name="has_linkedin" value="1" {{ 'checked' if mf.get('has_linkedin') }}> Has a LinkedIn link</label>
       </div>
     </div>
-    <datalist id="skill-list">{% for t in tags %}<option value="{{ t.tag }}">{% endfor %}</datalist>
+    <datalist id="skill-list">{% for t in tags %}<option value="{{ t.tag }}">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</option>{% endfor %}</datalist>
     <p class="fine">Remote means the location says remote, or the person has a Remote tag. Years of experience are worked out from the dates in each work history (overlapping jobs count once, a job with no end date runs to today). People with no dated work history are left out when you set a minimum.</p>
   </details>
 </form>
+{% include "_search_tips.html" %}
+{% if q or keep %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
