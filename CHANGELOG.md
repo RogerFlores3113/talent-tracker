@@ -2,18 +2,11 @@
 
 All notable changes to Talent Search. Newest first.
 
-## [Unreleased]
-
-### Keyboard, screen reader and first-time use
-- The month calendar links only days that have interviews, so Tab skips the empty days.
-- Choosing Rejected or Withdrawn on the board and tabbing away now says "Not moved yet", shows a dashed menu, and puts the keyboard in the reason box.
-- After a save that reloads the page (Pin, Check again on Import, Settings), the keyboard lands on the notice so it is read out.
-- Time zone boxes take any zone (type a city or zone name) and show its offset. Interview forms name their session. "All day" interviews can be logged on the web form, and the interview note has a 500 character limit.
-- Input borders reach 3:1 in every theme, and forced colors and high contrast settings are handled. Esc closes a menu without closing the tour. No autofocus on Today or the add forms.
-- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish says in one line what happens to its saved searches.
-- A bad email on the add or edit form is refused next to the field. Pasting a note that names someone fills the name.
+## [0.2.0] - 2026-11-09
 
 ### Search
+- Search shorthand: `skill:`, `title:`, `company:` and other prefixes, `-word` to leave things out, quoted phrases, `OR`, and a line that says how the app read your search.
+- Saved searches, shown on Today and on the Candidates table. Saved searches can include a color tag.
 - NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
 - "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
 - Phrase, OR and NEAR searches look in notes too, so a wider search never finds fewer people.
@@ -30,11 +23,10 @@ All notable changes to Talent Search. Newest first.
 - Today lists every saved search, with pinning. Each count says what it counts.
 - Opening a saved search marks the people who are new since you last looked, and the table has an Added column. Someone added in the same second now counts.
 
-### Interviews and time zones
-- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
-- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
-- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
-- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
+### Candidates
+- Color tag bubbles. Click a bubble to cycle red, orange, yellow, green, blue, purple and off. Tagged people sort to the top.
+- A duplicate finder with bulk actions. Every email a person has now counts for duplicates, imports, merges and search.
+- Pasting a profile or an email signature fills in more fields, including "Title, Company" lines.
 
 ### Importing and duplicates
 - A re-import that brings someone back with a new email offers to update them instead of adding a copy.
@@ -46,11 +38,36 @@ All notable changes to Talent Search. Newest first.
 - Possible duplicates can be filtered by reason, one tick covers every pair of a filter, bulk merge pages start unticked, the newer email is the default main email, and same-named people are told apart by email or company.
 - Import tidies names: spaces trimmed, ALL CAPS or all lowercase turned into Title Case (McDonald and de la Cruz are left alone). "Other emails" are kept in their own field, not repeated in Notes.
 
+### Interviews and time zones
+- A month calendar, with the week view kept as an alternate. Download interviews as a calendar (.ics) file for your own calendar app.
+- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
+- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
+- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
+- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
+
 ### Paste and connect
 - Pasting a resume reads every role with its dates, and a note reads name, title and company. The check page says what wasn't found.
 - The Connect AI page asks which app you use, says when an app isn't installed, keeps technical details in a fold, and gives Claude Code its one-line connect command.
 
+### First run
+- A guided tour that can load sample data and clear it again. Skip it at any time, or replay a short version from the footer or Settings.
+
+### Keyboard, screen reader and first-time use
+- The month calendar links only days that have interviews, so Tab skips the empty days.
+- Choosing Rejected or Withdrawn on the board and tabbing away now says "Not moved yet", shows a dashed menu, and puts the keyboard in the reason box.
+- After a save that reloads the page (Pin, Check again on Import, Settings), the keyboard lands on the notice so it is read out.
+- Time zone boxes take any zone (type a city or zone name) and show its offset. Interview forms name their session. "All day" interviews can be logged on the web form, and the interview note has a 500 character limit.
+- Input borders reach 3:1 in every theme, and forced colors and high contrast settings are handled. Esc closes a menu without closing the tour. No autofocus on Today or the add forms.
+- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish says in one line what happens to its saved searches.
+- A bad email on the add or edit form is refused next to the field. Pasting a note that names someone fills the name.
+- A skip link, current-page marks, named calendar days, table captions and sort state.
+- Stage menus on the board wait for Enter, keep focus on the person you moved and announce the move.
+- Better contrast on Rejected and Withdrawn columns.
+
 ### Working with AI apps
+- Ready-made skills for Claude Code, Codex and Claude Desktop, installed from the app or by following INSTALL-SKILLS.md.
+- Prompt-injection guards: text that tries to give the AI orders is flagged, held for your review, and shown with a warning. The AI still can never delete anything, and it never adds an email to a person who is already saved.
+- Scraping is no longer ruled out. A "Stricter site guards" switch in Settings (off by default) asks the AI app to stay off sites whose terms forbid scraping and lowers its hourly cap. Some sites' terms forbid scraping, so check before you point an AI app at them.
 - Saved searches made by an AI app are on Changes and can be undone.
 - Interview replies say which time zone was used and name any clash. An interview needs a start time.
 - Held-for-review replies say exactly what went through and what waits.
@@ -63,33 +80,6 @@ All notable changes to Talent Search. Newest first.
 - A move to Hired and a job close wait on Review even for Trusted apps. A Settings switch lets trusted apps do them.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
-
-### Keyboard and screen readers
-- A skip link, current-page marks, named calendar days, table captions and sort state.
-- Stage menus on the board wait for Enter, keep focus on the person you moved and announce the move.
-- Better contrast on Rejected and Withdrawn columns.
-
-## [0.2.0] - 2026-11-09
-
-### Search
-- Search shorthand: `skill:`, `title:`, `company:` and other prefixes, `-word` to leave things out, quoted phrases, `OR`, and a line that says how the app read your search.
-- Saved searches, shown on Today and on the Candidates table. Saved searches can include a color tag.
-
-### Candidates
-- Color tag bubbles. Click a bubble to cycle red, orange, yellow, green, blue, purple and off. Tagged people sort to the top.
-- A duplicate finder with bulk actions. Every email a person has now counts for duplicates, imports, merges and search.
-- Pasting a profile or an email signature fills in more fields, including "Title, Company" lines.
-
-### Interviews
-- A month calendar, with the week view kept as an alternate. Download interviews as a calendar (.ics) file for your own calendar app.
-
-### First run
-- A guided tour that can load sample data and clear it again. Skip it at any time, or replay a short version from the footer or Settings.
-
-### Working with AI apps
-- Ready-made skills for Claude Code, Codex and Claude Desktop, installed from the app or by following INSTALL-SKILLS.md.
-- Prompt-injection guards: text that tries to give the AI orders is flagged, held for your review, and shown with a warning. The AI still can never delete anything, and it never adds an email to a person who is already saved.
-- Scraping is no longer ruled out. A "Stricter site guards" switch in Settings (off by default) asks the AI app to stay off sites whose terms forbid scraping and lowers its hourly cap. Some sites' terms forbid scraping, so check before you point an AI app at them.
 
 ## [0.1.0] - 2026-11-09
 
