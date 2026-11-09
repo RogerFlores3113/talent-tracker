@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
-from . import sessions
+from . import sessions, skills
 from . import ai_caps, trust
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
@@ -3038,7 +3038,37 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             lmstudio_on=integrations.lmstudio_connected(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
+            skill_status=[skills.status(t) for t in skills.TARGETS],
+            skill_names=skills.skill_names(),
+            desktop_steps=skills.DESKTOP_STEPS[0],
         )
+
+    @app.get("/connect/skills.zip")
+    def skills_zip():
+        """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
+        return Response(skills.build_zip(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
+
+    @app.post("/connect/skills/{target}/{action}", response_class=HTMLResponse)
+    def connect_skills(request: Request, target: str, action: str):
+        """Add or remove the Talent Search skills. 'preview-*' only lists the files; nothing is written until
+        the person presses the confirm button, which posts 'install' or 'remove'."""
+        if target not in skills.TARGETS or action not in ("preview-install", "install", "preview-remove", "remove"):
+            raise HTTPException(404)
+        try:
+            if action == "preview-install":
+                result = skills.plan_install(target)
+            elif action == "install":
+                result = skills.install(target)
+            elif action == "preview-remove":
+                result = skills.plan_remove(target)
+            else:
+                result = skills.remove(target)
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_result.html", action="error", target=target,
+                        error=integrations.friendly_error(exc))
+        return page(request, "_skills_result.html", action=action, target=target, result=result)
 
     @app.post("/connect/claude/report", response_class=HTMLResponse)
     def connect_report(request: Request):

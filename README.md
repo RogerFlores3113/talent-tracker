@@ -103,6 +103,21 @@ report** copies a report you can paste into a bug report.
 **Codex and LM Studio:** press **Connect Codex** or **Connect LM Studio** on the same
 page, then quit and reopen that app.
 
+## Skills for your AI app
+
+Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline
+reviews, feedback and decisions) that teach your AI app how to use it well. On the
+Connect AI page, press **Add Talent Search skills** for Claude Code or Codex. You see the
+exact files first, and only folders named `talent-search-*` that the app made are ever
+updated or removed. Claude Desktop takes skills as an upload: download the zip from the
+same page and add it under Customize > Skills.
+
+From a terminal: `talent install-skills [--claude-code] [--codex] [--zip PATH]` and
+`talent remove-skills`.
+
+Ask Claude Code or Codex: "install the skills in skills/ by following
+skills/INSTALL-SKILLS.md".
+
 ## Troubleshooting
 
 **Claude Desktop doesn't show Talent Search.**

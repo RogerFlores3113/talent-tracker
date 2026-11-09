@@ -1,0 +1,36 @@
+{% set app = {'claude-code': 'Claude Code', 'codex': 'Codex'}[target] %}
+{% if action == 'error' %}
+<p class="error">That didn't work: {{ error }}</p>
+<p class="fine">Nothing was finished. You can also ask your AI app: “Install the skills in skills/ by following skills/INSTALL-SKILLS.md”.</p>
+{% elif action == 'preview-install' %}
+  {% if result['items'] %}
+  <p><strong>These files will be added for {{ app }}:</strong></p>
+  <ul class="plain code-list">{% for f in result['files'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul>
+  <p class="fine">Nothing else is touched. Folders start with <code>talent-search-</code> and carry a small marker file, so only these are ever updated or removed later.</p>
+  {% endif %}
+  {% for s in result['skipped'] %}
+  <p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>
+  {% endfor %}
+  {% if result['items'] %}
+  <button class="btn primary" hx-post="/connect/skills/{{ target }}/install" hx-target="#skills-{{ target }}-result">Add these files</button>
+  {% endif %}
+{% elif action == 'install' %}
+  <p class="ok">Added {{ result['items']|length }} skills to {{ result['base'] }}.</p>
+  {% for s in result['skipped'] %}
+  <p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>
+  {% endfor %}
+  <p class="fine">Start a new {{ app }} session to pick them up.</p>
+  <details class="fine"><summary>Files written</summary><ul class="plain code-list">{% for f in result['written'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul></details>
+{% elif action == 'preview-remove' %}
+  {% if result['folders'] %}
+  <p><strong>These folders will be removed from {{ app }}:</strong></p>
+  <ul class="plain code-list">{% for f in result['folders'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul>
+  <p class="fine">Only folders Talent Search added (they carry its marker file). Your own skills are not touched.</p>
+  <button class="btn" hx-post="/connect/skills/{{ target }}/remove" hx-target="#skills-{{ target }}-result">Remove these folders</button>
+  {% else %}
+  <p>There are no Talent Search skills to remove for {{ app }}.</p>
+  {% endif %}
+{% elif action == 'remove' %}
+  <p class="ok">Removed {{ result['removed']|length }} skill folders from {{ app }}.</p>
+  {% for k in result['kept'] %}<p class="flash warn">Kept <code>{{ k }}</code> because it holds files that aren't ours.</p>{% endfor %}
+{% endif %}
