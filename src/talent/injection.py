@@ -289,7 +289,9 @@ def clean_deep(v: Any) -> Any:
 _SKIP_KEYS = frozenset({"id", "app_url", "at", "at_local", "created_at", "updated_at", "stage_changed_at", "when",
                         "kind", "status", "stage", "data_note", "description_note", "note", "caution", "warning",
                         "nudge", "close_out_hint", "summary_note", "app_name", "suggested_step", "pending_review",
-                        "stages", "stage_outcomes", "query", "suggestion", "corrected", "count", "next_step", "hint"})
+                        "stages", "stage_outcomes", "query", "suggestion", "corrected", "count", "next_step", "hint",
+                        # sentences Talent Search writes itself (never text from outside): not scanned, never taint
+                        "time_zone_note", "when_notes", "clash", "not_listed_note", "waiting_note"})
 _NAME_KEYS = ("name", "candidate_name", "title", "job_title", "client", "company")
 
 

@@ -13,6 +13,13 @@ from talent.paths import backups_dir
 from test_mcp import call, structured, text
 
 
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
+
 def _ai_titles(store) -> list[str]:
     return [i["title"] for i in actions.action_items(store)["items"] if i["kind"] == "ai_change"]
 

@@ -1,4 +1,5 @@
 """Cycle 5 re-review fixer I: Decide safety, interviewer verdicts, in-house stage defaults, close_job."""
+import pytest
 import json
 import re
 from datetime import datetime, time, timedelta, timezone
@@ -9,6 +10,13 @@ from talent.mcp_server import build_server
 from talent.store import interview_label, interview_note, now_iso
 
 from test_mcp import call, structured, text
+
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
 
 INHOUSE = list(actions.STAGE_SETS["inhouse"][1])
 

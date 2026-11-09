@@ -123,7 +123,7 @@
 
 <section class="panel" id="ai-apps">
   <h2>AI apps</h2>
-  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and nothing happens until you press Keep. <strong>Trusted</strong> apps can make changes on their own, within the Cautious mode rules above, and you can Undo anything they do.</p>
+  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and nothing happens until you press Keep. <strong>Trusted</strong> apps can make changes on their own, within the Cautious mode rules above, and you can Undo anything they do. A move to Hired and a job close still wait on Review, unless you turn on the switch below.</p>
   {% if ai_apps %}
   <form method="post" action="/settings/ai-apps" class="stack">
     <div class="table-wrap"><table class="table">
@@ -142,6 +142,9 @@
     </table></div>
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
       <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Tick this to have every new AI app wait for your Keep on each change until you trust it. Left unticked, a new app can make changes as soon as it connects, unless another app here is already set to Read only or Suggest only.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% else %}
@@ -149,6 +152,9 @@
   <form method="post" action="/settings/ai-apps" class="stack">
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
       <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Tick this to have every new AI app wait for your Keep on each change until you trust it. Left unticked, a new app can make changes as soon as it connects, unless another app here is already set to Read only or Suggest only.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% endif %}

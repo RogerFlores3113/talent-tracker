@@ -293,6 +293,18 @@ def _odd_hours(name: str, zone: str | None, s: datetime, e: datetime) -> str | N
     return None
 
 
+PERSON_HOURS = (8, 18)  # a person's own working hours (their local clock) when only their zone is known
+
+
+def _in_their_hours(zone: str | None, s: datetime, e: datetime) -> bool:
+    """Whether a session fits inside 8 AM to 6 PM on that person's own clock. True when no zone is known."""
+    z = zone_named(zone) if zone else None
+    if z is None:
+        return True
+    a, b = s.astimezone(z), e.astimezone(z)
+    return a.date() == b.date() and a.hour >= PERSON_HOURS[0] and (b.hour, b.minute) <= (PERSON_HOURS[1], 0)
+
+
 # ------------------------------------------------------------ the plan
 def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
          unavailable: list[str] | None = None, now: datetime | None = None,
@@ -347,11 +359,12 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
             m = -(-m // STEP) * STEP
             while m + mins <= h1 * 60:
                 s, e = _at(day, m), _at(day, m + mins)
-                if not cal.candidate_busy(candidate_id, s, e):
+                if not cal.candidate_busy(candidate_id, s, e) and _in_their_hours(cz, s, e):
                     if not spec["interviewers"]:
                         found = (s, e, None, [])
                     else:
-                        free = [w for w in eligible if not cal.busy_for(w, s, e)]
+                        free = [w for w in eligible if not cal.busy_for(w, s, e)
+                                and _in_their_hours(interviews.interviewer_zone({}, w, book), s, e)]
                         if free:
                             free.sort(key=lambda w: (cal.count(w, day), eligible.index(w)))
                             found = (s, e, free[0], free[1:])
@@ -367,7 +380,9 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
             else:
                 who = ", ".join(eligible) or "anyone"
                 row["warnings"].append(f"No time in the next {HORIZON_DAYS} working days when {cand['name']} and {who} "
-                                       "are all free. Add an interviewer for this session, or start later.")
+                                       "are all free and inside working hours (the recruiter's, and 8 AM to 6 PM "
+                                       "where the candidate and interviewers are, when their zones are known). "
+                                       "Add an interviewer for this session, or start later.")
             sessions.append(row)
             continue
         s, e, who, others = found
@@ -478,11 +493,11 @@ def check_slot(store: Store, candidate_id: int, at: str, minutes: int, interview
     out = []
     b = cal.candidate_busy(candidate_id, s, e)
     if b:
-        out.append(f"The candidate already has {b['what']} then.")
+        out.append(f"The candidate already has {b['what']}, which overlaps this session.")
     for w in interviews.interviewers(interviewer or ""):
         b = cal.busy_for(w, s, e)
         if b:
-            out.append(f"{w} is booked then ({b['cname']}, {b['what']}).")
+            out.append(f"{w} is booked then ({b['cname']}, {b['what']}), which overlaps this session.")
     return out
 
 

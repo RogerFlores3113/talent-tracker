@@ -150,7 +150,13 @@ def test_an_odd_hour_for_someone_in_another_zone_is_warned_about(store):
     store.save_interviewer("Dana Lee", None, "Asia/Kolkata")
     loops.save_template(store, jid, "System design | 60 | Dana Lee", "9-17")
     p = loops.plan(store, jid, cid, start="2026-11-10", now=datetime(2026, 11, 5, tzinfo=timezone.utc))
-    assert any("Dana Lee would be at" in w and "late" in w for w in p["sessions"][0]["warnings"])
+    # Cycle 10 wave 2: the planner no longer picks a late hour for Dana. 9 to 5 in Los Angeles never falls inside
+    # 8 AM to 6 PM in Kolkata, so no slot is placed and the warning says why.
+    assert not p["sessions"][0]["placed"]
+    assert any("working hours" in w for w in p["sessions"][0]["warnings"])
+    from datetime import timedelta
+    s = datetime(2026, 11, 10, 17, 0, tzinfo=timezone.utc)  # 10:30 PM in Kolkata, picked by hand
+    assert "Dana Lee would be at" in loops._odd_hours("Dana Lee", "Asia/Kolkata", s, s + timedelta(minutes=60))
 
 
 def test_the_log_form_takes_zones_an_interviewer_length_and_an_email(store):

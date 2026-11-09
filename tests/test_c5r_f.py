@@ -16,6 +16,13 @@ from talent.store import AI_NOTE_CAP
 from conftest import flash_of, local_client
 
 
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
+
 def call(server, tool, **args):
     async def go():
         return await server.call_tool(tool, args)

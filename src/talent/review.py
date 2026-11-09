@@ -60,6 +60,21 @@ def cautious(store: Store) -> bool:
     return cautious_setting(store) or injection.ACTIVE.get()
 
 
+TRUSTED_HIRED = "ai_trusted_hired"  # settings row, "1": trusted AI apps may mark Hired and close jobs unheld
+HIRED_WAIT_NOTE = ("Nothing changed yet: marking someone Hired and closing a job wait for the recruiter by default, "
+                    "so they keep or pass it in the app (Review). Don't send it again.")
+
+
+def hold_hired_close(store: Store) -> bool:
+    """Whether an AI app's move into Hired, or close of a job, waits on Review. It does unless the recruiter turned on
+    "Let trusted AI apps mark people Hired and close jobs" in Settings (off by default). Cautious mode and a
+    session that read flagged text hold these too, through cautious()."""
+    from .trust import REPLAY  # here: trust imports this module
+    if REPLAY.get():
+        return False
+    return store.setting(TRUSTED_HIRED) != "1"
+
+
 def set_cautious(store: Store, on: bool) -> None:
     with store._write():  # its own settings row (not one of the Today settings set_settings checks)
         store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE"
