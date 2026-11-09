@@ -2,6 +2,26 @@
 
 All notable changes to Talent Search. Newest first.
 
+## [0.1.1] - 2026-11-09
+
+### Search and candidates
+- Search syntax: OR groups, exclusions and field prefixes, with a note on how your search was read. More filters, and saved searches you can color.
+- Color tags on the Candidates table, each person's page, CSV exports and the AI app.
+- A duplicate finder with bulk actions, better paste-a-profile parsing, and CSV export aliases.
+- Imports never skip an email column, re-imports only move forward, and every email a person has counts. Tags like `c#` and `f#` stay whole.
+
+### Interviews
+- A month calendar, with the week view still available, and calendar (`.ics`) downloads.
+
+### Your AI app
+- Talent Search skills for Claude Code, Codex and Claude Desktop, installed from inside the app.
+- Guards against instructions hidden in profiles and pages: warnings in the app, and the AI app can never delete anything.
+- A Settings switch that tells the AI app to stay off sites whose terms forbid scraping, with a lower hourly cap.
+- The AI app never adds an email to a person already saved, and says which ones it left out. It refuses more than 60 years of experience.
+
+### Getting started
+- A first-run guided tour with demo data that you can skip or replay.
+
 ## [0.1.0] - 2026-11-09
 
 The first release. Talent Search is a candidate database that lives on your own computer, that opens in your web browser for you and tools for your AI app.
