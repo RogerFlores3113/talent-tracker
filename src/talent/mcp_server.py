@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema, model_validator
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, duplicates, opsreview
@@ -39,6 +39,7 @@ from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, stage_outcome
 from .mcp_views import MIME, RESOURCE_META, URIS, tool_meta, view_html
 from . import searchquery
 from .paths import app_url
+from .links import MAX_LINKS, clean_links, fold_link_args, link_label, stored_links, text_line
 from .store import (clean_color, clean_duration, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
@@ -273,6 +274,13 @@ class Prospect(BaseModel):
     tags: list[str] | None = Field(None, description="Skills, saved with them if kept",
                                    validation_alias=AliasChoices("tags", "skills"))
     work_history: list[WorkEntry] | None = None
+    links: list[str] | str | None = Field(None, description="Other links: GitHub, portfolio, Scholar, X... "
+                                                            "(web addresses only; github, portfolio and urls work too)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _link_names(cls, data: Any) -> Any:
+        return fold_link_args(data) if isinstance(data, dict) else data
 
 
 class PersonIn(BaseModel):
@@ -293,7 +301,14 @@ class PersonIn(BaseModel):
     work_history: list[WorkEntry] | None = None
     source: str | None = None
     other_emails: list[str] | None = Field(None, description="More email addresses for someone new; never added to a person already saved")
+    links: list[str] | str | None = Field(None, description="Other links (GitHub, portfolio...): web addresses only; "
+                                                            "github, portfolio and urls work too")
     create_anyway: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _link_names(cls, data: Any) -> Any:
+        return fold_link_args(data) if isinstance(data, dict) else data
 
 
 def split_headline(headline: str) -> tuple[str, str | None]:
@@ -331,20 +346,9 @@ def _search_path(q: str, kw: dict[str, Any]) -> str:
     return "/candidates?" + urlencode(params) if params else "/candidates"
 
 
-def _card_links(c: dict[str, Any]) -> list[str]:
-    """The extra links saved on a person (a `links` list of URLs, or of {url} objects), as plain https URLs."""
-    raw = c.get("links")
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except ValueError:
-            raw = [x for x in re.split(r"[\s,]+", raw) if x]
-    out: list[str] = []
-    for x in raw if isinstance(raw, (list, tuple)) else []:
-        u = x.get("url") if isinstance(x, dict) else x
-        if isinstance(u, str) and re.match(r"https?://", u.strip(), re.I) and u.strip() not in out:
-            out.append(u.strip()[:500])
-    return out[:12]
+def _card_links(c: dict[str, Any]) -> list[dict[str, str]]:
+    """The extra links saved on a person as {url, label} (labels as the app names them), at most 10."""
+    return [{"url": u, "label": link_label(u)} for u in stored_links(c.get("links"))[:MAX_LINKS]]
 
 
 def _card_fields(c: dict[str, Any], link) -> dict[str, Any]:
@@ -794,6 +798,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
             out.append(f"{label}: {_local(c[k]) if k.endswith('_at') else c[k]}")
         if k == "email" and c.get("other_emails"):
             out.append("Other emails: " + ", ".join(c["other_emails"]))
+    if c.get("links"):
+        out.append(text_line(stored_links(c["links"])))
     if c.get("tags"):
         out.append("Skills: " + ", ".join(c["tags"]))
     if c.get("about"):
@@ -1002,14 +1008,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         results = []
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
-                                                 "tags", "email", "linkedin_url", "source", "last_contacted_at",
-                                                 "updated_at", "created_at", "color")}
+                                                 "tags", "email", "linkedin_url", "website", "source",
+                                                 "last_contacted_at", "updated_at", "created_at", "color")}
+            c["links"] = stored_links(h.candidate.get("links"))
             c["jobs"] = [_slim({"job_id": p["job_id"], "job": _job_name({"title": p["job_title"],
                                                                          "company": p.get("job_company")}),
                                 "stage": p["stage"], "since": p.get("stage_changed_at"),
                                 "state": stage_outcome(p["stage"]) if stage_outcome(p["stage"]) != "open" else None})
                         for p in store.candidate_pipelines(c["id"])]
-            c["website"] = h.candidate.get("website")
             c["has_email"] = bool(c.get("email"))
             if h.snippet:
                 c["match"] = snippet_text(h.snippet)
@@ -1246,9 +1252,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
         other_emails: list[str] | None = None,
+        links: list[str] | str | None = None,
         create_anyway: bool = False,
     ) -> CallToolResult:
         """Add a candidate, or update the existing one if the email or LinkedIn URL already exists.
+
+        links: their other links (GitHub, portfolio, Google Scholar, X...), as web addresses only; github,
+        portfolio and urls work too. On a person already saved, new links are added and none are removed.
 
         other_emails: more addresses for someone new (a personal one next to the work one). They count when
         matching, so a saved person is found by any of their addresses. You can't add an address to a person who
@@ -1291,9 +1301,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             saved_now = store.find_duplicate(email, linkedin_url)
             if saved_now is None or not (saved_now.get("about") or "").strip():
                 about, note_as_about = notes_text, True  # the notes are the about when there is none yet
+        link_list = clean_links(links, exclude=(linkedin_url, website)) if links not in (None, [], "") else None
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
-                      about=about, tags=tags, source=source)
+                      about=about, tags=tags, source=source, links=link_list or None)
         more = [e.strip().lower() for e in (other_emails or []) if isinstance(e, str) and _EMAIL_RE.match(e.strip())]
         someone_else: list[dict[str, Any]] = []
         if (not create_anyway and store.find_duplicate(email, linkedin_url) is None
@@ -1378,7 +1389,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes.append(f"Not saved, because save_candidate has no field for them: {', '.join(ignored)}. Put "
                          "skills in tags and anything else worth keeping in about or notes. It takes: name, email, phone, "
                          "linkedin_url, website, current_title (or title, headline), current_company (or company), "
-                         "location, about (or notes), tags (or skills), work_history, source, other_emails.")
+                         "location, about (or notes), tags (or skills), work_history, source, other_emails, links.")
         if headline_unused and (headline_unused.casefold() != (current_title or "").strip().casefold()):
             notes.append(f"Did not use the headline {headline_unused[:80]!r}, as you also sent a current_title. "
                          "Put it in notes or about if you want it kept.")
@@ -1447,8 +1458,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
         last_contacted_at: str | None = None,
+        links: list[str] | str | None = None,
     ) -> CallToolResult:
         """Change fields on a candidate by id. Pass an empty string (or empty list) to clear a field.
+
+        links: other links (GitHub, portfolio, Google Scholar...), web addresses only. They are added to the
+        person's links; you can't remove one here (the recruiter does that in the app).
 
         You can clear at most one field per call. Name, email, phone and LinkedIn URL say who the person is: you
         can change one of them per person every 10 minutes; anything more needs the recruiter in the app. A new name must still look like the same person ("Priya R." to "Priya Raman" is fine; a
@@ -1463,6 +1478,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source, last_contacted_at=last_contacted_at)
         current = store.get_candidate(candidate_id)
+        link_list = (clean_links(links, exclude=(linkedin_url or current.get("linkedin_url"),
+                                                 website or current.get("website")))
+                     if links not in (None, [], "") else [])
         if name and sentence_like_name(name):
             raise ValueError("No change made. The new name reads like a sentence, not a person's name. Ask the "
                              "recruiter what this person is called.")
@@ -1506,6 +1524,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError(_cap_text())
         cand = store.update_candidate(candidate_id, work_history=history, by="ai", **data)
         changed = cand.pop("_changed", [])
+        links_skipped: list[str] = []
+        if link_list:  # links only ever get added; not a replaced value, so no edit budget is used
+            more_links = store.add_links(candidate_id, link_list, by="ai")
+            links_skipped = more_links.pop("_links_skipped", [])
+            if more_links.pop("_changed", []):
+                changed = [*changed, "links"]
+            cand = {**cand, "links": more_links.get("links", cand.get("links"))}
         who = f"{quoted(cand['name'])} (id {candidate_id})"
         if not changed:
             sentence = (f"Nothing changed on {who} yet." if waiting
@@ -1517,6 +1542,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if waiting:
             sentence += " " + _wait_text(waiting, part=bool(changed))
         out: dict[str, Any] = {**_slim(cand), "changed": changed}
+        if links_skipped:
+            out["links_not_added"] = links_skipped
+            sentence += f" Not added, as a person can have 10 other links: {', '.join(links_skipped)}."
         if waiting:
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
         if lead:
@@ -2653,6 +2681,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 line += f". Fit: {p['fit']}"
             if p.get("tags"):
                 line += f". Skills: {', '.join(p['tags'])}"
+            if p.get("links"):
+                line += ". " + text_line(p["links"])
             if p.get("status") == "passed":
                 line += ". Passed" + (f": {p['pass_reason']}" if p.get("pass_reason") else "")
             elif p.get("status") == "kept" and p.get("candidate_id"):
@@ -2668,12 +2698,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         or with the buttons on the Shortlist card in the chat.
 
         Up to 25 people per call, each with name, linkedin_url (their linkedin.com/in/ link), title, company,
-        location, email and fit (one line on why they fit this job; reason works too). Add about (2 to 4 sentences), tags (skills) and
+        location, email, links (GitHub, portfolio or other web addresses) and fit (one line on why they fit this job; reason works too). Add about (2 to 4 sentences), tags (skills) and
         work_history when you know them: a kept person is saved with them, so search finds them later.
         People already proposed, kept or passed on for this
         job, or already in its pipeline, are skipped and named in the reply. People already saved are flagged
         with their candidate id and the jobs they're in. Undo in the app takes back the ones still waiting."""
         ignored = sorted({k for p in people for k in (p.model_extra or {})})
+        for p in people:  # a link that isn't a web address refuses the call, before anything is added
+            clean_links(p.links, exclude=(p.linkedin_url,)) if p.links else None
         if len(people) > ai_caps.proposed_left(store):
             raise ValueError(ai_caps.limit_text(f"propose {ai_caps.PROPOSE_CAP} people for Shortlists",
                                                 ai_caps.proposed_left(store)))
@@ -2694,7 +2726,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             shown = ", ".join(x[:40] for x in ignored[:8]) + (f" and {len(ignored) - 8} more" if len(ignored) > 8 else "")
             sentence += (f" Not saved, as the Shortlist doesn't take {'it' if len(ignored) == 1 else 'them'}: {shown}. "
                          "It takes name, linkedin_url, title (or headline), company, location, email, fit (or reason), "
-                         "source, about, tags and work_history.")
+                         "source, about, tags, links and work_history.")
         guard_site = next((x for x in listed if x), None)
         if guard_site:
             kept_names = {a.get("name") for a in added}  # the people actually added, not the ones skipped
@@ -3875,6 +3907,8 @@ ARG_ALIASES = {
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one
 # extra field. Every other tool refuses an argument it doesn't know.
 LENIENT_TOOLS = {"save_candidate"}
+# Tools whose github, portfolio and urls arguments are other names for links.
+LINK_TOOLS = {"save_candidate", "update_candidate"}
 _IGNORED: ContextVar[list[str]] = ContextVar("talent_ignored_args", default=[])
 
 
@@ -3909,6 +3943,8 @@ def _check_arguments(mcp: FastMCP) -> None:
         if tool is None:
             return await original(name, arguments, context=context, convert_result=convert_result)
         args = dict(arguments or {})
+        if name in LINK_TOOLS:
+            args = fold_link_args(args)
         for alias, real in ARG_ALIASES.get(name, {}).items():
             if alias in args and real not in args:
                 args[real] = args.pop(alias)
@@ -3955,7 +3991,7 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
     bad = trust.size_problem(args)
     if bad:
         return bad
-    args = dict(args)
+    args = fold_link_args(dict(args)) if name in LINK_TOOLS else dict(args)
     for alias, real in ARG_ALIASES.get(name, {}).items():  # the same other names the tool itself takes
         if alias in args and real not in args:
             args[real] = args.pop(alias)
@@ -3980,6 +4016,8 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
             bad = _save_search_blocker(store, args.get("name"))  # a taken name or a full list would be refused anyway
             if bad:
                 return f"No change made: {bad}"
+        if name in LINK_TOOLS and args.get("links") not in (None, [], ""):
+            clean_links(args["links"])  # a link that isn't a web address is refused now, not held
         if name == "set_candidate_color":
             clean_color(args.get("color"))  # a color that isn't one of the six is refused now, not held
         if name == "set_followup_sequence":

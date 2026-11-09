@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from .links import clean_links, link_label
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions, skills
 from . import ai_caps, site_guard, trust
@@ -121,6 +122,7 @@ class CandidateIn(BaseModel):
     tags: str | list[str] | None = None
     source: str | None = None
     last_contacted_at: str | None = None
+    links: str | list[str] | None = None
 
 
 def _ago(iso: str | None, now: datetime | None = None) -> str:
@@ -356,6 +358,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
+    env.filters["link_label"] = link_label
     env.globals["version"] = __version__
     env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
     env.globals["themes"] = THEMES
@@ -1031,7 +1034,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_emails = _split_emails(form.get("other_emails"))
         if other_emails:
             data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
-        bad = _bad_email_fields(data, other_emails)
+        bad = {**_bad_email_fields(data, other_emails), **_bad_link_fields(data)}
         if bad:
             return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                         error="Nothing was saved. " + " ".join(bad.values()), field_errors=bad,
@@ -1084,7 +1087,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = _form_fields(form, keep_blank=True)
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
-        bad = _bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else [])
+        bad = {**_bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else []),
+               **_bad_link_fields(data)}
         if bad:
             return page(request, "candidate_form.html",
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
@@ -3732,6 +3736,15 @@ def _bad_email_fields(data: dict[str, Any], others: list[str]) -> dict[str, str]
     if wrong:
         out["other_emails"] = f"{wrong[0][:60]!r} doesn't look like an email address. Fix that line or delete it."
     return out
+
+
+def _bad_link_fields(data: dict[str, Any]) -> dict[str, str]:
+    """An Other links line that isn't a web address, or too many: {"links": message}. Blank is fine."""
+    try:
+        clean_links(data.get("links"), exclude=(data.get("linkedin_url"), data.get("website")))
+    except ValueError as exc:
+        return {"links": str(exc)}
+    return {}
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

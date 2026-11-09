@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
+from .links import clean_links, link_key, merge_links, stored_links
 from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
@@ -112,6 +113,7 @@ ALL_TIMELINE_KINDS = (*TIMELINE_KINDS, CHANGE_KIND)
 FIELD_LABELS = {
     "current_title": "title", "current_company": "company", "linkedin_url": "LinkedIn",
     "last_contacted_at": "last contacted", "tags": "skills", "work_history": "work history",
+    "links": "other links",
 }
 # Who made a change -> the timeline entry's source ("from AI app", "from CSV import").
 CHANGE_SOURCES = {"app": "App", "ai": "AI app", "import": "CSV import"}
@@ -123,6 +125,7 @@ FIELD_LIMITS = {
     "name": 200, "email": 320, "phone": 50, "linkedin_url": 500, "website": 500, "current_title": 200,
     "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
     "tags": 3000,  # all skills joined into one text
+    "links": 6000,  # the JSON list of other links (10 links of up to 500 characters)
 }
 # Longest timeline entry (a note, a call summary, an email summary) one log call takes.
 NOTE_LIMIT = 20000
@@ -144,6 +147,7 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "source",
     "last_contacted_at",
     "color",
+    "links",
 )
 # The colour bubbles on the Candidates table, in rainbow order (the order they cycle and sort in).
 COLORS: tuple[str, ...] = ("red", "orange", "yellow", "green", "blue", "purple")
@@ -790,6 +794,8 @@ _MIGRATIONS: tuple[Any, ...] = (
     # v10w3: an "Other emails: ..." note that only repeats addresses the person keeps in their Other emails field is
     # removed (older imports wrote both). A note with any other words in it is left alone.
     ("SELECT 1;", _migrate_v10w3_data),
+    # v11l: other links on a person (GitHub, portfolio, Scholar...), a JSON list of web addresses.
+    "ALTER TABLE candidates ADD COLUMN links TEXT;",
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -2354,15 +2360,25 @@ class Store:
     def _hydrate(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is not None:
             row["tags"] = stored_tags(row.get("tags"))
+            if "links" in row:
+                row["links"] = stored_links(row.get("links"))
             row.pop("history_text", None)
             row.pop("linkedin_key", None)
         return row
 
-    def _prepare(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _prepare(self, data: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
         unknown = set(data) - set(CANDIDATE_FIELDS)
         if unknown:
             raise ValueError(f"Unknown candidate field(s): {', '.join(sorted(unknown))}")
-        out = {k: _clean(v) for k, v in data.items()}
+        out = {k: (v if k == "links" else _clean(v)) for k, v in data.items()}
+        if "links" in out:  # a list (or text) of addresses -> the saved JSON text, or None when empty
+            keep = (out.get("linkedin_url") if "linkedin_url" in out else (existing or {}).get("linkedin_url"),
+                    out.get("website") if "website" in out else (existing or {}).get("website"))
+            if out.get("website"):
+                keep = (keep[0], web_link(out["website"]))
+            out["links"] = json.dumps(clean_links(out["links"], exclude=keep)) if out["links"] else None
+            if out["links"] == "[]":
+                out["links"] = None
         if "tags" in out:
             out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
@@ -2665,8 +2681,8 @@ class Store:
             by_email = bool(hit_email)
             raise IdentityConflict(existing, incoming_name, "email" if by_email else "linkedin_url",
                                    hit_email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
-        incoming = self._prepare(data)
         row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
+        incoming = self._prepare(data, row)
         merged: dict[str, Any] = {}
         kept: list[str] = []
         for k, v in incoming.items():
@@ -2675,6 +2691,12 @@ class Store:
             cur = row.get(k)
             if k == "tags":
                 merged[k] = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
+            elif k == "links":  # saved again: new links are added, none are ever dropped
+                both = merge_links(stored_links(cur), stored_links(v),
+                                   exclude=(row.get("linkedin_url"), incoming.get("linkedin_url") or None,
+                                            row.get("website"), incoming.get("website") or None))
+                if both != stored_links(cur):
+                    merged[k] = json.dumps(both)
             elif k in MERGE_OVERWRITES:
                 merged[k] = v
             elif k == "last_contacted_at":
@@ -2686,7 +2708,8 @@ class Store:
                 kept.append(k)
         history = work_history or self._history_for_new_role(existing["id"], row, merged)
         cand = self._update(existing["id"], merged, history, by=by, merge=True,
-                            derived=() if work_history or history is None else ("work_history",))
+                            derived=(() if work_history or history is None else ("work_history",))
+                            + (("links",) if "links" in merged else ()))
         cand["_kept"] = kept
         newer = [e for e in [_clean(data.get("email")), *extra] if e]  # a different address of theirs is kept too
         if by == "ai":  # an address says who someone is: the AI app never adds one to a person already saved
@@ -2757,11 +2780,32 @@ class Store:
         be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
         carries "_changed", the fields that actually changed. via="claude": the recruiter did it with a button in
         Claude (Changes says so)."""
-        fields = self._prepare(data)
+        row = self._row("SELECT linkedin_url, website FROM candidates WHERE id = ?", (candidate_id,))
+        fields = self._prepare(data, row)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
         return self._update(candidate_id, fields, work_history, by=by, via=via)
+
+    def add_links(self, candidate_id: int, links: Any, *, by: str = "app", via: str | None = None) -> dict[str, Any]:
+        """Add other links to a person, keeping the ones they have (nothing is ever removed this way). Raises
+        ValueError for an entry that isn't a web address. The returned candidate carries "_changed" and
+        "_links_added" (the new ones) and "_links_skipped" (left out because of the cap of 10)."""
+        row = self._row("SELECT linkedin_url, website, links FROM candidates WHERE id = ?", (candidate_id,))
+        if row is None:
+            raise NotFound(f"No candidate with id {candidate_id}")
+        wanted = clean_links(links, exclude=(row.get("linkedin_url"), row.get("website")))
+        have = stored_links(row.get("links"))
+        both = merge_links(have, wanted, exclude=(row.get("linkedin_url"), row.get("website")))
+        added = [u for u in both if u not in have]
+        skipped = [u for u in wanted if u not in both and link_key(u) not in {link_key(h) for h in have}]
+        if added:
+            cand = self._update(candidate_id, {"links": json.dumps(both)}, None, by=by, via=via, derived=("links",))
+        else:
+            cand = self.get_candidate(candidate_id)
+            cand["_changed"] = []
+        cand["_links_added"], cand["_links_skipped"] = added, skipped
+        return cand
 
     def set_color(self, candidate_id: int, color: str | None) -> dict[str, Any]:
         """The recruiter's quick colour tag from the bubble on the Candidates table. It saves at once and changes
@@ -3692,6 +3736,12 @@ class Store:
                 elif k == "last_contacted_at":
                     if ov and (not kv or ov > kv):
                         fields[k] = ov
+                elif k == "links":
+                    both = merge_links(stored_links(kv), stored_links(ov),
+                                       exclude=(fields.get("linkedin_url") or krow.get("linkedin_url"),
+                                                fields.get("website") or krow.get("website")))
+                    if both != stored_links(kv):
+                        fields[k] = json.dumps(both)
                 elif ov and not kv:
                     fields[k] = ov
                 elif k not in ("name", "color") and ov and kv and str(ov).strip() != str(kv).strip():
@@ -3732,7 +3782,7 @@ class Store:
             old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields}
             if fields:
                 self._apply(keep_id, fields)
-            filled = [k for k in fields if k not in ("tags", "work_history")]
+            filled = [k for k in fields if k not in ("tags", "work_history", "links")]
             kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
             new_main = self._promote_email(keep_id, want) if want else None
             bits = [f"filled {_labels(filled)}"] if filled else []
@@ -3743,6 +3793,8 @@ class Store:
                             f"({', '.join(kept_emails)})")
             if "tags" in fields:
                 bits.append("added skills")
+            if "links" in fields:
+                bits.append("added their other links")
             if moved:
                 bits.append(f"moved {moved} timeline entr{'y' if moved == 1 else 'ies'}")
             if jobs:

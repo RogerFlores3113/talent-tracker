@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from . import __version__
+from .links import labels_json
 
 MIME = "text/html;profile=mcp-app"
 URIS = {
@@ -44,7 +45,8 @@ def view_html(name: str) -> str:
     if name not in URIS:
         raise KeyError(name)
     css = _read("kit.css") + ("\n" + _read("people.css") if name == "people" else "")
-    kit = _read("kit.js").replace("__VERSION__", json.dumps(__version__))
+    kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
+           .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Talent Search</title>"

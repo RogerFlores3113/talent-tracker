@@ -66,8 +66,9 @@ function fullscreenButton(){if(!canFullscreen())return null;
 function safeUrl(u){try{const x=new URL(String(u||""));return /^https?:$/.test(x.protocol)?x:null}catch(e){return null}}
 function appOrigin(u){const x=safeUrl(u);return x?x.origin:""}
 function isLocal(x){return /^(127\.0\.0\.1|localhost|\[::1\])$/.test(x.hostname)}
-const HOSTS=[[/(^|\.)linkedin\.com$/,"LinkedIn"],[/(^|\.)github\.com$/,"GitHub"],[/(^|\.)gitlab\.com$/,"GitLab"],[/(^|\.)(x|twitter)\.com$/,"X"],[/(^|\.)scholar\.google\./,"Google Scholar"],[/(^|\.)stackoverflow\.com$/,"Stack Overflow"],[/(^|\.)medium\.com$/,"Medium"],[/(^|\.)dribbble\.com$/,"Dribbble"],[/(^|\.)behance\.net$/,"Behance"],[/(^|\.)kaggle\.com$/,"Kaggle"],[/(^|\.)huggingface\.co$/,"Hugging Face"],[/(^|\.)substack\.com$/,"Substack"],[/(^|\.)youtube\.com$/,"YouTube"],[/(^|\.)orcid\.org$/,"ORCID"]];
-function hostLabel(u){const x=safeUrl(u);if(!x)return"Link";for(const[re,n]of HOSTS)if(re.test(x.hostname))return n;return"Portfolio"}
+const LINK_LABELS=__LINK_LABELS__;
+function hostLabel(u){const x=safeUrl(u);if(!x)return"Portfolio";let h=x.hostname.toLowerCase().replace(/^www\./,"");const parts=h.split(".");
+ for(let i=0;i<parts.length-1;i++){const n=LINK_LABELS[parts.slice(i).join(".")];if(n)return n}return"Portfolio"}
 function copyText(text,node){
  const sel=()=>{if(!node)return;const r=document.createRange();r.selectNodeContents(node);const s=window.getSelection();s.removeAllRanges();s.addRange(r)};
  try{if(navigator.clipboard&&navigator.clipboard.writeText)return navigator.clipboard.writeText(text).then(()=>true,()=>{sel();return false})}catch(e){}
@@ -139,7 +140,7 @@ function linksRow(c,primary){
  const add=(u,text,aria)=>{const x=safeUrl(u);if(!x||seen.has(x.href))return;seen.add(x.href);row.append(el("button",{class:"btn",type:"button","aria-label":aria,onclick:()=>openLink(x.href,text)},text))};
  if(c.linkedin_url)add(c.linkedin_url,"LinkedIn","LinkedIn profile of "+nm);
  if(c.website)add(c.website,"Website","Website of "+nm);
- for(const u of c.links||[]){const l=hostLabel(u);add(u,l,l+" of "+nm)}
+ for(const x of c.links||[]){const u=typeof x==="string"?x:(x&&x.url);const l=(x&&x.label)||hostLabel(u);add(u,l,l+" of "+nm)}
  return row}
 function stageOf(c){const j=(c.jobs||[])[0];return j||null}
 function stageText(j){return j?(j.stage+(j.job?", "+j.job:"")):""}

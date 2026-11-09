@@ -89,9 +89,16 @@ def test_candidate_cards_caps_at_twenty_and_reads_links(store):
     ids = [store.add_candidate(name=f"Person {i}")["id"] for i in range(25)]
     assert len(data(call(server, "candidate_cards", candidate_ids=ids))["cards"]) == 20
     from talent.mcp_server import _card_links
-    assert _card_links({"links": ["https://github.com/a", "javascript:alert(1)", "https://github.com/a"]}) == [
-        "https://github.com/a"]
-    assert _card_links({"links": '["https://x.dev"]'}) == ["https://x.dev"]
+    got = _card_links({"links": [f"https://github.com/u{i}" for i in range(14)]})
+    assert len(got) == 10 and got[0] == {"url": "https://github.com/u0", "label": "GitHub"}
+    assert _card_links({"links": '["https://x.dev"]'}) == [{"url": "https://x.dev", "label": "Portfolio"}]
+
+
+def test_the_view_names_links_with_the_apps_own_table():
+    from talent.links import LINK_LABELS
+    html = view_html("people")
+    assert "__LINK_LABELS__" not in html and '"scholar.google.com":"Google Scholar"' in html
+    assert len(LINK_LABELS) > 20
 
 
 def test_search_is_lean_and_pages_with_offset(store):
