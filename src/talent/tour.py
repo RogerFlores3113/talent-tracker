@@ -41,7 +41,7 @@ STEPS: list[dict[str, Any]] = [
     {"id": "codex", "title": "Connect Codex or another app", "path": "/connect", "target": ["#codex-panel"],
      "pulse": "#codex-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
      "body": "Using Codex instead? One click here connects it the same way. LM Studio has its own button just below, "
-             "and any other app that runs local tools (Cursor, Windsurf and others) takes the settings under By hand. "
+             "and any other app that runs local tools (Cursor, Windsurf and others) takes the settings under Details for technical users. "
              "Don't have it? Press Next, you can connect later."},
     {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
      "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),

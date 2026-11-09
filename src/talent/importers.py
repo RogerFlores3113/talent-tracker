@@ -1942,7 +1942,7 @@ _PHONE = re.compile(r"(?:\+?\(?\d[\d \t().-]{7,}\d)")
 _LINKEDIN = re.compile(r"(?:https?://)?(?:[a-z]{2,3}\.)?linkedin\.com/in/[\w%-]+/?", re.I)
 _URL = re.compile(r"https?://[^\s)>,]+", re.I)
 _TLDS = r"(?:com|dev|io|me|org|net|co|ai|app|xyz|tech|sh|page|site|info|us|uk|ca|de|eu|so|gg|codes|design)"
-_BARE = re.compile(r"(?<![\w@/.:-])((?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\." + _TLDS + r")(/[^\s)>,]*)?(?![\w@.-])")
+_BARE = re.compile(r"(?<![\w@/.:-])((?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\." + _TLDS + r")(/[^\s)>,]*)?(?![\w@-])(?!\.[\w-])")
 _PRONOUNS = re.compile(r"\(?\b(?:he|she|they|xe|ze)\s*/\s*(?:him|her|them|his|hers|their|theirs|xem|zir)"
                        r"(?:\s*/\s*\w+)?\b\)?", re.I)
 _DEGREE = re.compile(r"^(?:·\s*)?(?:1st|2nd|3rd\+?)(?:\s+degree connection)?$", re.I)
@@ -2043,7 +2043,8 @@ def _looks_like_linkedin(text: str) -> bool:
 _SKILL_HEADS = re.compile(r"^(?:technical |core |key )?(?:skills|skills & tools|skills and tools|tech stack|"
                           r"technologies|tools|competencies)\s*:?\s*(?P<rest>.*)$", re.I)
 _EXP_HEADS = {"experience", "work experience", "professional experience", "employment", "employment history",
-              "work history", "career history", "experience:", "work experience:", "employment:"}
+              "work history", "career history", "experience:", "work experience:", "employment:",
+              "relevant experience", "professional background", "career summary", "work experience and history"}
 _RESUME_SECTIONS = _SECTIONS | {"education:", "skills:", "projects:", "summary", "summary:", "profile", "objective",
                                 "certifications", "awards", "references", "contact", "technical skills",
                                 "publications:", "languages:", "interests:"} | _EXP_HEADS
@@ -2088,12 +2089,10 @@ _TOTAL_TIME = re.compile(rf"^(?:{_EMPLOY}\s*·\s*)?\d+\s*(?:yrs?|years?)(?:\s+\d
 _EMPLOYMENT = re.compile(rf"·\s*{_EMPLOY}\b", re.I)
 
 
-def _experience_section(lines: list[str]) -> list[dict[str, str]]:
-    """Roles under an Experience heading, only where each one has a clear date range.
-
-    Takes 'Senior Engineer at Stripe (2021 - Present)', 'Senior Engineer | Stripe | 2021 - now', and
-    LinkedIn's three lines (title, 'Stripe · Full-time', 'Jan 2021 - Present · 3 yrs')."""
-    start = next((i for i, l in enumerate(lines) if l.lower().strip() in _EXP_HEADS), None)
+def _experience_body(lines: list[str]) -> list[str]:
+    """The lines under the Experience heading, up to the next heading."""
+    start = next((i for i, l in enumerate(lines) if l.lower().strip().rstrip(":") in {h.rstrip(":") for h in _EXP_HEADS}),
+                 None)
     if start is None:
         return []
     body: list[str] = []
@@ -2101,6 +2100,17 @@ def _experience_section(lines: list[str]) -> list[dict[str, str]]:
         if _is_section(line):
             break
         body.append(line)
+    return body
+
+
+def _experience_section(lines: list[str]) -> list[dict[str, str]]:
+    """Roles under an Experience heading, only where each one has a clear date range.
+
+    Takes 'Senior Engineer at Stripe (2021 - Present)', 'Senior Engineer | Stripe | 2021 - now', and
+    LinkedIn's three lines (title, 'Stripe · Full-time', 'Jan 2021 - Present · 3 yrs')."""
+    body = _experience_body(lines)
+    if not body:
+        return []
     out: list[dict[str, str]] = []
     used = -1
     group = ""  # LinkedIn's one company, several roles layout: company, its total time, then each role
@@ -2131,11 +2141,15 @@ def _experience_section(lines: list[str]) -> list[dict[str, str]]:
         title = company = ""
         if rest:
             split = _split_role(rest)
-            parts = [p.strip() for p in re.split(r"\s+\|\s+|\s+·\s+|,\s+|\s+[-–]\s+", rest) if p.strip()]
+            parts = [p.strip() for p in re.split(r"\s+\|\s+|\s+·\s+|,\s+|\s+[-–—]\s+", rest) if p.strip()]
             if split:
                 title, company = split
             elif len(parts) >= 2:
                 title, company = parts[0], parts[1]
+                if not _has_title_word(title):  # "Streamline — Senior Data Engineer": the company comes first
+                    at = next((k for k, p in enumerate(parts) if _has_title_word(p)), None)
+                    if at:
+                        title, company = parts[at], parts[0]
             else:
                 continue  # one bare phrase and a date: not clear enough
         else:
@@ -2182,15 +2196,18 @@ def _about_section(lines: list[str]) -> str | None:
     return None
 
 
+_URL_TAIL = ".,;:!?)]}'\"”’"
+
+
 def _website(text: str) -> str | None:
     for m in _URL.finditer(text):
         if "linkedin.com" not in m.group(0).lower():
-            return m.group(0)
+            return m.group(0).rstrip(_URL_TAIL)
     bare = [m for m in _BARE.finditer(text) if "linkedin.com" not in m.group(0).lower()]
     # A bare domain counts when it has a path or www (github.com/x, www.site.com), or stands on its own.
     for m in bare:
         if m.group(2) or m.group(1).startswith("www."):
-            return "https://" + m.group(0)
+            return ("https://" + m.group(0)).rstrip(_URL_TAIL)
     for m in bare:
         line_start = text.rfind("\n", 0, m.start()) + 1
         line_end = text.find("\n", m.end())
@@ -2404,6 +2421,78 @@ def _signature_lines(text: str) -> list[str] | None:
     return None
 
 
+_NOT_NAMES = {"he", "she", "they", "it", "there", "this", "that", "i", "we", "who", "you", "dana", "someone",
+              "everyone", "hi", "hello", "hey", "dear", "thanks", "the", "my", "our", "his", "her", "their"}
+_COMPANY = r"(?P<company>[A-Z0-9][\w&.'-]*(?: (?:[A-Z0-9&][\w&.'-]*|of|and|the)){0,3})"
+_TITLE = r"(?P<title>[\w/&+'.-]+(?: [\w/&+'.-]+){0,5}?)"
+_ART = r"(?:(?:currently|now|also|still|recently) )?(?:(?:a|an|the) )?"
+_PLACE = r"[A-Z][\w.'-]*(?: [A-Z][\w.'-]*){0,2}(?:, ?[A-Z]{2}\b)?"
+_NOTE_ROLES = (
+    re.compile(rf"(?P<name>{_PERSON}) (?:is|was) {_ART}{_TITLE} (?:at|@|with) {_COMPANY}"),
+    re.compile(rf"(?P<name>{_PERSON}) (?:works|working|is working|worked) as {_ART}{_TITLE} (?:at|@|for|with) {_COMPANY}"),
+    re.compile(rf"(?P<name>{_PERSON}) (?:works|working|is working|worked|is|is now|just joined|joined) (?:at|for|with) "
+               rf"{_COMPANY} as {_ART}{_TITLE}(?=[.,;!\n]|$| and | in )"),
+)
+
+
+def paste_hints(text: str, guess: dict[str, Any]) -> list[str]:
+    """Plain sentences about what a paste did NOT give us, so a half-read person doesn't look complete."""
+    hints: list[str] = []
+    history = guess.get("work_history") or []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    dated = sum(1 for l in _experience_body(lines) if _RANGE.search(l))
+    if not history:
+        hints.append("No work history found. Add their past jobs below if you have them."
+                     if not dated else f"No work history could be read, but the text has {dated} dated "
+                     f"{'role' if dated == 1 else 'roles'}. Add them below.")
+    else:
+        if dated > len(history):
+            hints.append(f"Only {len(history)} of {dated} roles were read. Check the work history below.")
+        undated = sum(1 for h in history if not (h.get("start") and h.get("end")))
+        if undated:
+            hints.append(f"{undated} {'role has' if undated == 1 else 'roles have'} no dates. "
+                         "Check the work history below.")
+    if not guess.get("name"):
+        hints.append("No name found. Type it in before saving.")
+    elif not (guess.get("current_title") or guess.get("current_company")):
+        hints.append("No job title or company found.")
+    return hints
+
+
+def _prose_note(text: str) -> dict[str, Any]:
+    """A friendly note ("Marcus Lee is a staff backend engineer at Vercel, based in Austin, TX") pasted as
+    sentences: the name, title, company and place when they are said plainly. Never guesses a pronoun or a name."""
+    flat = " ".join(text.split())
+    for pat in _NOTE_ROLES:
+        for m in pat.finditer(flat):
+            name = m["name"].strip()
+            first = name.split()[0]
+            if first.lower() in _NOT_NAMES or not _is_name(name):
+                continue
+            title = m["title"].strip(" ,.")
+            if not _has_title_word(title) or len(title.split()) > 6:
+                continue
+            company = _strip_place(m["company"].strip(" ,.&-"))
+            if not company or _has_title_word(company):
+                continue
+            if title.islower():
+                title = title.title()
+            out: dict[str, Any] = {"current_title": title, "current_company": company}
+            if len(name.split()) == 1:  # "Met Jordan Ellis ... Jordan is a Designer": the full name is earlier
+                full = re.search(rf"\b{re.escape(first)} ([A-Z][\w'-]+)\b", flat)
+                name = f"{first} {full[1]}" if full and full[1].lower() not in _NOT_NAMES and full[1] != "is" else name
+            out["name"] = name
+            tail = flat[m.end():]
+            loc = re.match(rf"(?:,| -)? ?(?:based |located )?in ({_PLACE})", tail)
+            loc = loc or re.search(rf"\b(?:based|located|lives|living) in ({_PLACE})", flat)
+            if loc:
+                place = loc[1].strip(" .,")
+                if place.lower() not in ("the", "a") and not _has_title_word(place):
+                    out["location"] = place
+            return out
+    return {}
+
+
 def quick_parse(text: str) -> dict[str, Any]:
     """Pull the obvious bits out of pasted text without any AI. The recruiter reviews before saving.
     An intro email gives the introduced person (not its From or To) and "Referral from" its writer."""
@@ -2422,7 +2511,7 @@ def quick_parse(text: str) -> dict[str, Any]:
             intro["website"] = site
         return intro
     if m := _EMAIL.search(text):
-        out["email"] = m.group(0).lower()
+        out["email"] = m.group(0).strip(".'+-").lower()
     if m := _LINKEDIN.search(text):
         out["linkedin_url"] = m.group(0)
     for m in _PHONE.finditer(text):
@@ -2513,6 +2602,8 @@ def quick_parse(text: str) -> dict[str, Any]:
         out["source"] = "LinkedIn"
     elif marks == 0:
         out["source"] = "Resume" if head is lines else "Email signature"
+        if not out.get("name"):
+            out["source"] = "Note"  # no name line: a few sentences, not a resume or a signature
     # A link pasted under Skills (often the profile URL LinkedIn puts at the end) is never a skill.
     url_like = re.compile(r"(?i)://|^www\.|@|^[\w-]+(\.[\w-]+)*\.[a-z]{2,}/|"
                           r"^[\w-]+(\.[\w-]+)*\.(com|org|net|edu|gov|co\.uk)$")
@@ -2533,6 +2624,8 @@ def quick_parse(text: str) -> dict[str, Any]:
             and out.get("current_company")):  # a resume's header role is their current job
         out["work_history"] = [{"title": out["current_title"], "company": _strip_place(out["current_company"]),
                                 "start": None, "end": "now"}]
+    if not out.get("name") and out.get("source") != "LinkedIn":
+        out.update({k: v for k, v in _prose_note(text).items() if not out.get(k)})
     if out.get("location"):
         out["location"] = _no_zip(out["location"]) or out["location"]
     if out.get("current_company"):

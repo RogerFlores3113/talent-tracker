@@ -1,7 +1,7 @@
 {% set app = {'claude': 'Claude Desktop', 'codex': 'Codex', 'lmstudio': 'LM Studio'}[target] %}
 {% if ok and result.installed is sameas false %}
 <p class="flash warn">{{ result.message }}</p>
-<p class="fine">Nothing was changed. If it is installed somewhere unusual, use the settings under “By hand”.</p>
+<p class="fine">Nothing was changed. If it is installed somewhere unusual, use the settings under “Details for technical users”.</p>
 {% elif ok and result.ok is sameas false %}
 <p class="flash warn">{{ result.problem }}</p>
 <p class="fine">Nothing was changed in {{ app }}'s settings.</p>
@@ -37,5 +37,5 @@
 {% if result.backup and not result.already_connected %}<p class="fine">Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
 {% else %}
 <p class="error">That didn't work: {{ error }}</p>
-<p class="fine">You can still connect by hand with the settings under “By hand”.</p>
+<p class="fine">You can still connect by hand with the settings under “Details for technical users”.</p>
 {% endif %}

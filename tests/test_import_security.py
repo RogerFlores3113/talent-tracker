@@ -257,7 +257,10 @@ def test_connect_page_says_app_is_missing(store, tmp_path, monkeypatch):
     monkeypatch.setattr("talent.integrations.lmstudio_config_path", lambda: tmp_path / ".lmstudio" / "mcp.json")
     c = local_client(store)
     page = c.get("/connect").text
-    assert "Connect LM Studio" in page and "Connect Claude Desktop" in page and "Connect Codex" in page
+    # An app that isn't here says so and links to where to get it, with no bare Connect button (cycle 10 D).
+    for app in ("LM Studio", "Claude Desktop", "Codex"):
+        assert f"{app} isn&#39;t installed on this computer." in page or f"{app} isn't installed on this computer." in page
+        assert f">Connect {app}<" not in page
     r = c.post("/connect/lmstudio")
     assert "LM Studio doesn&#39;t seem to be installed" in r.text and "Nothing was changed" in r.text
     assert not (tmp_path / ".lmstudio").exists()
