@@ -18,7 +18,7 @@ function jobCard(j){
  const facts=el("dl",{class:"facts",style:"display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:8px 0 0;font-size:.8125rem"});
  const fact=(k,v)=>{if(v==null||v==="")return;facts.append(el("dt",{class:"muted"},k),el("dd",{style:"margin:0"},v))};
  const seats=j.openings||1,hired=j.hired_count||0;
- fact("In process",String(j.active_count||0)+(j.active_count===1?" person":" people"));
+ fact("In the pipeline",String(j.active_count||0)+(j.active_count===1?" person":" people"));
  fact("Hired",seats>1?hired+" of "+seats:String(hired));
  fact("Last activity",j.updated_at?dateEl(j.updated_at):null);
  fact("Next interview",j.next_interview?el("time",{datetime:j.next_interview},when(j.next_interview)):"None booked");
