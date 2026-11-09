@@ -4,7 +4,7 @@ You are an AI coding agent (Claude Code or Codex). A person asked you to install
 
 The skills are the folders next to this file named `talent-search-*`, each with a `SKILL.md`. (They are bundled with the Talent Search app. If you were not given this folder's path, the Connect AI page in Talent Search shows it.)
 
-**Easiest way:** if the `talent` command is available, run `talent install-skills --claude-code` (or `--codex`). It lists every file first, never overwrites a file the person edited, and does the label files for you. If it is not available, follow the steps below.
+**Easiest way:** if the `talent` command is available, run `talent install-skills --claude-code` (or `--codex`). It lists every file first (new, updated or unchanged), never overwrites a file the person edited, and does the label files for you. Without a terminal to answer a question it refuses to install unless you add `--yes`, and you add `--yes` only after the person said yes. If it is not available, follow the steps below.
 
 ## 0. Can you ask the person?
 
@@ -53,7 +53,7 @@ Read back the destination folders, confirm each `SKILL.md` starts with `---` and
 
 ## Removing them later
 
-Only after the person confirms the list, delete the files you wrote in `talent-search-*` folders that contain `.installed-by-talent-search`, and only a file whose SHA-256 still matches the recorded one. Keep any file the person changed or added, and say which. Leave every other folder alone. (`talent remove-skills` does this and asks first.)
+Only after the person confirms the list, delete the files you wrote in `talent-search-*` folders that contain `.installed-by-talent-search`, and only a file whose SHA-256 still matches the recorded one. Keep any file the person changed or added, and say which. Leave every other folder alone. (`talent remove-skills` does this and asks first.) A skill the person edited stays, but it loses its `.installed-by-talent-search` label, so it is the person's own from then on and a later install leaves it alone.
 
 ## Claude Desktop
 

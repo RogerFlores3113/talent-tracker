@@ -274,8 +274,8 @@ def test_cautious_overwrite_waits_and_a_blank_fill_applies(store):
     cid = store.add_candidate(name="Ana Ruiz", current_title="Engineer")["id"]
     res = call(server, "update_candidate", candidate_id=cid, current_title="CTO", location="Austin")
     t = text(res)
-    assert "Updated" in t and "Waiting for the recruiter's review: Change \"Ana Ruiz\"'s title" in t
-    assert "Nothing changed yet" in t and data(res)["pending_review"]["id"]
+    assert "Updated" in t and "Held for the recruiter's review: Change \"Ana Ruiz\"'s title" in t
+    assert "The rest of this call went through" in t and data(res)["pending_review"]["id"]
     cand = store.get_candidate(cid)
     assert cand["current_title"] == "Engineer" and cand["location"] == "Austin"
     # Read back: the AI sees it as pending.

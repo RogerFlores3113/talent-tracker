@@ -156,10 +156,10 @@ def test_install_doc_has_no_hardcoded_version_and_covers_symlinks_and_no_one_to_
 
 def test_cli_remove_skills_asks_and_filters(home, capsys, monkeypatch):
     from talent.cli import main
-    main(["install-skills", "--claude-code"])
+    main(["install-skills", "--claude-code", "--yes"])
     out = capsys.readouterr().out
-    assert "will add" in out and "SKILL.md" in out  # the list comes first
-    main(["install-skills", "--codex"])
+    assert "skills in" in out and "SKILL.md" in out  # the list comes first
+    main(["install-skills", "--codex", "--yes"])
     monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a terminal: it must stop, not remove
     with pytest.raises(SystemExit):
         main(["remove-skills"])
@@ -172,7 +172,7 @@ def test_cli_remove_skills_asks_and_filters(home, capsys, monkeypatch):
 
 def test_cli_remove_skills_answering_no_removes_nothing(home, monkeypatch):
     from talent.cli import main
-    main(["install-skills", "--claude-code"])
+    main(["install-skills", "--claude-code", "--yes"])
     monkeypatch.setattr("sys.stdin", type("T", (io.StringIO,), {"isatty": lambda self: True})(""))
     monkeypatch.setattr("builtins.input", lambda prompt="": "no")
     main(["remove-skills", "--claude-code"])

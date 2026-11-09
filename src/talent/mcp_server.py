@@ -337,7 +337,35 @@ def _cap_text() -> str:
             "across everyone. Ask the recruiter to make more changes in the app, or try again later.")
 
 
-def _wait_text(r: dict[str, Any]) -> str:
+def _when_has_zone(when: Any) -> bool:
+    """Whether a typed time says its own zone (an offset, Z, a zone name, PT/ET/UTC). Date words with no clock
+    ("tomorrow 2pm") and plain "2026-11-12 10:15" do not, so they are read in the recruiter's zone."""
+    text = re.sub(r"\s+", " ", str(when or "").strip())
+    if not text:
+        return False
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).tzinfo is not None
+    except ValueError:
+        pass
+    from .store import _split_zone  # the parser's own zone reader, so this agrees with it
+    return _split_zone(text)[1] is not None
+
+
+def _zone_used_note(when: Any, iso: str) -> str:
+    """For a time sent with no zone: which zone it was read in, as a sentence for the AI."""
+    from .store import shown_zone
+    dt = as_local(to_dt(iso))
+    abbr = dt.tzname() or "local time"
+    where = "the recruiter's time zone setting" if shown_zone() is not None else "this computer's time zone"
+    return (f"No time zone was sent, so the time was read as {_local(iso)} ({abbr}, {where}). If that's not the "
+            "zone meant, move it with update_interview and a time that includes the zone.")
+
+
+def _wait_text(r: dict[str, Any], *, part: bool = False) -> str:
+    """Say a change waits on Review. part=True when the rest of the call went through (only this part waits), so
+    the reply never says "Nothing changed yet" about a call that changed something."""
+    if part:
+        return f"Held for the recruiter's review: {r['summary']}. {review.HELD_PART_NOTE}"
     return f"Waiting for the recruiter's review: {r['summary']}. {review.WAIT_NOTE}"
 
 
@@ -732,6 +760,8 @@ def _save_search_blocker(store: Store, name: Any) -> str | None:
         return (f"No search saved. Your AI app has already saved {AI_SAVED_SEARCH_CAP} searches, which is the most, "
                 "and you can't delete them. Tell the recruiter they can delete ones they no longer use in the app, "
                 "then try again.")
+    if ai_caps.searches_left(store) < 1:
+        return ai_caps.limit_text(f"save {ai_caps.SEARCH_CAP} searches", 0, store, ("saved_search",)).replace("Nothing added.", "No search saved.")
     return store.save_search_problem(name, by="ai")
 
 
@@ -948,7 +978,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ, meta=tool_meta("results"))
     def run_saved_search(name_or_id: str | int, limit: int = 10) -> CallToolResult:
-        """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches) and show the
+        """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches; `name` and
+        `id` work too) and show the
         people who match now, like search_candidates. Running it does not mark it as looked at in the app."""
         limit = max(1, min(limit, 50))
         # text is looked up as a name first (even a number like "2"), then as an id; a JSON number is an id
@@ -1153,7 +1184,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if match is None:
             match = next((h for h in (store.find_duplicate(e) for e in more) if h), None)
         if match is None and ai_caps.people_left(store) < 1:  # a new person, past the hourly limit on new people
-            raise ValueError(ai_caps.people_text(0, ai_caps.people_cap(store)))
+            raise ValueError(ai_caps.people_text(0, ai_caps.people_cap(store), store=store))
         guarded = (site_guard.listed_site(data.get("linkedin_url"), data.get("website"), source=data.get("source"))
                    if site_guard.enabled(store) else None)
         if match is None and guarded and site_guard.left(store) < 1:  # stricter site guards: a lower hourly cap
@@ -1235,7 +1266,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 notes.append(f"Not saved: {_labels(over_held)}. {over_why or _budget_text(cand['name'])}")
             if waiting:
                 out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
-                notes.append(_wait_text(waiting))
+                notes.append(_wait_text(waiting, part=bool(changed)))
             if held:  # these were empty and stay empty for now: not "kept", just not saved
                 out["identity_kept"] = held
                 notes.append(f"Not saved: {_labels(held)}. These say who the person is, and {held_why}. "
@@ -1342,7 +1373,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             bits = [_labels([k]) + (" cleared" if k in cleared else "") for k in changed]
             sentence = f"Updated {who}: {', '.join(bits)}."
         if waiting:
-            sentence += " " + _wait_text(waiting)
+            sentence += " " + _wait_text(waiting, part=bool(changed))
         out: dict[str, Any] = {**_slim(cand), "changed": changed}
         if waiting:
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
@@ -1383,6 +1414,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             sentence = f"Nothing changed on {who} yet. " + _wait_text(waiting)
             out.update(_slim(current))
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
+            out["applied"] = False  # the color below is the one they still have, not the one asked for
+            out["color_requested"] = want or "none"
         else:
             cand = store.update_candidate(candidate_id, by="ai", color=want)
             changed = cand.pop("_changed", [])
@@ -1403,8 +1436,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         reply is their answer to your outreach, and ends their follow-ups). `summary` is what happened (`body` works too;
         summary is preferred); for an interview, start it with what it is, e.g. "Onsite: system design".
         `when` is the date/time, with time zone for interviews: ISO with an offset (2026-11-12T15:00:00-08:00),
-        or a time with a zone name (2026-11-12 3:00 PM America/Los_Angeles, or PT, ET, CT, MT); leave empty for
-        now. `interviewer` (interviews only) is who runs it. Past calls, emails, messages, meetings and
+        or a time with a zone name (2026-11-12 3:00 PM America/Los_Angeles, or PT, ET, CT, MT). An interview
+        needs `when` (it is refused without one); the other kinds default to now. A time sent with no zone is
+        read in the recruiter's time zone setting and the reply says which zone was used. A clash with the
+        candidate's or the interviewer's other sessions is flagged in the reply. `interviewer` (interviews only) is who runs it. Past calls, emails, messages, meetings and
         interviews update "last contacted". Future interviews show on the recruiter's dashboard. Logging the same
         item twice is harmless. Several interviews on the same day for the same job are an onsite loop; log each
         session. To reschedule, cancel or record how an interview went, use update_interview with the
@@ -1436,6 +1471,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Log one entry for log_activity: (sentence, structured result, the AI actions it made)."""
         if reply and not (summary or "").strip():
             summary = "Replied"
+        if what_kind == "interview" and not (when and str(when).strip()):
+            raise ValueError("No change made. An interview needs a start time in `when`, with a time zone "
+                             "(2026-11-12T15:00:00-08:00, or 2026-11-12 3:00 PM PT). Ask the recruiter when it is "
+                             "if you don't know.")
         _check_note_cap(store, candidate_id)
         if job_id is None and what_kind in outreach.OUTREACH_KINDS:  # the one job they're in play on
             job_id = outreach.job_for(store, candidate_id)
@@ -1453,11 +1492,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 store.get_job(job_id)
             at = parse_when(when) if when and str(when).strip() else None
             waiting = review.queue_note(store, candidate_id, what_kind, body or None, at, job_id, session, who or None)
-            return _wait_text(waiting), {"data_note": DATA_NOTE, "logged": None,
+            zone_note = (" " + _zone_used_note(when, at)) if what_kind == "interview" and not _when_has_zone(when) else ""
+            return _wait_text(waiting) + zone_note, {"data_note": DATA_NOTE, "logged": None,
                                          "pending_review": _waiting(waiting)}, []
         before = {t["id"]: t for t in store.upcoming_interviews(days=365)
                   if t["candidate_id"] == candidate_id and t.get("job_id") == job_id} \
             if what_kind == "interview" else {}
+        clashes: list[str] = []
+        if what_kind == "interview":  # checked before it is logged, so it doesn't clash with itself
+            when_iso = parse_when(when)
+            minutes = interviews.session_minutes({"body": summary})
+            clashes = loops.check_slot(store, candidate_id, when_iso, minutes, interviewer)
         entry = store.log(candidate_id, what_kind, summary, at=when, job_id=job_id, source="AI app",
                           interviewer=interviewer)
         if reply:
@@ -1503,6 +1548,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             set_note = (f"It was already logged with no job, so its job is now {_job_name(store.get_job(job_id))}. "
                         "The recruiter can undo that on Changes.")
             out["note"] = f"{out['note']} {set_note}" if out.get("note") else set_note
+        if what_kind == "interview":
+            if not _when_has_zone(when):
+                zn = _zone_used_note(when, entry["at"])
+                out["time_zone_note"] = zn
+                out["note"] = f"{out['note']} {zn}" if out.get("note") else zn
+            if clashes:
+                cl = "Clash: " + " ".join(clashes)
+                out["clash"] = clashes
+                out["warning"] = f"{out['warning']} {cl}" if out.get("warning") else cl
         later = interviews.future_note(entry["at"], entry["kind"])  # a call dated later today, say
         if later:
             out["warning"] = f"{out['warning']} {later}" if out.get("warning") else later
@@ -1664,6 +1718,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             done.append(f"Cancelled {whose} {_when_words(iv['at'])}. It stays on the timeline, marked cancelled")
         elif when and iv["at"] != before["at"]:
             done.append(f"Moved {whose} to {_local(iv['at'])} (was {_local(before['at'])})")
+            if not _when_has_zone(when):
+                done.append(_zone_used_note(when, iv["at"]).rstrip("."))
         if outcome is not None:
             done.append(f"Recorded {whose} {_when_words(iv['at'])} as {interview_label(data) or iv['status']}")
         if interviewer is not None:
@@ -2002,7 +2058,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         openings is the headcount (default 1); min_active is how many active candidates this job should have
         before the dashboard asks for more."""
         if ai_caps.jobs_left(store) < 1:
-            raise ValueError(ai_caps.limit_text(f"create {ai_caps.JOB_CAP} jobs", 0))
+            raise ValueError(ai_caps.limit_text(f"create {ai_caps.JOB_CAP} jobs", 0, store, ("job_created",)))
         twins = store.similar_open_jobs(title, company)
         if not stages and stage_set in (None, "") and stages_from_job_id in (None, ""):
             stage_set = actions.default_stage_set(store)  # in-house mode: the in-house stages
@@ -2041,7 +2097,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["pending_review"] = _waiting(waiting)
         return _plain(f"Created {_job_name(job)} (job id {job['id']}) with {len(names)} stages: {', '.join(names)}."
                       + (f" {'; '.join(ends)}." if ends else "") + (f" {JOB_NOTE}" if job.get("description") else "")
-                      + (f" {_wait_text(waiting)}" if waiting else ""), out)
+                      + (f" {_wait_text(waiting, part=True)}" if waiting else ""), out)
 
     @mcp.tool(annotations=EDIT)
     def update_job(job_id: int, title: str | None = None, company: str | None = None, location: str | None = None,
@@ -2094,7 +2150,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if waiting:
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
             done = _job_update_sentence(job, given) if given else f"Nothing changed on {_job_name(job)} yet."
-            return _plain(f"{done} {_wait_text(waiting)}", out)
+            return _plain(f"{done} {_wait_text(waiting, part=bool(given))}", out)
         if new.get("status") in ("closed", "on_hold"):
             out["note"] = "The recruiter is asked on Today to confirm this."
         return _plain(_job_update_sentence(job, given), out)
@@ -2197,7 +2253,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     else f"Added {quoted(name)} to {_job_name(job)}, in {out['stage']}.")
         if held_note:
             out["pending_review"] = _waiting(held_note)
-            sentence += " Its note: " + _wait_text(held_note)
+            sentence += " " + _wait_text(held_note, part=True)
         return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
@@ -2241,7 +2297,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             held_note = review.queue_note(store, candidate_id, "note", note_text, None, job_id, session)
         if held_note:
             out["pending_review"] = {"id": held_note["id"], "summary": held_note["summary"]}
-            out["note"] = _wait_text(held_note)
+            out["note"] = _wait_text(held_note, part=True)
         if ends and target["outcome"] == "hired":
             out["note"] = " ".join(x for x in (out.get("note"), "The recruiter is asked on Today to confirm this hire.") if x)
         if closed is not None:
@@ -2402,7 +2458,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE, meta=tool_meta("shortlist"))
     def propose_candidates(job_id: int, people: list[Prospect]) -> CallToolResult:
-        """Put people you researched on a job's Shortlist for the recruiter to review. Use this while sourcing,
+        """Put people you researched on a job's Shortlist (the list is `people`; `candidates` works too) for the recruiter to review. Use this while sourcing,
         instead of saving them: the recruiter keeps (saves and adds to the job) or passes on each one, in the app
         or with the buttons on the Shortlist card in the chat.
 
@@ -2612,7 +2668,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ToolError(f"Nothing changed: the AI app can pass on {ai_caps.PASS_CAP} people an hour and has "
                             f"{ai_caps.passes_left(store)} left. Pass the rest in Talent Search, or try again later.")
         if not passing and n > ai_caps.people_left(store):
-            raise ToolError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store), "changed"))
+            raise ToolError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store), "changed", store))
 
     def _decided(job_id: int, prospect_id: int, sentence: str, **extra: Any) -> CallToolResult:
         row = shortlist.get(store, job_id, prospect_id)
@@ -2787,7 +2843,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=WRITE, meta=tool_meta("saved"))
     def save_candidates(people: list[PersonIn], job_id: int | None = None, stage: str | None = None) -> CallToolResult:
         """Save several people at once (up to 25), only when the recruiter asks you to save them. While sourcing,
-        use propose_candidates instead.
+        use propose_candidates instead. The list is `people` (`candidates` works too). In each person `title` is
+        `current_title` and `company` is `current_company`; either spelling works.
 
         Each person takes the same fields as save_candidate and follows its rules: a matching email or LinkedIn
         merges, a saved person with the same name or a LinkedIn that belongs to someone else is not saved and
@@ -2816,7 +2873,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             stage_name = s["name"]
         new_people = sum(1 for x in people if store.find_duplicate(x.email, x.linkedin_url) is None)
         if new_people > ai_caps.people_left(store):  # counted by size, before anyone is saved
-            raise ValueError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store)))
+            raise ValueError(ai_caps.people_text(ai_caps.people_left(store), ai_caps.people_cap(store), store=store))
         groups: dict[str, list[dict[str, Any]]] = {"saved": [], "updated": [], "unchanged": [], "needs_answer": [],
                                                     "not_saved": []}
         added = 0
@@ -3186,7 +3243,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             data["note"] = "The recruiter sees who updates go to on the client's page before anything is emailed."
         if waiting:
             data["pending_review"] = _waiting(waiting)
-            return _plain(f"Changed {quoted(c['name'])}: {', '.join(bits)}. {_wait_text(waiting)}", data)
+            return _plain(f"Changed {quoted(c['name'])}: {', '.join(bits)}. {_wait_text(waiting, part=True)}", data)
         return _plain(f"Changed {quoted(c['name'])}: {', '.join(bits)}. The recruiter can undo it on Changes.", data)
 
     @mcp.tool(annotations=WRITE)
@@ -3595,6 +3652,9 @@ ARG_ALIASES = {
                           "working_hours": "hours"},
     "set_plan_seat": {"title": "role", "start": "target_start", "start_date": "target_start", "id": "seat_id"},
     "propose_candidates": {"prospects": "people", "candidates": "people"},
+    "save_candidates": {"candidates": "people", "prospects": "people"},
+    "run_saved_search": {"name": "name_or_id", "id": "name_or_id", "search": "name_or_id",
+                         "saved_search": "name_or_id", "search_id": "name_or_id"},
     "client_report": {"company": "client"},
     "status_digest": {"client": "company"},
     "client_chase": {"company": "client"},
@@ -3764,7 +3824,7 @@ def _track_session(mcp: FastMCP, store: Store, session: str, started: str) -> No
                 return res
             res, _ = mcp_guard.guard(name, res, read_only=not writes, session=None if replay else session)
             if tainted and writes and review.pending_in(store, session) > held_before:
-                res = mcp_guard.held_reply(res, review.cautious_setting(store))
+                res = mcp_guard.held_reply(res, review.cautious_setting(store), session)
             return res
         finally:
             injection.ACTIVE.reset(itoken)

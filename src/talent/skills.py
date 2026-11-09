@@ -148,6 +148,7 @@ def plan_install(target: str) -> dict[str, Any]:
     are), and any folder we'd leave alone."""
     base = target_dir(target)
     items, files, skipped, edited = [], [], [], []
+    labels: dict[str, str] = {}  # each file: "new", "updated" or "unchanged"
     for name in skill_names():
         folder = base / name
         if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
@@ -163,12 +164,25 @@ def plan_install(target: str) -> dict[str, Any]:
         kept = {r.as_posix() for r in keep}
         paths = [folder / rel for rel in _files_of(name) if rel.as_posix() not in kept] + [folder / MARKER]
         kept_paths = [display_path(folder / r) for r in keep]
+        changed_any = False
+        for rel in _files_of(name):
+            if rel.as_posix() in kept:
+                continue
+            dest = folder / rel
+            here = _file_sha(dest)
+            label = "new" if here is None else "unchanged" if here == _sha((source_dir() / name / rel).read_bytes()) else "updated"
+            changed_any = changed_any or label != "unchanged"
+            labels[display_path(dest)] = label
+        mark = _read_marker(folder) if folder.exists() else None
+        labels[display_path(folder / MARKER)] = (
+            "unchanged" if mark and mark.get("version") == __version__ and not changed_any and not keep
+            else "new" if not folder.exists() else "updated")
         items.append({"folder": name, "action": action, "files": [display_path(p) for p in paths],
                       "edited": kept_paths})
         files.extend(display_path(p) for p in paths)
         edited.extend(kept_paths)
     return {"target": target, "label": TARGET_LABELS[target], "base": display_path(base), "items": items,
-            "files": files, "skipped": skipped, "edited": edited, "version": __version__}
+            "files": files, "skipped": skipped, "edited": edited, "version": __version__, "labels": labels}
 
 
 def install(target: str) -> dict[str, Any]:

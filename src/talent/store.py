@@ -727,6 +727,7 @@ AI_ACTION_KINDS = {
     "sequence_set": "Set a job's follow-up steps",
     "plan_seat": "Changed the hiring plan",
     "loop_template": "Set a job's interview loop template",
+    "saved_search": "Saved a search",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -1738,6 +1739,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Moved {name} from {old.get('stage')} to {new.get('stage')} in {job}"
     if kind == "job_created":
         return f"Created the job {job}"
+    if kind == "saved_search":
+        return f"Saved the search {quoted(new.get('name') or r.get('body') or 'a search')} on the Candidates page"
     if kind == "job_edit":
         return f"Changed {job}: {r.get('body') or 'details'}"
     if kind == "stages_edit":
@@ -1868,6 +1871,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("offer", r.get("target_id")))
     if kind == "plan_seat":
         return (("plan", r.get("target_id")),)
+    if kind == "saved_search":
+        return (("search", r.get("target_id")),)
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
@@ -2765,6 +2770,8 @@ class Store:
             if kind == "job_created":
                 reason = self._job_touched(a["job_id"], new)
                 return reason.split(".")[0].lower() if reason else None
+            if kind == "saved_search":
+                return self._saved_search_blocker(a)
             if kind == "job_edit":
                 job = self._row("SELECT * FROM jobs WHERE id = ?", (a["job_id"],)) or {}
                 fields = [k for k in new if not k.startswith("_")]
@@ -3138,6 +3145,14 @@ class Store:
                 before_delete()
             self.delete_job(a["job_id"])
             return what
+        if kind == "saved_search":  # a search the AI app saved: taking it back is removing its own quick link
+            reason = self._saved_search_blocker(a)
+            if reason:
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
+            with self._write():
+                self._conn.execute("DELETE FROM saved_searches WHERE id = ?", (a["target_id"],))
+                self._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), action_id))
+            return what
         if kind == "note_logged":
             reason = self._ai_blocker(a)
             if reason and reason != "it was struck out already":
@@ -3227,6 +3242,16 @@ class Store:
         if self._row("SELECT 1 FROM suggestions WHERE candidate_id = ? AND coalesce(source, '') <> ?",
                      (candidate_id, AI_SOURCE)):
             return "You added a to-do about them since, so they stay."
+        return None
+
+    def _saved_search_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why an AI-saved search can't be taken back: it is gone, or the recruiter renamed or changed it since."""
+        row = self._row("SELECT name, params, created_by FROM saved_searches WHERE id = ?", (a["target_id"],))
+        if row is None:
+            return "that saved search is already gone"
+        made = a.get("new_data") or {}
+        if row["name"] != made.get("name") or (json.loads(row["params"] or "{}") or {}) != (made.get("params") or {}):
+            return "you renamed or changed that saved search since, so it stays"
         return None
 
     def _job_touched(self, job_id: int, made: dict[str, Any] | None = None) -> str | None:
@@ -3933,6 +3958,10 @@ class Store:
             cur = self._conn.execute(
                 "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
                 (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app"))
+            if by == "ai":  # logged like every other AI write, so Changes and Roll back can take it away again
+                self._log_ai("saved_search", target_id=cur.lastrowid, body=n,
+                             new={"name": n, "params": json.loads(self._row(
+                                 "SELECT params FROM saved_searches WHERE id = ?", (cur.lastrowid,))["params"])})
         return self.get_saved_search(cur.lastrowid)
 
     def get_saved_search(self, ref: int | str) -> dict[str, Any]:

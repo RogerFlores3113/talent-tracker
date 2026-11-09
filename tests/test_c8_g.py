@@ -158,7 +158,7 @@ def test_zip_layout():
 
 def test_cli_install_and_zip(home, tmp_path, capsys):
     from talent.cli import main
-    main(["install-skills", "--codex", "--zip", str(tmp_path / "s.zip")])
+    main(["install-skills", "--codex", "--yes", "--zip", str(tmp_path / "s.zip")])
     assert (home / ".agents" / "skills").is_dir() and not (home / ".claude").exists()
     assert zipfile.is_zipfile(tmp_path / "s.zip")
     main(["remove-skills", "--yes"])  # remove-skills asks first; --yes is the yes
