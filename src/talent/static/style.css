@@ -266,3 +266,12 @@ section.welcome.panel { margin-bottom: 20px; }
 .outreach-form { overflow-x: auto; }
 .outreach-form .bulk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+
+/* ---- connect checks (fixer A) ---- */
+.checking { display: none; color: var(--muted); font-size: 13px; margin-left: 8px; }
+.checking.htmx-request { display: inline; }
+#claude-panel code { word-break: break-all; font-size: 13px; }
+#claude-panel details { margin-top: 10px; }
+#claude-panel pre.code { max-height: 220px; overflow: auto; }
+.claude-open { border-left: 3px solid var(--line); padding-left: 10px; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }

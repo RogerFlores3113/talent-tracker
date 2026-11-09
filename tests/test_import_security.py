@@ -274,7 +274,7 @@ def test_connect_keeps_one_backup_and_the_file_mode(tmp_path):
     assert mode(p) == 0o600
     assert sorted(f.name for f in p.parent.iterdir()) == ["claude_desktop_config.json", "claude_desktop_config.json.bak"]
     assert res["backup"].endswith(".json.bak") and mode(res["backup"]) == 0o600
-    assert "click + and Connectors" in res["next_step"]
+    assert "Settings > Developer" in res["next_step"]
 
     toml = tmp_path / ".codex" / "config.toml"
     toml.parent.mkdir()

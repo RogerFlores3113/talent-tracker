@@ -2713,10 +2713,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ----------------------------------------------------- AI app setup
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
+        status = integrations.claude_status()
         return page(
             request,
             "connect.html",
-            claude_on=integrations.claude_connected(),
+            claude=status,
+            claude_on=status["connected"],
+            claude_entry_json=json.dumps(status["entry"], indent=2) if status["entry"] else "",
+            claude_quit=integrations.quit_instruction(),
             codex_on=integrations.codex_connected(),
             lmstudio_on=integrations.lmstudio_connected(),
             json_snippet=integrations.generic_json_snippet(),
@@ -2725,15 +2729,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.post("/connect/{target}", response_class=HTMLResponse)
     def connect(request: Request, target: str):
-        fn = {"claude": integrations.connect_claude, "codex": integrations.connect_codex,
-              "lmstudio": integrations.connect_lmstudio}.get(target)
+        fn = getattr(integrations, f"connect_{target}", None) if target in ("claude", "codex", "lmstudio") else None
         if fn is None:
             raise HTTPException(404)
         try:
             result = fn()
-            return page(request, "_connect_result.html", ok=True, target=target, result=result)
         except (OSError, ValueError) as exc:
             return page(request, "_connect_result.html", ok=False, target=target, error=str(exc))
+        check = None
+        if result.get("ok") and target in ("claude", "lmstudio") and result.get("entry"):
+            check = integrations.test_launch(result["entry"])
+            check["line"] = integrations.result_line(check)
+        return page(request, "_connect_result.html", ok=True, target=target, result=result, check=check,
+                    quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look())
+
+    @app.post("/connect/{target}/test", response_class=HTMLResponse)
+    def connect_test(request: Request, target: str):
+        if target not in ("claude", "lmstudio", "codex"):
+            raise HTTPException(404)
+        entry = integrations.entry_for(target)
+        check = None
+        if entry is not None:
+            check = integrations.test_launch(entry)
+            check["line"] = integrations.result_line(check)
+        return page(request, "_connect_test.html", target=target, entry=entry, check=check,
+                    problems=integrations.check_entry(entry) if entry else [], quit_text=integrations.quit_instruction())
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")
