@@ -752,6 +752,8 @@ def _search_filters(*, company: Any, skills: Any, skill_mode: Any, remote: Any, 
         if val is not None:
             if int(val) < 0:
                 raise ValueError("Years and days can't be negative.")
+            if key in ("exp_min", "exp_max") and int(val) > 60:
+                raise ValueError("Years of experience go up to 60.")
             if key == "added_days" and not int(val):
                 continue
             out[key] = int(val)

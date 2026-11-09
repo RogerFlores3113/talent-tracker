@@ -1197,7 +1197,7 @@ def split_tags(value: str | Iterable[str] | None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for p in parts:
-        t = re.sub(r"\s+", " ", p).strip().strip("#").strip()
+        t = re.sub(r"\s+", " ", p).strip().lstrip("#").strip()  # a leading # only: c# and f# keep theirs
         if t and t.lower() not in seen:
             seen.add(t.lower())
             out.append(t[:60])

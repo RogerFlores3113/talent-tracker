@@ -161,8 +161,10 @@ def test_negative_contacted_days_is_refused_on_the_ai_side(store, people):
 
 def test_save_search_says_what_it_left_out(store, people):
     s = build_server(store)
-    out = call(s, "save_search", name="Silly", query="python", min_years=9999999)
-    assert "min_years" in text(out) and "Not saved" in text(out)
+    with pytest.raises(ToolError, match="up to 60"):  # a silly number of years is refused outright now
+        call(s, "save_search", name="Silly", query="python", min_years=9999999)
+    out = call(s, "save_search", name="Silly", query="python", added_days=9999999)
+    assert "added_days" in text(out) and "Not saved" in text(out)
     ok = call(s, "save_search", name="Fine", query="python", min_years=3)
     assert "Not saved" not in text(ok)
 
@@ -216,3 +218,19 @@ def test_candidates_page_shows_how_we_read_your_search(store, people):
 def test_search_tips_copy_mentions_lowercase_or(store, people):
     r = local_client(store).get("/")
     assert "small letters" in r.text and "Write OR in capitals" not in r.text
+
+
+# ------------------------------------------------------------------ re-review: c# tags and huge years
+def test_tags_keep_a_trailing_hash_and_lose_a_leading_one(store):
+    from talent.store import split_tags
+    assert split_tags("c#, f#, #python") == ["c#", "f#", "python"]
+    store.add_candidate(name="Cee Sharp", tags="c#, .net")
+    store.add_candidate(name="Plain C", tags="c")
+    res = call(build_server(store), "search_candidates", query="skill:c#")
+    assert "Cee Sharp" in text(res) and "Plain C" not in text(res)
+
+
+def test_mcp_refuses_years_of_experience_over_sixty(store):
+    for tool, kw in (("search_candidates", {"query": "python"}), ("save_search", {"name": "Old hands", "query": "python"})):
+        with pytest.raises(ToolError, match="up to 60"):
+            call(build_server(store), tool, min_years=500, **kw)
