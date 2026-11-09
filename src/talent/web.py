@@ -615,6 +615,48 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 r["main_job"] = mine[0]["title"] + (f" ({mine[0]['company']})" if mine[0]["company"] else "")
                 r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
 
+    def hl_order_sql(hl_list: list[str]) -> tuple[str, list[str]]:
+        """ORDER BY terms that put people with the highlighted skills first, in click order (everyone stays)."""
+        sql = "".join("EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE) DESC, "
+                      for _ in hl_list)
+        return sql, list(hl_list)
+
+    def hl_rank_hits(hits: list[Any], hl_list: list[str]) -> list[Any]:
+        """A stable sort, so the order we already had (best match, colour, column) holds inside each highlight group."""
+        if not hl_list:
+            return hits
+
+        def key(h: Any) -> tuple[bool, ...]:
+            have = {str(t).lower() for t in (h.candidate.get("tags") or [])}
+            return tuple(x not in have for x in hl_list)
+        return sorted(hits, key=key)
+
+    def hl_href(base: dict[str, Any], hl_list: list[str], skill: str | None = None, clear: bool = False) -> str:
+        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept."""
+        cur = [h.lower() for h in hl_list]
+        if skill is not None:
+            k = " ".join(str(skill).split()).lower()
+            cur = [h for h in cur if h != k] if k in cur else [*cur, k]
+        if clear:
+            cur = []
+        rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more")}
+        if cur:
+            rest["hl"] = ",".join(searchquery.split_hl(",".join(cur)))
+        return "/candidates?" + urlencode(rest) if rest else "/candidates"
+
+    def hl_first(tags: list[str], hl_list: list[str]) -> list[str]:
+        """A person's skills with the highlighted ones first, in click order."""
+        mine = {t.lower(): t for t in tags}
+        first = [mine[h] for h in hl_list if h in mine]
+        return first + [t for t in tags if t not in first]
+
+    def hl_bar(hl_list: list[str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, str]]:
+        base = {**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}
+        return [{"skill": h, "color": COLORS[i], "href": hl_href(base, hl_list, h)} for i, h in enumerate(hl_list)]
+
+    env.globals["hl_href"] = hl_href
+    env.globals["hl_first"] = hl_first
+
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
@@ -623,8 +665,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = "", qsort: str = "", qdir: str = ""):
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
         per = 100
+        hl_list = searchquery.split_hl(hl)  # skills to highlight and sort by, in click order (never filters)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
         new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
@@ -664,6 +707,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                        limit=COLORED_FIRST_POOL, offset=0, **member)
                 ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
                                                             if h.candidate.get("color") in COLORS else len(COLORS)))
+                ranked = hl_rank_hits(ranked, hl_list)
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
             elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
@@ -672,7 +716,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 _attach_jobs([h.candidate for h in result.hits])
                 key, desc_first = QSORTS[qsort]
                 reverse = (qdir != "asc") if desc_first else (qdir == "desc")
-                ranked = sorted(result.hits, key=lambda h: key(h.candidate), reverse=reverse)
+                ranked = hl_rank_hits(sorted(result.hits, key=lambda h: key(h.candidate), reverse=reverse), hl_list)
+                start = (page_no - 1) * per
+                rows = [h.candidate for h in ranked[start:start + per]]
+            elif hl_list:  # best match first inside each highlight group, so rank a pool of the best matches
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                ranked = hl_rank_hits(list(result.hits), hl_list)
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
             else:
@@ -692,9 +742,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 order = f"({sql_sort} = '') ASC, {sql_sort} {direction}, c.id DESC"
             else:
                 order = f"{sql_sort} {direction}, c.id DESC"
+            hl_sql, hl_params = hl_order_sql(hl_list)
             rows = [store._hydrate(r) for r in store._rows(
-                f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
-                (*params, per, (page_no - 1) * per))]
+                f"SELECT c.* FROM candidates c {where} ORDER BY {hl_sql}{order} LIMIT ? OFFSET ?",
+                (*params, *hl_params, per, (page_no - 1) * per))]
         _attach_jobs(rows)
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
@@ -705,9 +756,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
-                                      ids=",".join(map(str, id_list)),
+                                      ids=",".join(map(str, id_list)), hl=",".join(hl_list),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, hl=hl_list, hl_bar=hl_bar(hl_list, keep, q, sort, dir, qsort, qdir), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),

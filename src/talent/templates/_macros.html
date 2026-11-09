@@ -21,8 +21,10 @@
 {# aria-current="page" for a link that class="on" marks as the current one. #}
 {% macro cur(on) -%}{% if on %} aria-current="page"{% endif %}{%- endmacro %}
 
-{% macro chips(tags, link=True) -%}
-{% if tags %}<span class="chips">{% for t in tags %}{% if link %}<a class="chip" href="/candidates?tag={{ t | urlencode }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
+{# Skill chips. With base (the table's current parameters) a click toggles the skill in the highlight list; without it,
+   a click starts a highlight on the Candidates table. hl is the list of highlighted skills, in click order. #}
+{% macro chips(tags, link=True, hl=None, base=None) -%}
+{% if tags %}{% set marked = hl or [] %}<span class="chips">{% for t in tags %}{% if link %}{% set pos = marked.index(t | lower) if (t | lower) in marked else -1 %}<a class="chip{{ ' hl' if pos >= 0 }}"{% if pos >= 0 %} data-hl="{{ COLORS[pos] }}"{% endif %} href="{{ hl_href(base, marked, t) if base is not none else '/candidates?hl=' ~ (t | urlencode) }}" aria-label="{{ (t ~ ', highlighted (remove)') if pos >= 0 else ('Highlight ' ~ t) }}" title="{{ 'Remove the highlight' if pos >= 0 else 'Highlight this skill and sort people who have it to the top' }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
 {%- endmacro %}
 
 {% macro sub(c) -%}
