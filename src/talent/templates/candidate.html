@@ -32,6 +32,7 @@
   {% if c.about %}<p class="about">{{ c.about }}</p>{% endif %}
   <dl class="facts">
     {% if c.email %}<dt>Email</dt><dd><a href="mailto:{{ c.email }}">{{ c.email }}</a></dd>{% endif %}
+    {% if c.other_emails %}<dt>Other emails</dt><dd>{% for e in c.other_emails %}<a href="mailto:{{ e }}">{{ e }}</a>{{ ', ' if not loop.last }}{% endfor %}</dd>{% endif %}
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
     {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}</a></dd>{% endif %}
     {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}</a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}

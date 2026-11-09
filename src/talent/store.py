@@ -299,6 +299,28 @@ def _fill_linkedin_keys(conn: sqlite3.Connection, everyone: bool = True) -> None
                  (LINKEDIN_RULE_KEY, _linkedin_rule()))
 
 
+_NOTE_EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+_NOTE_EMAIL_HEAD = re.compile(r"\be ?mails?\b", re.I)
+
+
+def _migrate_v9a_data(conn: sqlite3.Connection) -> None:
+    """Fill candidate_emails from the importers' notes. Only a one-line note that is a label and addresses counts."""
+    mains = {r[0] for r in conn.execute("SELECT lower(email) FROM candidates WHERE email IS NOT NULL AND email <> ''")}
+    seen: set[str] = set()
+    for cid, body in conn.execute("SELECT candidate_id, body FROM timeline WHERE kind = 'note' AND body LIKE '%@%'"
+                                  " ORDER BY id").fetchall():
+        head, sep, rest = (body or "").partition(": ")
+        if not sep or len(head) > 60 or "\n" in body or not (head == "Other emails" or _NOTE_EMAIL_HEAD.search(head)):
+            continue
+        if _NOTE_EMAIL.sub("", rest).strip(" ,;/") != "":
+            continue  # words besides addresses: a person's own note, not an importer's line
+        for e in dict.fromkeys(a.lower() for a in _NOTE_EMAIL.findall(rest)):
+            if e in mains or e in seen:
+                continue
+            seen.add(e)
+            conn.execute("INSERT OR IGNORE INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (cid, e))
+
+
 _MIGRATIONS: tuple[Any, ...] = (
     # v1: core tables, FTS5 index, outbox
     """
@@ -670,6 +692,21 @@ _MIGRATIONS: tuple[Any, ...] = (
     );
     CREATE UNIQUE INDEX saved_searches_name_uq ON saved_searches(name COLLATE NOCASE);
     """,
+    # v9a: candidate_emails: a person's other email addresses (a work and a home one), lowercased and unique across
+    # everyone, so they count wherever identity is checked. candidates.email stays the main address. Filled from
+    # the "Other emails: ..." and "<Email column>: addr" notes the importers wrote (the first person to claim an
+    # address keeps it; an address that is already someone's main email is skipped). The notes stay as they are.
+    (
+        """
+        CREATE TABLE candidate_emails (
+            candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+            email        TEXT NOT NULL,
+            PRIMARY KEY (candidate_id, email)
+        );
+        CREATE UNIQUE INDEX candidate_emails_email_uq ON candidate_emails(email);
+        """,
+        _migrate_v9a_data,
+    ),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -2089,8 +2126,9 @@ class Store:
         )
 
     def add_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
-                      **data: Any) -> dict[str, Any]:
-        """by="ai" also logs the add, so the recruiter can take the person out again from Changes."""
+                      other_emails: Iterable[str] | None = None, **data: Any) -> dict[str, Any]:
+        """by="ai" also logs the add, so the recruiter can take the person out again from Changes.
+        other_emails: more addresses for them (one that someone else has is left out)."""
         fields = self._prepare(data)
         if not fields.get("name"):
             raise ValueError("A candidate needs a name.")
@@ -2111,6 +2149,8 @@ class Store:
             self._sync_tags(new_id, fields.get("tags"))
             if work_history:
                 self._write_history(new_id, work_history)
+            if other_emails:
+                self.add_other_emails(new_id, other_emails, strict=False)
             if by == "ai":
                 self._log_ai("candidate", candidate_id=new_id)
         return self.get_candidate(new_id)
@@ -2119,6 +2159,9 @@ class Store:
         email = _clean(email)
         if email:
             hit = self._row(f"SELECT * FROM candidates WHERE {_EMAIL_MATCH}", (email,))
+            if hit is None:  # an other email counts like the main one
+                hit = self._row("SELECT c.* FROM candidates c JOIN candidate_emails e ON e.candidate_id = c.id"
+                                " WHERE e.email = lower(?)", (email,))
             if hit:
                 return self._hydrate(hit)
         li = normalize_linkedin(linkedin_url)
@@ -2129,8 +2172,7 @@ class Store:
     def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
         """The first prepared email or LinkedIn value in `fields` that someone else already has."""
         if fields.get("email"):
-            owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?",
-                              (fields["email"], candidate_id or 0))
+            owner = self._email_owner(fields["email"], candidate_id or 0)
             if owner:
                 return DuplicateValue("email", owner)
         key = normalize_linkedin(fields.get("linkedin_url"))
@@ -2139,6 +2181,93 @@ class Store:
             if owner:
                 return DuplicateValue("linkedin_url", owner)
         return None
+
+    def _email_owner(self, email: str, exclude_id: int = 0) -> dict[str, Any] | None:
+        """{"id", "name"} of someone other than `exclude_id` who has this address, as their main or an other email."""
+        owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?", (email, exclude_id))
+        return owner or self._row("SELECT c.id, c.name FROM candidates c JOIN candidate_emails e ON e.candidate_id"
+                                  " = c.id WHERE e.email = lower(?) AND c.id <> ?", (email, exclude_id))
+
+    def other_emails(self, candidate_id: int) -> list[str]:
+        """The person's other addresses (not the main one), oldest first."""
+        return [r["email"] for r in self._rows(
+            "SELECT email FROM candidate_emails WHERE candidate_id = ? ORDER BY rowid", (candidate_id,))]
+
+    def other_emails_by_id(self) -> dict[int, list[str]]:
+        """Everyone's other addresses in one pass: {candidate id: [addresses]}."""
+        out: dict[int, list[str]] = {}
+        for r in self._rows("SELECT candidate_id, email FROM candidate_emails ORDER BY rowid"):
+            out.setdefault(r["candidate_id"], []).append(r["email"])
+        return out
+
+    def all_emails(self, candidate_id: int) -> list[str]:
+        """Every address the person has: the main one first, then the others."""
+        main = (self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,)) or {}).get("email")
+        return ([main.lower()] if main else []) + self.other_emails(candidate_id)
+
+    def add_other_emails(self, candidate_id: int, emails: Iterable[str | None], *, strict: bool = True) -> list[str]:
+        """Keep more addresses for this person. Returns the ones newly added. An address the person already has is
+        skipped quietly. One that someone else has raises DuplicateValue (strict), or is left out (not strict)."""
+        row = self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,))
+        if row is None:
+            raise NotFound(f"No candidate with id {candidate_id}")
+        main = (row.get("email") or "").lower()
+        added: list[str] = []
+        with self._lock, self._conn:
+            have = set(self.other_emails(candidate_id))
+            for raw in emails:
+                e = (_clean(raw) or "").lower()
+                if not e or e == main or e in have or e in added:
+                    continue
+                if not _EMAIL_RE.match(e) or len(e) > FIELD_LIMITS["email"]:
+                    if strict:
+                        raise ValueError(f"{raw!r} doesn't look like an email address.")
+                    continue
+                owner = self._email_owner(e, candidate_id)
+                if owner:
+                    if strict:
+                        raise DuplicateValue("email", owner)
+                    continue
+                self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, e))
+                added.append(e)
+        if added:
+            self._dup_count = None
+        return added
+
+    def remove_other_email(self, candidate_id: int, email: str) -> bool:
+        """The recruiter takes one other address off a person (the app window only; the AI never removes)."""
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = lower(?)",
+                                     (candidate_id, (email or "").strip()))
+        self._dup_count = None
+        return cur.rowcount > 0
+
+    def set_other_emails(self, candidate_id: int, emails: Iterable[str | None]) -> tuple[list[str], list[str]]:
+        """The edit form: the person's other addresses become exactly this list. Returns (added, removed).
+        Nothing changes when any address is invalid or belongs to someone else."""
+        want: list[str] = []
+        for raw in emails:
+            e = (_clean(raw) or "").lower()
+            if e and e not in want:
+                want.append(e)
+        main = ((self.get_candidate(candidate_id).get("email")) or "").lower()
+        want = [e for e in want if e != main]
+        for e in want:
+            if not _EMAIL_RE.match(e) or len(e) > FIELD_LIMITS["email"]:
+                raise ValueError(f"{e!r} doesn't look like an email address.")
+            owner = self._email_owner(e, candidate_id)
+            if owner:
+                raise DuplicateValue("email", owner)
+        with self._lock, self._conn:
+            have = self.other_emails(candidate_id)
+            gone = [e for e in have if e not in want]
+            for e in gone:
+                self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = ?", (candidate_id, e))
+            new = [e for e in want if e not in have]
+            for e in new:
+                self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, e))
+        self._dup_count = None
+        return new, gone
 
     def split_same_name(self, name: str, email: str | None = None, linkedin_url: str | None = None
                         ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2189,10 +2318,14 @@ class Store:
             """SELECT * FROM candidates WHERE id <> ? AND (
                    (? <> '' AND fold_name(name) = ?)
                    OR (? IS NOT NULL AND lower(email) = lower(?))
+                   OR lower(email) IN (SELECT value FROM json_each(?))
+                   OR id IN (SELECT candidate_id FROM candidate_emails WHERE email IN (SELECT value FROM json_each(?))
+                             OR email = lower(coalesce(?, '')))
                    OR (? IS NOT NULL AND coalesce(linkedin_key, li_key(linkedin_url)) = ?)
                    OR (? IS NOT NULL AND phone_key(phone) = ?))
                ORDER BY updated_at DESC LIMIT 10""",
-            (candidate_id, key, key, c.get("email"), c.get("email"), li, li, phone, phone))
+            (candidate_id, key, key, c.get("email"), c.get("email"), json.dumps(self.other_emails(candidate_id)),
+             json.dumps(self.other_emails(candidate_id)), c.get("email"), li, li, phone, phone))
         if _clean(c.get("current_company")) and len(rows) < 10:
             seen = {r["id"] for r in rows}
             rows += [r for r in self._rows(
@@ -2203,7 +2336,7 @@ class Store:
         return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
-                         **data: Any) -> tuple[dict[str, Any], bool]:
+                         other_emails: Iterable[str] | None = None, **data: Any) -> tuple[dict[str, Any], bool]:
         """Add, or merge into an existing candidate matched by email or LinkedIn.
 
         Merges are conservative, because a CSV row or an AI re-save can be stale or wrong:
@@ -2216,16 +2349,27 @@ class Store:
 
         A match whose saved name clearly isn't the incoming one (see same_person_name) raises
         IdentityConflict and changes nothing, so one person's row can't overwrite someone else.
+
+        Every address counts: the match is by the email, any of other_emails, or the LinkedIn URL. When a saved
+        person is found that way and the row's own email is a new address for them, it becomes one of their
+        other emails (their main email is never replaced), and so does each of other_emails.
         """
+        extra = [e.lower() for e in (_clean(x) for x in (other_emails or [])) if e]
         existing = self.find_duplicate(data.get("email"), data.get("linkedin_url"))
+        hit_email = _clean(data.get("email")) if existing and self.find_duplicate(data.get("email")) else None
         if existing is None:
-            return self.add_candidate(work_history=work_history, by=by, **data), True
+            for e in extra:
+                existing = self.find_duplicate(e)
+                if existing:
+                    hit_email = e
+                    break
+        if existing is None:
+            return self.add_candidate(work_history=work_history, by=by, other_emails=extra, **data), True
         incoming_name = _clean(data.get("name"))
         if incoming_name and not same_person_name(existing["name"], incoming_name):
-            email = _clean(data.get("email"))
-            by_email = bool(email and (existing.get("email") or "").lower() == email.lower())
+            by_email = bool(hit_email)
             raise IdentityConflict(existing, incoming_name, "email" if by_email else "linkedin_url",
-                                   email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
+                                   hit_email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
         incoming = self._prepare(data)
         row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
         merged: dict[str, Any] = {}
@@ -2249,6 +2393,13 @@ class Store:
         cand = self._update(existing["id"], merged, history, by=by, merge=True,
                             derived=() if work_history or history is None else ("work_history",))
         cand["_kept"] = kept
+        newer = [e for e in [_clean(data.get("email")), *extra] if e]  # a different address of theirs is kept too
+        if newer and self.add_other_emails(existing["id"], newer, strict=False):
+            cand["_changed"] = [*cand["_changed"], "other_emails"]
+            cand["other_emails_added"] = True
+        mine = (_clean(data.get("email")) or "").lower()
+        if "email" in kept and mine in self.other_emails(existing["id"]):
+            cand["_kept"] = [k for k in kept if k != "email"]  # nothing lost: it is now one of their other emails
         return cand, False
 
     def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
@@ -2293,6 +2444,7 @@ class Store:
         """Everything the candidate page and the AI's get_candidate need."""
         c = self.get_candidate(candidate_id)
         c["work_history"] = self.work_history(candidate_id)
+        c["other_emails"] = self.other_emails(candidate_id)
         c["pipelines"] = self.candidate_pipelines(candidate_id)
         c["timeline"] = self.timeline(candidate_id, limit=timeline_limit)
         return c
@@ -2370,6 +2522,9 @@ class Store:
         self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))
         if "tags" in cols:
             self._sync_tags(candidate_id, cols["tags"])
+        if cols.get("email"):  # an address that becomes the main one is no longer an "other"
+            self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = lower(?)",
+                               (candidate_id, cols["email"]))
         if "work_history" in new:
             self._write_history(candidate_id, new["work_history"] or [])
 
@@ -3214,6 +3369,8 @@ class Store:
             # Offers come along, unless the kept profile has its own on that job (offers.py, v11).
             self._conn.execute("UPDATE offers SET candidate_id = ? WHERE candidate_id = ? AND job_id NOT IN"
                                " (SELECT job_id FROM offers WHERE candidate_id = ?)", (keep_id, other_id, keep_id))
+            # The merged-away person's addresses (main and others) become keep's other emails.
+            their_emails = ([orow["email"].lower()] if orow.get("email") else []) + self.other_emails(other_id)
             # other's email and LinkedIn URL are unique, so other goes before keep takes them.
             self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
             created = min(krow["created_at"], orow["created_at"])
@@ -3223,7 +3380,11 @@ class Store:
             if fields:
                 self._apply(keep_id, fields)
             filled = [k for k in fields if k not in ("tags", "work_history")]
+            kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
             bits = [f"filled {_labels(filled)}"] if filled else []
+            if kept_emails:
+                bits.append(f"kept {len(kept_emails)} more email{'' if len(kept_emails) == 1 else 's'} "
+                            f"({', '.join(kept_emails)})")
             if "tags" in fields:
                 bits.append("added skills")
             if moved:
@@ -3237,7 +3398,8 @@ class Store:
             by = by if by in CHANGE_SOURCES else "app"
             info = {"id": other_id, "name": other["name"], "email": orow.get("email"),
                     "linkedin_url": orow.get("linkedin_url"), "phone": orow.get("phone"), "timeline": moved,
-                    "jobs": jobs, "dropped": dropped}
+                    "jobs": jobs, "dropped": dropped,
+                    "other_emails": kept_emails}
             self._conn.execute(
                 "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (keep_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],

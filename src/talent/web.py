@@ -793,8 +793,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         data = _form_fields(form)
         history = _history_from_text(str(form.get("work_history", "")))
         job_id = str(form.get("job_id") or "")
+        other_emails = _split_emails(form.get("other_emails"))
+        if other_emails:
+            data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
         if (form.get("create_anyway") != "1" and data.get("name")
-                and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None):
+                and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None
+                and not any(store.find_duplicate(e) for e in other_emails)):
             same_name = store.find_by_name(str(data["name"]))  # the same check the AI app's save gets
             if same_name:
                 in_job = ({p["candidate_id"] for p in store.pipeline(int(job_id))}
@@ -804,14 +808,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job,
                             same_exact=same_exact, fill_fields=FILL_FIELDS)
         try:
-            cand, created = store.upsert_candidate(work_history=history or None, **data)
+            data.pop("other_emails", None)
+            cand, created = store.upsert_candidate(work_history=history or None, other_emails=other_emails, **data)
             if job_id.isdigit():
                 warning = add_with_warning(cand["id"], int(job_id))
                 return RedirectResponse(f"/jobs/{job_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
                                         status_code=303)
         except ValueError as exc:
-            return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
-                        error=str(exc), job_id=form.get("job_id"))
+            return page(request, "candidate_form.html", c={**data, "other_emails": "\n".join(other_emails)},
+                        history_text=str(form.get("work_history", "")), error=str(exc), job_id=form.get("job_id"))
         dest = f"/candidates/{cand['id']}" + ("" if created else "?merged=1")
         return RedirectResponse(dest, status_code=303)
 
@@ -841,8 +846,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
+            if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
+                store.set_other_emails(candidate_id, _split_emails(form.get("other_emails")))
         except ValueError as exc:
-            return page(request, "candidate_form.html", c={"id": candidate_id, **data},
+            return page(request, "candidate_form.html",
+                        c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
         return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
 
@@ -3331,6 +3339,11 @@ FILL_FIELDS = ("email", "phone", "current_company", "current_title", "location")
 
 def _and(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _split_emails(raw: Any) -> list[str]:
+    """The Other emails box: one address per line (commas and semicolons work too)."""
+    return [e for e in (x.strip() for x in re.split(r"[\n,;]+", str(raw or ""))) if e]
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:
