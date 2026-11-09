@@ -1,0 +1,35 @@
+/* People view: carousel and table */
+.carousel{position:relative}
+.cnav{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.cnav .count{font-weight:600;min-width:4.5rem;text-align:center}
+.cnav .navbtn{width:32px;padding:0;justify-content:center;font-size:1.1rem}
+.strip{display:flex;gap:4px;overflow-x:auto;padding:2px;margin:0 0 8px;list-style:none}
+.strip button{background:none;border:0;padding:0;cursor:pointer;border-radius:50%}
+.strip button[aria-current=true] .avatar{outline:2px solid var(--accent);outline-offset:1px}
+.pick{display:inline-flex;gap:4px;align-items:center;font-size:.8125rem}
+.tbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}
+.tbar .sel{font-weight:600}
+table.ptable{width:100%;border-collapse:collapse;font-size:.75rem;table-layout:auto}
+table.ptable caption{text-align:left;font-weight:700;font-size:.8125rem;padding:4px 0}
+table.ptable th,table.ptable td{padding:0 6px;height:30px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.ptable thead th{position:sticky;top:0;background:var(--surface);font-weight:600}
+table.ptable th button.sort{font:inherit;font-weight:600;background:none;border:0;padding:0;cursor:pointer;color:inherit;display:inline-flex;gap:2px;align-items:center}
+table.ptable th button.sort .arr{color:var(--muted)}
+table.ptable tbody tr:hover{background:var(--chip)}
+table.ptable tr.sel{background:var(--chip)}
+table.ptable td.match{max-width:14rem}
+table.ptable .out{color:var(--muted);text-decoration:line-through;text-decoration-thickness:1px}
+.tablewrap{overflow-x:auto}
+@media (max-width:560px){
+ table.ptable thead{position:absolute;left:-9999px}
+ table.ptable,table.ptable tbody,table.ptable tr,table.ptable td,table.ptable th[scope=row]{display:block;max-width:none;white-space:normal}
+ table.ptable tr{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;padding:6px 8px}
+ table.ptable td,table.ptable th[scope=row]{border:0;height:auto;padding:1px 0}
+ table.ptable td[data-label]::before{content:attr(data-label) ": ";color:var(--muted)}
+ table.ptable td.pickcell{order:-1}
+ table.ptable tr{display:flex;flex-direction:column}
+ table.ptable td.pickcell{order:-2}table.ptable th[scope=row]{order:-1}
+}
+@media (forced-colors:active){.btn,.chip,.avatar{border:1px solid ButtonText}.btn.primary{background:Highlight;color:HighlightText}mark{background:Highlight;color:HighlightText}}
+html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
+@media (max-width:560px){html table.ptable .wide{display:block!important}}

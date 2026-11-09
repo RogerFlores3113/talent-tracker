@@ -81,6 +81,12 @@ All notable changes to Talent Search. Newest first.
 - `talent install-skills` with no options installs into every app it finds (after listing the files); `--plugin [PATH]` writes the plugin file, and replaces `--zip`.
 - Connect page: long commands wrap and the three app cards stack on mid-size screens, the first-run tour no longer opens over the install buttons, and each app card lists connect and skills as steps 1 and 2.
 
+### In-chat views
+- One People view for searches, saved searches, one candidate and saved candidates: a summary card with links (profile in the app, LinkedIn, website and every saved link), skills, jobs with stage and days, recent activity and an "Ask Claude" button.
+- Flip through several people with the arrows (or Left, Right, Home and End), or jump from a strip of initials. "Show as table" opens a sortable table with filter, select all, shift-click ranges, "Ask Claude about these", "Open in Talent Search" and "Copy emails". Full screen where your chat app offers it.
+- "Load next 50" pages through long searches, and "Open in Talent Search" carries the search and filters. The Candidates page also opens a list of exact people with `?ids=1,2,3`, ticked.
+- Clicking a person in the pipeline, finalists and saved views opens their card in place. If your chat app won't open a link, the address is shown with a Copy button.
+- Better keyboard and screen reader support, stronger contrast in dark mode, and a Refresh button on read-only views.
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 

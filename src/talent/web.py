@@ -582,8 +582,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
-              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = ""):
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
+              ids: str = ""):
         per = 100
+        # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
+        id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
         new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
         # The chips above the table are submit buttons: pressing the colour already chosen clears it.
         color = (color_pick if color_pick != color else "") if color_pick else color
@@ -607,7 +610,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
-        if q.strip():
+        if id_list:
+            marks = ",".join("?" * len(id_list))
+            rows = [store._hydrate(r) for r in store._rows(
+                f"SELECT c.* FROM candidates c WHERE c.id IN ({marks}) ORDER BY c.name COLLATE NOCASE", tuple(id_list))]
+            total = len(rows)
+            q = ""
+            result = None
+        elif q.strip():
             member["color"] = color or None
             if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
@@ -643,8 +653,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
+                                      ids=",".join(map(str, id_list)),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, ticked=set(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),

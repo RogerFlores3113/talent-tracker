@@ -1,7 +1,7 @@
 {% from "_macros.html" import chips, color_bubble %}
 {% for c in rows %}
     <tr>
-      <td class="pickcell"><input type="checkbox" form="bulk-form" name="candidate_ids" value="{{ c.id }}" aria-label="Tick {{ c.name }}{% if c.current_company %}, {{ c.current_company }}{% elif c.email %}, {{ c.email }}{% endif %}"></td>
+      <td class="pickcell"><input type="checkbox" form="bulk-form" name="candidate_ids" value="{{ c.id }}"{% if ticked and c.id in ticked %} checked{% endif %} aria-label="Tick {{ c.name }}{% if c.current_company %}, {{ c.current_company }}{% elif c.email %}, {{ c.email }}{% endif %}"></td>
       <td class="colorcell">{{ color_bubble(c) }}</td>
       <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a>{% if new_after is not none and c.id > new_after %} <span class="badge new">New</span>{% endif %}</td>
       <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td><td>{{ c.location or '' }}</td>

@@ -193,7 +193,7 @@ def test_found_via_is_searchable_and_hits_show_jobs(store):
     assert "Dana Okafor" in text(out) and "Found via: Referral from Alex" in text(out)
     assert f"In: Founding Backend (Us) [job_id {job['id']}], Contacted" in text(out)
     hit = structured(out)["results"][0]
-    assert hit["jobs"] == [{"job_id": job["id"], "job": "Founding Backend (Us)", "stage": "Contacted"}]
+    assert [{k: v for k, v in j.items() if k != "since"} for j in hit["jobs"]] == [{"job_id": job["id"], "job": "Founding Backend (Us)", "stage": "Contacted"}]
     only = structured(call(server, "search_candidates", query="", source="linkedin"))["results"]
     assert [r["name"] for r in only] == ["Alex Kim"]
     table = local_client(store).get("/candidates?q=referral").text
