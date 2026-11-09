@@ -17,10 +17,17 @@
   <span class="fine">{{ [c.email, c.phone, c.linkedin_url] | select | join(' · ') }}</span>
 </div>
 {%- endmacro %}
+<div class="actions-inline dup-bulk">
+  {% if exact_count %}<a class="btn" href="/candidates/duplicates/merge-exact">Merge all exact email or LinkedIn matches ({{ exact_count }})</a>{% endif %}
+  <form method="post" action="/candidates/duplicates/dismiss-many" id="bulk-dismiss" class="inline">
+    <label class="check"><input type="checkbox" data-check-all data-check-name="pair" aria-label="Tick every pair shown"> <span class="fine">Tick every pair shown</span></label>
+    <button class="btn" type="submit">Not the same person, for the ticked pairs</button>
+  </form>
+</div>
 <ul class="items dup-list">
   {% for r in rows %}
   <li class="panel dup-pair">
-    <p class="fine"><strong>{{ r.reasons | join(', ') | capitalize }}</strong></p>
+    <p class="fine"><label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" form="bulk-dismiss" aria-label="Pick this pair"> <strong>{{ r.reasons | join(', ') | capitalize }}</strong></label></p>
     <div class="connect-grid">{{ person(r.a) }}{{ person(r.b) }}</div>
     <div class="actions-inline">
       <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}">Compare and merge</a>

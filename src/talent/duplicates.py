@@ -14,7 +14,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
-from .store import Store, _names_line_up, fold_name, fold_text, normalize_linkedin, phone_key
+from .store import Store, _names_line_up, fold_name, fold_text, normalize_linkedin, phone_key, same_person_name
 
 DISMISSED_KEY = "duplicates_dismissed"  # settings row: JSON list of "a-b" id pairs (a < b)
 DISMISSED_MAX = 5000
@@ -22,7 +22,9 @@ BLOCK_MAX = 300  # the looser name rule skips a company block bigger than this; 
 
 # Strongest first. A pair shows every reason that applies, strongest first.
 REASONS = ("same email", "same LinkedIn", "same name and phone", "same name and company",
-           "similar name and same company")
+           "similar name and same company", "same name and company, but different emails",
+           "similar name and company, but different emails")
+STRONG = (REASONS[0], REASONS[1])  # exact email or LinkedIn: what "Merge all exact matches" is about
 _RANK = {r: i for i, r in enumerate(REASONS)}
 
 
@@ -187,10 +189,73 @@ def find_pairs(store: Store, limit: int | None = None) -> list[dict[str, Any]]:
     pairs = []
     for (a, b), reasons in found.items():
         ra, rb = by_id[a], by_id[b]
+        if not reasons & {REASONS[0], REASONS[1], REASONS[2]} and reasons & {REASONS[3], REASONS[4]}:
+            # Only a name and a company agree. Two different LinkedIn profiles say two people (drop it); two
+            # different emails might be a work and a home address, so the pair stays but moves to the bottom.
+            la = ra["linkedin_key"] or normalize_linkedin(ra["linkedin_url"])
+            lb = rb["linkedin_key"] or normalize_linkedin(rb["linkedin_url"])
+            if la and lb and la != lb:
+                continue
+            ea, eb = email_key(ra["email"]), email_key(rb["email"])
+            if ea and eb and ea != eb:
+                reasons = {REASONS[5] if REASONS[3] in reasons else REASONS[6]}
         keep, other = ((a, b) if (_complete(ra), -a) >= (_complete(rb), -b) else (b, a))
         pairs.append({"keep": keep, "other": other, "reasons": sorted(reasons, key=_RANK.__getitem__)})
     pairs.sort(key=lambda p: (_RANK[p["reasons"][0]], min(p["keep"], p["other"]), max(p["keep"], p["other"])))
     return pairs[:limit] if limit else pairs
+
+
+def exact_matches(store: Store) -> list[dict[str, Any]]:
+    """Pairs with the same email or the same LinkedIn, whose names also line up: safe to merge in one go. Each:
+    {"keep", "other", "reasons", "a", "b"} with the two people as saved. A pair whose names differ is left out,
+    because the same email on two different names needs a human look."""
+    out = []
+    for p in find_pairs(store):
+        if not set(p["reasons"]) & set(STRONG):
+            continue
+        a, b = store.get_candidate(p["keep"]), store.get_candidate(p["other"])
+        if same_person_name(a["name"], b["name"]):
+            out.append({**p, "a": a, "b": b})
+    return out
+
+
+def merge_pairs(store: Store, pairs: list[tuple[int, int]]) -> dict[str, Any]:
+    """Merge each (keep, other), the recruiter's choice in the app. A person already folded into another by an
+    earlier pair in the list goes to that person instead. Returns {"merged": n, "skipped": [reasons]}."""
+    into: dict[int, int] = {}
+    merged, skipped = 0, []
+    for keep, other in pairs:
+        while keep in into:
+            keep = into[keep]
+        while other in into:
+            other = into[other]
+        if keep == other:
+            continue
+        try:
+            store.merge_candidates(keep, other, by="app")
+        except (LookupError, ValueError) as exc:
+            skipped.append(f"{keep} and {other}: {exc}")
+            continue
+        into[other] = keep
+        merged += 1
+    return {"merged": merged, "skipped": skipped}
+
+
+def plausible_for(store: Store, c: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The "Same person?" list on a profile: drops pairs the recruiter said are different people, and a match
+    with a different name unless it shares an email or LinkedIn (a shared phone alone says nothing)."""
+    skip = dismissed(store)
+    li = normalize_linkedin(c.get("linkedin_url"))
+    ek = email_key(c.get("email"))
+    out = []
+    for d in rows:
+        if pair_key(c["id"], d["id"]) in skip:
+            continue
+        strong = bool((ek and ek == email_key(d.get("email")))
+                      or (li and li == normalize_linkedin(d.get("linkedin_url"))))
+        if same_person_name(c["name"], d["name"]) or strong:
+            out.append(d)
+    return out
 
 
 def count(store: Store) -> int:

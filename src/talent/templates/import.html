@@ -49,6 +49,8 @@
   {% if no_client %}<label>Client for these jobs <input type="text" name="client" value="{{ client or '' }}" maxlength="120" placeholder="Leave empty if they're your own jobs"></label>
   <p class="fine">The file has a job column but no client column. Name the client here and every job in it goes under them. We remember it for this export.</p>{% endif %}
   {% if not has_name %}<p class="flash warn">Pick the column that holds each person's name.</p>{% endif %}
+  {% if skipped_email and not preview %}<p class="flash warn" id="email-skipped" role="status">{{ skipped_email | join(', ') }} look{{ 's' if skipped_email | length == 1 }} like {{ 'an email column' if skipped_email | length == 1 else 'email columns' }} but {{ 'is' if skipped_email | length == 1 else 'are' }} set to skip, so those addresses would be left out. Pick Email to keep {{ 'it' if skipped_email | length == 1 else 'them' }}: an address goes in as their email when they have none, and in a note when they do.</p>{% endif %}
+  {% if other_tool and has_name %}<p class="flash warn" id="other-tool">This looks like {{ export_phrase or "a different tool" }}, and your last import was from {{ other_tool }}. The two tools name their stages differently, so people are not moved between stages unless you tick the box below.</p>{% endif %}
   {% if preview %}<section class="panel" aria-label="What this import will do">
     <p><strong>{{ preview_lines[0] }}</strong></p>
     {% for line in preview_lines[1:] %}<p class="fine">{{ line }}</p>{% endfor %}
@@ -56,7 +58,9 @@
       <span>Add the missing stage{{ '' if n == 1 else 's' }} to {{ 'its job' if n == 1 else 'their jobs' }}, each as its own stage, in pipeline order: {% for m in preview.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}{% if n > 10 %}, and {{ n - 10 }} more{% endif %}.
       Left unticked, those people go in the closest stage by name, or the job's first stage. Changed it? Check again to see the result.</span></label>{% endif %}
     {% if preview.moved or preview.already_in or move_stages %}{% set n = preview.moved | length %}<label class="check"><input type="checkbox" name="move_stages" value="1" {{ 'checked' if move_stages }}>
-      <span>Move people whose stage in the file is different{% if n %} ({{ n }} will move){% endif %}. Each move is dated from the file's stage date column, or today, and shows in client updates as a real move. Anyone you moved here since the last import stays put unless the file's date is newer.</span></label>{% endif %}
+      <span>Move people whose stage in the file is different{% if n %} ({{ n }} will move{% if preview.held_back %}, {{ preview.held_back }} held back because it would move them backwards{% endif %}){% elif preview.held_back %} ({{ preview.held_back }} held back because it would move them backwards){% endif %}. Each move is dated from the file's stage date column, or today, and shows in client updates as a real move. Anyone you moved here since the last import stays put unless the file's date is newer. Nobody is moved backwards unless you tick the next box.</span></label>
+    {% if preview.held_back or allow_backward %}<label class="check"><input type="checkbox" name="allow_backward" value="1" {{ 'checked' if allow_backward }}>
+      <span>Also move people backwards when the file shows an earlier stage than they are at now. Changed it? Check again to see the result.</span></label>{% endif %}{% endif %}
     {% if preview.jobs_created and (preview.missing_stages or preview.defaults_dropped) %}<label class="check"><input type="checkbox" name="replace_stages" value="1" {{ 'checked' if replace_stages }}>
       <span>Replace the default stages on the new jobs with the file's own, so their boards don't carry empty Contacted, Screening, Interviewing and Offer stages. A default stays only when the file has no stage of that kind.</span></label>
     {% elif replace_stages %}<input type="hidden" name="replace_stages" value="1">{% endif %}
@@ -92,6 +96,8 @@
 {% for line in closed_lines or [] %}<p class="fine">{{ line }}</p>{% endfor %}
 {% if result.defaults_dropped %}<p class="fine">Left {{ result.defaults_dropped }} empty default stage{{ '' if result.defaults_dropped == 1 else 's' }} off the new jobs, so they show the file's own stages.</p>{% endif %}
 {% if result.moved %}<p class="fine">Moved {{ result.moved | length }} {{ 'person' if result.moved | length == 1 else 'people' }} to the stage the file shows. Each move is on their timeline, where you can undo it.</p>{% endif %}
+{% if result.held_back %}<p class="fine">Held back {{ result.held_back }} move{{ '' if result.held_back == 1 else 's' }} that would have put {{ 'someone' if result.held_back == 1 else 'people' }} earlier in a pipeline. They stay where they are. The list is under "Already in that job".</p>{% endif %}
+{% if result.email_columns_skipped %}<p class="fine" id="email-skipped">{{ result.email_columns_skipped | join(', ') }} looked like {{ 'an email column' if result.email_columns_skipped | length == 1 else 'email columns' }} and {{ 'was' if result.email_columns_skipped | length == 1 else 'were' }} left out, so those addresses were not imported.</p>{% endif %}
 {% if new_jobs %}{{ openings_form(new_jobs, result.backup_name) }}{% endif %}
 <p class="fine">We saved how this file was read. Next time you import a file with the same columns, the same matches are used, and on the command line: talent sync FILE</p>
 <p class="actions-inline"><a class="btn primary" href="/candidates">See candidates</a> <a class="btn" href="/import">Import another</a></p>
