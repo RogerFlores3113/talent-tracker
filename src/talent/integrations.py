@@ -74,14 +74,14 @@ def claude_config_dir(platform: str | None = None, env: dict[str, str] | None = 
     """The folder Claude Desktop keeps its settings in on this computer."""
     platform = platform or sys.platform
     env = os.environ if env is None else env
-    home = home or Path.home()
     if platform == "darwin":
-        return home / "Library" / "Application Support" / "Claude"
+        return (home or Path.home()) / "Library" / "Application Support" / "Claude"
     if platform == "win32":
         if store := _msix_claude_dirs(env, home):
             return store[0]
-        return Path(env.get("APPDATA") or home / "AppData" / "Roaming") / "Claude"
-    return home / ".config" / "Claude"
+        appdata = env.get("APPDATA")
+        return (Path(appdata) if appdata else (home or Path.home()) / "AppData" / "Roaming") / "Claude"
+    return (home or Path.home()) / ".config" / "Claude"
 
 
 def claude_config_path(platform: str | None = None, env: dict[str, str] | None = None,

@@ -282,7 +282,7 @@ def test_windows_store_config_path(tmp_path):
 
 
 def test_windows_store_logs_dir(tmp_path, monkeypatch):
-    env = {"LOCALAPPDATA": str(tmp_path / "Local")}
+    env = {"LOCALAPPDATA": str(tmp_path / "Local"), "USERPROFILE": str(tmp_path), "HOME": str(tmp_path)}
     store = tmp_path / "Local" / "Packages" / "Claude_z" / "LocalCache" / "Roaming" / "Claude"
     store.mkdir(parents=True)
     monkeypatch.setattr(sys, "platform", "win32")
