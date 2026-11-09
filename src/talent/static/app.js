@@ -1,7 +1,9 @@
 // Talent Search app window. All page scripts live here so the Content-Security-Policy
 // can forbid inline scripts. Pages opt in with data- attributes:
 //   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form)
-//   data-autosubmit           on a select: submit its form when it changes
+//   data-autosubmit           on a select: submit its form when it changes by mouse or touch. Picked with the keyboard
+//                             (arrow keys), it submits on Enter or when the select loses focus, so each arrow press
+//                             doesn't reload the page. On a checkbox it submits at once.
 //   data-recipe="run|copy"    on a button with data-prompt (and optional data-fill)
 //   data-copy-text="..." or data-copy-from="element id"   on a button: copy that text
 //   data-copy-note="next"     show the "Copied" message in the next element instead of the button
@@ -27,7 +29,10 @@
 //   data-color-count="red"    on a number in the colour chips: refreshed after a bubble changes
 //   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
-//   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover
+//   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover.
+//                             While it shows, the page behind it is inert (except the lit part); a step may also light
+//                             a second element ("reach") so the recruiter can click it, and the finish step offers
+//                             check boxes (delete_people, delete_searches) that are posted with Finish or Skip.
 (function () {
   "use strict";
 
@@ -170,9 +175,34 @@
     });
   });
 
+  // Selects with data-autosubmit: a mouse or touch pick submits at once. With the keyboard, arrow keys change the
+  // value one option at a time, so wait for Enter or for the select to lose focus.
+  const isAuto = n => n && n.matches && n.matches("select[data-autosubmit]");
+  document.addEventListener("keydown", e => {
+    const el = e.target;
+    if (!isAuto(el)) return;
+    if (e.key === "Enter") {
+      if (el.dataset.pending && el.form) { delete el.dataset.pending; delete el.dataset.kb; e.preventDefault(); el.form.submit(); }
+    } else if (/^(Arrow|Home$|End$|Page)/.test(e.key) || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      el.dataset.kb = "1";
+    }
+  }, true);
+  document.addEventListener("pointerdown", e => { const el = e.target.closest && e.target.closest("select[data-autosubmit]"); if (el) delete el.dataset.kb; }, true);
+  document.addEventListener("focusout", e => {
+    const el = e.target;
+    if (!isAuto(el) || !el.dataset.pending || !el.form) return;
+    const to = e.relatedTarget;
+    delete el.dataset.pending; delete el.dataset.kb;
+    if (to && to.form === el.form && to.type === "submit") return;  // the Go button sends it
+    el.form.submit();
+  });
   document.addEventListener("change", e => {
     const el = e.target;
-    if (el.matches && el.matches("select[data-autosubmit], input[type=checkbox][data-autosubmit]") && el.form) el.form.submit();
+    if (isAuto(el) && el.form) {
+      if (el.dataset.kb) { el.dataset.pending = "1"; return; }
+      el.form.submit(); return;
+    }
+    if (el.matches && el.matches("input[type=checkbox][data-autosubmit]") && el.form) { el.form.submit(); return; }
     // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
     if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
       const shared = document.getElementById("tbl-move");
@@ -263,10 +293,11 @@
       body: new URLSearchParams({color: back ? btn.dataset.prev : btn.dataset.next}).toString(),
     }).then(r => r.json().then(d => ({ok: r.ok, d})))
       .then(({ok, d}) => {
-        if (!ok) { announceColor(d.error || "Couldn't save that color."); return; }
-        setBubble(btn, d); announceColor("Color: " + d.name);
+        const who = btn.dataset.who ? btn.dataset.who + ": " : "";
+        if (!ok) { announceColor(who + (d.error || "Couldn't save that color.")); return; }
+        setBubble(btn, d); announceColor(who + "color is now " + d.name);
       })
-      .catch(() => { announceColor("Couldn't save that color."); })
+      .catch(() => { announceColor((btn.dataset.who ? btn.dataset.who + ": " : "") + "Couldn't save that color."); })
       .finally(() => { delete btn.dataset.busy; });
   }
   document.addEventListener("click", e => {
@@ -296,7 +327,8 @@
 
     const steps = data.steps;
     let idx = Math.max(0, Math.min(data.step || 0, steps.length - 1));
-    let target = null, pulsed = null, confirming = false, shown = -1;
+    let target = null, reach = null, pulsed = null, confirming = false, shown = -1;
+    const picks = [];  // the finish step's "also delete" boxes: {input, field, id}
     const calm = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
 
@@ -306,10 +338,11 @@
     const pop = el("div", "tour-pop");
     pop.setAttribute("role", "dialog"); pop.setAttribute("aria-modal", "true"); pop.tabIndex = -1;
     const count = el("p", "tour-count"), title = el("h2", "tour-title"), body = el("p", "tour-body"), note = el("p", "tour-note");
+    const extras = el("div", "tour-extras");
     title.id = "tour-title"; body.id = "tour-body";
     pop.setAttribute("aria-labelledby", "tour-title"); pop.setAttribute("aria-describedby", "tour-body");
     const acts = el("div", "tour-acts");
-    pop.append(count, title, body, note, acts);
+    pop.append(count, title, body, extras, note, acts);
     root.append(...dims, ring, pop);
     document.body.appendChild(root);
 
@@ -334,9 +367,40 @@
         else render();
       });
     }
-    function skip() {
-      if (data.demo) { confirming = true; render(); return; }  // skipping clears demo people the tour added: ask first
-      postForm("/tour/skip");
+    function skip() { confirming = true; render(); }  // ending is asked about first, by button or by Esc
+    // The finish step and the "End the tour?" question offer to delete the demo people the recruiter worked with and
+    // the saved searches they made during the demo. What they tick is posted with Finish or Skip.
+    function addPicks() {
+      picks.length = 0; extras.textContent = "";
+      if (!data.demo) return;
+      const ex = data.extras || {};
+      const add = (text, field, id) => {
+        const lab = el("label", "check"), inp = el("input"); inp.type = "checkbox";
+        lab.append(inp, el("span", "", text)); extras.appendChild(lab); picks.push({input: inp, field, id});
+      };
+      (ex.people || []).forEach(p => add("Also delete " + p.name + " (you worked with them)", "delete_people", p.id));
+      (ex.searches || []).forEach(x => add("Also remove my saved search " + x.name, "delete_searches", x.id));
+    }
+    function chosen() {
+      const out = {};
+      picks.forEach(p => { if (p.input.checked) out[p.field] = out[p.field] ? out[p.field] + "," + p.id : String(p.id); });
+      return out;
+    }
+
+    // While the popover is open, the page behind it can't be reached (inert), except the lit-up part.
+    function clearInert() {
+      document.querySelectorAll("[data-tour-inert]").forEach(n => { n.inert = false; n.removeAttribute("data-tour-inert"); });
+    }
+    function applyInert(keep) {
+      clearInert();
+      const keepers = keep.filter(Boolean).concat([root]);
+      const chain = new Set();
+      keepers.forEach(k => { for (let n = k; n && n !== document.body; n = n.parentElement) chain.add(n); });
+      const mark = parent => Array.from(parent.children).forEach(ch => {
+        if (chain.has(ch)) { if (!keepers.includes(ch)) mark(ch); }
+        else if (!ch.matches("script, style, link") && ch.getAttribute("role") !== "status") { ch.inert = true; ch.setAttribute("data-tour-inert", ""); }
+      });
+      mark(document.body);
     }
 
     function findTarget(s) {
@@ -347,6 +411,13 @@
       }
       return null;
     }
+    function findReach(s) {
+      if (!s.reach) return null;
+      let n = null;
+      try { n = document.querySelector(s.reach); } catch (e) { /* a bad selector just misses */ }
+      if (n) { const r = n.getBoundingClientRect(); if (r.width || r.height) return n; }
+      return null;
+    }
     function focusables(scope) {
       return Array.from(scope.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, summary"))
         .filter(n => n.offsetParent !== null || n === document.activeElement);
@@ -355,7 +426,12 @@
     function place() {
       const vw = document.documentElement.clientWidth, vh = window.innerHeight, pad = 6, gap = 12;
       let r = null;
-      if (target) { const b = target.getBoundingClientRect(); r = {l: Math.max(0, b.left - pad), t: Math.max(0, b.top - pad), r: Math.min(vw, b.right + pad), b: Math.min(vh, b.bottom + pad)}; }
+      if (target) {
+        const b = target.getBoundingClientRect();
+        let l = b.left, t = b.top, rt = b.right, bt = b.bottom;
+        if (reach) { const q = reach.getBoundingClientRect(); l = Math.min(l, q.left); t = Math.min(t, q.top); rt = Math.max(rt, q.right); bt = Math.max(bt, q.bottom); }
+        r = {l: Math.max(0, l - pad), t: Math.max(0, t - pad), r: Math.min(vw, rt + pad), b: Math.min(vh, bt + pad)};
+      }
       const box = (n, l, t, w, h) => { n.style.left = l + "px"; n.style.top = t + "px"; n.style.width = Math.max(0, w) + "px"; n.style.height = Math.max(0, h) + "px"; };
       if (r) {
         box(dims[0], 0, 0, vw, r.t); box(dims[1], 0, r.b, vw, vh - r.b);
@@ -386,22 +462,33 @@
     function replace() {
       if (queued) return;
       queued = true;
-      window.requestAnimationFrame(() => { queued = false; target = here(steps[idx]) ? findTarget(steps[idx]) : null; place(); });
+      window.requestAnimationFrame(() => {
+        queued = false; target = here(steps[idx]) ? findTarget(steps[idx]) : null;
+        reach = target ? findReach(steps[idx]) : null; place();
+      });
     }
 
     function render() {
       const s = steps[idx];
       if (pulsed) { pulsed.classList.remove("tour-pulse"); pulsed = null; }
       target = here(s) ? findTarget(s) : null;
+      reach = target ? findReach(s) : null;
       if (target && target.tagName === "DETAILS") target.open = true;
       if (target && shown !== idx) target.scrollIntoView({block: "center", behavior: calm() ? "auto" : "smooth"});
-      if (target && s.pulse) { try { pulsed = document.querySelector(s.pulse); } catch (e) { pulsed = null; } if (pulsed) pulsed.classList.add("tour-pulse"); }
-      acts.textContent = ""; note.textContent = "";
+      if (target && s.pulse) {
+        try { pulsed = document.querySelector(s.pulse); } catch (e) { pulsed = null; }
+        if (pulsed && pulsed.disabled) pulsed = null;  // a button that can't be pressed: the lit-up panel is the cue
+        if (pulsed) pulsed.classList.add("tour-pulse");
+      }
+      acts.textContent = ""; note.textContent = ""; extras.textContent = ""; picks.length = 0;
       if (confirming) {
         count.textContent = "Before you go"; title.textContent = "End the tour?";
-        body.textContent = "The demo people the tour added will be cleared. A backup is saved first, and anyone you worked with is kept as yours.";
+        body.textContent = data.demo
+          ? "The demo people the tour added will be cleared, and so will anyone you only gave a color to. A backup is saved first. Anyone else you worked with is kept as yours unless you tick the box below."
+          : "The tour closes. You can start it again any time from Take the tour in the footer or in Settings.";
+        addPicks();
         acts.append(btn("Keep going", "primary", () => { confirming = false; render(); }),
-                    btn("End tour and clear demo data", "", () => postForm("/tour/skip")));
+                    btn(data.demo ? "End tour and clear demo data" : "End the tour", "", () => postForm("/tour/skip", chosen())));
       } else {
         count.textContent = (idx + 1) + " of " + steps.length;
         title.textContent = s.title; body.textContent = s.body;
@@ -412,12 +499,13 @@
         const nav = el("div", "tour-nav");
         if (idx > 0) nav.append(btn("Back", "", () => go(idx - 1)));
         if (s.action === "load") nav.append(btn("Load the demo people", "primary", () => postForm("/tour/load")), btn("Not now", "", () => go(idx + 1)));
-        else if (s.action === "finish") nav.append(btn(s.cta || "Finish the tour", "primary", () => postForm("/tour/finish")));
+        else if (s.action === "finish") { addPicks(); nav.append(btn(s.cta || "Finish the tour", "primary", () => postForm("/tour/finish", chosen()))); }
         else nav.append(btn("Next", "primary", () => go(idx + 1)));
         acts.append(nav);
         acts.append(btn("Skip tour", "ghost small tour-skip", skip));
       }
       shown = idx;
+      applyInert([target, reach]);
       place();
       pop.focus({preventScroll: true});  // Tab then reaches the popover's buttons
       place();
@@ -425,10 +513,10 @@
 
     document.addEventListener("keydown", e => {
       if (!document.body.contains(root)) return;
-      if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }
+      if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }  // Esc asks first
       if (e.key !== "Tab") return;
       // Keep Tab inside the tour: its own buttons, then the lit-up area (so a Connect button can be reached by keyboard).
-      const list = focusables(pop).concat(target ? focusables(target) : []);
+      const list = focusables(pop).concat(target ? focusables(target) : [], reach && reach !== target && !(target && target.contains(reach)) ? focusables(reach).concat(reach.matches("button, a[href]") ? [reach] : []) : []);
       if (!list.length) return;
       const at = list.indexOf(document.activeElement);
       const next = e.shiftKey ? (at <= 0 ? list[list.length - 1] : list[at - 1]) : (at === -1 || at === list.length - 1 ? list[0] : list[at + 1]);

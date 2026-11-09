@@ -17,12 +17,16 @@ Formats checked against the apps' own docs:
 
 Safety rules for what we write:
   * Every folder we install is named talent-search-*, so we never touch the user's own skills.
-  * Every folder we create gets a marker file. We only replace or remove folders that carry it.
-  * A folder with the same name but no marker is left alone and reported.
+  * Every folder we create gets a small label file (the marker) that also records a fingerprint of each file we
+    wrote. We only replace or remove folders that carry it.
+  * A file the user edited since we wrote it (its fingerprint no longer matches) is never overwritten or deleted.
+    It is kept and reported as "edited by you, kept".
+  * A folder with the same name but no marker, or one that is a symlink, is left alone and reported.
   * Nothing is written until the user has seen the exact list of files and confirmed.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -88,6 +92,20 @@ def _files_of(skill: str, src: Path | None = None) -> list[Path]:
 
 
 # ------------------------------------------------------------------ marker
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file_sha(path: Path) -> str | None:
+    """Fingerprint of a real file, or None when it is missing, unreadable or a symlink (never followed)."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        return _sha(path.read_bytes())
+    except OSError:
+        return None
+
+
 def _read_marker(folder: Path) -> dict[str, Any] | None:
     marker = folder / MARKER
     try:
@@ -103,11 +121,33 @@ def _is_ours(folder: Path) -> bool:
     return folder.name.startswith(PREFIX) and _read_marker(folder) is not None
 
 
+def _recorded(folder: Path) -> dict[str, str]:
+    """The fingerprints the marker holds: {relative path: sha256}. An older marker holds none."""
+    files = (_read_marker(folder) or {}).get("files")
+    return {str(k): str(v) for k, v in files.items()} if isinstance(files, dict) else {}
+
+
+def _edited(folder: Path, rel: str, recorded: dict[str, str]) -> bool:
+    """True when this file is there and is not what we wrote. A missing file isn't edited. With no recorded
+    fingerprint (an older marker) a file that differs from the bundled one counts as edited, so it is kept."""
+    dest = folder / rel
+    if not (dest.exists() or dest.is_symlink()):
+        return False
+    have = _file_sha(dest)
+    if have is None:
+        return True  # a symlink or something odd where our file should be: not ours to replace
+    want = recorded.get(rel)
+    if want is None:
+        want = _file_sha(source_dir() / folder.name / rel)
+    return have != want
+
+
 # ------------------------------------------------------------------ plan / install / remove
 def plan_install(target: str) -> dict[str, Any]:
-    """What installing would do, without writing anything: the files, and any folder we'd leave alone."""
+    """What installing would do, without writing anything: the files, the ones the user edited (kept as they
+    are), and any folder we'd leave alone."""
     base = target_dir(target)
-    items, files, skipped = [], [], []
+    items, files, skipped, edited = [], [], [], []
     for name in skill_names():
         folder = base / name
         if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
@@ -118,15 +158,22 @@ def plan_install(target: str) -> dict[str, Any]:
                             "reason": "a folder with this name is already there and Talent Search didn't make it"})
             continue
         action = "update" if folder.exists() else "new"
-        paths = [folder / rel for rel in _files_of(name)] + [folder / MARKER]
-        items.append({"folder": name, "action": action, "files": [display_path(p) for p in paths]})
+        rec = _recorded(folder) if folder.exists() else {}
+        keep = [rel for rel in _files_of(name) if folder.exists() and _edited(folder, rel.as_posix(), rec)]
+        kept = {r.as_posix() for r in keep}
+        paths = [folder / rel for rel in _files_of(name) if rel.as_posix() not in kept] + [folder / MARKER]
+        kept_paths = [display_path(folder / r) for r in keep]
+        items.append({"folder": name, "action": action, "files": [display_path(p) for p in paths],
+                      "edited": kept_paths})
         files.extend(display_path(p) for p in paths)
+        edited.extend(kept_paths)
     return {"target": target, "label": TARGET_LABELS[target], "base": display_path(base), "items": items,
-            "files": files, "skipped": skipped, "version": __version__}
+            "files": files, "skipped": skipped, "edited": edited, "version": __version__}
 
 
 def install(target: str) -> dict[str, Any]:
-    """Copy our skills into the app's folder. Only creates or updates folders we made; reports the rest."""
+    """Copy our skills into the app's folder. Only creates or updates folders we made, never overwrites a file the
+    user edited, and reports the rest."""
     plan = plan_install(target)
     base = target_dir(target)
     src = source_dir()
@@ -134,15 +181,24 @@ def install(target: str) -> dict[str, Any]:
     for item in plan["items"]:
         name = item["folder"]
         folder = base / name
+        old = _recorded(folder) if folder.exists() else {}
+        kept = {p.split(name + "/", 1)[1] for p in item["edited"]}
         folder.mkdir(parents=True, exist_ok=True)
+        fingerprints: dict[str, str] = {}
         for rel in _files_of(name):
+            key = rel.as_posix()
+            data = (src / name / rel).read_bytes()
+            if key in kept:  # the user's version stays; the marker keeps what we last wrote, so it stays "edited"
+                fingerprints[key] = old.get(key) or _sha(data)
+                continue
             dest = folder / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes((src / name / rel).read_bytes())
+            dest.write_bytes(data)
+            fingerprints[key] = _sha(data)
             written.append(display_path(dest))
         marker = folder / MARKER
-        marker.write_text(json.dumps({"app": "talent-search", "version": __version__, "skill": name}) + "\n",
-                          encoding="utf-8")
+        marker.write_text(json.dumps({"app": "talent-search", "version": __version__, "skill": name,
+                                      "files": fingerprints}, sort_keys=True) + "\n", encoding="utf-8")
         written.append(display_path(marker))
     return {**plan, "written": written}
 
@@ -154,39 +210,74 @@ def _our_folders(target: str) -> list[Path]:
     return sorted(p for p in base.iterdir() if p.is_dir() and _is_ours(p))
 
 
+def _split_folder(folder: Path) -> tuple[list[Path], list[Path], list[Path]]:
+    """(files we wrote and can delete, files the user edited, other files in the folder that are not ours)."""
+    rec = _recorded(folder)
+    bundled = {r.as_posix() for r in _files_of(folder.name)} if folder.name in set(skill_names()) else set()
+    ours = set(rec) | bundled | {"SKILL.md"}
+    mine, edited, extra = [], [], []
+    for p in sorted(folder.rglob("*")):
+        if p.is_dir() and not p.is_symlink():
+            continue
+        rel = p.relative_to(folder).as_posix()
+        if rel == MARKER:
+            continue
+        if rel not in ours:
+            extra.append(p)
+        elif _edited(folder, rel, rec):
+            edited.append(p)
+        else:
+            mine.append(p)
+    return mine, edited, extra
+
+
 def plan_remove(target: str) -> dict[str, Any]:
-    folders = _our_folders(target)
-    files = []
-    for f in folders:
-        files.extend(display_path(p) for p in sorted(f.rglob("*")) if p.is_file())
+    """What removing would do: the folders that go entirely, the files kept because the user edited or added
+    them (and the folders that stay because of that)."""
+    folders, files, left, edited = [], [], [], []
+    for f in _our_folders(target):
+        mine, ed, extra = _split_folder(f)
+        files.extend(display_path(p) for p in mine)
+        edited.extend(display_path(p) for p in ed)
+        if ed or extra:
+            left.append({"folder": display_path(f), "files": [display_path(p) for p in ed + extra]})
+        else:
+            folders.append(display_path(f))
     return {"target": target, "label": TARGET_LABELS[target], "base": display_path(target_dir(target)),
-            "folders": [display_path(f) for f in folders], "files": files}
+            "folders": folders, "files": files, "edited": edited, "left": left}
 
 
 def remove(target: str) -> dict[str, Any]:
-    """Delete only folders that carry our marker. Files someone added inside one of them are kept."""
-    removed, kept = [], []
-    bundled = set(skill_names())
+    """Delete only files we wrote and that are unchanged, inside folders that carry our marker. A file the user
+    edited, or added, is kept. Its folder stays and loses the marker, so it is the user's own from then on, and the
+    result says so."""
+    removed, kept, edited = [], [], []
     for folder in _our_folders(target):
-        known = {MARKER, "SKILL.md"}
-        if folder.name in bundled:
-            known |= {r.as_posix() for r in _files_of(folder.name)}
-        for rel in sorted(known):
+        mine, ed, extra = _split_folder(folder)
+        for p in mine:
             try:
-                (folder / rel).unlink()
+                p.unlink()
             except OSError:
                 pass
-        for d in sorted((p for p in folder.rglob("*") if p.is_dir()), reverse=True):
+        try:
+            (folder / MARKER).unlink()  # what is left, if anything, is the user's own now
+        except OSError:
+            pass
+        for d in sorted((p for p in folder.rglob("*") if p.is_dir() and not p.is_symlink()), reverse=True):
             try:
                 d.rmdir()
             except OSError:
                 pass
+        if ed or extra:
+            kept.append(display_path(folder))
+            edited.extend(display_path(p) for p in ed)
+            continue
         try:
             folder.rmdir()
             removed.append(display_path(folder))
         except OSError:
             kept.append(display_path(folder))
-    return {"target": target, "label": TARGET_LABELS[target], "removed": removed, "kept": kept}
+    return {"target": target, "label": TARGET_LABELS[target], "removed": removed, "kept": kept, "edited": edited}
 
 
 def status(target: str) -> dict[str, Any]:
@@ -195,10 +286,12 @@ def status(target: str) -> dict[str, Any]:
     versions = sorted({str((_read_marker(f) or {}).get("version") or "") for f in ours} - {""})
     have = {f.name for f in ours}
     want = set(skill_names())
+    plan = plan_install(target)
     return {"target": target, "label": TARGET_LABELS[target], "base": display_path(target_dir(target)),
             "installed": sorted(have), "count": len(have), "total": len(want), "versions": versions,
             "current": bool(have) and have >= want and versions == [__version__],
-            "missing": sorted(want - have)}
+            "missing": sorted(want - have), "skipped": len(plan["skipped"]),
+            "edited": len(plan["edited"])}
 
 
 # ------------------------------------------------------------------ zip for Claude Desktop
@@ -218,6 +311,18 @@ def build_zip() -> bytes:
     return outer.getvalue()
 
 
+def build_skill_zip(name: str) -> bytes:
+    """One skill as its own zip (the skill folder is the root), for Claude Desktop's Customize > Skills."""
+    if name not in skill_names():
+        raise KeyError(name)
+    src = source_dir()
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zi:
+        for rel in _files_of(name):
+            zi.write(src / name / rel, f"{name}/{rel.as_posix()}")
+    return inner.getvalue()
+
+
 ZIP_README = """Talent Search skills for Claude Desktop
 
 1. Unzip this file. You get one zip per skill.
@@ -229,7 +334,8 @@ Uploading skills needs a Claude plan that allows custom skills.
 
 DESKTOP_STEPS = (
     "Claude Desktop reads skills from an upload, not from a folder on this computer. Download the zip, unzip it "
-    "once, then in Claude open Customize > Skills and add each small zip inside. Switch each one on.",
+    "once, then in Claude open Customize > Skills and add each small zip inside. Switch each one on. Or download "
+    "just the skills you want, one zip each, and add those.",
 )
 
 

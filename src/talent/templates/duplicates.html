@@ -3,7 +3,7 @@
 {% block title %}Possible duplicates · Talent Search{% endblock %}
 {% block body %}
 <div class="sec-head">
-  <h1>Possible duplicates {% if total %}<span class="muted">{{ total }}</span>{% endif %}</h1>
+  <h1>Possible duplicates {% if total %}<span class="muted"><span class="sr-only">Pairs found: </span>{{ total }}</span>{% endif %}</h1>
   <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a></div>
 </div>
 <p class="lead">People who may be saved twice: the same email or LinkedIn, the same name and phone or company, or a name that could be the same person at the same company. Nothing changes until you press Compare and merge, and you see both profiles first. A backup is saved before every merge.</p>
@@ -27,13 +27,13 @@
 <ul class="items dup-list">
   {% for r in rows %}
   <li class="panel dup-pair">
-    <p class="fine"><label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" form="bulk-dismiss" aria-label="Pick this pair"> <strong>{{ r.reasons | join(', ') | capitalize }}</strong></label></p>
+    {% set why = r.reasons | join(', ') %}<p class="fine"><label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" form="bulk-dismiss" aria-label="Pick the pair {{ r.a.name }} and {{ r.b.name }}"> <strong>{{ why[:1] | upper }}{{ why[1:] }}</strong></label></p>
     <div class="connect-grid">{{ person(r.a) }}{{ person(r.b) }}</div>
     <div class="actions-inline">
-      <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}">Compare and merge</a>
+      <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}" aria-label="Compare and merge {{ r.a.name }} and {{ r.b.name }}">Compare and merge</a>
       <form method="post" action="/candidates/duplicates/dismiss" class="inline">
         <input type="hidden" name="a" value="{{ r.keep }}"><input type="hidden" name="b" value="{{ r.other }}">
-        <button class="btn" type="submit">Not the same person</button>
+        <button class="btn" type="submit" aria-label="Not the same person: {{ r.a.name }} and {{ r.b.name }}">Not the same person</button>
       </form>
     </div>
   </li>

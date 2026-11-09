@@ -156,7 +156,9 @@
 <section class="panel" id="tour">
   <h2>Take the tour</h2>
   <p>A short walk through the pages, with the buttons to connect your AI app. It only looks: it never adds or removes anything.</p>
-  <form method="post" action="/tour/start"><input type="hidden" name="mode" value="short"><button class="btn" type="submit">Take the tour</button></form>
+  <form method="post" action="/tour/start" class="actions-inline"><input type="hidden" name="mode" value="short"><button class="btn" type="submit">Take the tour</button></form>
+  <p class="fine">Want the first-run version, with made-up demo people to click on? It adds them only if you say so, and clears them when it ends. People you worked with are kept unless you tick the box to delete them.</p>
+  <form method="post" action="/tour/start"><input type="hidden" name="mode" value="full"><button class="btn" type="submit">Take the full tour</button></form>
 </section>
 
 {% if sample_people or sample_jobs %}

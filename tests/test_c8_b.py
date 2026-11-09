@@ -60,15 +60,15 @@ def test_bubble_click_route_saves_and_returns_the_next_step(store):
     r = c.post(f"/candidates/{cid}/color", data={"color": "red"}, headers={"Accept": "application/json"})
     body = r.json()
     assert r.status_code == 200 and body["color"] == "red" and body["next"] == "orange" and body["prev"] == "none"
-    assert body["aria"] == "Color: red. Click for orange" and body["letter"] == "R" and body["counts"]["red"] == 1
+    assert body["aria"].startswith("Ana Ruiz: color red. Click for orange.") and body["letter"] == "R" and body["counts"]["red"] == 1
     assert store.get_candidate(cid)["color"] == "red"
     # all the way round, using the buttons' own data-next each time
     for want in ("orange", "yellow", "green", "blue", "purple", "none"):
         body = c.post(f"/candidates/{cid}/color", data={"color": body["next"]}, headers={"Accept": "application/json"}).json()
         assert body["name"] == want
-    assert store.get_candidate(cid)["color"] is None and body["aria"] == "Color: none. Click for red"
+    assert store.get_candidate(cid)["color"] is None and body["aria"].startswith("Ana Ruiz: color none. Click for red.")
     purple = c.post(f"/candidates/{cid}/color", data={"color": "purple"}, headers={"Accept": "application/json"}).json()
-    assert purple["aria"] == "Color: purple. Click to clear it" and purple["next"] == "none"
+    assert purple["aria"].startswith("Ana Ruiz: color purple. Click to clear it.") and purple["next"] == "none"
 
 
 def test_invalid_color_is_rejected_and_nothing_changes(store):
@@ -200,8 +200,8 @@ def test_search_sorts_by_match_and_colored_first_groups_by_color(store):
     assert "then grouped by color" in grouped and re.search(r'name="cf" value="1" checked', grouped)
     # the match order inside "no color" and the filter still work with a search
     assert _names(c.get("/candidates?q=python&color=purple").text) == ["Python Python Guru"]
-    # no search: no Colored first box
-    assert 'name="cf"' not in c.get("/candidates").text
+    # the box is always there (without a search it says what it does)
+    assert 'name="cf"' in c.get("/candidates").text
 
 
 # ----------------------------------------------------------------- the pages
@@ -210,15 +210,15 @@ def test_rows_have_a_real_button_with_aria_and_a_legend(store):
     c = local_client(store)
     html = c.get("/candidates").text
     assert f'<form class="cbub-form" method="post" action="/candidates/{cid}/color">' in html
-    assert re.search(r'<button type="submit" class="cbub" data-color-bubble data-cid="%d" data-color="" data-next="red" '
-                     r'data-prev="purple" aria-label="Color: none\. Click for red"' % cid, html)
+    assert re.search(r'<button type="submit" class="cbub" data-color-bubble data-cid="%d" data-who="Ana Ruiz" data-color="" '
+                     r'data-next="red" data-prev="purple" aria-label="Ana Ruiz: color none\. Click for red\.' % cid, html)
     store.set_color(cid, "red")
     html = c.get("/candidates").text
-    assert 'aria-label="Color: red. Click for orange"' in html and 'data-color="red"' in html and ">R</span>" in html
+    assert 'aria-label="Ana Ruiz: color red. Click for orange.' in html and 'data-color="red"' in html and ">R</span>" in html
     for name in COLORS:  # the legend: every color with its letter and the number of people
         assert f'value="{name}" class="cchip' in html
     page = c.get(f"/candidates/{cid}").text
-    assert 'class="cbub big"' in page and 'aria-label="Color: red. Click for orange"' in page
+    assert 'class="cbub big"' in page and 'aria-label="Ana Ruiz: color red. Click for orange.' in page
 
 
 def test_html_escaping_is_unaffected(store):

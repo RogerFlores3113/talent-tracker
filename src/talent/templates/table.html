@@ -31,17 +31,16 @@
     {% for st in stage_choices %}<option value="{{ st }}" {{ 'selected' if st | lower == stage | lower }}>{{ st }}</option>{% endfor %}
   </select>{% endif %}
   <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}"><input type="hidden" name="color" value="{{ color }}">
-  {% if q %}<label class="checkline"><input type="checkbox" name="cf" value="1" {{ 'checked' if colored_first }} data-autosubmit> Colored first</label>{% endif %}
+  <label class="checkline"{% if not q %} title="Groups search results by color. Without a search, the list is grouped by color unless you sort by another column."{% endif %}><input type="checkbox" name="cf" value="1" {{ 'checked' if colored_first }} data-autosubmit> Colored first</label>
   <button class="btn" type="submit">Go</button>
   {% if q or keep %}<a href="/candidates" class="small">Clear</a>{% endif %}
-  {# Implementer B's color chip row and hidden color field go here, inside this form. #}
   <details class="more-filters" {{ 'open' if more_open }}>
     <summary>More filters{% if more_open %} <span class="badge">on</span>{% endif %}</summary>
     <div class="more-grid">
       <label>Title contains <input type="text" name="title" value="{{ mf.get('title', '') }}" placeholder="engineer"></label>
       <label>Company contains <input type="text" name="company" value="{{ mf.get('company', '') }}" placeholder="Acme"></label>
       <label>Skills (separate with commas) <input type="text" name="skills" value="{{ mf.get('skills', '') }}" list="skill-list" placeholder="python, go"></label>
-      <label>Match <select name="skill_mode"><option value="">Any of those skills</option><option value="all" {{ 'selected' if mf.get('skill_mode') == 'all' }}>All of those skills</option></select></label>
+      <label>Match skills <select name="skill_mode"><option value="">Any of those skills</option><option value="all" {{ 'selected' if mf.get('skill_mode') == 'all' }}>All of those skills</option></select></label>
       <label>Years of experience, at least <input type="number" min="0" max="60" name="exp_min" value="{{ mf.get('exp_min', '') }}" placeholder="5"></label>
       <label>Years of experience, at most <input type="number" min="0" max="60" name="exp_max" value="{{ mf.get('exp_max', '') }}" placeholder="10"></label>
       <label>Last contacted <select name="contacted">
@@ -50,7 +49,7 @@
         <option value="older" {{ 'selected' if mf.get('contacted') == 'older' }}>More than this many days ago</option>
         <option value="within" {{ 'selected' if mf.get('contacted') == 'within' }}>Within this many days</option>
       </select></label>
-      <label>Days (for the choice beside) <input type="number" min="1" max="3650" name="contacted_days" value="{{ mf.get('contacted_days', '') }}" placeholder="30"></label>
+      <label>Number of days <input type="number" min="1" max="3650" name="contacted_days" value="{{ mf.get('contacted_days', '') }}" placeholder="30"></label>
       <label>Added in the last (days) <input type="number" min="1" max="3650" name="added_days" value="{{ mf.get('added_days', '') }}" placeholder="14"></label>
       <div class="more-checks">
         <label class="check"><input type="checkbox" name="remote" value="1" {{ 'checked' if mf.get('remote') }}> Remote</label>
@@ -62,10 +61,10 @@
     <p class="fine">Remote means the location says remote, or the person has a Remote tag. Years of experience are worked out from the dates in each work history (overlapping jobs count once, a job with no end date runs to today). People with no dated work history are left out when you set a minimum.</p>
   </details>
 </form>
-{% if active_chips %}<p class="filter-chips" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
+{% if active_chips %}<p class="filter-chips" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 <div class="savedbar">
   {% if saved %}<span class="fine">Saved searches:</span>
-  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
+  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" aria-label="{{ sv.name }}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% if sv.new %}, {{ sv.new }} new{% endif %}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
   {% if save_params %}<details class="save-search">
     <summary>Save this search</summary>
     <form method="post" action="/saved-searches" class="inline-form">
@@ -79,11 +78,11 @@
     <ul class="saved-manage">
     {% for sv in saved %}<li>
       <form method="post" action="/saved-searches/{{ sv.id }}/rename" class="inline-form">
-        <input type="text" name="search_name" value="{{ sv.name }}" maxlength="60" aria-label="Name">
-        <button class="btn small" type="submit">Rename</button>
+        <input type="text" name="search_name" value="{{ sv.name }}" maxlength="60" aria-label="New name for saved search {{ sv.name }}">
+        <button class="btn small" type="submit" aria-label="Rename saved search {{ sv.name }}">Rename</button>
       </form>
       <span class="fine">{{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
-      <form method="post" action="/saved-searches/{{ sv.id }}/delete" data-confirm="Delete the saved search {{ sv.name }}? The people stay."><button class="btn small" type="submit">Delete</button></form>
+      <form method="post" action="/saved-searches/{{ sv.id }}/delete" data-confirm="Delete the saved search {{ sv.name }}? The people stay."><button class="btn small" type="submit" aria-label="Delete saved search {{ sv.name }}">Delete</button></form>
     </li>{% endfor %}
     </ul>
   </details>{% endif %}

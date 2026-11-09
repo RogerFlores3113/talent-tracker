@@ -82,16 +82,19 @@ COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in 
 COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
 
 
-def color_info(color: str | None) -> dict[str, Any]:
+def color_info(color: str | None, who: str = "") -> dict[str, Any]:
     """What a colour bubble says and does: its name, letter, the colours a click and a right-click go to, and
-    the label for screen readers ("Color: red. Click for orange")."""
+    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange.
+    Shift+Enter goes back one color." so a list of bubbles has a different name for each."""
     color = color if color in COLORS else None
     nxt, prev = next_color(color, 1), next_color(color, -1)
     name = color or "none"
     go = f"Click for {nxt}" if nxt else "Click to clear it"
+    back = "Shift+Enter, Shift-click or right-click goes back one color."
+    lead = f"{who}: color" if who else "Color:"
     return {"color": color or "", "name": name, "letter": COLOR_LETTERS.get(color or "", ""),
-            "next": nxt or "none", "prev": prev or "none", "aria": f"Color: {name}. {go}",
-            "title": f"Color: {name}. {go}. Right-click or Shift-click goes back."}
+            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}. {back}",
+            "title": f"{lead} {name}. {go}. {back}"}
 
 
 TABLE_SORTS = {
@@ -849,7 +852,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 return JSONResponse({"error": str(exc)}, status_code=400)
             return back(request, default=f"/candidates/{candidate_id}", error=str(exc))
         if wants_json:
-            return JSONResponse({"id": candidate_id, **color_info(saved.get("color")), "counts": store.color_counts()})
+            return JSONResponse({"id": candidate_id, **color_info(saved.get("color"), saved.get("name") or ""),
+                                 "counts": store.color_counts()})
         return back(request, default=f"/candidates/{candidate_id}")
 
     @app.post("/candidates/{candidate_id}/delete")
@@ -1334,12 +1338,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def removal_notice(r: dict[str, Any], what: str = "the sample data") -> str:
         """One line on what removing the sample data did, and what it kept because the recruiter worked with it."""
         people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
+        dp, ds = r.get("deleted_people") or [], r.get("deleted_searches") or []
+        kp = [n for n in kp if n not in dp]
         msg = (f"Removed {what}: {people} candidate{'' if people == 1 else 's'} and "
                f"{jobs} job{'' if jobs == 1 else 's'}.")
         kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
                 if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
         if kept:
             msg += " Kept " + " and ".join(kept) + ". They are your own data now."
+        if dp:
+            msg += f" Also deleted {', '.join(dp)}."
+        if ds:
+            msg += f" Also removed the saved search{'' if len(ds) == 1 else 'es'} {', '.join(ds)}."
+        empty = [x["name"] for x in store.list_saved_searches(counts=True) if x["count"] == 0]
+        if empty:
+            msg += (f" {len(empty)} saved search{'' if len(empty) == 1 else 'es'} now match nobody ({', '.join(empty[:3])}"
+                    f"{', and more' if len(empty) > 3 else ''}). Delete what you don't need under Manage saved searches.")
         return msg + " A backup was saved first."
 
     @app.post("/sample-data/remove")
@@ -1354,13 +1368,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ------------------------------------------------------------ first-run tour
     def tour_for_page(request: Request) -> dict[str, Any] | None:
-        """The tour to draw on this page, or None. A first run starts it; ?tour=short starts the replay."""
+        """The tour to draw on this page, or None. A first run starts it; ?tour=short or ?tour=full starts a replay."""
         if request.method != "GET" or request.url.path.startswith(("/static/", "/api/")):
             return None
         try:
             if not tour.state(store)["active"]:
-                if request.query_params.get("tour") == tour.SHORT:
-                    tour.start(store, tour.SHORT)
+                if request.query_params.get("tour") in tour.MODES:
+                    tour.start(store, request.query_params["tour"])
                 elif tour.should_autostart(store):
                     tour.start(store, tour.FULL)
             return tour.payload(store)
@@ -1400,10 +1414,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="The demo people are only added by the full tour.")
         return RedirectResponse(tour_start_path(), status_code=303)
 
-    def tour_end(request: Request):
+    def _id_set(raw: Any) -> set[int]:
+        return {int(x) for x in str(raw or "").split(",") if x.strip().isdigit()}
+
+    async def tour_end(request: Request):
         mode = tour.state(store)["mode"]
+        form = await request.form()
         try:
-            removed = tour.end(store)
+            removed = tour.end(store, _id_set(form.get("delete_people")), _id_set(form.get("delete_searches")))
         except ValueError as exc:  # the backup failed, so nothing was removed and the tour stays open
             return back(request, error=str(exc))
         if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
@@ -1413,14 +1431,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse("/", status_code=303)
 
     @app.post("/tour/skip")
-    def tour_skip(request: Request):
+    async def tour_skip(request: Request):
         """End the tour now. Demo people the tour added are cleared; nothing else is touched."""
-        return tour_end(request)
+        return await tour_end(request)
 
     @app.post("/tour/finish")
-    def tour_finish(request: Request):
+    async def tour_finish(request: Request):
         """The last step: clear the demo people the tour added and close the tour for good."""
-        return tour_end(request)
+        return await tour_end(request)
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)
@@ -3108,7 +3126,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),
             desktop_steps=skills.DESKTOP_STEPS[0],
+            skills_source=str(skills.source_dir()),
+            skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
+                        for n in skills.skill_names()],
         )
+
+    @app.get("/connect/skills/{name}.zip")
+    def skill_zip(name: str):
+        """One skill as its own zip, for Claude Desktop's Customize > Skills."""
+        if name not in skills.skill_names():
+            raise HTTPException(404)
+        return Response(skills.build_skill_zip(name), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
 
     @app.get("/connect/skills.zip")
     def skills_zip():
