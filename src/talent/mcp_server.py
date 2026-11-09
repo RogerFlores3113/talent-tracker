@@ -15,6 +15,7 @@ Rules the tools enforce (from the product decisions):
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import secrets
@@ -38,7 +39,7 @@ from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from . import searchquery
 from .paths import app_url
-from .store import (clean_color, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
+from .store import (clean_color, clean_duration, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
                     to_dt)
@@ -79,6 +80,9 @@ except what you read.
 - When the recruiter has Cautious mode on, replacing or clearing saved values, moves into a stage that counts as
   hired or out, job changes and closes, and activity you log wait for the recruiter's review; the reply says so.
   Filling empty fields and adding new people still apply. Don't send a waiting change again.
+- Moving someone into a Hired stage, and closing a job, wait for the recruiter's review even when Cautious mode is
+  off, unless the recruiter lets trusted apps do them in Settings. The reply says it is waiting; tell the recruiter
+  and don't send it again.
 - Record offers with record_offer (terms, start and answer-by dates, notes from the offer call) and the answer with
   record_offer_answer; list_offers reads them back. Offer terms are private: never put them in a status update, a
   client message or anything pasted to others.
@@ -357,13 +361,32 @@ def _zone_used_note(when: Any, iso: str) -> str:
     dt = as_local(to_dt(iso))
     abbr = dt.tzname() or "local time"
     where = "the recruiter's time zone setting" if shown_zone() is not None else "this computer's time zone"
-    return (f"No time zone was sent, so the time was read as {_local(iso)} ({abbr}, {where}). If that's not the "
-            "zone meant, move it with update_interview and a time that includes the zone.")
+    return (f"No time zone was sent, so the time was read as {_local(iso)} ({abbr}, {where}). A time sent with "
+            "a zone is read in that zone.")
 
 
-def _wait_text(r: dict[str, Any], *, part: bool = False) -> str:
+def _unlisted_note(iv: dict[str, Any], who: str | None) -> str:
+    """'Sam Roe isn't listed as an interviewer on this session.' when feedback names someone who isn't on it."""
+    name = (who or "").strip()
+    if not name:
+        return ""
+    listed = interviews.interviewers(actions.interviewer_of(iv))
+    if any(interviews.name_matches(name, w) or interviews.name_matches(interviews.display_name(w), name)
+           for w in listed):
+        return ""
+    return f"{interviews.display_name(name)} isn't listed as an interviewer on this session."
+
+
+def _wait_text(r: dict[str, Any], *, part: bool = False, hired: bool = False) -> str:
     """Say a change waits on Review. part=True when the rest of the call went through (only this part waits), so
-    the reply never says "Nothing changed yet" about a call that changed something."""
+    the reply never says "Nothing changed yet" about a call that changed something. hired=True when it waits
+    only because Hired and closing a job wait by default (Cautious mode is not what holds it)."""
+    if hired:
+        if part:
+            return (f"Held for the recruiter's review: {r['summary']}. Marking someone Hired and closing a job wait "
+                    "for the recruiter by default, so only this part waits and they keep or pass it in the app "
+                    "(Review). The rest of this call went through. Don't send the held part again.")
+        return f"Waiting for the recruiter's review: {r['summary']}. {review.HIRED_WAIT_NOTE}"
     if part:
         return f"Held for the recruiter's review: {r['summary']}. {review.HELD_PART_NOTE}"
     return f"Waiting for the recruiter's review: {r['summary']}. {review.WAIT_NOTE}"
@@ -428,11 +451,14 @@ def _line(c: dict[str, Any]) -> str:
     return ", ".join(b for b in bits if b)
 
 
-def _local(iso: str | None) -> str:
-    """A UTC timestamp as this computer's local time, e.g. 'Thu Nov 12, 3:00 PM PST'."""
+def _local(iso: str | None, all_day: bool = False) -> str:
+    """A UTC timestamp as this computer's local time, e.g. 'Thu Nov 12, 3:00 PM PST'. An all-day entry gives
+    its day only ('Thu Dec 3, all day')."""
     dt = to_dt(iso)
     if dt is None:
         return ""
+    if all_day:
+        return _local_day(iso)
     dt = as_local(dt)
     hour = dt.hour % 12 or 12
     return f"{dt:%a %b} {dt.day}, {hour}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'} {dt.tzname() or ''}".strip()
@@ -623,12 +649,23 @@ def _filled_hint(store: Store, job: dict[str, Any]) -> dict[str, Any]:
     return {**hint, "close_out_hint": ask + (" " + hint["close_out_hint"] if hint.get("close_out_hint") else "")}
 
 
-def _when_words(iso: str | None) -> str:
-    """'for Sat Nov 7, 10:00 AM CST' for something still to come, 'on Thu Nov 5, 3:00 PM CST' for the past."""
+def _is_all_day(entry: dict[str, Any] | None) -> bool:
+    return bool(entry and interviews._data(entry).get("all_day"))
+
+
+def _local_day(iso: str | None) -> str:
+    """'Thu Dec 3, all day' for an all-day entry (no clock time, no zone)."""
+    dt = to_dt(iso)
+    return f"{as_local(dt):%a %b} {as_local(dt).day}, all day" if dt is not None else ""
+
+
+def _when_words(iso: str | None, all_day: bool = False) -> str:
+    """'for Sat Nov 7, 10:00 AM CST' for something still to come, 'on Thu Nov 5, 3:00 PM CST' for the past.
+    An all-day entry says 'for Thu Dec 3, all day', with no time."""
     dt = to_dt(iso)
     if dt is None:
         return ""
-    return ("for " if dt > datetime.now(timezone.utc) else "on ") + _local(iso)
+    return ("for " if dt > datetime.now(timezone.utc) else "on ") + (_local_day(iso) if all_day else _local(iso))
 
 
 def _job_update_sentence(job: dict[str, Any], given: dict[str, Any]) -> str:
@@ -1022,6 +1059,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         blocked = _save_search_blocker(store, name)
         if blocked:
             raise ValueError(blocked)
+        if review.cautious(store):  # Cautious mode, or a session that read flagged text: it waits like other writes
+            asked = {"name": name, "query": query, "location": location, "title": title, "tag": tag, "source": source,
+                     "company": company, "skills": skills, "skill_mode": skill_mode if skill_mode != "any" else None,
+                     "remote": remote, "min_years": min_years, "max_years": max_years, "contacted": contacted,
+                     "contacted_days": contacted_days, "added_days": added_days, "has_email": has_email,
+                     "has_linkedin": has_linkedin}
+            held = trust.hold(store, "save_search", {k: v for k, v in asked.items() if v not in (None, "", [])}, session)
+            return _said(_wait_text(held), {"data_note": DATA_NOTE, "pending_review": _waiting(held)})
         row = store.save_search(name, params, by="ai")
         what = searchquery.describe(row["params"])
         # A filter that was out of range is not kept: say which, so the AI doesn't report a search it didn't save.
@@ -1437,7 +1482,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=WRITE)
     def log_activity(candidate_id: int | None = None, kind: str = "", summary: str | None = None,
                      when: str | None = None, job_id: int | None = None, interviewer: str | None = None,
-                     candidate_ids: list[int] | None = None) -> CallToolResult:
+                     candidate_ids: list[int] | None = None, duration: int | None = None) -> CallToolResult:
         """Add something to a candidate's timeline.
 
         kind: note, call, email, message, meeting, interview or reply (an InMail, LinkedIn message or DM is a message;
@@ -1447,7 +1492,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         or a time with a zone name (2026-11-12 3:00 PM America/Los_Angeles, or PT, ET, CT, MT). An interview
         needs `when` (it is refused without one); the other kinds default to now. A time sent with no zone is
         read in the recruiter's time zone setting and the reply says which zone was used. A clash with the
-        candidate's or the interviewer's other sessions is flagged in the reply. `interviewer` (interviews only) is who runs it. Past calls, emails, messages, meetings and
+        candidate's or the interviewer's other sessions is flagged in the reply. `interviewer` (interviews only) is who runs it. `duration` (interviews only) is how long it runs, in
+        minutes (45 if you leave it out), so the clash check can say whether two sessions overlap. Past calls, emails, messages, meetings and
         interviews update "last contacted". Future interviews show on the recruiter's dashboard. Logging the same
         item twice is harmless. Several interviews on the same day for the same job are an onsite loop; log each
         session. To reschedule, cancel or record how an interview went, use update_interview with the
@@ -1470,11 +1516,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         what_kind = "message" if reply else KIND_ALIASES.get(what_kind, what_kind)  # an InMail is a message
         if len(ids) > 1:
             return _log_many(ids, what_kind, reply, summary, when, job_id)
-        sentence, out, _acts = _log_one(ids[0], what_kind, reply, summary, when, job_id, interviewer)
+        if duration is not None and what_kind != "interview":
+            raise ValueError("No change made. duration is for interviews only.")
+        sentence, out, _acts = _log_one(ids[0], what_kind, reply, summary, when, job_id, interviewer, duration)
         return (_said if out.get("pending_review") else _plain)(sentence, out)
 
     def _log_one(candidate_id: int, what_kind: str, reply: bool, summary: str | None, when: str | None,
-                 job_id: int | None, interviewer: str | None,
+                 job_id: int | None, interviewer: str | None, duration: int | None = None,
                  quiet: bool = False) -> tuple[str, dict[str, Any], list[int]]:
         """Log one entry for log_activity: (sentence, structured result, the AI actions it made)."""
         if reply and not (summary or "").strip():
@@ -1488,6 +1536,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             job_id = outreach.job_for(store, candidate_id)
         if what_kind in TIMELINE_KINDS and what_kind != "stage" and review.cautious(store):
             body = (summary or "").strip()
+            if duration is not None and what_kind == "interview":
+                body = f"{body} ({clean_duration(duration)} min)".strip()
             if what_kind == "note" and not body:
                 raise ValueError("A note needs some text.")
             if len(body) > NOTE_LIMIT:
@@ -1509,17 +1559,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         clashes: list[str] = []
         if what_kind == "interview":  # checked before it is logged, so it doesn't clash with itself
             when_iso = parse_when(when)
-            minutes = interviews.session_minutes({"body": summary})
+            minutes = (clean_duration(duration) if duration is not None
+                       else interviews.session_minutes({"body": summary}))
             clashes = loops.check_slot(store, candidate_id, when_iso, minutes, interviewer)
         entry = store.log(candidate_id, what_kind, summary, at=when, job_id=job_id, source="AI app",
-                          interviewer=interviewer)
+                          interviewer=interviewer, duration=duration if what_kind == "interview" else None)
         if reply:
             outreach.mark_reply(store, entry["id"])
         acts = [store.mark_ai_note(entry)]  # on Changes, so the recruiter (or Undo all AI) can strike it out
         fixed = chase.attach_interview_job(store, entry, job_id)  # the same interview again, now with its job
         job_id, job_skipped = fixed["job_id"], fixed["skipped"]
         cand = store.get_candidate(candidate_id)
-        logged = {**entry, "at_local": _local(entry["at"])}
+        all_day = _is_all_day(entry)
+        logged = {**entry, "at_local": _local(entry["at"], all_day)}
         if entry["kind"] == "interview":
             logged = {**logged, "data": None, "interviewer": actions.interviewer_of(entry) or None}
         out: dict[str, Any] = {"data_note": DATA_NOTE, "logged": _slim(logged),
@@ -1562,7 +1614,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["when_notes"] = when_notes
             out["note"] = f"{out['note']} {wn}" if out.get("note") else wn
         if what_kind == "interview":
-            if not _when_has_zone(when):
+            if not _when_has_zone(when) and not all_day:  # an all-day entry has no clock time to place
                 zn = _zone_used_note(when, entry["at"])
                 out["time_zone_note"] = zn
                 out["note"] = f"{out['note']} {zn}" if out.get("note") else zn
@@ -1583,7 +1635,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         with_ = "on" if what == "note" else "from" if reply else "with"
         job_words = f", for {_job_name(store.get_job(job_id))}" if job_id is not None else ""
         sentence = (f"Logged {'an' if what[0] in 'aeiou' else 'a'} {what} {with_} {quoted(cand['name'])} "
-                    f"{_when_words(entry['at'])}{job_words}."
+                    f"{_when_words(entry['at'], all_day)}{job_words}."
                     + (f" Moved them from {moved['from']} to {moved['to']}." if moved else "")
                     + (" Their follow-ups for this job stop." if reply and job_id is not None
                        and outreach.sequence(store, job_id) else "")
@@ -1684,7 +1736,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                              "default": None})] = None,
                          note: str | None = None,
                          reason: str | None = None, interviewer: str | None = None,
-                         keep: bool = False) -> CallToolResult:
+                         keep: bool = False, duration: int | None = None) -> CallToolResult:
         """Change an interview already on a candidate's timeline. Nothing is deleted.
 
         interview_id is the id log_activity returned (logged.id), or an interview's id in get_candidate's
@@ -1694,7 +1746,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         yes, mixed, no, strong no) is kept as said, or passed, not passed or no show; it's refused while the
         interview is still in the future. Strong yes and yes count as passed, no and strong no as not passed,
         and mixed as neither.
-        For what each interviewer said, use add_interview_feedback. `interviewer` names who runs it ("" clears it).
+        `duration` is how long it runs, in minutes. For what each interviewer said, use add_interview_feedback.
+        `interviewer` names who runs it ("" clears it).
         keep=true, only when the recruiter says so, keeps an interview whose candidate is out of the job (or
         hired), so the dashboard stops asking to cancel it. The recruiter sees every change on the timeline.
         """
@@ -1716,11 +1769,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 "pending_review": _waiting(waiting)})
         _check_cap(store, int(records))
         iv = store.update_interview(interview_id, at=when, cancel=cancel, outcome=outcome, note=note,
-                                    reason=reason, interviewer=interviewer, keep=keep, by="ai")
+                                    reason=reason, interviewer=interviewer, keep=keep, by="ai", duration=duration)
         data = iv["data"]
         out: dict[str, Any] = {"data_note": DATA_NOTE, "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
-            "job_id": iv.get("job_id"), "at": iv["at"], "at_local": _local(iv["at"]), "summary": iv.get("body"),
+            "job_id": iv.get("job_id"), "at": iv["at"], "at_local": _local(iv["at"], _is_all_day(iv)), "summary": iv.get("body"),
+            "minutes": interviews.session_minutes(iv) if not _is_all_day(iv) else None,
             "status": iv["status"], "result": interview_label(data), "interviewer": data.get("interviewer"),
             "outcome_note": interview_note(data),
             "reschedule_note": data.get("reschedule_note"), "rescheduled_from": data.get("rescheduled_from")})}
@@ -1728,21 +1782,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                                          else "")
         done = []
         if cancel:
-            done.append(f"Cancelled {whose} {_when_words(iv['at'])}. It stays on the timeline, marked cancelled")
+            done.append(f"Cancelled {whose} {_when_words(iv['at'], _is_all_day(iv))}. It stays on the timeline, marked cancelled")
         elif when and iv["at"] != before["at"]:
-            done.append(f"Moved {whose} to {_local(iv['at'])} (was {_local(before['at'])})")
-            if not _when_has_zone(when):
+            done.append(f"Moved {whose} to {_local(iv['at'], _is_all_day(iv))} "
+                        f"(was {_local(before['at'], _is_all_day(before))})")
+            if not _when_has_zone(when) and not _is_all_day(iv):
                 done.append(_zone_used_note(when, iv["at"]).rstrip("."))
             done.extend(n.rstrip(".") for n in (iv.get("when_notes") or []) if n)
         if outcome is not None:
-            done.append(f"Recorded {whose} {_when_words(iv['at'])} as {interview_label(data) or iv['status']}")
+            done.append(f"Recorded {whose} {_when_words(iv['at'], _is_all_day(iv))} as {interview_label(data) or iv['status']}")
         if interviewer is not None:
             done.append(f"Interviewer for {whose}: {data['interviewer']}" if data.get("interviewer")
                         else f"Cleared the interviewer on {whose}")
+        if duration is not None:
+            done.append(f"Set the length of {whose} to {data['minutes']} minutes")
         if keep:
-            done.append(f"Kept {whose} {_when_words(iv['at'])}. The dashboard stops asking to cancel it")
+            done.append(f"Kept {whose} {_when_words(iv['at'], _is_all_day(iv))}. The dashboard stops asking to cancel it")
         if not done:
-            done.append(f"Updated {whose} {_when_words(iv['at'])}")
+            done.append(f"Updated {whose} {_when_words(iv['at'], _is_all_day(iv))}")
         return _said(". ".join(done) + ".", out)
 
     @mcp.tool(annotations=WRITE)
@@ -1781,7 +1838,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                              {"data_note": DATA_NOTE, "interview": {"id": before["id"],
                                                                      "candidate_id": before["candidate_id"]}})
             waiting = review.queue_feedback(store, interview_id, body, who or None, session, verdict=verdict)
-            return _said(_wait_text(waiting), {"data_note": DATA_NOTE, "interview": {
+            unlisted = _unlisted_note(before, who)
+            return _said(_wait_text(waiting) + (" " + unlisted if unlisted else ""), {
+                "data_note": DATA_NOTE, **({"not_listed_note": unlisted} if unlisted else {}), "interview": {
                 "id": before["id"], "candidate_id": before["candidate_id"], "status": before["status"]},
                 "pending_review": _waiting(waiting)})
         if verdict is not None:
@@ -1798,13 +1857,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         said_by = interviews.pick_interviewer(iv, interviewer) if interviewer and interviewer.strip() else None
         who = f" from {quoted(said_by)}" if said_by else ""
         sentence = (f"That feedback{who} was already saved on {whose}." if same
-                    else f"Saved feedback{who} on {whose} {_when_words(iv['at'])}.")
+                    else f"Saved feedback{who} on {whose} {_when_words(iv['at'], _is_all_day(iv))}.")
         if verdict is not None and not same:
             sentence += f" The session now reads {interview_label(iv['data']) or iv['status']}."
         sentence += interviews.owed_after(iv)
-        return _said(sentence, {"data_note": DATA_NOTE, "interview": _slim({
+        unlisted = _unlisted_note(before, interviewer)
+        if unlisted:
+            sentence += " " + unlisted
+        return _said(sentence, {"data_note": DATA_NOTE, **({"not_listed_note": unlisted} if unlisted else {}),
+                                "interview": _slim({
             "id": iv["id"], "candidate_id": iv["candidate_id"], "candidate_name": iv["candidate_name"],
-            "job_id": iv.get("job_id"), "at_local": _local(iv["at"]), "summary": iv.get("body"), "status": iv["status"],
+            "job_id": iv.get("job_id"), "at_local": _local(iv["at"], _is_all_day(iv)), "summary": iv.get("body"), "status": iv["status"],
             "interviewer": iv["data"].get("interviewer"), "feedback": notes}),
             "app_url": app_url(f"/candidates/{iv['candidate_id']}#iv-{iv['id']}")})
 
@@ -1833,10 +1896,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     def plan_loop(job_id: int, candidate_id: int | None = None, start: str | None = None,
-                  unavailable: list[str] | None = None) -> CallToolResult:
+                  unavailable: list[str] | None = None, candidate_tz: str | None = None) -> CallToolResult:
         """Propose an interview loop for a candidate: a slot for each session in the job's loop template (set on the
-        job's Loop page in the app), over the next working days, inside the recruiter's working hours and clear
-        of the interviewers' and the candidate's booked sessions. Warns about heavy days and busy interviewers,
+        job's Loop page in the app), over the next working days, inside the recruiter's working hours, inside
+        8 AM to 6 PM where the candidate and each interviewer are (when their time zones are known), and clear
+        of the interviewers' and the candidate's booked sessions. `candidate_tz` is the candidate's own time zone
+        (America/Chicago, Asia/Kolkata, or PT, ET); the one saved for them is used when you leave it out. Warns about heavy days and busy interviewers,
         names who else is free to swap in, and returns paste-ready invite text for each interviewer and for the
         candidate (in the structured result: show it to the recruiter). Nothing is booked and no calendar is
         written. `start` is the first day to try (2026-11-09; default tomorrow). `unavailable` names interviewers
@@ -1849,8 +1914,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "app_url": app_url(f"/jobs/{job_id}/loop")})
         if candidate_id is None:
             raise ValueError("Which candidate? Send candidate_id (search_candidates finds it).")
-        p = loops.plan(store, job_id, candidate_id, start, unavailable)
+        p = loops.plan(store, job_id, candidate_id, start, unavailable, candidate_tz=candidate_tz)
         data = {"data_note": DATA_NOTE, "candidate_id": candidate_id, "job_id": job_id,
+                "candidate_tz": p.get("candidate_tz"),
                 "sessions": [_slim({"session": x["name"], "minutes": x["minutes"], "at": x["at"], "at_local": x["at_local"],
                                     "interviewer": x["interviewer"], "swap_in": x["others"], "warnings": x["warnings"],
                                     "already_booked": x["already"] or None}) for x in p["sessions"]],
@@ -2141,10 +2207,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if review.cautious(store):  # where updates get emailed: held even when it fills an empty one
             over += [k for k in new if k in review.JOB_CONTACT_FIELDS and k not in over]
         waiting = None
-        if over and review.cautious(store):
-            waiting = review.queue_job(store, job_id, {k: new[k] for k in over}, {k: old[k] for k in over}, session)
-            given = {k: v for k, v in given.items() if k not in over}
-        elif over and not store.ai_overwrites_left(len(over)):
+        closing = "status" in new and new["status"] == "closed" and old.get("status") != "closed"
+        by_default = closing and review.hold_hired_close(store) and not review.cautious(store)
+        held = over if (over and review.cautious(store)) else ["status"] if by_default else []
+        if held:
+            waiting = review.queue_job(store, job_id, {k: new[k] for k in held}, {k: old.get(k) for k in held}, session)
+            given = {k: v for k, v in given.items() if k not in held}
+        rest = [k for k in over if k not in held]
+        if rest and not review.cautious(store) and not store.ai_overwrites_left(len(rest)):
             raise ValueError(_cap_text())
         was = store.get_job(job_id)
         was_filled = actions.job_numbers(store, job_id)["filled"]
@@ -2164,15 +2234,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if waiting:
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
             done = _job_update_sentence(job, given) if given else f"Nothing changed on {_job_name(job)} yet."
-            return _plain(f"{done} {_wait_text(waiting, part=bool(given))}", out)
+            return _plain(f"{done} {_wait_text(waiting, part=bool(given), hired=not review.cautious(store))}", out)
         if new.get("status") in ("closed", "on_hold"):
             out["note"] = "The recruiter is asked on Today to confirm this."
         return _plain(_job_update_sentence(job, given), out)
 
     @mcp.tool(annotations=EDIT)
     def close_job(job_id: int) -> CallToolResult:
-        """Close a job (the same as update_job with status closed). Nothing is deleted, and the recruiter is asked
-        on Today to confirm it. Only when the recruiter says the job is filled or off."""
+        """Close a job (the same as update_job with status closed). Nothing is deleted. Closing a job waits for the
+        recruiter on Review by default, even for a Trusted app (Settings has a switch to let trusted apps do it), and
+        they are asked on Today to confirm it. Only when the recruiter says the job is filled or off."""
         return update_job(job_id, status="closed")
 
     @mcp.tool(annotations=EDIT)
@@ -2226,12 +2297,39 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 out["warning"] = " ".join(w for w in (out.get("warning"), sub["warning"]) if w)
 
     @mcp.tool(annotations=WRITE)
-    def add_to_pipeline(candidate_id: int, job_id: int, stage: str | None = None,
-                        notes: str | None = None) -> CallToolResult:
+    def add_to_pipeline(candidate_id: int | None = None, job_id: int | None = None, stage: str | None = None,
+                        notes: str | None = None, candidate_ids: list[int] | None = None) -> CallToolResult:
         """Put a candidate into a job's pipeline, in its first stage unless you name one (no-op if already there).
         A stage can be given by the start of its name ("tech" for "Technical interview").
         `notes` (or `note`; notes is preferred) is logged on their timeline. Only a stage still in play works (not
-        one that counts as hired or out): ask the recruiter before anyone goes further."""
+        one that counts as hired or out): ask the recruiter before anyone goes further.
+        For several people at once send candidate_ids (up to 25) instead of candidate_id: they all go to the same
+        job and stage."""
+        if job_id is None:
+            raise ValueError("Nothing saved. Send job_id (list_jobs shows them).")
+        ids = [int(i) for i in (candidate_ids or [])]
+        if candidate_id is not None and candidate_id not in ids:
+            ids.insert(0, int(candidate_id))
+        if not ids:
+            raise ValueError("Nothing saved. Send candidate_id, or candidate_ids for several people.")
+        if len(ids) == 1:
+            return _add_one_to_pipeline(ids[0], job_id, stage, notes)
+        if len(ids) > shortlist.MAX_BATCH:
+            raise ValueError(f"Nothing saved. Send at most {shortlist.MAX_BATCH} people per call ({len(ids)} "
+                             "given); split them into several calls.")
+        if len(set(ids)) != len(ids):
+            raise ValueError("Nothing saved. A candidate is listed twice in candidate_ids.")
+        store.get_job(job_id)
+        for cid in ids:
+            store.get_candidate(cid)  # "No candidate with id 7", before anyone is added
+        results = [_add_one_to_pipeline(cid, job_id, stage, notes) for cid in ids]
+        rows = [{"candidate_id": cid, **(r.structuredContent or {})} for cid, r in zip(ids, results)]
+        lines = [r.content[0].text.splitlines()[0] for r in results if r.content]
+        return _said(f"Added {len(ids)} people to {_job_name(store.get_job(job_id))}.\n" + "\n".join(lines),
+                     {"data_note": DATA_NOTE, "people": rows})
+
+    def _add_one_to_pipeline(candidate_id: int, job_id: int, stage: str | None,
+                             notes: str | None) -> CallToolResult:
         store.get_job(job_id)  # "No job with id 7", not "This job has no stages."
         already = any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id))
         held_note = None
@@ -2275,7 +2373,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Move a candidate to another of the job's stages, optionally with a note in `notes` (or `note`;
         notes is preferred). The start of a stage name is enough when it's unambiguous ("tech" for
         "Technical interview"). A move into a stage that counts as out (Rejected, Withdrawn and the like) needs the
-        reason in `notes`. A move out of a hired or out stage is flagged, and waits on Review in Cautious mode."""
+        reason in `notes`. A move into a Hired stage waits for the recruiter on Review by default, even for a Trusted
+        app (Settings has a switch to let trusted apps do it). A move out of a hired or out stage is flagged, and
+        waits on Review in Cautious mode."""
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         if before is None:
             store.get_job(job_id)  # "No job with id 7", never a database error
@@ -2295,9 +2395,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if was is not None and was["outcome"] in ("hired", "lost"):
                 closed = was
         every = target is not None and target["name"] != before and review.hold_moves(store)
-        if (ends or every or closed) and review.cautious(store):  # into Hired or Out, out of one (or any move): waits
+        by_default = bool(ends and target["outcome"] == "hired" and review.hold_hired_close(store))
+        if ((ends or every or closed) and review.cautious(store)) or by_default:  # into Hired or Out, out of one (or any move): waits
             waiting = review.queue_move(store, candidate_id, job_id, target["name"], before, notes, session)
-            return _said(_wait_text(waiting), {"candidate_id": candidate_id, "job_id": job_id, "stage": before,
+            return _said(_wait_text(waiting, hired=not review.cautious(store)), {"candidate_id": candidate_id, "job_id": job_id, "stage": before,
                                                "pending_review": {"id": waiting["id"], "summary": waiting["summary"]}})
         held_note, note_text = None, (notes or "").strip()
         if note_text and review.cautious(store):  # the move lands; its note waits
@@ -3660,13 +3761,17 @@ ARG_ALIASES = {
                      "start": "start_date", "starts": "start_date", "deadline": "answer_by",
                      "respond_by": "answer_by", "answer_date": "answer_by", "note": "notes", "terms": "notes"},
     "move_stage": {"note": "notes"},
-    "add_to_pipeline": {"note": "notes"},
-    "log_activity": {"body": "summary", "candidates": "candidate_ids", "people": "candidate_ids"},
+    "add_to_pipeline": {"note": "notes", "candidates": "candidate_ids", "people": "candidate_ids"},
+    "log_activity": {"body": "summary", "note": "summary", "notes": "summary", "text": "summary",
+                     "duration_minutes": "duration", "minutes": "duration", "length": "duration",
+                     "length_minutes": "duration", "candidates": "candidate_ids", "people": "candidate_ids"},
     "set_loop_template": {"template": "sessions", "loop_template": "sessions", "loop": "sessions",
                           "working_hours": "hours"},
     "set_plan_seat": {"title": "role", "start": "target_start", "start_date": "target_start", "id": "seat_id"},
     "propose_candidates": {"prospects": "people", "candidates": "people"},
     "save_candidates": {"candidates": "people", "prospects": "people"},
+    "update_interview": {"duration_minutes": "duration", "minutes": "duration", "length": "duration",
+                         "length_minutes": "duration", "start": "when", "time": "when"},
     "run_saved_search": {"name": "name_or_id", "id": "name_or_id", "search": "name_or_id",
                          "saved_search": "name_or_id", "search_id": "name_or_id"},
     "client_report": {"company": "client"},
@@ -3721,6 +3826,10 @@ def _check_arguments(mcp: FastMCP) -> None:
         unknown = [k for k in args if k not in accepted]
         if unknown and name not in LENIENT_TOOLS:
             hints = [f"{k}_id" for k in unknown if f"{k}_id" in accepted]
+            for k in unknown:  # a near spelling of a real name (summery -> summary, candidate_id1 -> candidate_id)
+                close = difflib.get_close_matches(k, [a for a in accepted if a not in args], n=1, cutoff=0.7)
+                if close and close[0] not in hints:
+                    hints.append(close[0])
             read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
             raise ToolError(("" if read_only else "No change made. ") + f"{name} doesn't take {', '.join(unknown)}."
                             + (f" Did you mean {', '.join(hints)}?" if hints else "")
@@ -3756,6 +3865,10 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
     bad = trust.size_problem(args)
     if bad:
         return bad
+    args = dict(args)
+    for alias, real in ARG_ALIASES.get(name, {}).items():  # the same other names the tool itself takes
+        if alias in args and real not in args:
+            args[real] = args.pop(alias)
     try:
         meta = tool.fn_metadata
         fields = set(meta.arg_model.model_fields)

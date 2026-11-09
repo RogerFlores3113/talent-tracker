@@ -25,7 +25,11 @@ _LENGTH = re.compile(r"(?<![\w.])(\d{2,3})\s*(?:min|mins|minutes|m)\b", re.I)
 
 
 def session_minutes(t: dict[str, Any]) -> int:
-    """How long a session runs: '(30 min)' or '30 minutes' in its summary, else SESSION_MINUTES."""
+    """How long a session runs: the length saved with it (`duration`), else '(30 min)' or '30 minutes' in its
+    summary, else SESSION_MINUTES."""
+    saved = _data(t).get("minutes") if isinstance(t.get("data"), (dict, str)) else None
+    if isinstance(saved, int) and not isinstance(saved, bool):
+        return min(480, max(10, saved))
     m = _LENGTH.search(str(t.get("body") or ""))
     return min(480, max(10, int(m.group(1)))) if m else SESSION_MINUTES
 
@@ -951,10 +955,12 @@ def ics_event(t: dict[str, Any], stamp: datetime, book: dict[str, dict[str, Any]
             if z:
                 notes.append(f"{display_name(w)}'s time: {when_for(t['at'], z)}")
     desc = "\n".join(x for x in notes if x)
-    # Nothing records when an interview was last edited, so each download gets a higher SEQUENCE (minutes since
-    # 2020) and the download time as LAST-MODIFIED: a calendar app that already has the event then takes the
-    # changed times, status or summary instead of keeping the old copy.
-    seq = max(0, int((stamp - datetime(2020, 1, 1, tzinfo=timezone.utc)).total_seconds() // 60))
+    # DTSTAMP and LAST-MODIFIED come from the interview itself (when it was last changed, else when it was
+    # logged) and SEQUENCE is its edit count, so an unchanged interview downloads the same every time and a
+    # calendar app only sees a change when there was one.
+    seq = int(d.get("edits") or 0)
+    made = to_dt(d.get("updated_at") or t.get("created_at")) or stamp
+    stamp = made
     if all_day:
         day = date.fromisoformat(d.get("all_day_date") or as_local(start).date().isoformat())
         when = [f"DTSTART;VALUE=DATE:{day.strftime('%Y%m%d')}",

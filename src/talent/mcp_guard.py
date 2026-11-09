@@ -98,6 +98,10 @@ def held_reply(res: Any, store_setting_on: bool, session: str | None = None) -> 
     def fix(text: str) -> str:
         if store_setting_on:
             return text
+        start = r"(^|[.!?:]\s+|\n)"  # at the start of a sentence the swapped words keep a capital letter
+        text = re.sub(start + "Cautious mode is on", lambda m: m.group(1) + "This session read text that looked like "
+                      "instructions", text)
+        text = re.sub(start + "Cautious mode holds", lambda m: m.group(1) + "The hold on this session holds", text)
         text = text.replace("Cautious mode is on", "this session read text that looked like instructions")
         return text.replace("Cautious mode holds", "the hold on this session holds")
 

@@ -13,6 +13,13 @@ from talent.store import normalize_linkedin
 from test_mcp import call, structured, text
 
 
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
+
 def _iso(days: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
 

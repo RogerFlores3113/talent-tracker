@@ -2749,6 +2749,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 elif a["kind"].startswith("client_"):
                     d = a.get("new_data") or {}
                     name, href = d.get("_client") or "Client", f"/clients/{reports.slug(d.get('_key') or '')}"
+                elif a["kind"] == "saved_search":
+                    name, href = "Saved search", "/candidates"
                 else:
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
@@ -3119,6 +3121,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """How far each AI app that has connected is trusted, and what a new one starts as."""
         form = await request.form()
         trust.set_new_apps(store, "suggest" if form.get("new_apps") == "suggest" else "trusted")
+        if form.get("hired_shown"):  # the switch sits in both forms: ticked or not
+            store.set_settings(**{review.TRUSTED_HIRED: "1" if form.get(review.TRUSTED_HIRED) == "1" else "0"})
         changed = 0
         for a in trust.apps(store):
             level = str(form.get(f"trust_{a['id']}") or "")
@@ -3127,7 +3131,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 changed += 1
         msg = ("Saved. " + (f"{changed} AI app{'' if changed == 1 else 's'} changed. " if changed else "")
                + ("New AI apps start at Suggest only." if trust.new_apps_level(store) == "suggest"
-                  else "New AI apps start as Trusted."))
+                  else "New AI apps start as Trusted.")
+               + (" Trusted AI apps can mark people Hired and close jobs." if store.setting(review.TRUSTED_HIRED) == "1"
+                  else " Hired and closing a job wait on Review."))
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
 
     @app.post("/settings/time-zone")

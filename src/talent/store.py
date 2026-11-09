@@ -1223,6 +1223,24 @@ def _zone_or_error(name: str | None) -> str | None:
     return key
 
 
+def _same_interview_data(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    """Whether two copies of an interview's data are the same, not counting the calendar file's edit count and
+    stamp (a put-back raises those so calendar apps see it, but it is not another change by anyone)."""
+    skip = ("edits", "updated_at")
+    return {k: v for k, v in (a or {}).items() if k not in skip} == {k: v for k, v in (b or {}).items() if k not in skip}
+
+
+def clean_duration(minutes: Any) -> int:
+    """An interview's length in whole minutes, 10 to 480, or a plain error."""
+    try:
+        n = int(str(minutes).strip().lower().removesuffix("minutes").removesuffix("min").strip())
+    except ValueError:
+        raise ValueError("The length is a number of minutes, like 45.") from None
+    if not 10 <= n <= 480:
+        raise ValueError("An interview's length is between 10 and 480 minutes.")
+    return n
+
+
 def _noon_utc(day: Any) -> str:
     """Midday on `day` on the recruiter's clock, in UTC: where an all-day entry sits, so it stays on its day."""
     naive = datetime(day.year, day.month, day.day, 12)
@@ -1885,6 +1903,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "stale_days": "180",
     "pipeline_view": "board",
     "theme": "sunset",
+    "ai_trusted_hired": "0",  # "1": trusted AI apps may mark people Hired and close jobs without waiting on Review
     "strict_site_guards": "0",  # "1": the AI app is told to stay off sites whose terms forbid scraping (site_guard.py)
     # First-run guided tour (see tour.py): where the user is in it, and whether it ever ran.
     "tour_active": "0",
@@ -3066,7 +3085,7 @@ class Store:
                 data = json.loads(t["data"] or "{}") or {}
                 if data.get("struck_at"):
                     return "it was struck out already"
-                if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
+                if new.get("kind") == "interview" and (t["at"] != new.get("at") or not _same_interview_data(data, new.get("data"))):
                     return "that interview was changed again since"
                 return None
             if kind == "card_keep":
@@ -3092,7 +3111,7 @@ class Store:
         data = json.loads(t["data"]) if t.get("data") else {}
         if data.get("struck_at"):
             return "That interview was struck out."
-        if t["at"] != new.get("at") or data != (new.get("data") or {}):
+        if t["at"] != new.get("at") or not _same_interview_data(data, new.get("data")):
             return "That interview was changed again since."
         return None
 
@@ -3446,8 +3465,13 @@ class Store:
                 reason = self._interview_blocker(a)
                 if reason:
                     raise ValueError(reason)
+                back = dict(old.get("data") or {})
+                now_row = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
+                here = json.loads(now_row["data"] or "{}") if now_row else {}
+                back["edits"] = int(here.get("edits") or 0) + 1  # a put-back is a change a calendar app must see
+                back["updated_at"] = now_iso()
                 self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
-                                   (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
+                                   (old.get("at"), json.dumps(back), a["target_id"]))
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -3758,8 +3782,9 @@ class Store:
     def log(self, candidate_id: int, kind: str, body: str | None = None, *, at: str | datetime | None = None,
             job_id: int | None = None, source: str | None = None,
             interviewer: str | None = None, candidate_tz: str | None = None,
-            interviewer_tz: str | None = None) -> dict[str, Any]:
-        """Add a note, call, email, message, meeting or interview to the candidate's timeline.
+            interviewer_tz: str | None = None, duration: int | None = None) -> dict[str, Any]:
+        """Add a note, call, email, message, meeting or interview to the candidate's timeline. An interview can
+        say how long it runs in minutes (`duration`, 10 to 480).
 
         Logging the same thing twice (same kind, time and text) is a no-op, so
         an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`), the
@@ -3793,6 +3818,8 @@ class Store:
             if at is not None and str(at).strip() and w.date_only and w.day is not None:
                 when = _noon_utc(w.day)  # a day with no time: all day, kept on that day in the recruiter's zone
                 extra.update(all_day=True, all_day_date=w.day.isoformat())
+            if duration is not None:
+                extra["minutes"] = clean_duration(duration)
             ctz = _zone_or_error(candidate_tz)
             itz = _zone_or_error(interviewer_tz)
             if ctz:
@@ -3933,7 +3960,8 @@ class Store:
     def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
                          restore: bool = False, outcome: str | None = None, note: str | None = None,
                          reason: str | None = None, candidate_id: int | None = None,
-                         interviewer: str | None = None, keep: bool = False, by: str = "app") -> dict[str, Any]:
+                         interviewer: str | None = None, keep: bool = False, by: str = "app",
+                         duration: int | None = None) -> dict[str, Any]:
         """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
         restore, record how it went, or name the interviewer ('' clears it).
 
@@ -4001,16 +4029,22 @@ class Store:
                 data.pop("interviewer", None)
         if keep:
             data["kept_at"] = ts
+        if duration is not None:
+            data["minutes"] = clean_duration(duration)
         if not (at or cancel or restore or outcome is not None or note is not None or reason is not None
-                or interviewer is not None or keep):
-            raise ValueError("Say what to change: a new time, cancel, an outcome or the interviewer.")
+                or interviewer is not None or keep or duration is not None):
+            raise ValueError("Say what to change: a new time, cancel, an outcome, the length or the interviewer.")
         data["updated_by"] = CHANGE_SOURCES.get(by, by)
+        if (at is not None and str(at).strip()) or cancel or restore or interviewer is not None or duration is not None:
+            data["edits"] = int(iv["data"].get("edits") or 0) + 1  # what the .ics says: SEQUENCE and DTSTAMP
+            data["updated_at"] = ts
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
             if by == "ai":  # on Changes: a cancel, a new time or an outcome can be undone (put back as it was)
                 kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
-                        else "interview_outcome" if outcome is not None or note is not None else None)
+                        else "interview_outcome" if outcome is not None or note is not None
+                        else "interview_move" if duration is not None else None)
                 if kind:
                     self._log_ai(kind, candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), target_id=entry_id,
                                  old={"at": iv["at"], "data": iv["data"]},

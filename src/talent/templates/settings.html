@@ -117,7 +117,7 @@
 
 <section class="panel" id="ai-apps">
   <h2>AI apps</h2>
-  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and Keep makes it once. <strong>Trusted</strong> apps follow the rules above: Cautious mode, the hourly limits and Undo.</p>
+  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and Keep makes it once. <strong>Trusted</strong> apps follow the rules above: Cautious mode, the hourly limits and Undo. A move to Hired and a job close wait on Review even for them, unless you turn on the switch below.</p>
   {% if ai_apps %}
   <form method="post" action="/settings/ai-apps" class="stack">
     <div class="table-wrap"><table class="table">
@@ -136,6 +136,9 @@
     </table></div>
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
       <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% else %}
@@ -143,6 +146,9 @@
   <form method="post" action="/settings/ai-apps" class="stack">
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
       <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% endif %}
