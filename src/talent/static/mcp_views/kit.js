@@ -53,13 +53,13 @@ function applyCtx(){const d=document.documentElement;
  if(CTX.locale)d.lang=String(CTX.locale).slice(0,16);
  TOOL=(CTX.toolInfo&&CTX.toolInfo.tool&&CTX.toolInfo.tool.name)||TOOL}
 function mergeCtx(p){if(!p)return;const was=CTX.displayMode;CTX=Object.assign({},CTX,p);if(p.styles)CTX.styles=Object.assign({},CTX.styles||{},p.styles);applyCtx();
- if(was!==CTX.displayMode&&typeof window.onModeChange==="function")window.onModeChange(CTX.displayMode)}
+ if(was!==CTX.displayMode){document.querySelectorAll("button[data-fs]").forEach(b=>{b.textContent=isFull()?"Exit full screen":"Full screen";b.setAttribute("aria-pressed",isFull()?"true":"false")});if(typeof window.onModeChange==="function")window.onModeChange(CTX.displayMode)}}
 function canFullscreen(){return Array.isArray(CTX.availableDisplayModes)&&CTX.availableDisplayModes.includes("fullscreen")&&!FAILED.mode}
 function isFull(){return CTX.displayMode==="fullscreen"}
 function setMode(m){if(m==="fullscreen"&&!canFullscreen())return Promise.resolve(false);
  return req("ui/request-display-mode",{mode:m}).then(r=>{if(r&&r.isError){FAILED.mode=1;return false}mergeCtx({displayMode:(r&&r.mode)||m});return true})}
 function fullscreenButton(){if(!canFullscreen())return null;
- const b=el("button",{class:"btn",type:"button","aria-pressed":isFull()?"true":"false"},isFull()?"Exit full screen":"Full screen");
+ const b=el("button",{class:"btn",type:"button","data-fs":"1","aria-pressed":isFull()?"true":"false"},isFull()?"Exit full screen":"Full screen");
  b.addEventListener("click",()=>setMode(isFull()?"inline":"fullscreen").then(()=>{b.textContent=isFull()?"Exit full screen":"Full screen";b.setAttribute("aria-pressed",isFull()?"true":"false")}));return b}
 
 /* ---- links, with a way out when the chat app won't open them */
@@ -263,9 +263,9 @@ const TCOLS=[
  {k:"stage",l:"Stage",v:p=>stageText(firstJob(p))},
  {k:"match",l:"Match",v:plainMatch},
  {k:"contacted",l:"Last contacted",v:p=>p.last_contacted_at,date:1},
- {k:"added",l:"Added",v:p=>p.created_at,date:1},
- {k:"updated",l:"Updated",v:p=>p.updated_at,date:1},
- {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i}}];
+ {k:"added",l:"Added",v:p=>p.created_at,date:1,wide:1},
+ {k:"updated",l:"Updated",v:p=>p.updated_at,date:1,wide:1},
+ {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i},wide:1}];
 function cmpVals(a,b,date){if(date){a=parseD(a);b=parseD(b);a=a?+a:null;b=b?+b:null}
  if(typeof a==="string")a=a.toLowerCase();if(typeof b==="string")b=b.toLowerCase();
  return a<b?-1:a>b?1:0}
@@ -295,7 +295,7 @@ function peopleTable(rows,st,h){
  const ths=TCOLS.map(c=>{const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
    if(st.sort===c.k)st.dir=st.dir==="asc"?"desc":"asc";else{st.sort=c.k;st.dir="asc"}
    fill();heads();announce("Sorted by "+c.l+", "+(st.dir==="asc"?"ascending":"descending"))});
-  return{c,b,th:el("th",{scope:"col"},b)}});
+  return{c,b,th:el("th",{scope:"col",class:c.wide?"wide":null},b)}});
  function heads(){for(const{c,b,th}of ths){const on=st.sort===c.k;
    th.setAttribute("aria-sort",on?(st.dir==="asc"?"ascending":"descending"):"none");
    b.replaceChildren(c.l,el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
@@ -330,13 +330,14 @@ function peopleTable(rows,st,h){
    const open=el("button",{class:"link",type:"button","aria-label":"Show card for "+p.name,onclick:()=>h.onOpen(p)},p.name);
    const j=firstJob(p);
    const td=(label,...kids)=>el("td",{"data-label":label},...kids);
+   const wd=(label,...kids)=>el("td",{class:"wide","data-label":label},...kids);
    const txt=(label,v)=>{const t=el("td",{"data-label":v?label:null,title:v||null},v||"");return t};
    const mt=el("td",{class:"match","data-label":plainMatch(p)?"Match":null,title:plainMatch(p)||null},p.match?marked(p.match):(p.reason||""));
    tbody.append(el("tr",{},el("td",{class:"pickcell"},pick),el("th",{scope:"row"},open),
     txt("Title",p.current_title),txt("Company",p.current_company),txt("Location",p.location),
     el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:j&&(j.state==="lost"||j.state==="hired")?"out":null},j?stageText(j):""),
-    mt,td(p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),td(p.created_at?"Added":null,dateEl(p.created_at)),td(p.updated_at?"Updated":null,dateEl(p.updated_at)),
-    el("td",{"data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
+    mt,td(p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),wd(p.created_at?"Added":null,dateEl(p.created_at)),wd(p.updated_at?"Updated":null,dateEl(p.updated_at)),
+    el("td",{class:"wide","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
   if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"11"},"Nobody matches that filter.")));
   selUI()}
  filter.addEventListener("input",()=>{st.filter=filter.value;fill()});

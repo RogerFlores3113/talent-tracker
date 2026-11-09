@@ -67,6 +67,13 @@ All notable changes to Talent Search. Newest first.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
 
+### In-chat views
+- One People view for searches, saved searches, one candidate and saved candidates: a summary card with links (profile in the app, LinkedIn, website and every saved link), skills, jobs with stage and days, recent activity and an "Ask Claude" button.
+- Flip through several people with the arrows (or Left, Right, Home and End), or jump from a strip of initials. "Show as table" opens a sortable table with filter, select all, shift-click ranges, "Ask Claude about these", "Open in Talent Search" and "Copy emails". Full screen where your chat app offers it.
+- "Load next 50" pages through long searches, and "Open in Talent Search" carries the search and filters. The Candidates page also opens a list of exact people with `?ids=1,2,3`, ticked.
+- Clicking a person in the pipeline, finalists and saved views opens their card in place. If your chat app won't open a link, the address is shown with a Copy button.
+- Better keyboard and screen reader support, stronger contrast in dark mode, and a Refresh button on read-only views.
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates

@@ -11,7 +11,7 @@
 .tbar .sel{font-weight:600}
 table.ptable{width:100%;border-collapse:collapse;font-size:.75rem;table-layout:auto}
 table.ptable caption{text-align:left;font-weight:700;font-size:.8125rem;padding:4px 0}
-table.ptable th,table.ptable td{padding:0 6px;height:30px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;max-width:12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.ptable th,table.ptable td{padding:0 6px;height:30px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 table.ptable thead th{position:sticky;top:0;background:var(--surface);font-weight:600}
 table.ptable th button.sort{font:inherit;font-weight:600;background:none;border:0;padding:0;cursor:pointer;color:inherit;display:inline-flex;gap:2px;align-items:center}
 table.ptable th button.sort .arr{color:var(--muted)}
@@ -19,7 +19,7 @@ table.ptable tbody tr:hover{background:var(--chip)}
 table.ptable tr.sel{background:var(--chip)}
 table.ptable td.match{max-width:14rem}
 table.ptable .out{color:var(--muted);text-decoration:line-through;text-decoration-thickness:1px}
-.tablewrap{overflow-x:visible}
+.tablewrap{overflow-x:auto}
 @media (max-width:560px){
  table.ptable thead{position:absolute;left:-9999px}
  table.ptable,table.ptable tbody,table.ptable tr,table.ptable td,table.ptable th[scope=row]{display:block;max-width:none;white-space:normal}
@@ -31,3 +31,5 @@ table.ptable .out{color:var(--muted);text-decoration:line-through;text-decoratio
  table.ptable td.pickcell{order:-2}table.ptable th[scope=row]{order:-1}
 }
 @media (forced-colors:active){.btn,.chip,.avatar{border:1px solid ButtonText}.btn.primary{background:Highlight;color:HighlightText}mark{background:Highlight;color:HighlightText}}
+html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
+@media (max-width:560px){html table.ptable .wide{display:block!important}}
