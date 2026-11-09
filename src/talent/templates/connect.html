@@ -15,7 +15,7 @@
     <h2>Claude Desktop</h2>
     {% if not claude.installed %}
       <p class="flash warn" id="claude-missing">Claude Desktop isn't installed on this computer.</p>
-      <p><a class="btn primary" href="https://claude.ai/download" target="_blank" rel="noopener noreferrer">Get Claude Desktop</a></p>
+      <p><a class="btn primary" href="https://claude.ai/download" target="_blank" rel="noopener noreferrer">Get Claude Desktop<span class="sr-only"> (opens in a new tab)</span></a></p>
       <p class="fine">Already installed? Open it once, then come back and reload this page.</p>
     {% elif claude.launch_problem %}
       <p class="flash warn">{{ claude.launch_problem }}</p>
@@ -57,7 +57,7 @@
     <h2>Codex</h2>
     {% if not codex_installed %}
       <p class="flash warn" id="codex-missing">Codex isn't installed on this computer.</p>
-      <p><a class="btn primary" href="https://developers.openai.com/codex" target="_blank" rel="noopener noreferrer">Get Codex</a></p>
+      <p><a class="btn primary" href="https://developers.openai.com/codex" target="_blank" rel="noopener noreferrer">Get Codex<span class="sr-only"> (opens in a new tab)</span></a></p>
       <p class="fine">Already installed? Open it once, then come back and reload this page.</p>
     {% else %}
       <p>{% if codex_on %}<span class="ok">Connected.</span> Press Reconnect to repair it.{% else %}Works for the Codex app and the codex command.{% endif %}</p>
@@ -73,7 +73,7 @@
   <h2>Using a model that runs on this computer? (LM Studio)</h2>
   {% if not lmstudio_installed %}
     <p class="flash warn" id="lmstudio-missing">LM Studio isn't installed on this computer.</p>
-    <p><a class="btn" href="https://lmstudio.ai" target="_blank" rel="noopener noreferrer">Get LM Studio</a></p>
+    <p><a class="btn" href="https://lmstudio.ai" target="_blank" rel="noopener noreferrer">Get LM Studio<span class="sr-only"> (opens in a new tab)</span></a></p>
   {% else %}
     <p>{% if lmstudio_on %}<span class="ok">Connected.</span> Press Reconnect to repair it.{% else %}For models that run on your own computer. Pick one that supports tool use, like Qwen 3 or Llama 3.1.{% endif %}</p>
     <button class="btn primary" hx-post="/connect/lmstudio" hx-target="#lmstudio-result" hx-indicator="#lmstudio-busy">{{ 'Reconnect' if lmstudio_on else 'Connect' }} LM Studio</button>

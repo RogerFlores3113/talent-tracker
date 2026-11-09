@@ -52,7 +52,7 @@
   {% if skipped_email and not preview %}<p class="flash warn" id="email-skipped" role="status">{{ skipped_email | join(', ') }} look{{ 's' if skipped_email | length == 1 }} like {{ 'an email column' if skipped_email | length == 1 else 'email columns' }} but {{ 'is' if skipped_email | length == 1 else 'are' }} set to skip, so those addresses would be left out. Pick Email to keep {{ 'it' if skipped_email | length == 1 else 'them' }}: an address goes in as their email when they have none, and in a note when they do.</p>{% endif %}
   {% if other_tool and has_name %}<p class="flash warn" id="other-tool">This looks like {{ export_phrase or "a different tool" }}, and your last import was from {{ other_tool }}. The two tools name their stages differently, so people are not moved between stages unless you tick the box below.</p>{% endif %}
   {% if preview %}<section class="panel" aria-label="What this import will do">
-    <p><strong>{{ preview_lines[0] }}</strong></p>
+    <p data-focus-here tabindex="-1"><strong>{{ preview_lines[0] }}</strong></p>
     {% for line in preview_lines[1:] %}<p class="fine">{{ line }}</p>{% endfor %}
     {% if preview.missing_stages %}{% set n = preview.missing_stages | length %}<label class="check"><input type="checkbox" name="add_stages" value="1" {{ 'checked' if add_stages }}>
       <span>Add the missing stage{{ '' if n == 1 else 's' }} to {{ 'its job' if n == 1 else 'their jobs' }}, each as its own stage, in pipeline order: {% for m in preview.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}{% if n > 10 %}, and {{ n - 10 }} more{% endif %}.

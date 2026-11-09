@@ -119,8 +119,26 @@
     // One click: "Use America/Chicago" saves this browser's zone as it is.
     document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
   }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
-  else prefillZones();
+  // The banner only shows when it matters: the server shows it when this computer says UTC with no zone saved; for a
+  // saved zone it stays hidden unless this browser's zone has a different offset now.
+  function offsetOf(zone) {
+    try {
+      const p = new Intl.DateTimeFormat("en-US", {timeZone: zone, timeZoneName: "longOffset"}).formatToParts(new Date())
+        .find(x => x.type === "timeZoneName");
+      return p ? p.value : null;
+    } catch (e) { return null; }
+  }
+  function checkZoneBanner() {
+    let zone = "";
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* leave it hidden */ }
+    document.querySelectorAll("form[data-tz-banner][hidden]").forEach(f => {
+      const here = offsetOf(zone), saved = offsetOf(f.dataset.tzSaved);
+      if (zone && here && saved && here !== saved) f.hidden = false;
+    });
+  }
+  function zoneStart() { checkZoneBanner(); prefillZones(); }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", zoneStart);
+  else zoneStart();
 
   // The Decide form: say exactly who gets the offer and who is passed on before anything moves.
   function decideQuestion(form) {
@@ -189,9 +207,24 @@
     reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
     const w = reason.querySelector(".tbl-who");
     if (w) w.textContent = "Why " + (who || "this person") + " is going to " + o.textContent + ":";
+    const wasHidden = reason.hidden;
     reason.hidden = false;
+    // Nothing has been sent yet. Say so on the page and out loud, so the stage menu doesn't look like a finished move.
+    let note = reason.querySelector(".reason-note");
+    if (!note) { note = document.createElement("span"); note.className = "reason-note"; reason.prepend(note); }
+    note.textContent = "Not moved yet. ";
+    const holder = reason.closest("form") || reason;
+    holder.classList.add("unsent");
+    const name = who || (reason.closest("[data-who]") || {dataset: {}}).dataset.who || "this person";
     const pick = reason.querySelector("select");
-    if (pick && !quiet) pick.focus();
+    if (pick) {
+      if (!quiet) pick.focus();
+      else if (wasHidden) {
+        announceColor("Not moved yet. Pick a reason for " + name + ", or press Move without a reason.");
+        // The keyboard is already leaving the stage menu; put it in the reason box once it has landed.
+        window.setTimeout(() => { pick.focus(); }, 0);
+      }
+    }
   }
   // A stage menu or reason menu has settled: an out stage shows the optional reason first; any other pick moves.
   function stageSettled(el, quiet) {
@@ -203,7 +236,7 @@
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = shared.querySelector(".reason");
       if (o && o.dataset.out && reason) { askReason(reason, o, el.dataset.who, quiet); return; }
-      if (reason) reason.hidden = true;
+      if (reason) { reason.hidden = true; shared.classList.remove("unsent"); }
       sendForm(shared);
       return;
     }
@@ -213,7 +246,7 @@
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = form.querySelector(".reason");
       if (o && o.dataset.out && reason) { askReason(reason, o, "", quiet); return; }
-      if (reason) reason.hidden = true;
+      if (reason) { reason.hidden = true; form.classList.remove("unsent"); }
     }
     sendForm(form);
   }
@@ -301,6 +334,43 @@
     if (!live || !t || t.id !== "results") return;
     const meta = t.querySelector(".meta");
     live.textContent = meta ? meta.textContent.replace(/\s+/g, " ").trim() : "";
+  });
+
+  // After a save that reloads the page, put the keyboard on the notice (or on the result a page marks with
+  // data-focus-here), so a screen reader reads it. Not while the tour owns focus, and not over an autofocus.
+  function focusResult() {
+    if (document.getElementById("tour-data") || document.querySelector("[autofocus]")) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && a.id !== "main") return;
+    const t = document.querySelector("[data-focus-here]") || document.querySelector("main > .flash, main > p.error[role=alert]");
+    if (!t) return;
+    if (!t.hasAttribute("tabindex")) t.setAttribute("tabindex", "-1");
+    try { t.focus({preventScroll: !!window.location.hash}); } catch (e) { t.focus(); }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", focusResult);
+  else focusResult();
+
+  // "All day" on the log form: the date box asks for a day only, with no time.
+  document.addEventListener("change", e => {
+    const box = e.target.closest && e.target.closest("input[data-all-day]");
+    if (!box || !box.form) return;
+    const at = box.form.querySelector("input[data-all-day-input]");
+    if (!at) return;
+    const old = at.value;
+    at.type = box.checked ? "date" : "datetime-local";
+    at.value = box.checked ? old.slice(0, 10) : (old ? old + "T09:00" : "");
+    const tz = box.form.elements.tz;
+    if (tz) tz.disabled = box.checked;
+  });
+  // A visible count next to a box with data-count-limit, from 80% of the limit on.
+  document.addEventListener("input", e => {
+    const box = e.target.closest && e.target.closest("input[data-count-limit]");
+    if (!box || !box.form) return;
+    const note = box.form.querySelector("[data-count-note]");
+    if (!note) return;
+    const n = box.value.length, max = parseInt(box.dataset.countLimit, 10);
+    const kind = box.form.elements.kind;
+    note.textContent = (!kind || kind.value === "interview") && n >= max * 0.8 ? n + " of " + max + " used." : "";
   });
 
   // Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.
@@ -444,7 +514,10 @@
         lab.append(inp, el("span", "", text)); extras.appendChild(lab); picks.push({input: inp, field, id});
       };
       (ex.people || []).forEach(p => add("Also delete " + p.name + " (you worked with them)", "delete_people", p.id));
-      (ex.searches || []).forEach(x => add("Also remove my saved search " + x.name, "delete_searches", x.id));
+      const found = ex.searches || [];  // one box for all of them: they only match the demo people
+      if (found.length) add(found.length === 1 ? "Also remove the saved search I made during the tour"
+                                               : "Also remove the " + found.length + " saved searches I made during the tour",
+                            "delete_searches", found.map(x => x.id).join(","));
     }
     function chosen() {
       const out = {};
@@ -578,6 +651,8 @@
 
     document.addEventListener("keydown", e => {
       if (!document.body.contains(root)) return;
+      // Esc on a menu closes the menu (a native dropdown may be open), not the tour.
+      if (e.key === "Escape" && e.target && e.target.tagName === "SELECT") return;
       if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }  // Esc asks first
       if (e.key !== "Tab") return;
       // Keep Tab inside the tour: its own buttons, then the lit-up area (so a Connect button can be reached by keyboard).

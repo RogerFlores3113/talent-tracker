@@ -35,7 +35,8 @@
       {% for d in wk %}
       <li class="cal-day{{ ' other' if not d.in_month }}{{ ' today' if d.today }}{{ ' weekend' if d.weekend }}{{ ' empty' if not d.sessions }}"{% if d.today %} aria-current="date"{% endif %}>
         {% set n_iv = d.sessions | rejectattr('state', 'equalto', 'cancelled') | list | length %}
-        <a class="cal-num" href="/interviews?view=week&amp;week={{ d.week }}"><span aria-hidden="true"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}</span><span class="cal-vh">{{ d.day | day('%A %B %-d') }}{% if d.today %}, today{% endif %}, {{ n_iv }} interview{{ '' if n_iv == 1 else 's' }}{% if d.sessions | length > n_iv %}, {{ d.sessions | length - n_iv }} cancelled{% endif %}, week of {{ d.week_label }}</span></a>
+        {% if d.sessions %}<a class="cal-num" href="/interviews?view=week&amp;week={{ d.week }}"><span aria-hidden="true"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}</span><span class="cal-vh">{{ d.day | day('%A %B %-d') }}{% if d.today %}, today{% endif %}, {{ n_iv }} interview{{ '' if n_iv == 1 else 's' }}{% if d.sessions | length > n_iv %}, {{ d.sessions | length - n_iv }} cancelled{% endif %}, week of {{ d.week_label }}</span></a>
+        {% else %}<span class="cal-num"><span aria-hidden="true"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}</span><span class="cal-vh">{{ d.day | day('%A %B %-d') }}{% if d.today %}, today{% endif %}</span></span>{% endif %}
         {% for x in d.shown %}
         <a class="cal-chip st-{{ x.state }}{{ ' clash' if x.clash and x.state != 'cancelled' }}" href="{{ x.href }}" title="{{ x.candidate }}{% if x.job %}, {{ x.job }}{% endif %}: {{ x.name }}{% if x.interviewer %} with {{ x.interviewer }}{% endif %} ({{ {'upcoming': 'upcoming', 'done': x.result or interview_outcomes.get(x.status, 'done'), 'owes': 'still needs an outcome or feedback', 'cancelled': 'cancelled'}[x.state] }}{% if x.clash and x.state != 'cancelled' %}, clash{% endif %})"><span class="cal-vh">{{ {'upcoming': 'Upcoming', 'done': 'Done', 'owes': 'Needs feedback', 'cancelled': 'Cancelled'}[x.state] }}: </span><span class="cal-time">{{ x.time_text }}</span> <span class="cal-who">{{ x.candidate }}</span>{% if x.tag %} <span class="cal-tag">{{ x.tag }}</span>{% endif %}{% if x.clash and x.state != 'cancelled' %} <span class="cal-vh">Clash</span>{% endif %}</a>
         {% endfor %}
@@ -45,7 +46,7 @@
     </ul>
     {% endfor %}
   </div>
-  <p class="cal-key fine" role="group" aria-label="Colour key">
+  <p class="cal-key fine" role="group" aria-label="Color key">
     <span class="cal-chip st-upcoming">Upcoming</span>
     <span class="cal-chip st-done">Done</span>
     <span class="cal-chip st-owes">Needs outcome or feedback</span>

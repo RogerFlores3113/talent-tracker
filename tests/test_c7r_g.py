@@ -65,7 +65,7 @@ def test_settings_shows_first_seen_writes_and_new(store, named):
     [app] = trust.apps(store)
     assert app["writes"] == 1 and app["is_new"]
     page = local_client(store).get("/settings").text
-    assert ">New<" in page and "Writes" in page and "any app above is set to Read only" in page
+    assert ">New<" in page and "Changes made" in page and "already set to Read only" in page
 
 
 def test_card_tools_refuse_a_read_only_app_and_cap_a_suggest_only_app(store, named):

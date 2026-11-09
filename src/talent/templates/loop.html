@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import zone_list %}
 {% block title %}Loop planner · {{ job.title }} · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block body %}
@@ -27,7 +28,7 @@
   <form method="get" action="/jobs/{{ job.id }}/loop" class="stack">
     <label>Candidate <select name="candidate" required><option value="">Pick someone</option>{% for a in people %}<option value="{{ a.candidate_id }}"{{ ' selected' if a.candidate_id == cand_id }}>{{ a.candidate_name }}</option>{% endfor %}</select></label>
     <label>First day to try (optional) <input type="date" name="start" value="{{ start }}"></label>
-    <label>Candidate's time zone (optional) <select name="cz"><option value="">{{ 'Saved or same as mine' }}</option>{% for z in common_zones %}<option value="{{ z }}"{{ ' selected' if z == cz }}>{{ z | replace('_', ' ') }}</option>{% endfor %}</select></label>
+    <label>Candidate's time zone (optional) <input type="text" name="cz" value="{{ cz or '' }}" list="zone-list" autocomplete="off" placeholder="Saved or same as mine"></label>{{ zone_list() }}
     <label>Who is out (optional, names separated by commas) <input type="text" name="out" value="{{ out }}" maxlength="200"></label>
     <button class="btn primary" type="submit">Propose slots</button>
   </form>

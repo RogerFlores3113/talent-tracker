@@ -7,7 +7,7 @@
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <form method="post" action="/paste" class="stack">
   <label for="paste-text" class="sr-only">Resume or profile text to paste</label>
-  <textarea id="paste-text" name="text" rows="14" placeholder="Paste here" autofocus>{{ text }}</textarea>
+  <textarea id="paste-text" name="text" rows="14" placeholder="Paste here">{{ text }}</textarea>
   <div class="choice-row">
     <section class="option static">
       <strong>Quick fill, on this computer</strong>

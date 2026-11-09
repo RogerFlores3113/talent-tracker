@@ -244,9 +244,9 @@ def test_person_and_pipeline_steps_are_skipped_after_not_now(store):
 
 def test_welcome_and_today_explain_sample_data_loaded_by_hand(store):
     c = local_client(store)
-    assert "never clears" in step_of(tour_data(c.get("/")), "welcome")["body"]
+    assert "never clears" not in step_of(tour_data(c.get("/")), "welcome")["body"]  # short and plain now (c10 w4)
     c.post("/tour/skip", follow_redirects=False)
-    assert "never clears data you add this way" in c.get("/").text
+    assert "never clears" not in c.get("/").text
 
 
 def test_finish_names_the_demo_person_they_worked_with_and_offers_to_delete_them(store):

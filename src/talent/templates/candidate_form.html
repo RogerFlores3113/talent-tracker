@@ -45,9 +45,10 @@
       ('linkedin_url','LinkedIn URL','text'), ('website','Website or GitHub','text'),
       ('source','Where you found them','text'), ('last_contacted_at','Last contacted (date)','date')] %}
   {% set v = c[f] or '' %}
-  <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ v[:10] if kind == 'date' else v }}" {{ 'required autofocus' if f == 'name' and not c.id }}></label>
+  {% set fe = (field_errors or {}).get(f) %}
+  <label>{{ label }}<input type="{{ 'text' if f == 'email' else kind }}"{{ ' inputmode="email" autocomplete="off"' if f == 'email' }} name="{{ f }}" value="{{ v[:10] if kind == 'date' else v }}" {{ 'required' if f == 'name' and not c.id }}{% if fe %} aria-invalid="true" aria-describedby="err-{{ f }}"{% endif %}>{% if fe %}<span class="error" id="err-{{ f }}">{{ fe }}</span>{% endif %}</label>
   {% endfor %}
-  <label class="wide">Other emails (one per line; delete a line to remove it)<textarea name="other_emails" rows="2" placeholder="a personal or older address">{{ c.other_emails | join('\n') if c.other_emails is iterable and c.other_emails is not string else (c.other_emails or '') }}</textarea></label>
+  <label class="wide">Other emails (one per line; delete a line to remove it)<textarea name="other_emails" rows="2" placeholder="a personal or older address"{% if (field_errors or {}).get('other_emails') %} aria-invalid="true" aria-describedby="err-other_emails"{% endif %}>{{ c.other_emails | join('\n') if c.other_emails is iterable and c.other_emails is not string else (c.other_emails or '') }}</textarea>{% if (field_errors or {}).get('other_emails') %}<span class="error" id="err-other_emails">{{ field_errors.other_emails }}</span>{% endif %}</label>
   <label class="wide">Skills (comma separated)<input type="text" name="tags" value="{{ c.tags | join(', ') if c.tags is not string else c.tags }}" placeholder="python, sql, leadership"></label>
   <label class="wide">About (search looks here first)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
   <label class="wide">Work history, one role per line: Title | Company | Start | End

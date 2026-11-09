@@ -343,6 +343,9 @@ def _zone_field(value: Any, label: str) -> str | None:
     return key
 
 
+SUMMARY_LIMIT = 500  # characters in an interview's note or session name on the web form
+
+
 def form_fields(form: Any) -> dict[str, Any]:
     """The interview extras of the web log form, checked: {interviewer, interviewer_email, interviewer_tz,
     candidate_tz, minutes}. Raises ValueError with a plain message, before anything is saved."""

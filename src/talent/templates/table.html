@@ -85,7 +85,7 @@
         <button class="btn small" type="submit" aria-label="Rename saved search {{ sv.name }}">Rename</button>
       </form>
       <span class="fine">{% if sv.count is not none %}{{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% endif %}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
-      <form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}"><button class="btn small" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin' }} saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin to top' }}</button></form>
+      <form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}"><button class="btn small" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin to top' }}, saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin to top' }}</button></form>
       <form method="post" action="/saved-searches/{{ sv.id }}/delete" data-confirm="Delete the saved search {{ sv.name }}? The people stay."><button class="btn small" type="submit" aria-label="Delete saved search {{ sv.name }}">Delete</button></form>
     </li>{% endfor %}
     </ul>
