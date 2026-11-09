@@ -264,6 +264,8 @@ def seed(store: Store) -> dict[str, int]:
 @pytest.fixture
 def poisoned(store):
     ids = seed(store)
+    # A saved search that finds the poisoned people, so run_saved_search shows their text.
+    ids["saved"] = store.save_search("Instructions people", {"q": "instructions"})["id"]
     return store, ids
 
 
@@ -300,6 +302,8 @@ def _args_for(tool, ids):
             base[k] = ids["iid"]
         elif k == "summary":
             base[k] = "x"
+        elif k == "name_or_id":
+            base[k] = str(ids["saved"])
         else:
             pytest.fail(f"read tool {tool.name} needs {k}: teach _args_for / VARIANTS how to call it")
     out = []
@@ -367,7 +371,8 @@ def test_clean_database_gets_no_caution_from_any_read_tool(store):
     sample_data.load_sample_data(store)
     ids = {"cid": store._row("SELECT id FROM candidates ORDER BY id LIMIT 1")["id"],
            "jid": store._row("SELECT id FROM jobs ORDER BY id LIMIT 1")["id"],
-           "iid": (store._row("SELECT id FROM timeline WHERE kind = 'interview' LIMIT 1") or {"id": 1})["id"]}
+           "iid": (store._row("SELECT id FROM timeline WHERE kind = 'interview' LIMIT 1") or {"id": 1})["id"],
+           "saved": store.save_search("Python people", {"q": "python"})["id"]}
     for tool in read_tools(build_server(store)):
         for args in _args_for(tool, ids):
             try:
