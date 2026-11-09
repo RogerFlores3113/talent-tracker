@@ -58,7 +58,7 @@ STEPS: list[dict[str, Any]] = [
      "body": "Drag a person to another column, or use the menu on their card, to move them along."},
     {"id": "interviews", "title": "Interviews", "path": "/interviews",
      "target": ["#interviews-view", "main section.panel", "main h1"], "modes": (FULL, SHORT),
-     "body": "Every interview across all your jobs, with clashes flagged. Interviews you or your AI app log show up here."},
+     "body": "Your month of interviews across every job, like a calendar. Switch to Week for loops, clashes and who owes feedback. Download a calendar file to add them to your own calendar."},
     {"id": "today-actions", "title": "Back to Today", "path": "/", "target": ["section.today", "main h1"],
      "modes": (FULL,),
      "body": "Today is where you will start each day. Each item has a button to act on it, and you choose what "
