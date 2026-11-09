@@ -205,15 +205,18 @@ Behind a feature flag and off by default, and it has to respect site terms
 ## 8. Distribution
 
 - PyInstaller, one spec (`packaging/talent-search.spec`): macOS `.app`, Windows
-  folder app with the extra console MCP exe. Linux build verified locally (37 MB).
-- GitHub Actions: tests on Linux/Windows/macOS, builds on every push, MCP smoke
-  test inside each build, zips attached to a GitHub Release on `v*` tags.
+  folder app with the extra console MCP exe, Linux folder.
+- GitHub Actions: tests on Linux/Windows/macOS, builds on every push (Mac `.dmg` with an
+  Applications shortcut plus zip, Windows zip, Linux `.tar.gz`), MCP smoke test and
+  one-click-connect check inside each build. On a `v*` tag a release job attaches every
+  file and uses the matching `CHANGELOG.md` section as the release notes
+  (`packaging/release_notes.py`). Install steps live in the README.
 - **Trust warnings are the biggest UX gap for non-engineers.** Unsigned apps get
   Gatekeeper and SmartScreen warnings. Fix before a real launch: Apple Developer
   ID signing plus notarization, and a Windows code-signing certificate. Both
   cost money and need accounts, so they're Roger's call.
-- Also next: app icon, an installer (DMG with Applications link; Inno Setup or
-  MSIX on Windows), auto-update check against GitHub Releases, backups/export
+- Also next: app icon, a Windows installer (Inno Setup or
+  MSIX), auto-update check against GitHub Releases, backups/export
   (CSV and a "Back up my database" button).
 
 ## 9. Hosted mode (later, short research)

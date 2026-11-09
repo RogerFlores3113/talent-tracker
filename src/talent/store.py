@@ -1547,7 +1547,18 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "thin_min": "5",
     "stale_days": "180",
     "pipeline_view": "board",
+    "theme": "sunset",
 }
+
+# The color themes on the Settings page: (value, name, one-line description). The first is the default.
+THEMES: tuple[tuple[str, str, str], ...] = (
+    ("sunset", "Sunset to forest", "Sunset orange fading to deep forest green. Goes dark with your computer."),
+    ("forest-night", "Forest night", "Deep greens with warm amber accents. Always dark."),
+    ("ocean", "Ocean", "Cool blues and teals on a light page."),
+    ("midnight", "Midnight", "Dark indigo with a soft violet glow."),
+    ("classic", "Classic", "The plain neutral look from before. Light or dark with your computer."),
+)
+DEFAULT_THEME = THEMES[0][0]
 
 
 JOB_FIELD_LABELS = {"hiring_manager_email": "hiring manager email", "min_active": "active target",

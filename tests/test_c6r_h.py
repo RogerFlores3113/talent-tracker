@@ -64,6 +64,7 @@ def test_interviews_page_drops_owed_on_a_closed_or_hired_req(store):
     jid, cid = _job(store)
     store.log(cid, "interview", "Panel", at=_ago(30), job_id=jid, interviewer="Alex Ruiz")
     day = as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date()
+    day -= timedelta(days=day.weekday())  # its Monday: week() moves a weekend day on to the next week
     assert interviews.week(store, day)["owed"][0]["feedback"] == ["Alex Ruiz"]
     store.move_stage(cid, jid, "Hired")
     w = interviews.week(store, day)
@@ -199,7 +200,8 @@ def test_lowercase_interviewer_names_read_with_capitals(store):
     a = store.log(cid, "interview", "Tech", at=_ago(30), job_id=jid, interviewer="sam ortiz")["id"]
     store.log(cid, "interview", "Values", at=_ago(29), job_id=jid, interviewer="Sam Ortiz")
     assert interviews.named(store.get_interview(a)) == ["Sam Ortiz"]
-    out = interviews.week_text(interviews.week(store, as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date()))
+    day = as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date()
+    out = interviews.week_text(interviews.week(store, day - timedelta(days=day.weekday())))
     assert "sam ortiz" not in out and "Sam Ortiz 2" in out
 
 

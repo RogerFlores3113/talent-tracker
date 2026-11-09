@@ -16,7 +16,7 @@ def test_claude_creates_file(tmp_path):
     cfg = json.loads(p.read_text())
     assert cfg["mcpServers"]["talent-search"]["command"].endswith("talent-search-mcp.exe")
     assert res["backup"] is None
-    assert integrations.claude_connected(p)
+    assert integrations._json_entry(p) == SPEC.as_json_entry()  # (the program path is fake here, so not "connected")
 
 
 def test_claude_preserves_other_settings_and_backs_up(tmp_path):
@@ -53,7 +53,7 @@ def test_codex_appends_then_replaces_our_section_only(tmp_path):
     text = p.read_text()
     assert text.count("[mcp_servers.talent-search]") == 1
     assert tomllib.loads(text)["mcp_servers"]["talent-search"]["command"] == newer.command
-    assert integrations.codex_connected(p)
+    assert integrations._codex_entry(p)["command"] == newer.command
 
 
 def test_codex_strips_our_subtables_too(tmp_path):
@@ -88,4 +88,4 @@ def test_lmstudio_uses_same_shape_and_keeps_other_servers(tmp_path):
     out = integrations.connect_lmstudio(path, SPEC)
     data = json.loads(path.read_text())
     assert set(data["mcpServers"]) == {"other", "talent-search"} and out["backup"]
-    assert integrations.lmstudio_connected(path)
+    assert integrations._json_entry(path) is not None

@@ -99,7 +99,8 @@ def test_one_nudge_per_interviewer_across_candidates(store):
     res = call(build_server(store), "list_feedback_owed")
     assert "Priya Shah owes 3: Dana Cho, Omar Ali, Lena Wu" in text(res)
     assert data(res)["people"][0]["owes"] == 3 and len(data(res)["loops"]) == 3
-    w = interviews.week(store, actions.as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date())
+    day = actions.as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date()
+    w = interviews.week(store, day - timedelta(days=day.weekday()))  # its Monday, even on a weekend
     assert w["owed_people"] and w["owed_people"][0]["name"] == "Priya Shah"
     html = local_client(store).get("/interviews?week=" + w["start"].isoformat()).text
     assert "Feedback owed, by interviewer" in html

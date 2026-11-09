@@ -149,6 +149,13 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     if port != wanted:
         say.warning("Port %s is in use by another program that isn't this Talent Search, so no launch code was sent "
                     "to it. Starting on port %s instead.", wanted, port)
+    try:  # a moved or updated app leaves a stale entry behind; fix it, but never stop the app starting
+        from . import integrations
+
+        for target in integrations.repair_if_packaged():
+            say.info("Pointed %s's Talent Search entry at this copy of the app, because the old path was gone.", target)
+    except Exception:
+        pass
     app = create_app(Store(db_path()))
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
@@ -253,6 +260,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
     sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
+    sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
+    sub.add_parser("check-codex", help="check that Codex can start Talent Search")
+    sub.add_parser("check-lmstudio", help="check that LM Studio can start Talent Search")
     imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
     imp.add_argument("file")
     imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
@@ -383,7 +393,77 @@ def main(argv: list[str] | None = None) -> None:
 
         fn = {"connect-claude": integrations.connect_claude, "connect-codex": integrations.connect_codex,
               "connect-lmstudio": integrations.connect_lmstudio}[cmd]
-        result = fn()
+        try:
+            result = fn()
+        except Exception as exc:
+            integrations.log_failure(exc)
+            sys.exit(integrations.friendly_error(exc))
         if not result.get("installed", True):
             sys.exit(result["message"])
-        print(f"Updated {result['path']}. {result.get('next_step') or 'Restart the app to load Talent Search.'}")
+        if result.get("ok") is False:
+            sys.exit(result["problem"])
+        if result.get("already_connected"):
+            print(f"Already set up. Talent Search's entry in {result['path']} is correct, so nothing was rewritten.")
+        else:
+            print(f"Updated {result['path']}.")
+        print("Read it back and it matches what we meant to write.")
+        target = cmd.removeprefix("connect-")
+        if target == "claude":
+            print(integrations.REOPEN_LINE)
+        print(result.get("next_step") or "Restart the app to load talent-search.")
+        if result.get("running"):
+            print("Claude Desktop is open right now, so it won't see the change until you quit it completely.")
+        if result.get("quarantine"):
+            print(result["quarantine"])
+        if target in ("claude", "lmstudio") and result.get("entry"):
+            try:
+                test = integrations.test_launch(result["entry"], timeout=45)
+            except Exception as exc:
+                integrations.log_failure(exc)
+                sys.exit(integrations.friendly_error(exc))
+            print(integrations.result_line(test))
+            if test["ok"]:
+                if target == "claude":
+                    print(integrations.HEALTHY_LINE)
+            else:
+                for line in test["stderr_tail"][-5:]:
+                    print(f"  {line}")
+                sys.exit(1)
+    elif cmd in ("check-claude", "check-codex", "check-lmstudio"):
+        from . import integrations
+
+        target = cmd.removeprefix("check-")
+        try:
+            if target == "claude":
+                status = integrations.claude_status()
+                test = integrations.test_launch(status["entry"]) if status["entry"] else None
+                text = integrations.claude_report(status, test)
+                ok = status["connected"] and bool(test and test["ok"])
+                if sys.stdout is None:  # the windowed Windows app has no console to print to
+                    out = data_dir() / "connect-report.txt"
+                    out.write_text(text + "\n", encoding="utf-8")
+                    sys.exit(0 if ok else 1)
+                print(text)
+                sys.exit(0 if ok else 1)
+            path = integrations._config_path_for(target)
+            entry = integrations.entry_for(target, path)
+            print(f"Settings file: {path}")
+            if entry is None:
+                sys.exit("Talent Search isn't in that file. Run: talent connect-" + target)
+            print(f"Entry: {entry.get('command')} {' '.join(map(str, entry.get('args') or []))}")
+            problems = integrations.check_entry(entry)
+            for problem in problems:
+                print(f"Problem: {problem}")
+            test = integrations.test_launch(entry)
+            print(integrations.result_line(test))
+            if not test["ok"]:
+                for line in test["stderr_tail"][-5:]:
+                    print(f"  {line}")
+            if test["stray_stdout"]:
+                print("It also printed text that isn't part of the protocol: " + test["stray_stdout"][0][:160])
+            sys.exit(0 if test["ok"] and not problems else 1)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            integrations.log_failure(exc)
+            sys.exit(integrations.friendly_error(exc))

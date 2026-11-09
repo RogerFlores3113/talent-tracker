@@ -275,8 +275,9 @@ def test_the_send_out_page_lists_due_updates_with_email_and_mark_as_sent(store):
     _ai_move(store, maya, be["id"], "Client interview")
     reports.save_client(store, "acme", update_day=_today(),
                         contacts="Dana <dana@acme.example>\nsam@acme.example\nDana again dana@acme.example")
-    store.add_job("Designer", company="Globex")
-    reports.save_client(store, "globex", update_day="Sunday" if _today() != "Sunday" else "Monday")
+    if _today() != "Sunday":  # on a Sunday every other day has passed, so Globex would be due, not later
+        store.add_job("Designer", company="Globex")
+        reports.save_client(store, "globex", update_day="Sunday")
     c = local_client(store)
     body = c.get("/clients/due").text
     assert "Updates due this week" in body and "Due today" in body and "Acme" in body

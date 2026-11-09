@@ -62,6 +62,6 @@ if sys.platform == "darwin":
         coll,
         name="Talent Search.app",
         bundle_identifier="dev.rogerflores.talentsearch",
-        version="0.0.2",
+        version="0.1.0",
         info_plist={"NSHighResolutionCapable": True, "LSUIElement": False},
     )

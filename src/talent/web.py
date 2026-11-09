@@ -40,7 +40,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
 from .store import as_local, parse_when
-from .store import BATCH_KINDS
+from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -231,6 +231,12 @@ def _history_to_text(entries: list[dict[str, Any]]) -> str:
                      for e in entries)
 
 
+def current_theme(store: Store) -> str:
+    """The saved color theme, or the default when nothing valid is saved."""
+    value = store.setting("theme")
+    return value if value in {t[0] for t in THEMES} else DEFAULT_THEME
+
+
 def key_cookie_name(key: str) -> str:
     """Cookies are shared by every port on 127.0.0.1, so each install's cookie gets its own name."""
     return "talent_key_" + hashlib.sha256(key.encode()).hexdigest()[:10]
@@ -318,6 +324,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
     env.globals["version"] = __version__
+    env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
+    env.globals["themes"] = THEMES
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
@@ -2666,6 +2674,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 errors[key] = "Use a whole number from 1 to 9999."
         if form.get("pipeline_view") in ("board", "table"):
             values["pipeline_view"] = str(form.get("pipeline_view"))
+        if str(form.get("theme") or "") in {t[0] for t in THEMES}:  # anything else is ignored
+            values["theme"] = str(form.get("theme"))
         if errors:
             return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
         if form.get("hiring_for") in ("own", "clients"):
@@ -2713,27 +2723,65 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ----------------------------------------------------- AI app setup
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
+        status = integrations.claude_status()
         return page(
             request,
             "connect.html",
-            claude_on=integrations.claude_connected(),
+            claude=status,
+            claude_on=status["connected"],
+            claude_entry_json=json.dumps(status["entry"], indent=2) if status["entry"] else "",
+            claude_quit=integrations.quit_instruction(),
             codex_on=integrations.codex_connected(),
             lmstudio_on=integrations.lmstudio_connected(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
         )
 
+    @app.post("/connect/claude/report", response_class=HTMLResponse)
+    def connect_report(request: Request):
+        """Everything we know about the Claude Desktop hookup, with a fresh test, as text to paste into a bug report."""
+        try:
+            text = integrations.claude_report()
+        except Exception as exc:
+            integrations.log_failure(exc)
+            text = "We couldn't put the report together: " + integrations.friendly_error(exc)
+        return page(request, "_connect_report.html", report=text)
+
     @app.post("/connect/{target}", response_class=HTMLResponse)
     def connect(request: Request, target: str):
-        fn = {"claude": integrations.connect_claude, "codex": integrations.connect_codex,
-              "lmstudio": integrations.connect_lmstudio}.get(target)
+        fn = getattr(integrations, f"connect_{target}", None) if target in ("claude", "codex", "lmstudio") else None
         if fn is None:
             raise HTTPException(404)
         try:
             result = fn()
-            return page(request, "_connect_result.html", ok=True, target=target, result=result)
-        except (OSError, ValueError) as exc:
-            return page(request, "_connect_result.html", ok=False, target=target, error=str(exc))
+            check = None
+            if result.get("ok") and target in ("claude", "lmstudio") and result.get("entry"):
+                check = integrations.test_launch(result["entry"], timeout=45)
+                check["line"] = integrations.result_line(check)
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
+        return page(request, "_connect_result.html", ok=True, target=target, result=result, check=check,
+                    quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
+                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
+
+    @app.post("/connect/{target}/test", response_class=HTMLResponse)
+    def connect_test(request: Request, target: str):
+        if target not in ("claude", "lmstudio", "codex"):
+            raise HTTPException(404)
+        try:
+            entry = integrations.entry_for(target)
+            check = None
+            if entry is not None:
+                check = integrations.test_launch(entry)
+                check["line"] = integrations.result_line(check)
+            problems = integrations.check_entry(entry) if entry else []
+        except Exception as exc:
+            integrations.log_failure(exc)
+            return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
+        return page(request, "_connect_test.html", target=target, entry=entry, check=check, problems=problems,
+                    quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
+                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")
