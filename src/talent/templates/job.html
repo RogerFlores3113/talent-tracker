@@ -1,8 +1,9 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, sample_badge %}
+{% from "_macros.html" import recipe_buttons, sample_badge, injection_box %}
 {% block title %}{{ job.title }} · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block body %}
+{{ injection_box(inject_warnings, "job") }}
 <div class="sec-head">
   <div>
     <h1>{{ job.title }}{% if job.status != 'open' %} <span class="badge">{{ job.status | replace('_', ' ') }}</span>{% endif %} {{ sample_badge(job.id in sample_ids()[1]) }}</h1>

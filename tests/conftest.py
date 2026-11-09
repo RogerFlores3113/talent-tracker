@@ -1,3 +1,4 @@
+import re
 import pytest
 
 from talent.store import Store
@@ -46,6 +47,11 @@ def store(tmp_path):
 @pytest.fixture
 def client(store):
     return local_client(store)
+
+
+def uncaution(text: str) -> str:
+    """A tool reply without its leading "Caution: ..." line (cycle 8 C adds one when text looks like instructions)."""
+    return re.sub(r"\A(?:Caution: [^\n]*\n)+", "", text)
 
 
 def flash_of(response, key: str = "notice") -> str:

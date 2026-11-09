@@ -29,7 +29,7 @@ from starlette.background import BackgroundTask
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions
 from . import ai_caps, trust
-from . import outreach
+from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import chase, desk, opsreview
@@ -584,6 +584,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
+                    inject_warnings=injection.candidate_warnings(c),
                     dupes=store.possible_duplicates(candidate_id),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
                     refresh_prompt=recipes.refresh_candidate(c))
@@ -1169,6 +1170,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
+                   inject_warnings=injection.job_warnings(job),
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),

@@ -7,7 +7,7 @@ from talent import actions, shortlist
 from talent.mcp_server import INSTRUCTIONS, build_server
 from talent.store import _MIGRATIONS
 
-from conftest import flash_of, local_client
+from conftest import flash_of, local_client, uncaution
 
 
 def call(server, tool, **args):
@@ -202,7 +202,7 @@ def test_save_candidates_batches_with_the_same_rules_and_undo_all(store):
         {"name": "Bo Li", "email": "bo@new.com"},
         {"name": "Tom Ng", "email": "kim@x.com"},
     ])
-    d, t = data(res), text(res)
+    d, t = data(res), uncaution(text(res))  # cycle 8 C: a poisoned reason adds a Caution line on top
     # Cycle 4 W: a batch merge keeps a saved title (Wei stays "SWE"), so Wei is "already saved".
     assert t.startswith("Saved 1 new person, 1 already saved with nothing new, and 2 need the recruiter's answer "
                         "before saving; "

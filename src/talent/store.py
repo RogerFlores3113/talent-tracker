@@ -972,6 +972,16 @@ def to_dt(iso: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+class AIForbidden(PermissionError):
+    """The AI app tried something only the recruiter may do (delete, merge)."""
+
+
+def refuse_ai(what: str, by: str | None = None) -> None:
+    """The AI never deletes. Raised for by="ai", and for anything running inside an AI session's tool call."""
+    if by == "ai" or AI_SESSION.get():
+        raise AIForbidden(f"{what} is only for the recruiter, in the Talent Search window. The AI app can't do it.")
+
+
 class NotFound(LookupError):
     pass
 
@@ -3047,8 +3057,9 @@ class Store:
         if old.get("_at") and job.get("updated_at") == new.get("_at"):
             self._conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (old["_at"], job_id))
 
-    def delete_candidate(self, candidate_id: int) -> None:
+    def delete_candidate(self, candidate_id: int, *, by: str = "app") -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
+        refuse_ai("Deleting a candidate", by)
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
         if cur.rowcount == 0:
@@ -3057,6 +3068,7 @@ class Store:
 
     def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
         """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
+        Refused for by="ai" and inside an AI session.
 
         keep's empty fields are filled from other (last contacted takes the later date), skills are
         combined, and other's timeline, to-dos, work history and jobs move to keep. When both are in
@@ -3064,6 +3076,7 @@ class Store:
         from where (it can't be undone with Undo; the backup taken before merging can). The
         returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
         """
+        refuse_ai("Merging candidates", by)
         if keep_id == other_id:
             raise ValueError("Pick two different people to merge.")
         self.get_candidate(keep_id)
@@ -3844,12 +3857,13 @@ class Store:
                                  new={**fields, "_at": ts})
         return self.get_job(job_id)
 
-    def delete_job(self, job_id: int) -> None:
+    def delete_job(self, job_id: int, *, by: str = "app") -> None:
         """App window only: remove a job, its stages and its pipeline. The candidates stay.
 
         Timeline entries keep their text but lose the job link; to-dos about a
         candidate stay, without the job. The AI has no tool for this.
         """
+        refuse_ai("Deleting a job", by)
         with self._lock, self._conn:
             self._conn.execute("UPDATE suggestions SET job_id = NULL WHERE job_id = ? AND candidate_id IS NOT NULL",
                                (job_id,))
@@ -4081,8 +4095,9 @@ class Store:
                     f"{was['name']} counts as {_OUTCOME_WORDS.get(s['outcome'], s['outcome'])}. Ask the recruiter "
                     f"to rename {was['name']} in the app, or pick a name that reads the same way.")
 
-    def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
+    def remove_empty_stage(self, job_id: int, name: str, *, by: str = "app") -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""
+        refuse_ai("Removing a stage", by)
         stage = self.resolve_stage(job_id, name)
         n = self._row("SELECT count(*) AS n FROM applications WHERE job_id = ? AND lower(stage) = lower(?)",
                       (job_id, stage["name"]))["n"]

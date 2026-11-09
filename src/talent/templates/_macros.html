@@ -18,6 +18,16 @@
 {% if is_sample %}<span class="badge sample" title="Made-up sample data. Remove it in Settings.">Sample</span>{% endif %}
 {%- endmacro %}
 
+{% macro injection_box(warnings, what="profile") -%}
+{% if warnings %}
+<aside class="flash warn inject-warn" id="injection-warning" role="note">
+  <p><strong>Some text on this {{ what }} looks like instructions to an AI app.</strong> Talent Search tells your AI to treat it as data.</p>
+  <ul class="fine">{% for w in warnings %}<li>{{ w.field }}: {{ w.reason }}. <code>{{ w.snippet }}</code></li>{% endfor %}</ul>
+  <p class="fine">If you didn't write it, you may want to edit it. <a href="/privacy#injection">How this works</a></p>
+</aside>
+{% endif %}
+{%- endmacro %}
+
 {% macro hiring_for_form(next) -%}
 <form method="post" action="/jobs/wording" class="hiring-for">
   <input type="hidden" name="next" value="{{ next }}">
