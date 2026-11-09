@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Jobs · Talent Search{% endblock %}
-{% from "_macros.html" import sample_badge %}
+{% from "_macros.html" import sample_badge, cur %}
 {% block body %}
 {% set sample_jobs = sample_ids()[1] %}
 <div class="sec-head"><h1>Jobs</h1><a class="btn primary" href="/jobs/new">New job</a></div>
 <nav class="tabs" aria-label="Job status">
   {% for key, label in [('', 'All'), ('open', 'Open'), ('on_hold', 'On hold'), ('closed', 'Closed')] %}
-  <a href="/jobs{{ '?status=' ~ key if key }}" class="{{ 'on' if status == key }}">{{ label }}</a>
+  <a href="/jobs{{ '?status=' ~ key if key }}" class="{{ 'on' if status == key }}"{{ cur(status == key) }}>{{ label }}</a>
   {% endfor %}
 </nav>
 {% if not jobs %}

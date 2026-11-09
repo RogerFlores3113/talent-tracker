@@ -319,7 +319,8 @@ def _session(t: dict[str, Any], now_iso: str) -> dict[str, Any]:
                                  else interview_result(_iv_data(t)) or "scheduled")
     return {"interview_id": t["id"], "at": t["at"], "name": interview_name(t) or "Interview",
             "interviewer": interviewer_of(t) or None, "status": status, "result": result_label(_iv_data(t)),
-            "started": t["at"] <= now_iso,
+            "started": t["at"] <= now_iso, "all_day": bool(_iv_data(t).get("all_day")),
+            "time_text": "All day" if _iv_data(t).get("all_day") else local_time(t["at"], "%-I:%M %p"),
             "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}"}
 
 
@@ -1346,7 +1347,8 @@ def _capped(names: list[str], limit: int = NAMES_PER_STAGE) -> str:
 
 
 def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
-                    omit_stages: list[str] | None = None, dated: bool = True) -> str:
+                    omit_stages: list[str] | None = None, dated: bool = True,
+                    imported: set[int] | None = None) -> str:
     """A plain-text pipeline summary to paste to a hiring manager or client. No ids, local times.
 
     omit_stages leaves those stages' people out (Sourced, Rejected...), from the lists and the counts.
@@ -1370,7 +1372,8 @@ def job_status_text(store: Store, job_id: int, now: datetime | None = None, *,
         lines.append(f"Target date: {local_time(job['target_date'] + 'T12:00:00', '%a %b %-d, %Y')}")
     lines += [headline(nums, job["status"]), ""]
     from .importers import imported_placements  # placed by an import with no stage date: "(imported)"
-    imported = imported_placements(store, job_id)
+    if imported is None:
+        imported = imported_placements(store, job_id)
     total = shown = 0
     own = inhouse(store)
     for g in groups:
@@ -1636,9 +1639,12 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
         lines += [f"- {g['company'] or none}: {summary(g)}" for g in groups]
     elif groups and len(groups[0]["jobs"]) > 1:  # one company: its total, without repeating its name
         lines.append(summary(groups[0]))
+    from .importers import imported_placements_by_job  # one query for every job, not one per job
+    undated = imported_placements_by_job(store)
     for g in groups:
         for j in g["jobs"]:
-            lines += ["", job_status_text(store, j["id"], now, omit_stages=omit_stages, dated=False)]
+            lines += ["", job_status_text(store, j["id"], now, omit_stages=omit_stages, dated=False,
+                                          imported=undated.get(j["id"], set()))]
     if held:
         lines.append("")
         lines += [f"{job_label(j['title'], j.get('company'))}: on hold." for j in held]

@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from talent import actions, offers, plan, review, shortlist
+from talent import reports, actions, offers, plan, review, shortlist
 from talent import mcp_server
 from talent.mcp_server import build_server
 from talent.store import _MIGRATIONS, as_local
@@ -336,7 +336,8 @@ def test_changes_page_lists_the_seat_write(store):
     assert "Added the seat" in html
 
 
-def test_time_zone_banner_has_a_one_click_use_button_and_offer_terms_are_private(store):
+def test_time_zone_banner_has_a_one_click_use_button_and_offer_terms_are_private(store, monkeypatch):
+    monkeypatch.setattr(reports, "computer_on_utc", lambda: True)  # the bar only shows on a computer set to UTC
     c = local_client(store)
     assert "data-tz-use" in c.get("/").text
     job, m = _offer_setup(store)

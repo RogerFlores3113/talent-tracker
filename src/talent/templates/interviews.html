@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Interviews · Talent Search{% endblock %}
+{% block title %}Interviews · week of {{ w.start|day }} · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block body %}
 <div class="sec-head">
@@ -27,11 +27,12 @@
 {% endif %}
 
 <section class="panel">
+  <h2 class="sr-only">Days this week</h2>
   {% if not w.total %}<p class="none">Nothing booked this week. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
   <div class="week days-{{ w.days | length }}">
   {% for d in w.days %}
-    <div class="day">
-      <h3 id="day-{{ d.day.isoformat() }}">{{ d.label }}</h3>
+    <div class="day"{% if d.today %} aria-current="date"{% endif %}>
+      <h3 id="day-{{ d.day.isoformat() }}">{{ d.label }}{% if d.today %} <span class="sr-only">(today)</span>{% endif %}</h3>
       {% for lp in d.loops %}
       <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
         <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}
@@ -39,7 +40,7 @@
         {% if lp.split %}<div class="fine">Some sessions of this loop are on another day.</div>{% endif %}
         <ul class="sessions">
         {% for x in lp.sessions %}
-          <li><span class="fine">{{ x.at | local('%-I:%M %p') }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% elif x.needs_outcome %} <span class="badge overdue">Needs outcome</span>{% endif %}
+          <li><span class="fine">{{ x.time_text }}</span> {{ x.name }}{% if x.interviewer %} <span class="fine">with {{ x.interviewer }}</span>{% endif %}{% if x.clash %} <span class="badge overdue">Clash</span>{% endif %}{% if x.status in interview_outcomes %} <span class="badge">{{ x.result or interview_outcomes[x.status] }}</span>{% elif x.needs_outcome %} <span class="badge overdue">Needs outcome</span>{% endif %}
             {% if x.owed %}<span class="fine">Owed: {{ x.owed | join(', ') }}, due by {{ x.feedback_due | local('%a %-I:%M %p') }}</span>{% if x.feedback_overdue %} <span class="badge overdue">Feedback overdue</span>{% endif %}{% endif %}
             <a class="link small" href="{{ x.href }}">Change</a></li>
         {% endfor %}
@@ -72,6 +73,6 @@
   <ul>{% for e in w.load %}<li>{{ e.name }}: {{ e.count }} session{{ '' if e.count == 1 else 's' }}</li>{% endfor %}</ul>
 </section>
 {% endif %}
-{% set ics_month = w.start.strftime('%Y-%m') %}
+{% set ics_months = w.months %}{% set ics_week = w.start.isoformat() %}
 {% include "_interviews_calendar.html" %}
 {% endblock %}

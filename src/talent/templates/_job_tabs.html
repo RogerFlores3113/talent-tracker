@@ -1,8 +1,9 @@
+{% from "_macros.html" import cur %}
 {% set waiting = shortlist_waiting(job.id) %}
 <nav class="seg job-tabs" aria-label="Job sections">
-  <a href="/jobs/{{ job.id }}" class="{{ 'on' if request.url.path == '/jobs/' ~ job.id }}">Pipeline</a>
-  <a href="/jobs/{{ job.id }}/shortlist" class="{{ 'on' if request.url.path.endswith('/shortlist') }}">Shortlist{% if waiting %} <span class="badge shortlist">{{ waiting }}</span>{% endif %}</a>
-  <a href="/jobs/{{ job.id }}/outreach" class="{{ 'on' if request.url.path.endswith('/outreach') }}" title="Everyone you messaged, who replied and what is due next">Outreach</a>
-  <a href="/jobs/{{ job.id }}/decide" class="{{ 'on' if request.url.path.endswith('/decide') }}" title="Compare the finalists and record who gets the offer">Decide</a>
-  <a href="/jobs/{{ job.id }}/loop" class="{{ 'on' if request.url.path.endswith('/loop') }}" title="Plan an onsite loop: slots, who runs each session and invite text">Loop</a>
+  <a href="/jobs/{{ job.id }}" class="{{ 'on' if request.url.path == '/jobs/' ~ job.id }}"{{ cur(request.url.path == '/jobs/' ~ job.id) }}>Pipeline</a>
+  <a href="/jobs/{{ job.id }}/shortlist" class="{{ 'on' if request.url.path.endswith('/shortlist') }}"{{ cur(request.url.path.endswith('/shortlist')) }}>Shortlist{% if waiting %} <span class="badge shortlist">{{ waiting }}</span>{% endif %}</a>
+  <a href="/jobs/{{ job.id }}/outreach" class="{{ 'on' if request.url.path.endswith('/outreach') }}"{{ cur(request.url.path.endswith('/outreach')) }} title="Everyone you messaged, who replied and what is due next">Outreach</a>
+  <a href="/jobs/{{ job.id }}/decide" class="{{ 'on' if request.url.path.endswith('/decide') }}"{{ cur(request.url.path.endswith('/decide')) }} title="Compare the finalists and record who gets the offer">Decide</a>
+  <a href="/jobs/{{ job.id }}/loop" class="{{ 'on' if request.url.path.endswith('/loop') }}"{{ cur(request.url.path.endswith('/loop')) }} title="Plan an onsite loop: slots, who runs each session and invite text">Loop</a>
 </nav>

@@ -15,6 +15,13 @@ from talent.store import AI_NOTE_CAP, AI_OVERWRITE_ALERT, AI_OVERWRITE_CAP
 from conftest import flash_of, local_client
 
 
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
+
 def call(server, tool, **args):
     async def go():
         return await server.call_tool(tool, args)
@@ -274,8 +281,8 @@ def test_cautious_overwrite_waits_and_a_blank_fill_applies(store):
     cid = store.add_candidate(name="Ana Ruiz", current_title="Engineer")["id"]
     res = call(server, "update_candidate", candidate_id=cid, current_title="CTO", location="Austin")
     t = text(res)
-    assert "Updated" in t and "Waiting for the recruiter's review: Change \"Ana Ruiz\"'s title" in t
-    assert "Nothing changed yet" in t and data(res)["pending_review"]["id"]
+    assert "Updated" in t and "Held for the recruiter's review: Change \"Ana Ruiz\"'s title" in t
+    assert "The rest of this call went through" in t and data(res)["pending_review"]["id"]
     cand = store.get_candidate(cid)
     assert cand["current_title"] == "Engineer" and cand["location"] == "Austin"
     # Read back: the AI sees it as pending.

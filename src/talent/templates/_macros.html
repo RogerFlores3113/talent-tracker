@@ -13,6 +13,14 @@
 <form class="cbub-form" method="post" action="/candidates/{{ c.id }}/color"><input type="hidden" name="color" value="{{ i.next }}"><button type="submit" class="cbub{{ ' big' if big }}" data-color-bubble data-cid="{{ c.id }}" data-who="{{ c.name }}" data-color="{{ i.color }}" data-next="{{ i.next }}" data-prev="{{ i.prev }}" aria-label="{{ i.aria }}" title="{{ i.title }}"><span aria-hidden="true">{{ i.letter }}</span></button></form>
 {%- endmacro %}
 
+{#- Every time zone with its offset right now, to pick from as you type: an <input list="zone-list">. Once per page. -#}
+{% macro zone_list(id="zone-list") -%}
+<datalist id="{{ id }}">{% for n, off in zone_options() %}<option value="{{ n }}">{{ off }}</option>{% endfor %}</datalist>
+{%- endmacro %}
+
+{# aria-current="page" for a link that class="on" marks as the current one. #}
+{% macro cur(on) -%}{% if on %} aria-current="page"{% endif %}{%- endmacro %}
+
 {% macro chips(tags, link=True) -%}
 {% if tags %}<span class="chips">{% for t in tags %}{% if link %}<a class="chip" href="/candidates?tag={{ t | urlencode }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
 {%- endmacro %}

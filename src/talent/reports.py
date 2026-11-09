@@ -19,7 +19,7 @@ import statistics
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from . import actions
 from .store import NotFound, Store, _stage_key, now_iso, parse_when, quoted, stage_outcome, to_dt, zone_named
@@ -72,6 +72,41 @@ TZ_ALIASES = {
 COMMON_ZONES = ("America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Toronto",
                 "America/Sao_Paulo", "Europe/London", "Europe/Berlin", "Europe/Paris", "Asia/Kolkata",
                 "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC")
+
+
+def zone_options(now: datetime | None = None) -> list[tuple[str, str]]:
+    """Every time zone this computer knows, as (name, label) with the offset it has right now: ('Asia/Dubai',
+    'UTC+04:00'). The most used ones come first, then the rest by name. For a pick-as-you-type list."""
+    now = now or datetime.now(timezone.utc)
+    key = now.strftime("%Y-%m-%d %H")
+    hit = _ZONE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        names = sorted(available_timezones())
+    except Exception:  # no time zone list on this computer: the short list still works
+        names = list(COMMON_ZONES)
+    out: list[tuple[str, str]] = []
+    for name in names:
+        if name.startswith(("Etc/", "posix/", "right/")) or name in ("Factory", "localtime"):
+            continue
+        try:
+            off = now.astimezone(ZoneInfo(name)).utcoffset()
+        except Exception:
+            continue
+        mins = int((off.total_seconds() if off else 0) // 60)
+        sign = "+" if mins >= 0 else "-"
+        out.append((name, f"UTC{sign}{abs(mins) // 60:02d}:{abs(mins) % 60:02d}"))
+    if "UTC" not in {n for n, _ in out}:
+        out.append(("UTC", "UTC+00:00"))
+    first = {n: i for i, n in enumerate(COMMON_ZONES)}
+    out.sort(key=lambda t: (first.get(t[0], len(first)), t[0]))
+    _ZONE_CACHE.clear()
+    _ZONE_CACHE[key] = out
+    return out
+
+
+_ZONE_CACHE: dict[str, list[tuple[str, str]]] = {}
 UPDATE_DAYS = tuple(d.capitalize() for d in actions.WEEKDAYS)
 _EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
 NOTE_KEY = "client_note:{}"  # per client (and hiring manager), the recruiter's "Note to the client this week"
@@ -147,7 +182,9 @@ def user_zone(store: Store) -> str | None:
 
 def computer_on_utc() -> bool:
     """This computer's clock says UTC: a server or a fresh virtual machine, rarely where a recruiter sits."""
-    return (datetime.now().astimezone().tzname() or "").upper() in ("UTC", "Z")
+    now = datetime.now().astimezone()
+    # Windows names it "Coordinated Universal Time"; Mac and Linux say "UTC".
+    return now.utcoffset() == timedelta(0) and (now.tzname() or "").upper() in ("UTC", "Z", "COORDINATED UNIVERSAL TIME")
 
 
 def fallback_zone(store: Store) -> str | None:

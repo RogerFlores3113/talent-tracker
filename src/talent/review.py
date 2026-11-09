@@ -42,6 +42,8 @@ KINDS = {"profile": "Profile change", "stage_move": "Stage move", "job_edit": "J
 CLIENT_LABELS = {"contacts": "contacts", "update_day": "update day", "time_zone": "time zone", "notes": "notes"}
 WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps or passes it in the app "
              "(Review). Don't send it again.")
+HELD_PART_NOTE = ("Cautious mode is on, so only this part waits and the recruiter keeps or passes it in the app "
+                  "(Review). The rest of this call went through. Don't send the held part again.")
 
 
 def cautious_setting(store: Store) -> bool:
@@ -56,6 +58,21 @@ def cautious(store: Store) -> bool:
     if REPLAY.get():  # a request the recruiter just kept doesn't wait again
         return False
     return cautious_setting(store) or injection.ACTIVE.get()
+
+
+TRUSTED_HIRED = "ai_trusted_hired"  # settings row, "1": trusted AI apps may mark Hired and close jobs unheld
+HIRED_WAIT_NOTE = ("Nothing changed yet: marking someone Hired and closing a job wait for the recruiter by default, "
+                    "so they keep or pass it in the app (Review). Don't send it again.")
+
+
+def hold_hired_close(store: Store) -> bool:
+    """Whether an AI app's move into Hired, or close of a job, waits on Review. It does unless the recruiter turned on
+    "Let trusted AI apps mark people Hired and close jobs" in Settings (off by default). Cautious mode and a
+    session that read flagged text hold these too, through cautious()."""
+    from .trust import REPLAY  # here: trust imports this module
+    if REPLAY.get():
+        return False
+    return store.setting(TRUSTED_HIRED) != "1"
 
 
 def set_cautious(store: Store, on: bool) -> None:
@@ -917,4 +934,4 @@ __all__ = ["extra_holds_text", "mark_submit", "queue_submit", "stale_move", "HOL
            "KINDS", "SETTING", "cautious", "client_diff", "contacts_change", "count", "decide_many", "decided",
            "dry_run", "field_lines", "get", "keep", "new_session", "pass_", "pending", "queue_client", "queue_feedback",
            "queue_interview", "queue_job", "queue_loop_template", "queue_move", "queue_note", "queue_profile", "queue_chased", "queue_sent", "queue_sequence", "queue_stages",
-           "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE"]
+           "sessions", "set_cautious", "today_items", "ai_lines", "WAIT_NOTE", "HELD_PART_NOTE"]

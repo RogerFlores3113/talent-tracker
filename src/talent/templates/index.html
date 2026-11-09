@@ -1,21 +1,24 @@
 {% extends "base.html" %}
+{% from "_macros.html" import zone_list %}
+{% block title %}Today - Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
 {% if qp.get('deleted') %}<p class="flash">Candidate deleted.</p>{% endif %}
-{% if not user_zone() and not searching %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone">
+{% set tz_unset = not user_zone() and computer_on_utc() %}
+{% if not searching and (tz_unset or user_zone()) %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone" data-tz-banner data-tz-saved="{{ user_zone() or '' }}"{{ '' if tz_unset else ' hidden' }}>
   <input type="hidden" name="next" value="/">
-  <span>Times show in {{ shown_zone_name() or local_zone() or "this computer's time zone" }}. Set your time zone:</span>
-  <input type="text" name="time_zone" value="" list="banner-zones" data-tz-prefill placeholder="America/Chicago, or ET, CT, MT, PT" aria-label="Time zone">
-  <datalist id="banner-zones">{% for z in common_zones %}<option value="{{ z }}">{% endfor %}</datalist>
+  <span data-tz-text>{% if tz_unset %}Times show in {{ shown_zone_name() or 'UTC' }}. Set your time zone:{% else %}This computer's time zone changed. Times show in {{ user_zone() }}. Switch?{% endif %}</span>
+  <input type="text" name="time_zone" value="" list="zone-list" autocomplete="off" data-tz-prefill placeholder="America/Chicago, or ET, CT, MT, PT" aria-label="Time zone">
   <button class="btn small primary" type="submit" data-tz-use hidden></button>
   <button class="btn small" type="submit">Save</button>
-</form>{% endif %}
+</form>{{ zone_list() }}{% endif %}
 {% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab. You can remove it any time.</p>{% endif %}
 {% if total_all or jobs or searching %}
+<h1 class="sr-only">Today</h1>
 <form class="searchbar" action="/" method="get" role="search"
       hx-get="/" hx-target="#results" hx-push-url="true"
       hx-trigger="input delay:150ms, search, submit">
-  <input type="search" name="q" value="{{ q }}" placeholder="Search skills, companies, titles, names, notes" {{ 'autofocus' if total_all }} autocomplete="off" aria-label="Search candidates">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search skills, companies, titles, names, notes" autocomplete="off" aria-label="Search candidates">
   <details class="filters-wrap" {{ 'open' if title or location or tag }}>
     <summary>Filters</summary>
     <div class="filters">
@@ -24,20 +27,9 @@
       <input type="text" name="tag" value="{{ tag }}" placeholder="Has skill (exact)" aria-label="Skill filter">
     </div>
   </details>
-  <details class="search-tips">
-    <summary>Search tips</summary>
-    <ul class="tips">
-      <li><code>react python</code> finds people who have both words (this is the default).</li>
-      <li><code>"machine learning"</code> in quotes finds those words together.</li>
-      <li><code>python OR go</code> (or <code>python or go</code> in small letters) finds people with either word.</li>
-      <li><code>-recruiter</code> or <code>NOT manager</code> leaves out people who have that exact word.</li>
-      <li><code>title:engineer</code>, <code>company:acme</code>, <code>location:sf</code>, <code>skill:python</code> and <code>source:referral</code> narrow to one field. Punctuation stays, so <code>skill:c++</code> and <code>skill:node.js</code> work, and <code>skill:python OR go</code> means either skill.</li>
-      <li><code>-title:manager</code> or <code>NOT source:referral</code> leaves out people whose Title or Found via has it.</li>
-      <li>Example: <code>title:engineer "machine learning" python OR go -recruiter</code>. Brackets are ignored. The Candidates page shows how your search was read.</li>
-    </ul>
-    <p class="fine">More filters (skills, remote, years of experience, last contacted) are on the <a href="/candidates">Candidates</a> page, where you can also save a search.</p>
-  </details>
+  {% set tips_more_link = true %}{% include "_search_tips.html" %}
 </form>
 {% endif %}
-<section id="results" aria-live="polite">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>
+<p class="sr-only" id="results-status" role="status"></p>
+<section id="results">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>
 {% endblock %}

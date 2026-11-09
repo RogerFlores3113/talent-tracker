@@ -27,10 +27,8 @@ MODES = (FULL, SHORT)
 #   can really try it during the tour.
 STEPS: list[dict[str, Any]] = [
     {"id": "welcome", "title": "Welcome to Talent Search", "path": None, "target": [], "modes": (FULL,),
-     "body": "This is your own candidate database, kept on this computer. Your AI app does the typing: you "
-             "ask it in plain English and it saves, searches and updates people here. The tour takes about two "
-             "minutes. Sample people you add yourself with the Try it with sample data button on Today are yours: "
-             "this tour never clears them."},
+     "body": "This is your own candidate list, kept on this computer. Your AI app can do the typing: ask it "
+             "in plain words and it saves, searches and updates people here. The tour takes about two minutes."},
     {"id": "today", "title": "Today", "path": "/", "target": ["section.today", "main h1"], "modes": (SHORT,),
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
     {"id": "claude", "title": "Connect Claude Desktop", "path": "/connect", "target": ["#claude-panel"],
@@ -41,7 +39,7 @@ STEPS: list[dict[str, Any]] = [
     {"id": "codex", "title": "Connect Codex or another app", "path": "/connect", "target": ["#codex-panel"],
      "pulse": "#codex-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
      "body": "Using Codex instead? One click here connects it the same way. LM Studio has its own button just below, "
-             "and any other app that runs local tools (Cursor, Windsurf and others) takes the settings under By hand. "
+             "and any other app that runs local tools (Cursor, Windsurf and others) takes the settings under Details for technical users. "
              "Don't have it? Press Next, you can connect later."},
     {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
      "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
@@ -278,13 +276,14 @@ def end(store: Store, delete_people: set[int] | None = None,
         offered_people = {w["id"]: w["name"] for w in worked_with(store)}
         offered_searches = {x["id"]: x["name"] for x in demo_searches(store)}
         removed = remove_sample_data(store)
-        removed["deleted_people"], removed["deleted_searches"] = [], []
+        removed["deleted_people"] = []
         for cid in sorted((delete_people or set()) & set(offered_people)):
             try:
                 store.delete_candidate(cid)
                 removed["deleted_people"].append(offered_people[cid])
             except NotFound:
                 pass
+        removed["deleted_searches"] = list(removed.get("deleted_searches") or [])  # made on the demo people
         for sid in sorted((delete_searches or set()) & set(offered_searches)):
             try:
                 store.delete_saved_search(sid)

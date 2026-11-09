@@ -4,6 +4,7 @@ hire keeps its people in the update, in-house wording, and the small ones (plura
 Let them know, Settings that change only what's sent)."""
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 import anyio
 from mcp.types import CallToolResult
 
@@ -12,6 +13,13 @@ from talent.mcp_server import build_server
 from talent.store import as_local
 
 from conftest import flash_of, local_client
+
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
 
 INHOUSE = list(actions.STAGE_SETS["inhouse"][1])
 

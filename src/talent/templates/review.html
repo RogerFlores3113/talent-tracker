@@ -5,7 +5,15 @@
   <h1>Review AI changes</h1>
   <a class="small" href="/changes?who=ai">All AI changes</a>
 </div>
-<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes from Trusted apps apply straight away. What waits here came from an app set to Suggest only in Settings > AI apps, or was sent while Cautious mode was on.{% endif %} Your AI app's overwrites, moves into Hired or out, job and stage changes, notes, interview changes and feedback, client contacts, job hiring manager emails, to-dos it marks done and Mark as sent wait here until you keep or pass them. Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling other empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
+<p class="lead">{% if cautious %}Cautious mode is on.{% else %}Cautious mode is off, so new AI changes from Trusted apps apply straight away, except moves to Hired and job closes (unless you let them in Settings). What waits here came from an app set to Suggest only in Settings > AI apps, or was sent while Cautious mode was on.{% endif %} These wait here until you keep or pass them:</p>
+<ul class="fine">
+  <li>Changes to saved details, and moves into Hired or out.</li>
+  <li>Job and stage changes, and closing a job.</li>
+  <li>Notes, interview changes and feedback.</li>
+  <li>Client contacts and job hiring manager emails.</li>
+  <li>To-dos your AI app marks done, and Mark as sent.</li>
+</ul>
+<p class="fine">Keep makes the change once, and you can still undo it on Changes. Pass drops it. Filling other empty fields and adding new people don't wait. <a href="/settings#cautious">Change in Settings</a>.</p>
 
 {% if not groups %}
 <p class="none">Nothing waits for your review.</p>
@@ -34,7 +42,7 @@
         {% for x in r.lines %}{% if r.kind == 'tool_call' %}<div class="fine">{{ x.label | capitalize }}: {{ x.new }}{% if x.more %}... <details class="inline"><summary>and {{ x.more }} more characters. Show all</summary>{{ x.full }}</details>{% endif %}</div>{% else %}<div class="fine">{{ x.label | capitalize }}: was {{ x.old }}, would be {{ x.new }}</div>{% endif %}{% endfor %}
         {% if r.payload.held_because %}<div class="fine"><span class="badge warn">Held</span> Held because this session read text that looked like instructions to an AI (in a profile, note or job description). Check that this change is what you want before you keep it. <a href="/privacy#injection">How this works</a></div>{% endif %}
         {% if r.result %}<div class="fine"><span class="badge warn">Still waiting</span> {{ r.result }}</div>{% endif %}
-        {% if r.kind == 'tool_call' %}<div class="fine">Your AI app is set to Suggest only. Keep runs this request once, and you can still undo it on Changes. Text from your AI app, not checked.</div>{% endif %}
+        {% if r.kind == 'tool_call' %}<div class="fine">This request waits for you. Keep runs it once, and you can still undo it on Changes. Text from your AI app, not checked.</div>{% endif %}
         {% if r.kind == 'note' %}<div class="fit">{{ r.payload.body or '(no text)' }}</div><div class="fine">{{ r.payload.kind | capitalize }}, {{ r.payload.at | local('%b %-d, %Y, %-I:%M %p') }}. Text from your AI app, not checked.</div>{% endif %}
         {% if r.detail %}<div class="fit">{{ r.detail }}</div><div class="fine">Text from your AI app, not checked.</div>{% endif %}
         {% if r.kind == 'client_edit' and 'contacts' in r.payload.fields %}<div class="fine">Client updates would go to these contacts.</div>{% endif %}

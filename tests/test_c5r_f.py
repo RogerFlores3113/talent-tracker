@@ -16,6 +16,13 @@ from talent.store import AI_NOTE_CAP
 from conftest import flash_of, local_client
 
 
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
+
 def call(server, tool, **args):
     async def go():
         return await server.call_tool(tool, args)
@@ -97,7 +104,7 @@ def test_cautious_update_client_fills_an_empty_day_but_holds_a_replaced_zone(sto
     res = call(server, "update_client", client="globex", update_day="Friday", time_zone="PT")
     c = reports.client(store, "globex")
     assert c["update_day"] == "Friday" and c["time_zone"] == "America/New_York"
-    assert "Waiting for the recruiter's review: Change \"Globex\"'s time zone" in text(res)
+    assert "Held for the recruiter's review: Change \"Globex\"'s time zone" in text(res)
     with pytest.raises(ToolError, match="day of the week"):
         call(server, "update_client", client="globex", update_day="Someday")
 
@@ -181,7 +188,7 @@ def test_cautious_add_to_pipeline_lands_and_its_note_waits(store):
     jid = store.add_job("Data Lead", company="Acme")["id"]
     cid = store.add_candidate(name="Bo Li")["id"]
     res = call(server, "add_to_pipeline", candidate_id=cid, job_id=jid, notes="Asked for 400k, flag to client")
-    assert "Added \"Bo Li\" to Data Lead (Acme)" in text(res) and "Waiting for the recruiter's review: Log a note" in text(res)
+    assert "Added \"Bo Li\" to Data Lead (Acme)" in text(res) and "Held for the recruiter's review: Log a note" in text(res)
     assert store.candidate_pipelines(cid)[0]["job_id"] == jid
     assert not [t for t in store.timeline(cid) if t["kind"] == "note"]
     assert store.candidate_pipelines(cid)[0].get("notes") in (None, "")

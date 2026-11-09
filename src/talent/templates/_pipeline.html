@@ -21,14 +21,16 @@
   <span class="reason" hidden><span class="tbl-who"></span> <select name="notes" aria-label="Reason"><option value="">Pick a reason</option>{% for r, like in move_reasons() %}<option value="Reason: {{ r }}" data-like="{{ like }}">{{ r }}</option>{% endfor %}</select><button class="btn small" type="submit">Move without a reason</button></span>
   <noscript><button class="btn small" type="submit">Move</button></noscript>
 </form>
+<h2 class="sr-only">Pipeline table</h2>
 <div class="table-wrap"><table class="dense">
-  <thead><tr><th>Name</th><th>Title</th><th>Stage</th><th>In stage since</th><th>Last contacted</th><th>Next interview</th></tr></thead>
+  <caption class="sr-only">People in this job, grouped by stage</caption>
+  <thead><tr><th scope="col">Name</th><th scope="col">Title</th><th scope="col">Stage</th><th scope="col">In stage since</th><th scope="col">Last contacted</th><th scope="col">Next interview</th></tr></thead>
   {% for g in groups if g.candidates %}
   <tbody class="group o-{{ g.outcome }}">
-    <tr class="group-head"><th colspan="6">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
+    <tr class="group-head"><th colspan="6" scope="rowgroup">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
     {% for a in g.candidates %}
     <tr>
-      <td><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}</td>
+      <th scope="row" class="rowhead"><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}</td>
       <td>{{ a.current_title or '' }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
       <td><select aria-label="Stage for {{ a.candidate_name }}" data-table-stage data-cid="{{ a.candidate_id }}" data-who="{{ a.candidate_name }}">{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}{{ ' data-out=1' if s.outcome == 'lost' and s.name | lower != a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select></td>
       <td class="nowrap">{{ a.stage_changed_at | ago }}</td>
@@ -40,18 +42,21 @@
   {% endfor %}
 </table></div>
 {% else %}
-<div class="board" role="list">
+<h2 class="sr-only">Pipeline by stage</h2>
+<p class="fine board-hint">To move someone, use the Stage menu on their card. Press Enter to move them. Dragging a card also works.</p>
+<div class="board">
   {% set show = show or '' %}
   {% set job_offers = offers_on(job.id) %}
   {% for g in groups %}
   {% set n = g.candidates | length %}
   {% set wide = show | lower == g.name | lower %}
   {% set cards = g.candidates if wide else g.candidates[:50] %}
-  <section class="col o-{{ g.outcome }}" data-stage="{{ g.name }}" role="listitem" aria-label="{{ g.name }}">
-    <h3><span>{{ g.name }}</span><span class="muted">{{ n }}</span></h3>
+  <section class="col o-{{ g.outcome }}" data-stage="{{ g.name }}" aria-labelledby="stage-{{ loop.index }}">
+    <h3 id="stage-{{ loop.index }}"><span>{{ g.name }}</span><span class="sr-only">, </span><span class="muted">{{ n }}</span></h3>
     {% if n and g.outcome != 'open' %}<details class="fold" {{ 'open' if wide }}><summary class="fine">Show {{ n }}</summary>{% endif %}
+    {% if cards %}<div role="list" aria-label="People in {{ g.name }}">{% endif %}
     {% for a in cards %}
-    <div class="pc" draggable="true" data-cid="{{ a.candidate_id }}">
+    <div class="pc" role="listitem" draggable="true" data-cid="{{ a.candidate_id }}">
       <a href="/candidates/{{ a.candidate_id }}"><strong>{{ a.candidate_name }}</strong></a> {{ sample_badge(a.candidate_id in sample_people) }}
       {% if a.candidate_id in elsewhere %}<span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}
       {% if a.current_title %}<div class="fine">{{ a.current_title }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</div>{% endif %}
@@ -63,6 +68,8 @@
     </div>
     {% else %}<p class="fine drop-hint">Drop here</p>
     {% endfor %}
+    {% if cards %}</div>{% endif %}
+    {% if cards %}</div>{% endif %}
     {% if n > cards | length %}<a class="fine show-more" href="/jobs/{{ job.id }}?view=board&amp;show={{ g.name | urlencode }}#pipeline">Show {{ n - cards | length }} more</a>{% endif %}
     {% if n and g.outcome != 'open' %}</details>{% endif %}
   </section>

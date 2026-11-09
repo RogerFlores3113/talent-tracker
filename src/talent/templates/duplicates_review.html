@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sub %}
+{% block title %}Merge ticked pairs · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <h1>Merge ticked pairs <span class="muted"><span class="sr-only">Pairs: </span>{{ count }}</span></h1>
+  <div class="actions-inline"><a class="btn" href="/candidates/duplicates">Back to possible duplicates</a></div>
+</div>
+<p class="lead">Nothing has changed yet, and no pair is ticked: tick the ones you want to merge. When one person's email changed, the newer email is the main one unless you pick another. For each pair below, the profile marked Kept stays. Anything it is missing is filled in from the other, skills are combined, every email from both is kept (you pick the main one), the timeline, work history and jobs move over, and the other profile is deleted. Where both have a different value, the kept profile's value wins and the other one is written on the timeline. If both are in the same job, the further stage is kept. One backup is saved for the whole batch before anything is merged.</p>
+{% if cut %}<p class="flash warn">Only the first {{ rows | length }} pairs are shown. Go back and merge the rest in a second round.</p>{% endif %}
+<form method="post" action="/candidates/duplicates/merge-ticked" class="stack" id="merge-ticked"
+      data-confirm="Merge the ticked pairs? In each one, the other profile is deleted. One backup is saved first.">
+  <label class="check"><input type="checkbox" data-check-all data-check-name="pair" aria-label="Tick every pair"> <span>Tick every pair</span></label>
+  <ul class="items dup-list">
+    {% for r in rows %}{% set v = r.keep ~ '-' ~ r.other %}
+    <li class="panel dup-pair">
+      <label class="check"><input type="checkbox" name="pair" value="{{ v }}"
+        aria-label="Merge {{ r.a_label }} and {{ r.b_label }}"> <span class="fine"><strong>{{ r.reasons | join(', ') | capitalize }}</strong></span></label>
+      <div class="connect-grid">
+        <div class="dup-person"><a href="/candidates/{{ r.a.id }}"><strong>{{ r.a.name }}</strong></a>
+          <span class="muted">{{ sub(r.a) }}</span>
+          <span class="fine">{{ [r.a.email, r.a.phone, r.a.linkedin_url] | select | join(' · ') }}</span></div>
+        <div class="dup-person"><a href="/candidates/{{ r.b.id }}"><strong>{{ r.b.name }}</strong></a>
+          <span class="muted">{{ sub(r.b) }}</span>
+          <span class="fine">{{ [r.b.email, r.b.phone, r.b.linkedin_url] | select | join(' · ') }}</span></div>
+      </div>
+      <p><label>Kept
+        <select name="keep_{{ v }}" aria-label="Which profile is kept: {{ r.a_label }} or {{ r.b_label }}">
+          <option value="{{ r.keep }}">{{ r.a_label }}, the more complete one</option>
+          <option value="{{ r.other }}">{{ r.b_label }}</option>
+        </select></label></p>
+      {% if r.emails | length > 1 %}<p><label>Main email
+        <select name="primary_{{ v }}" aria-label="Main email for {{ r.a_label }} and {{ r.b_label }}">
+          {% for e in r.emails %}<option value="{{ e }}" {{ 'selected' if e == r.default_email }}>{{ e }}</option>{% endfor %}
+        </select></label>
+        <span class="fine">All {{ r.emails | length }} addresses are kept. The rest become other emails.</span></p>
+      {% elif r.emails %}<p class="fine">Email: {{ r.emails[0] }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="actions-inline"><button class="btn primary" type="submit">Merge the ticked pairs</button>
+    <a class="btn" href="/candidates/duplicates">Cancel</a></div>
+</form>
+{% endblock %}

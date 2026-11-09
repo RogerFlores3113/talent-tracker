@@ -2,6 +2,71 @@
 
 All notable changes to Talent Search. Newest first.
 
+## [Unreleased]
+
+### Search
+- NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
+- "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
+- Phrase, OR and NEAR searches look in notes too, so a wider search never finds fewer people.
+- `c#`, `c++`, `f#` and `.net` are words of their own, so `c#` no longer finds C++ people.
+- Every saved search shows its count and "+N new" (not just the first six), and hovering a chip shows what it searches for.
+- Hints for common slips: `skill:machine learning` (use quotes), `"a b"~3` (use NEAR/3), lowercase `not` and `near`, and a lone `-`.
+- The zero-results page offers "Did you mean" and a way to widen the search.
+- The color counters follow your search and filters.
+- Clearing sample data or finishing the tour removes the saved searches you made on the sample people, so no empty chips are left.
+- A prefix typed twice means either (`company:google company:meta`), and a filter plus a typed prefix both count. The read-back line says so.
+- A match count, search tips on Candidates, and a type-ahead skill filter with every skill.
+
+### Saved searches
+- Today lists every saved search, with pinning. Each count says what it counts.
+- Opening a saved search marks the people who are new since you last looked, and the table has an Added column. Someone added in the same second now counts.
+
+### Importing and duplicates
+- A re-import that brings someone back with a new email offers to update them instead of adding a copy.
+- Merge many duplicate pairs at once, with one backup, and pick which email stays main.
+- Today and Jobs load fast with thousands of people.
+- CSV exports open correctly in Excel (names like Søren and Łukasz) and keep stage dates on a round trip.
+- Tick people on the Candidates table (or all the results) to set a color, add them to a job at a stage, or export just them as CSV. There is no bulk delete.
+- A re-import matches a changed email by name plus company, or name plus phone, and updates by default. When several people fit, the one with the same phone or job is picked, or you choose. People who still came in as new show on the result page with a Merge button for each.
+- Possible duplicates can be filtered by reason, one tick covers every pair of a filter, bulk merge pages start unticked, the newer email is the default main email, and same-named people are told apart by email or company.
+- Import tidies names: spaces trimmed, ALL CAPS or all lowercase turned into Title Case (McDonald and de la Cruz are left alone). "Other emails" are kept in their own field, not repeated in Notes.
+
+### Interviews and time zones
+- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
+- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
+- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
+- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
+
+### Paste and connect
+- Pasting a resume reads every role with its dates, and a note reads name, title and company. The check page says what wasn't found.
+- The Connect AI page asks which app you use, says when an app isn't installed, keeps technical details in a fold, and gives Claude Code its one-line connect command.
+
+### Keyboard, screen reader and first-time use
+- The month calendar links only days that have interviews, so Tab skips the empty days.
+- Choosing Rejected or Withdrawn on the board and tabbing away now says "Not moved yet", shows a dashed menu, and puts the keyboard in the reason box.
+- After a save that reloads the page (Pin, Check again on Import, Settings), the keyboard lands on the notice so it is read out.
+- Time zone boxes take any zone (type a city or zone name) and show its offset. Interview forms name their session. "All day" interviews can be logged on the web form, and the interview note has a 500 character limit.
+- Input borders reach 3:1 in every theme, and forced colors and high contrast settings are handled. Esc closes a menu without closing the tour. No autofocus on Today or the add forms.
+- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish says in one line what happens to its saved searches.
+- A bad email on the add or edit form is refused next to the field. Pasting a note that names someone fills the name.
+- A skip link, current-page marks, named calendar days, table captions and sort state.
+- Stage menus on the board wait for Enter, keep focus on the person you moved and announce the move.
+- Better contrast on Rejected and Withdrawn columns.
+
+### Working with AI apps
+- Saved searches made by an AI app are on Changes and can be undone.
+- Interview replies say which time zone was used and name any clash. An interview needs a start time.
+- Held-for-review replies say exactly what went through and what waits.
+- `talent install-skills` asks first (or takes `--yes`), and reinstalls say which files are new, updated or unchanged.
+- Talent Search's own notes in a reply (time zone, clash, who isn't listed) are no longer mistaken for text that gives an AI orders, so logging an interview without a zone no longer holds later changes for review.
+- An all-day interview says "all day" in the reply, not a made-up time.
+- Interviews can carry a length (`duration` in minutes), used by the clash check and calendar files. Common other names for a setting are accepted (`note` for `summary`, a list of people for `add_to_pipeline`), and a wrong name gets "Did you mean".
+- The loop planner keeps to the candidate's and each interviewer's daytime hours when their zones are known.
+- Feedback from someone not listed on that session is saved, and the reply says they weren't listed.
+- A move to Hired and a job close wait on Review even for Trusted apps. A Settings switch lets trusted apps do them.
+- The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
+- A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates

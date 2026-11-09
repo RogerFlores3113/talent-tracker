@@ -10,12 +10,13 @@
 {% if result.corrected %}
 <p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ result.suggestion }}</strong>.</p>
 {% endif %}
-<p class="meta">{% if result.closest %}No one has every word. Closest matches:{% else %}{{ result.exact_total }} match{{ '' if result.exact_total == 1 else 'es' }}{% if result.total > result.exact_total %}, plus {{ result.total - result.exact_total }} closest{% endif %}{% if result.total > result.hits | length %}, showing {{ result.hits | length }}{% endif %}{% endif %} · <a href="/candidates?{{ {'q': shown_q, 'location': location or '', 'tag': tag or ''} | urlencode }}">Open in table</a></p>
-{% if result.suggestion and not result.corrected %}
+{% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
+<p class="meta">{% if result.closest %}No one has every word. Closest matches:{% else %}{{ result.exact_total }} {{ 'person matches' if result.exact_total == 1 else 'people match' }}{% if result.total > result.exact_total %}, plus {{ result.total - result.exact_total }} closest{% endif %}{% if result.total > result.hits | length %}, showing {{ result.hits | length }}{% endif %}{% endif %} · <a href="/candidates?{{ {'q': shown_q, 'location': location or '', 'tag': tag or ''} | urlencode }}">Open in table</a></p>
+{% if result.suggestion and not result.corrected and result.hits %}
 <p class="suggest">Did you mean <a href="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-get="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-target="#results" hx-push-url="true">{{ result.suggestion }}</a>?</p>
 {% endif %}
 {% if not result.hits %}
-<p class="none">No one matches that yet. Try fewer words, or a skill like “python”.</p>
+<p class="none">No one matches that yet.{% if result.suggestion and not result.corrected %} Did you mean <a href="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-get="/?{{ {'q': result.suggestion, 'location': location or '', 'title': title or '', 'tag': tag or ''} | urlencode }}" hx-target="#results" hx-push-url="true">{{ result.suggestion }}</a>?{% endif %} To widen it, use fewer words, or put OR between them (python OR go).</p>
 {% endif %}
 <ul class="cards">
   {% include "_result_cards.html" %}

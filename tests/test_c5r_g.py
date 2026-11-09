@@ -2,6 +2,7 @@
 AI outcomes and AI-logged interviews are undoable and strikeable, and Undo all AI says what it did."""
 from __future__ import annotations
 
+import pytest
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,13 @@ from talent import cli, decide, paths, web
 from talent.mcp_server import build_server
 from test_mcp import call, structured
 
+
+
+@pytest.fixture(autouse=True)
+def _trusted_apps_may_hire(store):
+    """Cycle 10 wave 2: Hired and Close job wait for review by default. These tests are about what happens after an
+    AI app hires or closes, so they turn on the Settings switch that lets a trusted app do it."""
+    store.set_settings(ai_trusted_hired="1")
 
 def _iso(days: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()

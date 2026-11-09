@@ -289,7 +289,9 @@ def clean_deep(v: Any) -> Any:
 _SKIP_KEYS = frozenset({"id", "app_url", "at", "at_local", "created_at", "updated_at", "stage_changed_at", "when",
                         "kind", "status", "stage", "data_note", "description_note", "note", "caution", "warning",
                         "nudge", "close_out_hint", "summary_note", "app_name", "suggested_step", "pending_review",
-                        "stages", "stage_outcomes", "query", "suggestion", "corrected", "count", "next_step", "hint"})
+                        "stages", "stage_outcomes", "query", "suggestion", "corrected", "count", "next_step", "hint",
+                        # sentences Talent Search writes itself (never text from outside): not scanned, never taint
+                        "time_zone_note", "when_notes", "clash", "not_listed_note", "waiting_note"})
 _NAME_KEYS = ("name", "candidate_name", "title", "job_title", "client", "company")
 
 
@@ -409,15 +411,37 @@ TAINT_MINUTES = 30
 HELD_BECAUSE = "held because this session read text that looked like instructions"
 HELD_NOTE = ("Held because this session read text that looked like instructions. The recruiter reviews this "
              "(Review) before it changes anything. Don't send it again.")
+# The same hold when part of the call went through (a move that landed with its note waiting, say).
+HELD_PART_NOTE = ("Part of this call is held because this session read text that looked like instructions. "
+                  "The rest went through. Don't send the held part again.")
 # True while a tool call runs in a session that read flagged text (set around each call by the MCP server).
 ACTIVE: ContextVar[bool] = ContextVar("talent_injection_taint", default=False)
 _TAINTED: dict[str, float] = {}
+_TAINT_WHY: dict[str, str] = {}
 _LOCK = threading.Lock()
 
 
-def taint(session: str, minutes: float = TAINT_MINUTES) -> None:
+def taint(session: str, minutes: float = TAINT_MINUTES, why: str | None = None) -> None:
+    """Hold risky writes from this session for `minutes`. `why` names the text that did it, for the replies."""
     with _LOCK:
         _TAINTED[session] = max(_TAINTED.get(session, 0.0), time.monotonic() + minutes * 60)
+        if why:
+            _TAINT_WHY[session] = why
+
+
+def taint_explanation(session: str | None) -> str:
+    """Why this session's risky writes wait, and for how long, in a sentence for the AI. "" when not tainted."""
+    if not session:
+        return ""
+    with _LOCK:
+        until, why = _TAINTED.get(session), _TAINT_WHY.get(session)
+    if until is None or until < time.monotonic():
+        return ""
+    mins = max(1, int((until - time.monotonic()) / 60) + 1)
+    return (f"Why: this session read {why or 'text that looked like instructions'}, so for about {mins} more "
+            f"minute{'' if mins == 1 else 's'} every risky change from this session waits for the recruiter "
+            "(replacing saved values, moves into or out of Hired and out stages, job edits, notes and logged "
+            "activity, interviews, offers). New people and filling empty fields still go through.")
 
 
 def tainted(session: str | None) -> bool:
@@ -429,6 +453,7 @@ def tainted(session: str | None) -> bool:
             return False
         if until < time.monotonic():
             del _TAINTED[session]
+            _TAINT_WHY.pop(session, None)
             return False
         return True
 
@@ -436,7 +461,8 @@ def tainted(session: str | None) -> bool:
 def untaint(session: str) -> None:
     with _LOCK:
         _TAINTED.pop(session, None)
+        _TAINT_WHY.pop(session, None)
 
 
 __all__ = ["Flag", "scan", "clean", "clean_deep", "hidden_ascii", "scan_result", "scan_fields", "warning_line", "has_free_text", "candidate_warnings", "job_warnings",
-           "taint", "tainted", "untaint", "ACTIVE", "HELD_NOTE", "HELD_BECAUSE", "TAINT_MINUTES", "reasons"]
+           "taint", "tainted", "untaint", "taint_explanation", "HELD_PART_NOTE", "ACTIVE", "HELD_NOTE", "HELD_BECAUSE", "TAINT_MINUTES", "reasons"]

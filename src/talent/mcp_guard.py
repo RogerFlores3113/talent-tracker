@@ -74,7 +74,9 @@ def guard(name: str, res: Any, *, read_only: bool, session: str | None) -> tuple
             if add_data_note:
                 data["data_note"] = DATA_LINE
     if flagged and session:
-        injection.taint(session)
+        first = items[0]
+        place = f"{first['who']}'s {first['field']}" if first["who"] != "this result" else "a result"
+        injection.taint(session, why=f"text that looked like instructions in {place}")
     if kind == "result":
         return CallToolResult(content=content, structuredContent=data, isError=res.isError, _meta=res.meta), flagged
     if kind == "tuple":
@@ -82,27 +84,45 @@ def guard(name: str, res: Any, *, read_only: bool, session: str | None) -> tuple
     return content, flagged
 
 
-def held_reply(res: Any, store_setting_on: bool) -> Any:
+def _is_whole_hold(texts: list[str]) -> bool:
+    """Whether the whole call waits (nothing applied), as against one part of it (a note, a value) while the rest went
+    through. The tools word a whole hold "Waiting for the recruiter's review" or "Nothing changed ... yet"."""
+    body = " ".join(texts)
+    return "Waiting for the recruiter's review" in body or bool(re.search(r"Nothing (changed|logged|booked|moved)", body))
+
+
+def held_reply(res: Any, store_setting_on: bool, session: str | None = None) -> Any:
     """A write that waited on Review only because this session read flagged text: say why, first thing in its text,
-    and in the structured result. When Cautious mode is not on, its wording about Cautious mode is swapped for the
-    real reason."""
+    and in the structured result, and say plainly whether the whole call waits or only a part of it. When Cautious
+    mode is not on, its wording about Cautious mode is swapped for the real reason."""
     def fix(text: str) -> str:
         if store_setting_on:
             return text
+        start = r"(^|[.!?:]\s+|\n)"  # at the start of a sentence the swapped words keep a capital letter
+        text = re.sub(start + "Cautious mode is on", lambda m: m.group(1) + "This session read text that looked like "
+                      "instructions", text)
+        text = re.sub(start + "Cautious mode holds", lambda m: m.group(1) + "The hold on this session holds", text)
         text = text.replace("Cautious mode is on", "this session read text that looked like instructions")
         return text.replace("Cautious mode holds", "the hold on this session holds")
 
-    line = injection.HELD_NOTE
+    def lead(texts: list[str]) -> str:
+        line = injection.HELD_NOTE if _is_whole_hold(texts) else injection.HELD_PART_NOTE
+        return " ".join(x for x in (line, injection.taint_explanation(session)) if x)
+
     if isinstance(res, CallToolResult):
+        texts = [c.text for c in res.content if isinstance(c, TextContent)]
         content = [TextContent(type="text", text=fix(c.text)) if isinstance(c, TextContent) else c for c in res.content]
-        content.insert(0, TextContent(type="text", text=line.split(". ")[0] + "."))
+        content.insert(0, TextContent(type="text", text=lead(texts)))
         data = dict(res.structuredContent) if isinstance(res.structuredContent, dict) else res.structuredContent
         if isinstance(data, dict):
             data["held_because"] = injection.HELD_BECAUSE
+            data["held_scope"] = "all" if _is_whole_hold(texts) else "part"
         return CallToolResult(content=content, structuredContent=data, isError=res.isError, _meta=res.meta)
     if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], (list, tuple)):
+        texts = [c.text for c in res[0] if isinstance(c, TextContent)]
         content = [TextContent(type="text", text=fix(c.text)) if isinstance(c, TextContent) else c for c in res[0]]
-        content.insert(0, TextContent(type="text", text=line.split(". ")[0] + "."))
-        data = {**res[1], "held_because": injection.HELD_BECAUSE} if isinstance(res[1], dict) else res[1]
+        content.insert(0, TextContent(type="text", text=lead(texts)))
+        data = ({**res[1], "held_because": injection.HELD_BECAUSE,
+                 "held_scope": "all" if _is_whole_hold(texts) else "part"} if isinstance(res[1], dict) else res[1])
         return content, data
     return res

@@ -1,19 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble, injection_box %}
+{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble, injection_box, zone_list %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
 {{ injection_box(inject_warnings) }}
-{% if dupes %}
-<section class="panel" id="duplicates">
-  <h2>Same person?</h2>
-  <p class="fine">These look like they could be {{ c.name }} too. Merging keeps this profile, adds anything it's missing, moves the timeline and jobs over, then deletes the other one.</p>
-  <ul class="items">
-    {% for d in dupes %}<li><a href="/candidates/{{ d.id }}">{{ d.name }}</a> <span class="muted">{{ sub(d) }}</span> <a class="btn small" href="/candidates/{{ c.id }}/merge/{{ d.id }}">Merge</a></li>{% endfor %}
-  </ul>
-</section>
-{% endif %}
 <article class="profile">
   <div class="head">
     <div>
@@ -24,6 +15,15 @@
     <a class="btn" href="/candidates/{{ c.id }}?edit=1">Edit</a>
   </div>
 
+{% if dupes %}
+<section class="panel" id="duplicates">
+  <h2>Same person?</h2>
+  <p class="fine">These look like they could be {{ c.name }} too. Merging keeps this profile, adds anything it's missing, moves the timeline and jobs over, then deletes the other one.</p>
+  <ul class="items">
+    {% for d in dupes %}<li><a href="/candidates/{{ d.id }}">{{ d.name }}</a> <span class="muted">{{ sub(d) }}</span> <a class="btn small" href="/candidates/{{ c.id }}/merge/{{ d.id }}">Merge</a></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
   <div class="contact-line">
     <span>Last contacted: <strong>{{ c.last_contacted_at | ago if c.last_contacted_at else 'never' }}</strong>{% if c.last_contacted_at %} ({{ c.last_contacted_at | date }}){% endif %}</span>
     <form method="post" action="/candidates/{{ c.id }}/contacted"><button class="btn small" type="submit">I contacted them today</button></form>
@@ -34,8 +34,8 @@
     {% if c.email %}<dt>Email</dt><dd><a href="mailto:{{ c.email }}">{{ c.email }}</a></dd>{% endif %}
     {% if c.other_emails %}<dt>Other emails</dt><dd>{% for e in c.other_emails %}<a href="mailto:{{ e }}">{{ e }}</a>{{ ', ' if not loop.last }}{% endfor %}</dd>{% endif %}
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
-    {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}</a></dd>{% endif %}
-    {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}</a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
+    {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}<span class="sr-only"> (opens in a new tab)</span></a></dd>{% endif %}
+    {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}<span class="sr-only"> (opens in a new tab)</span></a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
     {% if c.source %}<dt>Found via</dt><dd>{{ c.source }}</dd>{% endif %}
     <dt>Profile updated</dt><dd>{{ c.updated_at | date }} ({{ c.updated_at | ago }})</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
@@ -76,17 +76,30 @@
   <h2 id="timeline">Timeline</h2>
   {% if (request.state.flash or {}).get('error') %}<p class="error">{{ request.state.flash.get('error') }}</p>{% endif %}
   <form method="post" action="/candidates/{{ c.id }}/log" class="logform">
-    <select name="kind" aria-label="Kind">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
-    <input type="text" name="body" placeholder="What happened? (for an interview, add the date)" aria-label="Note">
-    <input type="datetime-local" name="at" aria-label="When (leave blank for now)" title="When, in {{ local_zone() }} (leave blank for now)"><span class="fine zone">{{ local_zone() }}</span>
-    {% if c.pipelines %}<select name="job_id" aria-label="Job"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ job_label(p.job_title, p.job_company) }}</option>{% endfor %}</select>{% endif %}
+    <select name="kind" aria-label="Kind of timeline entry">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
+    <input type="text" name="body" placeholder="What happened? For an interview, the session, like Onsite: coding" aria-label="What happened (new timeline entry)" data-count-limit="{{ summary_limit }}" aria-describedby="iv-limit">
+    <input type="datetime-local" name="at" data-all-day-input aria-label="When (leave blank for now, but an interview needs a time)" title="When (leave blank for now). An interview needs a date and a time."><input type="text" name="tz" list="zone-list" autocomplete="off" placeholder="{{ local_zone() or 'My time zone' }} (mine)" aria-label="Time zone of that time, blank is mine" title="The time zone the date and time are in. Type a city or zone name, like Asia/Dubai." size="18"><label class="followup"><input type="checkbox" name="all_day" value="1" data-all-day> All day</label>
+    {% if c.pipelines %}<select name="job_id" aria-label="Job for this timeline entry"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ job_label(p.job_title, p.job_company) }}</option>{% endfor %}</select>{% endif %}
     <label class="followup">Follow up on <input type="date" name="follow_up" aria-label="Follow up on (optional)" title="Optional. Adds a follow-up to Today on this day."></label>
+    <details class="iv-extras fine" style="flex-basis:100%">
+      <summary>Interview details (who runs it, how long, time zones)</summary>
+      <div class="logform">
+        <input type="text" name="interviewer" placeholder="Interviewer (names separated by commas)" aria-label="Interviewer (names separated by commas) for a new interview" maxlength="200">
+        <input type="email" name="interviewer_email" placeholder="Their email (saved for invites)" aria-label="Their email (saved for invites)" maxlength="200">
+        <input type="number" name="minutes" min="10" max="480" placeholder="Length (min)" aria-label="Length (min) of a new interview" style="width:9rem">
+        <label class="followup">Interviewer's zone <input type="text" name="interviewer_tz" list="zone-list" autocomplete="off" placeholder="Same as mine" size="18"></label>
+        <label class="followup">Candidate's zone <input type="text" name="candidate_tz" list="zone-list" autocomplete="off" placeholder="{{ ('Saved: ' ~ c_zone) if c_zone else 'Same as mine' }}" size="18"></label>
+      </div>
+      <p class="fine">For an interview, invites and calendar files show each person the time on their own clock. A zone you pick is remembered for that person. Type a city or zone name, like Asia/Dubai or Europe/Warsaw, and pick from the list.</p>
+    </details>
     <button class="btn small primary" type="submit">Add</button>
+    <p class="fine" id="iv-limit" style="flex-basis:100%">For an interview, the note can be up to {{ summary_limit }} characters: the session name, like Onsite: coding. <span data-count-note></span></p>
   </form>
+  {{ zone_list() }}
   {% if c.timeline %}
   <ul class="timeline">
     {% for t in c.timeline %}
-    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ 'reply' if t.data is mapping and t.data.reply else t.kind }}</span> <span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ 'reply' if t.data is mapping and t.data.reply else t.kind }}</span> {% set allday = t.kind == 'interview' and t.data is mapping and t.data.all_day %}<span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') and not allday else '%b %-d, %Y') }}{% if allday %}, all day{% endif %}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
       {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}{% if t.status == 'cancelled' %} <span class="badge">Cancelled</span>{% elif t.status in interview_outcomes %} <span class="badge">{{ interview_label(ivd) or interview_outcomes[t.status] }}</span>{% endif %}{% if ivd.rescheduled_from %} <span class="fine">moved from {{ ivd.rescheduled_from[-1] | local }}</span>{% endif %}{% endif %}
       {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
       {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}
@@ -100,15 +113,15 @@
       {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">
-          <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
-          <input type="text" name="reason" value="" placeholder="Reason (optional)" aria-label="Reason for the new time" maxlength="500">
+          <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time for {{ t.body or 'this session' }}" required><input type="text" name="tz" list="zone-list" autocomplete="off" placeholder="{{ local_zone() or 'My time zone' }} (mine)" aria-label="Time zone for the new time of {{ t.body or 'this session' }}, blank is mine" size="18">
+          <input type="text" name="reason" value="" placeholder="Reason (optional)" aria-label="Reason for the new time of {{ t.body or 'this session' }}" maxlength="500">
           <button class="btn small" type="submit">Reschedule</button>
         </form>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="outcome">
           {% set ivcur = (ivd.verdict or t.status or '') | replace('_', ' ') %}
-          <select name="outcome" aria-label="How it went">{% for k, label in interview_form_choices %}<option value="{{ k }}" {{ 'selected' if ivcur == k }}>{{ label }}</option>{% endfor %}</select>
-          <input type="text" name="note" value="{{ interview_note(ivd) or '' }}" placeholder="Note (optional)" aria-label="Outcome note">
+          <select name="outcome" aria-label="How {{ t.body or 'it' }} went">{% for k, label in interview_form_choices %}<option value="{{ k }}" {{ 'selected' if ivcur == k }}>{{ label }}</option>{% endfor %}</select>
+          <input type="text" name="note" value="{{ interview_note(ivd) or '' }}" placeholder="Note (optional)" aria-label="Outcome note for {{ t.body or 'this session' }}">
           <button class="btn small" type="submit">Save outcome</button>
         </form>
         {% if t.status == 'cancelled' %}
@@ -118,14 +131,14 @@
         {% endif %}
         {% if t.status != 'cancelled' %}
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}/feedback" class="inline">
-          <input type="text" name="interviewer" value="{{ ivd.interviewer or '' }}" placeholder="Who said it" aria-label="Interviewer" maxlength="200">
-          <input type="text" name="text" placeholder="Their feedback, in their words" aria-label="Feedback" maxlength="4000" required>
+          <input type="text" name="interviewer" value="{{ ivd.interviewer or '' }}" placeholder="Who said it" aria-label="Interviewer, {{ t.body or 'this session' }}" maxlength="200">
+          <input type="text" name="text" placeholder="Their feedback, in their words" aria-label="Feedback on {{ t.body or 'this session' }}" maxlength="4000" required>
           <button class="btn small" type="submit">Add feedback</button>
         </form>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}/session" class="inline">
-          <input type="text" name="body" placeholder="Next session, like Onsite: coding" aria-label="Session name" maxlength="200" required>
-          <input type="time" name="time" aria-label="Start time, {{ local_zone() }}" required>
-          <input type="text" name="interviewer" placeholder="Interviewer (optional)" aria-label="Interviewer" maxlength="200">
+          <input type="text" name="body" placeholder="Next session, like Onsite: coding" aria-label="Next session after {{ t.body or 'this one' }}" maxlength="200" required>
+          <input type="time" name="time" aria-label="Start time of the session after {{ t.body or 'this one' }}, {{ local_zone() }}" title="Start time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
+          <input type="text" name="interviewer" placeholder="Interviewer (optional)" aria-label="Interviewer for the session after {{ t.body or 'this one' }}" maxlength="200">
           <button class="btn small" type="submit" title="Builds an onsite loop: same day and job">Add another session that day</button>
         </form>
         {% endif %}

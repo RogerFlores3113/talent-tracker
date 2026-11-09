@@ -4,7 +4,7 @@
 <h1>{{ 'Edit ' ~ j.title if j.id else 'New job' }}</h1>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <form class="form" method="post" action="{{ '/jobs/' ~ j.id if j.id else '/jobs' }}">
-  <label>Job title<input type="text" name="title" value="{{ j.title or '' }}" required {{ 'autofocus' if not j.id }}></label>
+  <label>Job title<input type="text" name="title" value="{{ j.title or '' }}" required></label>
   <label>Company<input type="text" name="company" value="{{ j.company or '' }}"></label>
   <label>Location<input type="text" name="location" value="{{ j.location or '' }}" placeholder="Remote, Austin, hybrid NYC"></label>
   <label>Hiring manager<input type="text" name="hiring_manager" value="{{ j.hiring_manager or '' }}" placeholder="Who makes the hiring call"></label>

@@ -5,7 +5,7 @@
     <a class="option" href="/connect"><strong>Connect your AI app</strong><span>Then paste a LinkedIn link into Claude and say “save this person”.</span></a>
     <a class="option" href="/import"><strong>Import a spreadsheet</strong><span>Bring in a CSV from Excel, Google Sheets or another tool.</span></a>
     <a class="option" href="/paste"><strong>Paste a resume</strong><span>We pull out the name, email and links for you to check.</span></a>
-    {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button. The first-run tour never clears data you add this way.</span></button></form>{% endif %}
+    {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button.</span></button></form>{% endif %}
   </div>
 {%- endmacro %}
 {% macro loop_sessions(i) -%}
@@ -39,10 +39,15 @@
   {{ start_options(False) }}
 </section>
 {% endif %}
+{% macro saved_chip(sv) %}<span class="saved-item"><a class="chip saved-link" href="/saved-searches/{{ sv.id }}" title="{{ sv.summary }}" aria-label="Saved search {{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }} {% if sv.count is not none %}<span class="fine">{{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a><form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}" class="inline-form pin-form"><button class="btn small linkish" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin' }} saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin' }}</button></form></span>{% endmacro %}
 {% if saved_searches %}<section class="saved-today" aria-label="Saved searches">
   <span class="fine">Saved searches:</span>
-  {% for sv in saved_searches %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}
-  <a class="fine" href="/candidates">All</a>
+  {% for sv in saved_searches[:6] %}{{ saved_chip(sv) }}{% endfor %}
+  {% if saved_searches | length > 6 %}<details class="saved-more">
+    <summary>Show all {{ saved_searches | length }} saved searches</summary>
+    <div class="saved-today">{% for sv in saved_searches[6:] %}{{ saved_chip(sv) }}{% endfor %}</div>
+  </details>{% endif %}
+  <a class="fine" href="/candidates#saved-searches">Rename or delete saved searches</a>
 </section>{% endif %}
 <div class="overview">
   <section class="today">
@@ -77,13 +82,18 @@
           </details>
           {% endif %}
           {% if i.kind == 'feedback_owed' %}
-          <ul class="sessions">
-          {% for o in i.owed %}
-            <li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a> <span class="fine">{{ o.session }}, {{ o.day }}</span></li>
+          {% for p in i.people %}
+          <div class="owed-person">
+            {% if i.people | length > 1 %}<strong>{{ p.name }}</strong> <span class="fine">owes {{ p.count }}</span>{% endif %}
+            <ul class="sessions">
+            {% for o in p['items'] %}
+              <li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a> <span class="fine">{{ o.session }}, {{ o.day }}</span></li>
+            {% endfor %}
+            </ul>
+            <a class="link small" href="{{ p.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ p.name }}</a>{% if not p.email %} <span class="fine">(no email saved)</span>{% endif %}
+            <button type="button" class="link small" data-copy-text="{{ p.subject }}&#10;&#10;{{ p.body }}">Copy request</button>
+          </div>
           {% endfor %}
-          </ul>
-          <a class="link small" href="{{ i.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ i.who }}</a>
-          <button type="button" class="link small" data-copy-text="{{ i.subject }}&#10;&#10;{{ i.body }}">Copy request</button>
           {% endif %}
         </div>
         <div class="item-acts">

@@ -50,7 +50,7 @@ def test_clean_color_accepts_the_six_and_none_and_refuses_the_rest():
     assert [clean_color(c) for c in ("Red", " ORANGE ", "yellow", "green", "blue", "purple")] == list(COLORS)
     assert clean_color("") is None and clean_color(None) is None and clean_color("none") is None
     for bad in ("pink", "#ff0000", "red; drop table", "<b>red</b>"):
-        with pytest.raises(ValueError, match="isn't a colour"):
+        with pytest.raises(ValueError, match="isn't a color"):
             clean_color(bad)
 
 
@@ -76,7 +76,7 @@ def test_invalid_color_is_rejected_and_nothing_changes(store):
     store.set_color(cid, "blue")
     c = local_client(store)
     r = c.post(f"/candidates/{cid}/color", data={"color": "pink"}, headers={"Accept": "application/json"})
-    assert r.status_code == 400 and "isn't a colour" in r.json()["error"]
+    assert r.status_code == 400 and "isn't a color" in r.json()["error"]
     assert store.get_candidate(cid)["color"] == "blue"
     with pytest.raises(ValueError):
         store.set_color(cid, "pink")
@@ -333,7 +333,7 @@ def test_the_tool_sets_and_clears_a_color_and_it_shows_in_get_candidate(store, n
     assert again.structuredContent["changed"] == [] and "already green" in again.content[0].text
     cleared = call(server, "set_candidate_color", candidate_id=cid, color="none")
     assert cleared.structuredContent["color"] == "none" and store.get_candidate(cid)["color"] is None
-    with pytest.raises(ToolError, match="colour"):
+    with pytest.raises(ToolError, match="color"):
         call(server, "set_candidate_color", candidate_id=cid, color="teal")
     with pytest.raises(ToolError):
         call(server, "set_candidate_color", candidate_id=9999, color="red")
@@ -380,7 +380,7 @@ def test_suggest_only_apps_wait_on_review_and_keep_sets_it_once(store, named):
     assert row["kind"] == "tool_call" and "Set candidate color" in row["summary"]
     assert local_client(store).post(f"/review/{row['id']}/keep", follow_redirects=False).status_code == 303
     assert store.get_candidate(cid)["color"] == "red" and not review.pending(store)
-    with pytest.raises(ToolError, match="isn't a colour|colour"):  # a bad color is refused before it waits
+    with pytest.raises(ToolError, match="isn't a color|color"):  # a bad color is refused before it waits
         call(server, "set_candidate_color", candidate_id=cid, color="teal")
     assert not review.pending(store)
 

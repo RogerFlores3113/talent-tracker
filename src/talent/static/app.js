@@ -1,6 +1,7 @@
 // Talent Search app window. All page scripts live here so the Content-Security-Policy
 // can forbid inline scripts. Pages opt in with data- attributes:
-//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form)
+//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form);
+//                             on a submit button: ask only when that button sent the form
 //   data-autosubmit           on a select: submit its form when it changes by mouse or touch. Picked with the keyboard
 //                             (arrow keys), it submits on Enter or when the select loses focus, so each arrow press
 //                             doesn't reload the page. On a checkbox it submits at once.
@@ -21,7 +22,8 @@
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
-//   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//   data-stage-pick           on a stage menu: a mouse pick moves at once (or asks for a reason first for an out stage);
+//                             with the keyboard it waits for Enter or blur. After a move, focus returns to that person.
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
 //   data-color-bubble         on a colour bubble button (data-cid, data-color, data-next, data-prev): a click saves the
 //                             next colour at once and updates the bubble in place; Right-click or Shift-click goes to
@@ -32,7 +34,7 @@
 //   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover.
 //                             While it shows, the page behind it is inert (except the lit part); a step may also light
 //                             a second element ("reach") so the recruiter can click it, and the finish step offers
-//                             check boxes (delete_people, delete_searches) that are posted with Finish or Skip.
+//                             check boxes (delete_people) that are posted with Finish or Skip.
 (function () {
   "use strict";
 
@@ -118,8 +120,26 @@
     // One click: "Use America/Chicago" saves this browser's zone as it is.
     document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
   }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prefillZones);
-  else prefillZones();
+  // The banner only shows when it matters: the server shows it when this computer says UTC with no zone saved; for a
+  // saved zone it stays hidden unless this browser's zone has a different offset now.
+  function offsetOf(zone) {
+    try {
+      const p = new Intl.DateTimeFormat("en-US", {timeZone: zone, timeZoneName: "longOffset"}).formatToParts(new Date())
+        .find(x => x.type === "timeZoneName");
+      return p ? p.value : null;
+    } catch (e) { return null; }
+  }
+  function checkZoneBanner() {
+    let zone = "";
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* leave it hidden */ }
+    document.querySelectorAll("form[data-tz-banner][hidden]").forEach(f => {
+      const here = offsetOf(zone), saved = offsetOf(f.dataset.tzSaved);
+      if (zone && here && saved && here !== saved) f.hidden = false;
+    });
+  }
+  function zoneStart() { checkZoneBanner(); prefillZones(); }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", zoneStart);
+  else zoneStart();
 
   // The Decide form: say exactly who gets the offer and who is passed on before anything moves.
   function decideQuestion(form) {
@@ -156,6 +176,7 @@
     const form = e.target;
     if (form.dataset && form.dataset.decide !== undefined && !window.confirm(decideQuestion(form))) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.confirm && !window.confirm(confirmText(form))) { e.preventDefault(); return; }
+    if (e.submitter && e.submitter.dataset && e.submitter.dataset.confirm && !window.confirm(e.submitter.dataset.confirm)) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.busy) {
       // A big import takes a while: say so, and don't let a second click send it again.
       if (form.dataset.sent) { e.preventDefault(); return; }
@@ -175,51 +196,50 @@
     });
   });
 
-  // Selects with data-autosubmit: a mouse or touch pick submits at once. With the keyboard, arrow keys change the
-  // value one option at a time, so wait for Enter or for the select to lose focus.
-  const isAuto = n => n && n.matches && n.matches("select[data-autosubmit]");
-  document.addEventListener("keydown", e => {
-    const el = e.target;
-    if (!isAuto(el)) return;
-    if (e.key === "Enter") {
-      if (el.dataset.pending && el.form) { delete el.dataset.pending; delete el.dataset.kb; e.preventDefault(); el.form.submit(); }
-    } else if (/^(Arrow|Home$|End$|Page)/.test(e.key) || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
-      el.dataset.kb = "1";
+  // Menus that wait for the keyboard: filters (data-autosubmit) and the stage menus on the board and the job table.
+  // A mouse or touch pick goes at once. With the keyboard, arrow keys change the value one option at a time, so wait
+  // for Enter or for the menu to lose focus.
+  const DEFER = "select[data-autosubmit], select[data-stage-pick], select[data-table-stage], form.stage-form .reason select";
+  const isAuto = n => n && n.matches && n.matches(DEFER);
+  const sendForm = form => { form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true})); };
+  // Make the optional reason box show, and put the keyboard in it.
+  function askReason(reason, o, who, quiet) {
+    // Hide the reason that only repeats the stage ("Withdrew" when moving to Withdrawn).
+    const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
+    reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
+    const w = reason.querySelector(".tbl-who");
+    if (w) w.textContent = "Why " + (who || "this person") + " is going to " + o.textContent + ":";
+    const wasHidden = reason.hidden;
+    reason.hidden = false;
+    // Nothing has been sent yet. Say so on the page and out loud, so the stage menu doesn't look like a finished move.
+    let note = reason.querySelector(".reason-note");
+    if (!note) { note = document.createElement("span"); note.className = "reason-note"; reason.prepend(note); }
+    note.textContent = "Not moved yet. ";
+    const holder = reason.closest("form") || reason;
+    holder.classList.add("unsent");
+    const name = who || (reason.closest("[data-who]") || {dataset: {}}).dataset.who || "this person";
+    const pick = reason.querySelector("select");
+    if (pick) {
+      if (!quiet) pick.focus();
+      else if (wasHidden) {
+        announceColor("Not moved yet. Pick a reason for " + name + ", or press Move without a reason.");
+        // The keyboard is already leaving the stage menu; put it in the reason box once it has landed.
+        window.setTimeout(() => { pick.focus(); }, 0);
+      }
     }
-  }, true);
-  document.addEventListener("pointerdown", e => { const el = e.target.closest && e.target.closest("select[data-autosubmit]"); if (el) delete el.dataset.kb; }, true);
-  document.addEventListener("focusout", e => {
-    const el = e.target;
-    if (!isAuto(el) || !el.dataset.pending || !el.form) return;
-    const to = e.relatedTarget;
-    delete el.dataset.pending; delete el.dataset.kb;
-    if (to && to.form === el.form && to.type === "submit") return;  // the Go button sends it
-    el.form.submit();
-  });
-  document.addEventListener("change", e => {
-    const el = e.target;
-    if (isAuto(el) && el.form) {
-      if (el.dataset.kb) { el.dataset.pending = "1"; return; }
-      el.form.submit(); return;
-    }
-    if (el.matches && el.matches("input[type=checkbox][data-autosubmit]") && el.form) { el.form.submit(); return; }
-    // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
-    if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
+  }
+  // A stage menu or reason menu has settled: an out stage shows the optional reason first; any other pick moves.
+  function stageSettled(el, quiet) {
+    if (el.matches("select[data-table-stage]")) {  // job table view: one shared move form
       const shared = document.getElementById("tbl-move");
       if (!shared) return;
       shared.elements.candidate_id.value = el.dataset.cid;
       shared.elements.stage.value = el.value;
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = shared.querySelector(".reason");
-      if (o && o.dataset.out && reason) {
-        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
-        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
-        const who = reason.querySelector(".tbl-who");
-        if (who) who.textContent = "Why " + (el.dataset.who || "this person") + " is going to " + o.textContent + ":";
-        reason.hidden = false; return;
-      }
-      if (reason) reason.hidden = true;
-      shared.requestSubmit ? shared.requestSubmit() : shared.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+      if (o && o.dataset.out && reason) { askReason(reason, o, el.dataset.who, quiet); return; }
+      if (reason) { reason.hidden = true; shared.classList.remove("unsent"); }
+      sendForm(shared);
       return;
     }
     const form = el.closest && el.closest("form.stage-form");
@@ -227,15 +247,132 @@
     if (el.matches("select[data-stage-pick]")) {
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = form.querySelector(".reason");
-      if (o && o.dataset.out && reason) {
-        // Hide the reason that only repeats the stage ("Withdrew" when moving to Withdrawn).
-        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
-        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
-        reason.hidden = false; return;
-      }
-      if (reason) reason.hidden = true;
+      if (o && o.dataset.out && reason) { askReason(reason, o, "", quiet); return; }
+      if (reason) { reason.hidden = true; form.classList.remove("unsent"); }
     }
-    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+    sendForm(form);
+  }
+  function settle(el, quiet) {
+    if (el.matches("select[data-autosubmit]")) { if (el.form) el.form.submit(); return; }
+    stageSettled(el, quiet);
+  }
+  document.addEventListener("keydown", e => {
+    const el = e.target;
+    if (!isAuto(el)) return;
+    if (e.key === "Enter") {
+      if (el.dataset.pending) { delete el.dataset.pending; delete el.dataset.kb; e.preventDefault(); settle(el, false); }
+    } else if (/^(Arrow|Home$|End$|Page)/.test(e.key) || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      el.dataset.kb = "1";
+    }
+  }, true);
+  document.addEventListener("pointerdown", e => { const el = e.target.closest && e.target.closest(DEFER); if (el) delete el.dataset.kb; }, true);
+  document.addEventListener("focusout", e => {
+    const el = e.target;
+    if (!isAuto(el) || !el.dataset.pending) return;
+    const to = e.relatedTarget;
+    delete el.dataset.pending; delete el.dataset.kb;
+    if (to && el.form && to.form === el.form && to.type === "submit") return;  // the Go or Move button sends it
+    settle(el, true);
+  });
+  document.addEventListener("change", e => {
+    const el = e.target;
+    if (isAuto(el)) {
+      if (el.dataset.kb) { el.dataset.pending = "1"; return; }
+      settle(el, false); return;
+    }
+    if (el.matches && el.matches("input[type=checkbox][data-autosubmit]") && el.form) { el.form.submit(); return; }
+  });
+
+  // After a stage move the board or table is drawn again. Say what moved, and put the keyboard back on that
+  // person's stage menu (or leave it where the person tabbed to, when they are already somewhere on the page).
+  let moved = null;
+  const cssId = v => (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v);
+  document.addEventListener("htmx:beforeRequest", e => {
+    const cfg = e.detail && e.detail.requestConfig;
+    if (!cfg || !/\/jobs\/\d+\/move$/.test(cfg.path || "")) return;
+    const p = cfg.parameters || {};
+    const cid = p.candidate_id, stage = p.stage;
+    if (!cid) { moved = null; return; }
+    const at = document.querySelector("#pipeline [data-cid=\"" + cssId(cid) + "\"]");
+    const strong = at && at.querySelector && at.querySelector("strong");
+    moved = {cid, stage, who: (at && at.dataset.who) || (strong && strong.textContent.trim()) || "This person"};
+  });
+  document.addEventListener("htmx:afterSettle", e => {
+    const m = moved;
+    const t = e.detail && e.detail.target;
+    if (!m || !t || t.id !== "pipeline") return;
+    moved = null;
+    const lost = t.querySelector(".error, .ask-cancel");
+    announceColor(lost ? (lost.textContent || "").trim().replace(/\s+/g, " ") : m.who + " moved to " + (m.stage || "the new stage") + ".");
+    if (lost) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && document.body.contains(a)) return;
+    const pick = t.querySelector("[data-cid=\"" + cssId(m.cid) + "\"] select[data-stage-pick]") ||
+      t.querySelector("select[data-table-stage][data-cid=\"" + cssId(m.cid) + "\"]");
+    if (pick) pick.focus();
+  });
+
+  // "Show more" swaps its own row away. Put the keyboard on the first row or card that was added.
+  let more = null;
+  document.addEventListener("htmx:beforeRequest", e => {
+    const elt = e.detail && e.detail.elt;
+    const holder = elt && elt.closest && elt.closest("tr.more, li.more");
+    if (!holder) return;
+    more = {prev: holder.previousElementSibling, parent: holder.parentElement};
+  });
+  document.addEventListener("htmx:afterSettle", () => {
+    if (!more) return;
+    const m = more; more = null;
+    const a = document.activeElement;
+    if (a && a !== document.body && document.body.contains(a)) return;
+    const first = m.prev ? m.prev.nextElementSibling : (m.parent && m.parent.firstElementChild);
+    const target = first && first.querySelector && first.querySelector("a[href], button");
+    if (target) target.focus();
+  });
+  // The Today search: say the match count once, not the whole list of people.
+  document.addEventListener("htmx:afterSettle", e => {
+    const t = e.detail && e.detail.target;
+    const live = document.getElementById("results-status");
+    if (!live || !t || t.id !== "results") return;
+    const meta = t.querySelector(".meta");
+    live.textContent = meta ? meta.textContent.replace(/\s+/g, " ").trim() : "";
+  });
+
+  // After a save that reloads the page, put the keyboard on the notice (or on the result a page marks with
+  // data-focus-here), so a screen reader reads it. Not while the tour owns focus, and not over an autofocus.
+  function focusResult() {
+    if (document.getElementById("tour-data") || document.querySelector("[autofocus]")) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && a.id !== "main") return;
+    const t = document.querySelector("[data-focus-here]") || document.querySelector("main > .flash, main > p.error[role=alert]");
+    if (!t) return;
+    if (!t.hasAttribute("tabindex")) t.setAttribute("tabindex", "-1");
+    try { t.focus({preventScroll: !!window.location.hash}); } catch (e) { t.focus(); }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", focusResult);
+  else focusResult();
+
+  // "All day" on the log form: the date box asks for a day only, with no time.
+  document.addEventListener("change", e => {
+    const box = e.target.closest && e.target.closest("input[data-all-day]");
+    if (!box || !box.form) return;
+    const at = box.form.querySelector("input[data-all-day-input]");
+    if (!at) return;
+    const old = at.value;
+    at.type = box.checked ? "date" : "datetime-local";
+    at.value = box.checked ? old.slice(0, 10) : (old ? old + "T09:00" : "");
+    const tz = box.form.elements.tz;
+    if (tz) tz.disabled = box.checked;
+  });
+  // A visible count next to a box with data-count-limit, from 80% of the limit on.
+  document.addEventListener("input", e => {
+    const box = e.target.closest && e.target.closest("input[data-count-limit]");
+    if (!box || !box.form) return;
+    const note = box.form.querySelector("[data-count-note]");
+    if (!note) return;
+    const n = box.value.length, max = parseInt(box.dataset.countLimit, 10);
+    const kind = box.form.elements.kind;
+    note.textContent = (!kind || kind.value === "interview") && n >= max * 0.8 ? n + " of " + max + " used." : "";
   });
 
   // Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.
@@ -276,12 +413,17 @@
     colorLive.textContent = text;
   }
   function setBubble(btn, d) {
+    const was = btn.dataset.color || "none", now = d.color || "none";
     btn.dataset.color = d.color; btn.dataset.next = d.next; btn.dataset.prev = d.prev;
     btn.setAttribute("aria-label", d.aria); btn.title = d.title;
     const letter = btn.querySelector("span"); if (letter) letter.textContent = d.letter;
     const hidden = btn.form && btn.form.elements.color; if (hidden) hidden.value = d.next;
-    document.querySelectorAll("[data-color-count]").forEach(n => {
-      if (d.counts && d.counts[n.dataset.colorCount] !== undefined) n.textContent = d.counts[n.dataset.colorCount];
+    // The numbers follow the search and filters on the page, so move one person from the old colour to the new
+    // one here instead of swapping in whole-database totals.
+    if (was !== now) document.querySelectorAll("[data-color-count]").forEach(n => {
+      const k = n.dataset.colorCount, v = parseInt(n.textContent, 10);
+      if (!isNaN(v) && k === was) n.textContent = Math.max(0, v - 1);
+      else if (!isNaN(v) && k === now) n.textContent = v + 1;
     });
   }
   function pickColor(btn, back) {
@@ -379,7 +521,9 @@
         lab.append(inp, el("span", "", text)); extras.appendChild(lab); picks.push({input: inp, field, id});
       };
       (ex.people || []).forEach(p => add("Also delete " + p.name + " (you worked with them)", "delete_people", p.id));
-      (ex.searches || []).forEach(x => add("Also remove my saved search " + x.name, "delete_searches", x.id));
+      // Saved searches made on the demo people go with them on their own: one short line, not a box for each.
+      if ((ex.searches || []).length) extras.appendChild(el("p", "fine",
+        "Saved searches you made that only find demo people are removed with them."));
     }
     function chosen() {
       const out = {};
@@ -513,6 +657,8 @@
 
     document.addEventListener("keydown", e => {
       if (!document.body.contains(root)) return;
+      // Esc on a menu closes the menu (a native dropdown may be open), not the tour.
+      if (e.key === "Escape" && e.target && e.target.tagName === "SELECT") return;
       if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }  // Esc asks first
       if (e.key !== "Tab") return;
       // Keep Tab inside the tour: its own buttons, then the lit-up area (so a Connect button can be reached by keyboard).

@@ -13,6 +13,7 @@ Design notes
 """
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import sqlite3
@@ -25,6 +26,8 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
+
+from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
 # candidate is still in play; "hired" and "lost" close the application.
@@ -153,7 +156,7 @@ def clean_color(value: Any) -> str | None:
         return v
     if v in ("none", "no color", "no colour", "clear", ""):
         return None
-    raise ValueError(f"{str(value)[:30]!r} isn't a colour. Use one of: {', '.join(COLORS)} (or none to clear it).")
+    raise ValueError(f"{str(value)[:30]!r} isn't a color. Use one of: {', '.join(COLORS)} (or none to clear it).")
 
 
 def next_color(color: str | None, step: int = 1) -> str | None:
@@ -184,6 +187,60 @@ def _fts_triggers() -> str:
         INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
     END;
     """
+
+
+def _sym_index() -> str:
+    """The search index again, now reading c#, c++, f# and .net as words of their own (tt_sym turns c# into
+    csharp, c++ into cplusplus and .net into dotnet before indexing). The index takes its text from a view that
+    applies tt_sym, and the triggers apply it to what they add, so a rebuild and a live write agree."""
+    cols = [c.strip() for c in _FTS_COLS.split(",")]
+    view = ", ".join(f"tt_sym({c}) AS {c}" for c in cols)
+    new = ", ".join(f"tt_sym(new.{c})" for c in cols)
+    old = ", ".join(f"tt_sym(old.{c})" for c in cols)
+    return f"""
+    DROP TRIGGER IF EXISTS candidates_ai;
+    DROP TRIGGER IF EXISTS candidates_ad;
+    DROP TRIGGER IF EXISTS candidates_au;
+    DROP TABLE IF EXISTS candidates_fts;
+    DROP VIEW IF EXISTS candidates_sym;
+    CREATE VIEW candidates_sym AS SELECT id, {view} FROM candidates;
+    CREATE VIRTUAL TABLE candidates_fts USING fts5(
+        {_FTS_COLS}, content='candidates_sym', content_rowid='id',
+        tokenize='porter unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER candidates_ai AFTER INSERT ON candidates BEGIN
+        INSERT INTO candidates_fts(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
+    END;
+    CREATE TRIGGER candidates_ad AFTER DELETE ON candidates BEGIN
+        INSERT INTO candidates_fts(candidates_fts, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (old.id, 'delete');
+    END;
+    CREATE TRIGGER candidates_au AFTER UPDATE ON candidates BEGIN
+        INSERT INTO candidates_fts(candidates_fts, rowid, {_FTS_COLS}) VALUES ('delete', old.id, {old});
+        INSERT INTO candidates_fts(rowid, {_FTS_COLS}) VALUES (new.id, {new});
+        INSERT INTO search_outbox(candidate_id, op) VALUES (new.id, 'upsert');
+    END;
+    """
+
+
+def _migrate_v10q_data(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
+
+
+def _migrate_v10w3_data(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, candidate_id, body FROM timeline WHERE kind = 'note' AND body LIKE 'Other emails:%'")
+    drop = []
+    for tid, cid, body in rows.fetchall():
+        head, sep, rest = (body or "").partition(": ")
+        if head != "Other emails" or not sep or "\n" in body or _NOTE_EMAIL.sub("", rest).strip(" ,;/") != "":
+            continue
+        found = {a.lower() for a in _NOTE_EMAIL.findall(rest)}
+        kept = {r[0] for r in conn.execute("SELECT email FROM candidate_emails WHERE candidate_id = ?", (cid,))}
+        main = conn.execute("SELECT lower(email) FROM candidates WHERE id = ?", (cid,)).fetchone()
+        if found and found <= kept | {main[0] if main and main[0] else ""}:
+            drop.append((tid,))
+    conn.executemany("DELETE FROM timeline WHERE id = ?", drop)
 
 
 def _words_index() -> str:
@@ -707,6 +764,32 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v9a_data,
     ),
+    # v10n: saved searches can be pinned (they stay first), and remember the newest candidate id when they were last
+    # opened, so "new since you looked" counts people saved after that point even in the same second.
+    """
+    ALTER TABLE saved_searches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE saved_searches ADD COLUMN seen_max_id INTEGER;
+    """,
+    # v10i: time zones per person for interviews, and a small interviewer address book. person_zones is the zone a
+    # candidate is in (their own, when it isn't the recruiter's); interviewers keeps an interviewer's email and zone
+    # by their folded name, so invite emails open with the right address and show the time on their clock.
+    """
+    CREATE TABLE IF NOT EXISTS person_zones (
+        candidate_id INTEGER PRIMARY KEY REFERENCES candidates(id) ON DELETE CASCADE,
+        time_zone    TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS interviewers (
+        key       TEXT PRIMARY KEY,
+        name      TEXT NOT NULL,
+        email     TEXT,
+        time_zone TEXT
+    );
+    """,
+    # v10q: c#, c++, f# and .net are words of their own in search (they used to be read as c and net).
+    (_sym_index(), _migrate_v10q_data),
+    # v10w3: an "Other emails: ..." note that only repeats addresses the person keeps in their Other emails field is
+    # removed (older imports wrote both). A note with any other words in it is left alone.
+    ("SELECT 1;", _migrate_v10w3_data),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -727,6 +810,7 @@ AI_ACTION_KINDS = {
     "sequence_set": "Set a job's follow-up steps",
     "plan_seat": "Changed the hiring plan",
     "loop_template": "Set a job's interview loop template",
+    "saved_search": "Saved a search",
 }
 # AI actions that stand for several others (one row on Changes, undone together): a save_candidates call and a
 # log_activity call for several people.
@@ -1003,10 +1087,125 @@ def _split_zone(s: str) -> tuple[str, tzinfo | None]:
     if word.lower() in ("am", "pm", "a", "p"):
         return s, None
     zone = zone_named(word)
+    if zone is None and word.lower() in _ZONE_GUESS:
+        raise ValueError(f"I don't know the time zone {word!r} ({word.upper()} can mean more than one place). Use a "
+                         f"name like {_ZONE_GUESS[word.lower()]}, or PT, ET, CT or MT.")
     if zone is None and "/" in word:
         raise ValueError(f"Couldn't read the time zone {word!r}. Use a name like America/Los_Angeles, a short one "
                          "like PT or ET, or an offset like 2026-11-09T13:00:00-08:00.")
     return (m.group("rest"), zone) if zone is not None else (s, None)
+
+
+_HAS_TIME = re.compile(r":|\b\d{1,2}\s*[ap]\.?m\b|\bnoon\b|\bmidnight\b|\bnow\b", re.I)
+_ZONE_GUESS = {"ist": "Asia/Kolkata", "cet": "Europe/Paris", "cest": "Europe/Paris", "bst": "Europe/London",
+               "eet": "Europe/Athens", "eest": "Europe/Athens", "jst": "Asia/Tokyo", "aest": "Australia/Sydney",
+               "aedt": "Australia/Sydney", "sgt": "Asia/Singapore", "hkt": "Asia/Hong_Kong", "kst": "Asia/Seoul",
+               "msk": "Europe/Moscow", "nzst": "Pacific/Auckland", "nzdt": "Pacific/Auckland"}
+
+
+def zone_key(name: str | None) -> str | None:
+    """The saved name of a time zone a person typed ('PT', 'est', 'Europe/London') or None when it isn't one:
+    an IANA name like America/Los_Angeles, or UTC."""
+    word = (name or "").strip()
+    if not word:
+        return None
+    key = _ZONE_WORDS.get(word.lower(), word)
+    zone = zone_named(key)
+    if zone is None:
+        return None
+    if zone is timezone.utc:
+        return "UTC"
+    return getattr(zone, "key", None) or getattr(zone, "_name", None) or key
+
+
+def _clock12(dt: datetime) -> str:
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _place(zone: tzinfo | None) -> str:
+    key = getattr(zone, "key", None) or getattr(zone, "_name", None)
+    if key == "UTC":
+        return "UTC"
+    return key.split("/")[-1].replace("_", " ") if key else "your time zone"
+
+
+@dataclass
+class When:
+    """A time as typed, read: `iso` in UTC, `notes` the things worth telling the person (an ambiguous time that
+    defaulted to the first), `date_only` when no time of day was given, `day` the calendar day as typed."""
+    iso: str
+    notes: list[str] = field(default_factory=list)
+    date_only: bool = False
+    day: Any = None
+
+
+def _localize(naive: datetime, zone: tzinfo | None) -> tuple[datetime, list[str]]:
+    """A clock time on a zone's wall: a time that doesn't exist (clocks spring forward) is refused with a message
+    that offers the nearest real ones; one that happens twice (clocks fall back) is read as the first, with a
+    note saying so."""
+    naive = naive.replace(tzinfo=None, fold=0)
+
+    def mk(n: datetime, fold: int) -> datetime:
+        n = n.replace(fold=fold)
+        return n.replace(tzinfo=zone) if zone is not None else n.astimezone()
+
+    def real(n: datetime) -> bool:
+        at = mk(n, 0).astimezone(timezone.utc)
+        back = at.astimezone(zone) if zone is not None else at.astimezone()
+        return back.replace(tzinfo=None) == n
+
+    first, second = mk(naive, 0), mk(naive, 1)
+    off_a, off_b = first.utcoffset(), second.utcoffset()
+    if off_a == off_b:
+        return first, []
+    day = f"{naive.strftime('%b')} {naive.day}"
+    if not real(naive):
+        gap = off_b - off_a
+        start = naive.replace(minute=naive.minute // 15 * 15, second=0)
+        for _ in range(200):
+            if real(start - timedelta(minutes=15)):
+                break
+            start -= timedelta(minutes=15)
+        end = start + gap
+        a, b = _clock12(start), _clock12(end)
+        jump = f"{a[:-3]} to {b[:-3]}" if a[-2:] == b[-2:] else f"{a} to {b}"
+        raise ValueError(f"{_clock12(naive)} doesn't exist on {day} in {_place(zone)}; clocks jump from {jump}. "
+                         f"Pick {_clock12(naive + gap)} or {_clock12(naive - gap)}?")
+    off = second.isoformat(timespec="minutes")
+    return first, [f"{_clock12(naive)} happens twice on {day} in {_place(zone)} because the clocks go back. I used "
+                   f"the first one ({first.tzname()}). For the second one ({second.tzname()}), write the time with "
+                   f"its offset, like {off}."]
+
+
+def resolve_when(value: str | datetime | None, *, default_now: bool = True) -> When | None:
+    """parse_when, with what it learned: the UTC time, notes (a fall-back time that happens twice defaulted to the
+    first), and whether the person gave only a day. A time in a spring-forward gap raises ValueError."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return When(now_iso()) if default_now else None
+    zone: tzinfo | None = None
+    date_only = False
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = re.sub(r"\s+", " ", value.strip())
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            date_only = not _HAS_TIME.search(s) and not re.search(r"\dT\d", s)
+        except ValueError:
+            s, zone = _split_zone(s)
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                loose = _parse_loose(s, zone)
+                if loose is None:
+                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
+                dt = loose
+            date_only = not _HAS_TIME.search(s)
+    notes: list[str] = []
+    day = dt.date()
+    if dt.tzinfo is None:
+        dt, notes = _localize(dt, zone if zone is not None else _SHOWN_ZONE[0])
+    return When(dt.astimezone(timezone.utc).replace(microsecond=0).isoformat(), notes, date_only, day)
 
 
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
@@ -1017,29 +1216,11 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
     A time can end with a zone: an IANA name ('America/Los_Angeles') or PT, ET, CT, MT (PST, EST... too),
     or UTC. A time with no zone is taken as this computer's local time, which is what a recruiter means
     when they type one. Slash dates read month first (US), unless the first number can't be a month.
+    A time that doesn't exist where it was typed (clocks spring forward) raises ValueError saying so; a time
+    that happens twice (clocks fall back) is read as the first one (resolve_when says so in its notes).
     """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return now_iso() if default_now else None
-    zone: tzinfo | None = None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        s = re.sub(r"\s+", " ", value.strip())
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except ValueError:
-            s, zone = _split_zone(s)
-            try:
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            except ValueError:
-                loose = _parse_loose(s, zone)
-                if loose is None:
-                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
-                dt = loose
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=zone) if zone is not None else (  # else local time
-            dt.replace(tzinfo=_SHOWN_ZONE[0]) if _SHOWN_ZONE[0] is not None else dt.astimezone())
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    w = resolve_when(value, default_now=default_now)
+    return w.iso if w else None
 
 
 def to_dt(iso: str | None) -> datetime | None:
@@ -1047,6 +1228,43 @@ def to_dt(iso: str | None) -> datetime | None:
         return None
     dt = datetime.fromisoformat(iso)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _zone_or_error(name: str | None) -> str | None:
+    """A zone name a person typed or picked as its saved form; blank is None; one that isn't a zone is an error."""
+    if not name or not str(name).strip():
+        return None
+    key = zone_key(str(name))
+    if key is None:
+        raise ValueError(f"I don't know the time zone {str(name).strip()!r}. Use a name like America/New_York or "
+                         "Europe/London, or PT, ET, CT or MT.")
+    return key
+
+
+def _same_interview_data(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    """Whether two copies of an interview's data are the same, not counting the calendar file's edit count and
+    stamp (a put-back raises those so calendar apps see it, but it is not another change by anyone)."""
+    skip = ("edits", "updated_at")
+    return {k: v for k, v in (a or {}).items() if k not in skip} == {k: v for k, v in (b or {}).items() if k not in skip}
+
+
+def clean_duration(minutes: Any) -> int:
+    """An interview's length in whole minutes, 10 to 480, or a plain error."""
+    try:
+        n = int(str(minutes).strip().lower().removesuffix("minutes").removesuffix("min").strip())
+    except ValueError:
+        raise ValueError("The length is a number of minutes, like 45.") from None
+    if not 10 <= n <= 480:
+        raise ValueError("An interview's length is between 10 and 480 minutes.")
+    return n
+
+
+def _noon_utc(day: Any) -> str:
+    """Midday on `day` on the recruiter's clock, in UTC: where an all-day entry sits, so it stays on its day."""
+    naive = datetime(day.year, day.month, day.day, 12)
+    zone = _SHOWN_ZONE[0]
+    at = naive.replace(tzinfo=zone) if zone is not None else naive.astimezone()
+    return at.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class AIForbidden(PermissionError):
@@ -1212,6 +1430,7 @@ class SearchResult:
     exact_total: int | None = None  # hits with every word; the rest of total are closest matches
     suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
     corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
+    notes: list[str] = field(default_factory=list)  # how the search was read, when something needed saying
 
     def __post_init__(self) -> None:
         if self.exact_total is None:
@@ -1436,15 +1655,21 @@ class _Term:
         return (self.form, *self.expansions)
 
     def fts(self) -> str:
-        term = f'"{self.form}"*' if self.prefix else f'"{self.form}"'
-        alts = [*(f'"{e}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
+        form = _fts_words(self.form)
+        term = f'"{form}"*' if self.prefix else f'"{form}"'
+        alts = [*(f'"{_fts_words(e)}"' for e in self.expansions), *(f'name : "{n}"' for n in self.names)]
         if alts:
             term = "(" + " OR ".join([term, *alts]) + ")"
         return term
 
 
+def _fts_words(text: str) -> str:
+    """Words as the index holds them: c# is csharp, c++ is cplusplus, .net is dotnet (see searchquery.sym_text)."""
+    return " ".join(fts_token(t) for t in _search_tokens(text)) or text
+
+
 def _query_terms(text: str) -> list[_Term]:
-    words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
+    words = [w.lower() for w in _search_tokens(text)]
     kept = [w for w in words if w not in STOPWORDS] or words
     tail = (text or "").split()
     # Only a plain last word of 3+ letters is a prefix: "c++", "c#" or "go" must not spread to every word that starts so.
@@ -1473,16 +1698,16 @@ def _query_terms(text: str) -> list[_Term]:
 def _item_fts(text: str, phrase: bool) -> str:
     """One parsed word or phrase as FTS5 text, every piece quoted. A word keeps its shorthand ('sf' also finds
     San Francisco); a phrase must sit together. `text` holds only letters, digits and spaces."""
-    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    text = " ".join(_search_tokens(text)).lower()
     if phrase or " " in text:
-        return f'"{text}"'
+        return f'"{_fts_words(text)}"'
     return _Term(text, False, ALIASES.get(text, ())).fts()
 
 
 def _exact_fts(text: str, phrase: bool) -> str:
     """One word or phrase to leave out, as FTS5 text for the unstemmed word index: the exact word (and its plain
     plural and shorthand), so -recruiter does not drop a Recruiting Coordinator."""
-    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    text = " ".join(_search_tokens(text)).lower()
     if phrase or " " in text:
         return f'"{text}"'
     forms = [text, text + "s", *ALIASES.get(text, ())]
@@ -1538,10 +1763,48 @@ def _filter_forms(value: str, *, singular: bool = False) -> list[str]:
 
 def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     """Regex for a query word inside free text (notes, job titles), on whole words."""
+    if form.endswith(("#", "+")) or form == ".net":  # c#, c++, f#, .net: the symbol is part of the word
+        return re.compile(rf"(?<![\w.#+]){re.escape(form)}(?![\w#+])" if form != ".net" else r"(?<!\w)\.net(?!\w)", re.I)
     base = form[:-1] if not prefix and len(form) > 3 and form.endswith("s") else form
     body = r"\s+".join(re.escape(p) for p in base.split())
     tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
     return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _phrase_pattern(words: list[str]) -> re.Pattern[str]:
+    """Regex for words that sit together in free text (a note), with anything but letters between them."""
+    parts = [re.escape(w) for w in words]
+    tail = r"(?:e?s)?(?![\w#+])" if words and words[-1].isalnum() else r"(?![\w#+])"
+    return re.compile(r"(?<![\w.#+])" + r"[\W_]+".join(parts) + tail, re.I)
+
+
+def _near_ok(text: str, operands: list[list[str]], dist: int) -> bool:
+    """Do all the operands (each a word or a phrase, as lowercase tokens) sit within `dist` words of each other,
+    in any order? Like the index's NEAR: the words between them are counted, the operands themselves are not."""
+    toks = [t.lower() for t in _search_tokens(text)]
+
+    def same(a: str, b: str) -> bool:
+        return a == b or a == b + "s" or a == b + "es"
+
+    spots: list[list[tuple[int, int]]] = []
+    for op in operands:
+        n = len(op)
+        found = [(i, i + n) for i in range(len(toks) - n + 1) if all(same(toks[i + k], op[k]) for k in range(n))]
+        if not found:
+            return False
+        spots.append(found[:60])
+    own = sum(len(op) for op in operands)
+    budget = 4000
+    for combo in itertools.product(*spots):
+        budget -= 1
+        if budget < 0:
+            return False
+        ordered = sorted(combo)
+        if any(a[1] > b[0] for a, b in zip(ordered, ordered[1:])):
+            continue  # the same words can't count for two operands
+        if ordered[-1][1] - ordered[0][0] - own <= dist:
+            return True
+    return False
 
 
 # Index columns to quote a match from, most useful first: about, skills, title, company, location, past roles, name.
@@ -1555,6 +1818,7 @@ def _match_snippet(snippets: list[str | None], patterns: list[list[re.Pattern[st
     picked: list[str] = []
     covered: set[int] = set()
     seen: set[str] = set()
+    snippets = [unsym_text(x) for x in snippets]  # the index holds csharp for c#; show what the profile says
     for snip in snippets:
         marked = [fold(m) for m in _HL_RE.findall(snip or "")]
         if not marked:
@@ -1657,6 +1921,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "stale_days": "180",
     "pipeline_view": "board",
     "theme": "sunset",
+    "ai_trusted_hired": "0",  # "1": trusted AI apps may mark people Hired and close jobs without waiting on Review
     "strict_site_guards": "0",  # "1": the AI app is told to stay off sites whose terms forbid scraping (site_guard.py)
     # First-run guided tour (see tour.py): where the user is in it, and whether it ever ran.
     "tour_active": "0",
@@ -1738,6 +2003,8 @@ def _ai_summary(r: dict[str, Any]) -> str:
         return f"Moved {name} from {old.get('stage')} to {new.get('stage')} in {job}"
     if kind == "job_created":
         return f"Created the job {job}"
+    if kind == "saved_search":
+        return f"Saved the search {quoted(new.get('name') or r.get('body') or 'a search')} on the Candidates page"
     if kind == "job_edit":
         return f"Changed {job}: {r.get('body') or 'details'}"
     if kind == "stages_edit":
@@ -1868,6 +2135,8 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
         return (("person", cid), ("offer", r.get("target_id")))
     if kind == "plan_seat":
         return (("plan", r.get("target_id")),)
+    if kind == "saved_search":
+        return (("search", r.get("target_id")),)
     if kind == "note_logged":  # an interview it logged is the same thing its later interview changes touch
         thing = "interview" if (r.get("new_data") or {}).get("kind") == "interview" else "entry"
         return (("person", cid), (thing, r.get("target_id")))
@@ -1885,6 +2154,8 @@ class Store:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._depth = 0  # > 0 inside _write(): nested writes join the outer transaction
+        self._saved_counts: dict[Any, tuple[int, int]] = {}  # saved search counts, good until anything is written
+        self._saved_counts_stamp: Any = None
         self._open()
 
     def _open(self) -> None:
@@ -1900,6 +2171,7 @@ class Store:
         self._conn.create_function("phone_key", 1, phone_key, deterministic=True)
         self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
+        self._conn.create_function("tt_sym", 1, sym_text, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -2235,6 +2507,28 @@ class Store:
             self._dup_count = None
         return added
 
+    def _promote_email(self, candidate_id: int, email: str) -> str | None:
+        """Make one of the person's other addresses their main one; the old main becomes an other. Inside a
+        transaction. Returns the address, or None when it is already the main one or isn't theirs."""
+        row = self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,))
+        old = (row.get("email") or "").lower() if row else ""
+        if not row or email == old or email not in self.other_emails(candidate_id):
+            return None
+        self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = ?", (candidate_id, email))
+        self._conn.execute("UPDATE candidates SET email = ?, updated_at = ? WHERE id = ?",
+                           (email, now_iso(), candidate_id))
+        if old:
+            self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, old))
+        self._dup_count = None
+        return email
+
+    def set_primary_email(self, candidate_id: int, email: str, *, by: str = "app") -> bool:
+        """The recruiter makes one of a person's other addresses their main one. App window only."""
+        refuse_ai("Changing a main email", by)
+        e = (_clean(email) or "").lower()
+        with self._lock, self._conn:
+            return self._promote_email(candidate_id, e) is not None
+
     def remove_other_email(self, candidate_id: int, email: str) -> bool:
         """The recruiter takes one other address off a person (the app window only; the AI never removes)."""
         with self._lock, self._conn:
@@ -2479,11 +2773,31 @@ class Store:
             self._conn.execute("UPDATE candidates SET color = ? WHERE id = ?", (want, candidate_id))
         return self.get_candidate(candidate_id)
 
-    def color_counts(self) -> dict[str, int]:
-        """How many people have each colour ("none" counts the untagged), for the chips above the table."""
+    def set_color_many(self, candidate_ids: Iterable[int], color: str | None) -> int:
+        """The bulk colour tag on the Candidates table: the same quiet save as set_color for each person, in one
+        go. Returns how many people were changed (an id nobody has is skipped)."""
+        want = clean_color(color)
+        ids = list(dict.fromkeys(int(i) for i in candidate_ids))
+        done = 0
+        with self._lock, self._conn:
+            for at in range(0, len(ids), 500):
+                chunk = ids[at:at + 500]
+                done += self._conn.execute(
+                    f"UPDATE candidates SET color = ? WHERE id IN ({', '.join('?' * len(chunk))})",
+                    (want, *chunk)).rowcount
+        return done
+
+    def color_counts(self, **filters: Any) -> dict[str, int]:
+        """How many people have each colour ("none" counts the untagged), for the chips above the table. With
+        filters (the same ones as candidate_filters: tag, location, job_id, skills...) only the people those let
+        through are counted, so the numbers follow what the table shows. A colour filter is never applied here."""
         out = {c: 0 for c in COLORS}
         out["none"] = 0
-        for r in self._rows("SELECT color, count(*) AS n FROM candidates GROUP BY color"):
+        filters.pop("color", None)
+        conds, params, _ = self.candidate_filters(**filters) if filters else ([], [], {})
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        for r in self._rows(f"SELECT c.color AS color, count(*) AS n FROM candidates c {where} GROUP BY c.color",
+                            params):
             out[r["color"] or "none"] = r["n"]
         return out
 
@@ -2765,6 +3079,8 @@ class Store:
             if kind == "job_created":
                 reason = self._job_touched(a["job_id"], new)
                 return reason.split(".")[0].lower() if reason else None
+            if kind == "saved_search":
+                return self._saved_search_blocker(a)
             if kind == "job_edit":
                 job = self._row("SELECT * FROM jobs WHERE id = ?", (a["job_id"],)) or {}
                 fields = [k for k in new if not k.startswith("_")]
@@ -2807,7 +3123,7 @@ class Store:
                 data = json.loads(t["data"] or "{}") or {}
                 if data.get("struck_at"):
                     return "it was struck out already"
-                if new.get("kind") == "interview" and (t["at"] != new.get("at") or data != (new.get("data") or {})):
+                if new.get("kind") == "interview" and (t["at"] != new.get("at") or not _same_interview_data(data, new.get("data"))):
                     return "that interview was changed again since"
                 return None
             if kind == "card_keep":
@@ -2833,7 +3149,7 @@ class Store:
         data = json.loads(t["data"]) if t.get("data") else {}
         if data.get("struck_at"):
             return "That interview was struck out."
-        if t["at"] != new.get("at") or data != (new.get("data") or {}):
+        if t["at"] != new.get("at") or not _same_interview_data(data, new.get("data")):
             return "That interview was changed again since."
         return None
 
@@ -3138,6 +3454,14 @@ class Store:
                 before_delete()
             self.delete_job(a["job_id"])
             return what
+        if kind == "saved_search":  # a search the AI app saved: taking it back is removing its own quick link
+            reason = self._saved_search_blocker(a)
+            if reason:
+                raise ValueError(reason[:1].upper() + reason[1:] + ".")
+            with self._write():
+                self._conn.execute("DELETE FROM saved_searches WHERE id = ?", (a["target_id"],))
+                self._conn.execute("UPDATE ai_actions SET undone_at = ? WHERE id = ?", (now_iso(), action_id))
+            return what
         if kind == "note_logged":
             reason = self._ai_blocker(a)
             if reason and reason != "it was struck out already":
@@ -3179,8 +3503,13 @@ class Store:
                 reason = self._interview_blocker(a)
                 if reason:
                     raise ValueError(reason)
+                back = dict(old.get("data") or {})
+                now_row = self._row("SELECT data FROM timeline WHERE id = ?", (a["target_id"],))
+                here = json.loads(now_row["data"] or "{}") if now_row else {}
+                back["edits"] = int(here.get("edits") or 0) + 1  # a put-back is a change a calendar app must see
+                back["updated_at"] = now_iso()
                 self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
-                                   (old.get("at"), json.dumps(old.get("data") or {}), a["target_id"]))
+                                   (old.get("at"), json.dumps(back), a["target_id"]))
             else:
                 raise ValueError("That change can't be undone here.")
             self._conn.execute("UPDATE ai_actions SET undone_at = ?, undo_note = ? WHERE id = ?",
@@ -3227,6 +3556,16 @@ class Store:
         if self._row("SELECT 1 FROM suggestions WHERE candidate_id = ? AND coalesce(source, '') <> ?",
                      (candidate_id, AI_SOURCE)):
             return "You added a to-do about them since, so they stay."
+        return None
+
+    def _saved_search_blocker(self, a: dict[str, Any]) -> str | None:
+        """Why an AI-saved search can't be taken back: it is gone, or the recruiter renamed or changed it since."""
+        row = self._row("SELECT name, params, created_by FROM saved_searches WHERE id = ?", (a["target_id"],))
+        if row is None:
+            return "that saved search is already gone"
+        made = a.get("new_data") or {}
+        if row["name"] != made.get("name") or (json.loads(row["params"] or "{}") or {}) != (made.get("params") or {}):
+            return "you renamed or changed that saved search since, so it stays"
         return None
 
     def _job_touched(self, job_id: int, made: dict[str, Any] | None = None) -> str | None:
@@ -3317,7 +3656,8 @@ class Store:
             raise NotFound(f"No candidate with id {candidate_id}")
         self.erase_traces()
 
-    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
+    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app",
+                         primary_email: str | None = None) -> dict[str, Any]:
         """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
         Refused for by="ai" and inside an AI session.
 
@@ -3326,12 +3666,18 @@ class Store:
         the same job, keep ends up in the further stage. A "change" entry on keep records what came
         from where (it can't be undone with Undo; the backup taken before merging can). The
         returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
+
+        primary_email picks which of their addresses ends up as the main one (the others stay as other emails).
+        It must be one of the two people's own addresses; left out, keep's main email stays.
         """
         refuse_ai("Merging candidates", by)
         if keep_id == other_id:
             raise ValueError("Pick two different people to merge.")
         self.get_candidate(keep_id)
         other = self.get_candidate(other_id)
+        want = (_clean(primary_email) or "").lower() or None
+        if want and want not in {*self.all_emails(keep_id), *self.all_emails(other_id)}:
+            raise ValueError(f"{primary_email} isn't one of their addresses.")
         with self._lock, self._conn:
             krow = self._row("SELECT * FROM candidates WHERE id = ?", (keep_id,))
             orow = self._row("SELECT * FROM candidates WHERE id = ?", (other_id,))
@@ -3388,7 +3734,10 @@ class Store:
                 self._apply(keep_id, fields)
             filled = [k for k in fields if k not in ("tags", "work_history")]
             kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
+            new_main = self._promote_email(keep_id, want) if want else None
             bits = [f"filled {_labels(filled)}"] if filled else []
+            if new_main:
+                bits.append(f"made {new_main} the main email")
             if kept_emails:
                 bits.append(f"kept {len(kept_emails)} more email{'' if len(kept_emails) == 1 else 's'} "
                             f"({', '.join(kept_emails)})")
@@ -3470,11 +3819,18 @@ class Store:
     # -------------------------------------------------------------- timeline
     def log(self, candidate_id: int, kind: str, body: str | None = None, *, at: str | datetime | None = None,
             job_id: int | None = None, source: str | None = None,
-            interviewer: str | None = None) -> dict[str, Any]:
-        """Add a note, call, email, message, meeting or interview to the candidate's timeline.
+            interviewer: str | None = None, candidate_tz: str | None = None,
+            interviewer_tz: str | None = None, duration: int | None = None) -> dict[str, Any]:
+        """Add a note, call, email, message, meeting or interview to the candidate's timeline. An interview can
+        say how long it runs in minutes (`duration`, 10 to 480).
 
         Logging the same thing twice (same kind, time and text) is a no-op, so
-        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
+        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`), the
+        candidate's own time zone (`candidate_tz`, also remembered for the candidate) and the interviewers' zone
+        (`interviewer_tz`, remembered for each named interviewer), so invites show each person their own clock.
+        An interview given only a day (no time) is an all-day entry: it keeps its day and says "all day" rather
+        than turning into midnight. The returned entry's `when_notes` lists anything worth telling the person
+        (a time that happens twice when clocks go back was read as the first).
         """
         kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
         kind = KIND_ALIASES.get(kind, kind)
@@ -3490,10 +3846,25 @@ class Store:
         self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)
-        when = parse_when(at)
+        w = resolve_when(at)
+        when, notes = w.iso, list(w.notes)
+        extra: dict[str, Any] = {}
         who = _clean(interviewer) if kind == "interview" else None
         if who and len(who) > 200:
             raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
+        if kind == "interview":
+            if at is not None and str(at).strip() and w.date_only and w.day is not None:
+                when = _noon_utc(w.day)  # a day with no time: all day, kept on that day in the recruiter's zone
+                extra.update(all_day=True, all_day_date=w.day.isoformat())
+            if duration is not None:
+                extra["minutes"] = clean_duration(duration)
+            ctz = _zone_or_error(candidate_tz)
+            itz = _zone_or_error(interviewer_tz)
+            if ctz:
+                extra["candidate_tz"] = ctz
+            if itz and who:
+                from . import interviews  # here: interviews imports this module
+                extra["interviewer_tz"] = {interviews.display_name(n): itz for n in interviews.interviewers(who)}
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM timeline WHERE candidate_id = ? AND kind = ? AND at = ? AND coalesce(body, '') = ?",
@@ -3516,13 +3887,73 @@ class Store:
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
                         (when, candidate_id, when),
                     )
-            if who:  # who runs the interview lives in its data, like its status (a re-log fills it in)
+            if who or extra:  # who runs the interview lives in its data, like its status (a re-log fills it in)
                 raw = self._conn.execute("SELECT data FROM timeline WHERE id = ?", (entry_id,)).fetchone()["data"]
                 old = json.loads(raw) if raw else {}
-                if not old.get("interviewer"):
+                fill = {k: v for k, v in extra.items() if k not in old}
+                if who and not old.get("interviewer"):
+                    fill["interviewer"] = who
+                if fill:
                     self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?",
-                                       (json.dumps({**old, "interviewer": who}), entry_id))
-        return self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
+                                       (json.dumps({**old, **fill}), entry_id))
+            if kind == "interview" and extra.get("candidate_tz"):
+                self._conn.execute("INSERT INTO person_zones(candidate_id, time_zone) VALUES (?, ?) ON CONFLICT"
+                                   "(candidate_id) DO UPDATE SET time_zone = excluded.time_zone",
+                                   (candidate_id, extra["candidate_tz"]))
+        if who:
+            self._remember_interviewers(who, interviewer_tz)
+        out = self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
+        out["when_notes"] = notes
+        return out
+
+    # ------------------------------------------------ time zones and the interviewer address book
+    def candidate_zone(self, candidate_id: int) -> str | None:
+        """The candidate's own time zone name (America/New_York), when one was saved."""
+        row = self._row("SELECT time_zone FROM person_zones WHERE candidate_id = ?", (candidate_id,))
+        return row["time_zone"] if row else None
+
+    def set_candidate_zone(self, candidate_id: int, zone: str | None) -> str | None:
+        """Save (or with an empty value, clear) a candidate's own time zone. Returns the saved name."""
+        self.get_candidate(candidate_id)
+        key = _zone_or_error(zone)
+        with self._lock, self._conn:
+            if key:
+                self._conn.execute("INSERT INTO person_zones(candidate_id, time_zone) VALUES (?, ?) ON CONFLICT"
+                                   "(candidate_id) DO UPDATE SET time_zone = excluded.time_zone", (candidate_id, key))
+            else:
+                self._conn.execute("DELETE FROM person_zones WHERE candidate_id = ?", (candidate_id,))
+        return key
+
+    def interviewer_book(self) -> dict[str, dict[str, Any]]:
+        """{folded name: {key, name, email, time_zone}} for the interviewers saved so far."""
+        return {r["key"]: r for r in self._rows("SELECT key, name, email, time_zone FROM interviewers")}
+
+    def save_interviewer(self, name: str, email: str | None = None, time_zone: str | None = None) -> dict[str, Any]:
+        """Remember an interviewer's email and time zone by name. A value left as None stays as it was; an
+        empty one clears it."""
+        name = " ".join((name or "").split())
+        if not name or len(name) > 200:
+            raise ValueError("Give the interviewer's name (up to 200 characters).")
+        if email is not None and email.strip() and not re.fullmatch(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", email.strip()):
+            raise ValueError(f"{email.strip()!r} doesn't look like an email address.")
+        key = fold_text(name)
+        zone = _zone_or_error(time_zone) if time_zone is not None else None
+        with self._lock, self._conn:
+            old = self._conn.execute("SELECT email, time_zone FROM interviewers WHERE key = ?", (key,)).fetchone()
+            em = (email.strip() or None) if email is not None else (old["email"] if old else None)
+            tz = (zone if time_zone is not None else (old["time_zone"] if old else None))
+            self._conn.execute("INSERT INTO interviewers(key, name, email, time_zone) VALUES (?, ?, ?, ?) ON CONFLICT"
+                               "(key) DO UPDATE SET name = excluded.name, email = excluded.email, "
+                               "time_zone = excluded.time_zone", (key, name, em, tz))
+        return {"key": key, "name": name, "email": em, "time_zone": tz}
+
+    def _remember_interviewers(self, who: str, zone: str | None) -> None:
+        """Interviewers typed as 'Dana Lee <dana@x.com>' keep that email, and a zone given with them is kept too."""
+        from . import interviews  # here: interviews imports this module
+        for n in interviews.interviewers(who):
+            email = interviews.email_of(n)
+            if email or zone:
+                self.save_interviewer(interviews.display_name(n), email, _zone_or_error(zone) if zone else None)
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._rows(
@@ -3567,7 +3998,8 @@ class Store:
     def update_interview(self, entry_id: int, *, at: str | datetime | None = None, cancel: bool = False,
                          restore: bool = False, outcome: str | None = None, note: str | None = None,
                          reason: str | None = None, candidate_id: int | None = None,
-                         interviewer: str | None = None, keep: bool = False, by: str = "app") -> dict[str, Any]:
+                         interviewer: str | None = None, keep: bool = False, by: str = "app",
+                         duration: int | None = None) -> dict[str, Any]:
         """Reschedule (with an optional reason), cancel (it stays on the timeline, marked cancelled),
         restore, record how it went, or name the interviewer ('' clears it).
 
@@ -3582,8 +4014,16 @@ class Store:
         data = dict(iv["data"])
         ts = now_iso()
         new_at = iv["at"]
+        notes: list[str] = []
         if at is not None and str(at).strip():
-            new_at = parse_when(at)
+            w = resolve_when(at)
+            new_at, notes = w.iso, list(w.notes)
+            if w.date_only and w.day is not None:  # a day with no time: all day, as when it is logged
+                new_at = _noon_utc(w.day)
+                data["all_day"], data["all_day_date"] = True, w.day.isoformat()
+            else:
+                data.pop("all_day", None)
+                data.pop("all_day_date", None)
             if new_at != iv["at"]:
                 data["rescheduled_from"] = [*data.get("rescheduled_from", []), iv["at"]]
                 data["rescheduled_at"] = ts
@@ -3627,16 +4067,22 @@ class Store:
                 data.pop("interviewer", None)
         if keep:
             data["kept_at"] = ts
+        if duration is not None:
+            data["minutes"] = clean_duration(duration)
         if not (at or cancel or restore or outcome is not None or note is not None or reason is not None
-                or interviewer is not None or keep):
-            raise ValueError("Say what to change: a new time, cancel, an outcome or the interviewer.")
+                or interviewer is not None or keep or duration is not None):
+            raise ValueError("Say what to change: a new time, cancel, an outcome, the length or the interviewer.")
         data["updated_by"] = CHANGE_SOURCES.get(by, by)
+        if (at is not None and str(at).strip()) or cancel or restore or interviewer is not None or duration is not None:
+            data["edits"] = int(iv["data"].get("edits") or 0) + 1  # what the .ics says: SEQUENCE and DTSTAMP
+            data["updated_at"] = ts
         with self._lock, self._conn:
             self._conn.execute("UPDATE timeline SET at = ?, data = ? WHERE id = ?",
                                (new_at, json.dumps(data), entry_id))
             if by == "ai":  # on Changes: a cancel, a new time or an outcome can be undone (put back as it was)
                 kind = ("interview_cancel" if cancel else "interview_move" if new_at != iv["at"]
-                        else "interview_outcome" if outcome is not None or note is not None else None)
+                        else "interview_outcome" if outcome is not None or note is not None
+                        else "interview_move" if duration is not None else None)
                 if kind:
                     self._log_ai(kind, candidate_id=iv["candidate_id"], job_id=iv.get("job_id"), target_id=entry_id,
                                  old={"at": iv["at"], "data": iv["data"]},
@@ -3645,7 +4091,9 @@ class Store:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                     " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
-        return self.get_interview(entry_id)
+        out = self.get_interview(entry_id)
+        out["when_notes"] = notes
+        return out
 
     def add_interview_feedback(self, entry_id: int, text: str, interviewer: str | None = None, *,
                                candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:
@@ -3703,7 +4151,8 @@ class Store:
                           has_email: bool = False, has_linkedin: bool = False,
                           exclude: list[tuple[str, bool]] | None = None,
                           field_any: dict[str, list[str]] | None = None,
-                          field_not: dict[str, list[str]] | None = None) -> tuple[list[str], list[Any], dict]:
+                          field_not: dict[str, list[str]] | None = None,
+                          after_id: int | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location, title and company take shorthand (sf, nyc,
         la, bay area, swe) and ignore case and accents; tag and source ignore case.
 
@@ -3733,6 +4182,9 @@ class Store:
             params.append(source.strip())
             filters["source"] = source
         self._prefix_filters(where, params, filters, field_any or {}, field_not or {})
+        if after_id is not None:  # saved after a known point (a saved search's high-water mark), however close in time
+            where.append("c.id > ?")
+            params.append(int(after_id))
         if color and color.strip():  # one of the six colours, or "none" for people with no colour
             want = clean_color(color)
             where.append("c.color = ?" if want else "c.color IS NULL")
@@ -3870,9 +4322,14 @@ class Store:
             where.append("(c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) <> '')")
             filters["has_linkedin"] = "yes"
         if exclude:
-            expr = " OR ".join(_exact_fts(text, phrase) for text, phrase in exclude)
-            where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
-            params.append(expr)
+            sym = [(t, ph) for t, ph in exclude if any(fts_token(w) != w.lower() for w in _search_tokens(t))]
+            plain = [(t, ph) for t, ph in exclude if (t, ph) not in sym]
+            if plain:  # the unstemmed word index: -recruiter does not drop a Recruiting Coordinator
+                where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
+                params.append(" OR ".join(_exact_fts(text, phrase) for text, phrase in plain))
+            if sym:  # -c#, -c++: only the main index reads those as words of their own
+                where.append("c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+                params.append(" OR ".join(_item_fts(text, phrase) for text, phrase in sym))
             filters["without"] = ", ".join(t for t, _ in exclude)
 
     def experience_years(self) -> dict[int, float | None]:
@@ -3901,8 +4358,9 @@ class Store:
             params = json.loads(r["params"])
         except (TypeError, ValueError):
             params = {}
-        from .searchquery import clean_params
-        return {**r, "params": clean_params(params if isinstance(params, dict) else {})}
+        from .searchquery import clean_params, describe
+        params = clean_params(params if isinstance(params, dict) else {})
+        return {**r, "params": params, "summary": describe(params)}  # summary: what it runs, for a chip's tooltip
 
     def save_search_problem(self, name: str, *, by: str = "app") -> str | None:
         """Why a saved search under this name would be refused (name already used, too many), or None. The words
@@ -3931,8 +4389,14 @@ class Store:
                 raise ValueError(problem)
             now = now_iso()
             cur = self._conn.execute(
-                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
-                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app"))
+                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by, seen_max_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app",
+                 self._candidate_high_water()))
+            if by == "ai":  # logged like every other AI write, so Changes and Roll back can take it away again
+                self._log_ai("saved_search", target_id=cur.lastrowid, body=n,
+                             new={"name": n, "params": json.loads(self._row(
+                                 "SELECT params FROM saved_searches WHERE id = ?", (cur.lastrowid,))["params"])})
         return self.get_saved_search(cur.lastrowid)
 
     def get_saved_search(self, ref: int | str) -> dict[str, Any]:
@@ -3946,14 +4410,25 @@ class Store:
             raise NotFound("That saved search isn't there any more.")
         return self._saved_row(r)
 
-    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
-        """Saved searches, newest first. counts=True adds `count` (people who match now) and `new` (of those, saved
-        since the search was last opened)."""
+    def _candidate_high_water(self) -> int:
+        """The highest candidate id used so far (deleted ones too): everyone saved later gets a higher id."""
+        mark = self._row("SELECT value FROM settings WHERE key = ?", (ID_MARKS["candidates"],))
+        top = self._row("SELECT coalesce(max(id), 0) AS n FROM candidates")["n"]
+        return max(int(mark["value"]) if mark and str(mark["value"]).isdigit() else 0, top)
+
+    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None,
+                            count_first: int | None = None) -> list[dict[str, Any]]:
+        """Saved searches: pinned ones first, then newest first. counts=True adds `count` (people who match now)
+        and `new` (of those, saved since the search was last opened). count_first: only the first N get counts
+        (the rest have count and new as None), so a long list stays quick."""
         rows = [self._saved_row(r) for r in self._rows(
-            "SELECT * FROM saved_searches ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
+            "SELECT * FROM saved_searches ORDER BY pinned DESC, id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
         if counts:
-            for r in rows:
-                r["count"], r["new"] = self.saved_search_counts(r)
+            for i, r in enumerate(rows):
+                if count_first is not None and i >= count_first:
+                    r["count"] = r["new"] = None
+                else:
+                    r["count"], r["new"] = self.saved_search_counts(r)
         return rows
 
     def _saved_kwargs(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -3967,14 +4442,39 @@ class Store:
 
     def saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
         """(people who match now, how many of them were saved after the search was last opened)."""
+        # Same answer until something is written (here or by the AI app's own connection): kept, so the pages that
+        # show the chips on every click stay quick.
+        stamp = (self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0])
+        if stamp != self._saved_counts_stamp:
+            self._saved_counts, self._saved_counts_stamp = {}, stamp
+        key = (row["id"], json.dumps(row["params"], sort_keys=True), row.get("seen_max_id"), row.get("last_viewed_at"))
+        if key not in self._saved_counts:
+            self._saved_counts[key] = self._saved_search_counts(row)
+        return self._saved_counts[key]
+
+    def saved_search_new_after(self, row: dict[str, Any]) -> int:
+        """The candidate id the search was last opened at: people with a higher id are new since then."""
+        if row.get("seen_max_id") is not None:
+            return int(row["seen_max_id"])
+        since = row.get("last_viewed_at") or row["created_at"]  # saved before ids were tracked: by time
+        r = self._row("SELECT coalesce(max(id), 0) AS n FROM candidates WHERE datetime(created_at) <= datetime(?)", (since,))
+        return int(r["n"])
+
+    def _saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
         q, kw = self._saved_kwargs(row)
         # the same search as opening it (typo help included), so the count matches what the page then shows
         res = self.search_candidates(q, limit=1, **kw)
         total = res.exact_total if res.exact_total is not None else res.total
-        since = row.get("last_viewed_at") or row["created_at"]
         new = 0
-        if total:
-            res = self.search_candidates(q, limit=1, added_since=since, **kw)
+        newest = (self._row("SELECT coalesce(max(id), 0) AS n FROM candidates") or {}).get("n") or 0
+        if total and row.get("seen_max_id") is not None and newest <= row["seen_max_id"]:
+            pass  # nobody was saved since the last look: no second search needed
+        elif total:
+            if row.get("seen_max_id") is not None:  # people saved after the last look, by id (the same second counts)
+                res = self.search_candidates(q, limit=1, after_id=row["seen_max_id"], **kw)
+            else:  # saved before ids were tracked: by time
+                res = self.search_candidates(q, limit=1, added_since=row.get("last_viewed_at") or row["created_at"],
+                                             **kw)
             new = res.exact_total if res.exact_total is not None else res.total
         return total or 0, new or 0
 
@@ -3990,7 +4490,15 @@ class Store:
 
     def mark_search_viewed(self, search_id: int) -> None:
         with self._write():
-            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ? WHERE id = ?", (now_iso(), search_id))
+            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ?, seen_max_id = ? WHERE id = ?",
+                               (now_iso(), self._candidate_high_water(), search_id))
+
+    def pin_saved_search(self, search_id: int, pinned: bool = True) -> dict[str, Any]:
+        """Keep a saved search at the top of the lists (or let it sort by age again)."""
+        self.get_saved_search(search_id)
+        with self._write():
+            self._conn.execute("UPDATE saved_searches SET pinned = ? WHERE id = ?", (int(bool(pinned)), search_id))
+        return self.get_saved_search(search_id)
 
     def delete_saved_search(self, search_id: int) -> dict[str, Any]:
         """The recruiter's own action in the app window. No AI tool calls this."""
@@ -4044,8 +4552,9 @@ class Store:
         The query may use quotes ("machine learning"), OR (python OR go), a leading minus or NOT to leave
         people out, and field prefixes (title:, company:, location:, skill:, tag:, source:). See searchquery.py.
         Whatever is typed is parsed into pieces and the FTS5 text is built here from quoted pieces, so nothing
-        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase or an OR uses
-        the operator search (profile text only, no typo help or note matching).
+        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase, an OR or a NEAR uses
+        the operator search, which reads the same text (profile, pipeline jobs, Found via and timeline notes) but
+        gives "Did you mean" instead of fixing typos.
 
         `more` takes the newer filters of candidate_filters (company, skills, skill_mode, remote, exp_min,
         exp_max, contacted, contacted_days, added_days, added_since, has_email, has_linkedin).
@@ -4060,11 +4569,28 @@ class Store:
         is_id, _ = self.lookup_exact(query)
         pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
         if not pq.structured and not pq.operator_mode:
-            return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
-        # Field prefixes fill the matching filter when the form did not set it; skills add to the skill list.
-        # the form's own Title, Company, Location or Found via filter stays; the prefix does not override it
-        field_any = {f: v for f, v in pq.fields.items()
-                     if f in ("title", "company", "location", "source") and v and not kw.get(f)}
+            res = self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+            if pq.advice and not res.corrected and not (res.total and not res.closest):  # "python near django"
+                res.suggestion = pq.apply_advice(res.suggestion or query) or res.suggestion
+                res.notes = [*res.notes, *(a.note for a in pq.advice)]
+            return res
+        # Field prefixes add to the form's own filters. A Title, Company, Location or Found via typed both ways
+        # counts as either one (OR), and the read-back says so; nothing typed is dropped.
+        notes: list[str] = []
+        field_any: dict[str, list[str]] = {}
+        names = {"title": "Title", "company": "Company", "location": "Location", "source": "Found via"}
+        for f, vals in pq.fields.items():
+            if f not in names or not vals:
+                continue
+            vals = list(vals)
+            form_value = (kw.get(f) or "").strip() if isinstance(kw.get(f), str) else ""
+            if form_value:
+                if form_value.lower() not in {v.lower() for v in vals}:
+                    vals.append(form_value)
+                    notes.append(f"You typed {f}:{vals[0]} and the {names[f]} filter says {form_value}, so people who "
+                                 f"match either one are shown (OR).")
+                kw[f] = None
+            field_any[f] = vals
         if field_any:
             kw["field_any"] = field_any
         if pq.not_fields:
@@ -4072,52 +4598,166 @@ class Store:
         if pq.fields.get("skill"):
             have = list(kw.get("skills") or [])
             kw["skills"] = [*have, *(x for x in pq.fields["skill"] if x.lower() not in {h.lower() for h in have})]
-            if pq.skill_any and not have:
+            if have:
+                notes.append(f"The Skills filter ({', '.join(have)}) and the typed skill: "
+                             f"({', '.join(pq.fields['skill'])}) were put together"
+                             + (", so a person needs every one of them." if kw.get("skill_mode") == "all"
+                                else ", so a person needs any one of them."))
+            elif pq.skill_any:
                 kw["skill_mode"] = "any"
-            elif not have:
+            else:
                 kw["skill_mode"] = "all"
+            if kw.get("tag"):
+                notes.append(f"The Skill filter ({kw['tag']}) and the typed skill: both apply: a person needs them all.")
         if pq.exclude:
             kw["exclude"] = [(i.text, i.phrase) for i in pq.exclude]
         if pq.operator_mode:
             res = self._search_operators(pq, limit=limit, offset=offset, **kw)
+            if fix_typos:  # offered as "Did you mean", never applied: an operator search is run as typed
+                res.suggestion = self._operator_typo_hint(pq, query)
         else:
             res = self._search_core(pq.bare, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
             if res.suggestion and pq.bare:
                 res.suggestion = sq.rewrite_suggestion(query, pq.bare, res.suggestion)
+        if not res.corrected:  # skill:pyhton -> the closest skill somebody has
+            vfix = self._skill_value_hint(pq, res.suggestion or query)
+            if vfix:
+                res.suggestion = vfix
+        if pq.hints and not res.corrected:  # skil:python -> "Did you mean skill:python?" (spelling fixes carry over)
+            fixed = pq.fix_prefixes(res.suggestion or query)
+            if fixed:
+                res.suggestion = fixed
+        found = bool(res.total) and not res.closest
+        if pq.advice and not res.corrected:  # skill:machine learning, "a b"~3, lowercase not: offer what was meant
+            fixed = pq.apply_advice(res.suggestion or query, only_always=found)
+            if fixed:
+                res.suggestion = fixed
+        res.notes = [*pq.notes, *notes, *(a.note for a in pq.advice if not a.always and not found)]
         res.query = query
         return res
 
-    def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
-        """The search for a query with a phrase or an OR: every group must match (AND), a group matches when any
-        of its words or phrases does. Profile text only, ranked by bm25; the last bare word is still a prefix."""
-        where, params, filters = self.candidate_filters(**kw)
-        groups = []
+    def _skill_value_hint(self, pq: Any, text: str) -> str | None:
+        """skill:pyhton when nobody has that skill but somebody has Python: the text with the closest saved skill
+        swapped in, or None. Only ever a suggestion."""
+        wanted = [v for v in pq.fields.get("skill", []) if v.isalpha() and _typo_cap(v)]
+        if not wanted:
+            return None
+        known: list[str] | None = None
+        out = text
+        for v in dict.fromkeys(wanted):
+            if self._row("SELECT 1 AS x FROM candidate_tags WHERE tag = ? COLLATE NOCASE LIMIT 1", (v,)):
+                continue
+            if known is None:
+                known = [r["tag"] for r in self._rows(
+                    "SELECT tag FROM candidate_tags GROUP BY lower(tag) ORDER BY count(*) DESC")]
+            cap = _typo_cap(v)
+            best = None
+            for tag in known:
+                t = tag.lower()
+                if t != v and abs(len(t) - len(v)) <= cap:
+                    d = _distance(v, t, cap)
+                    if d <= cap and (best is None or d < best[0]):
+                        best = (d, tag)
+            if best:
+                out = re.sub(rf"(?<!\w){re.escape(v)}(?!\w)", best[1], out, flags=re.I)
+        return out if out != text else None
+
+    def _operator_typo_hint(self, pq: Any, query: str) -> str | None:
+        """For a search with a phrase, an OR or a NEAR: the typed query with misspelled words fixed, or None. Words
+        nobody has (in a profile, a pipeline job or a note) that are one or two slips from a saved word. Only ever
+        offered as a suggestion."""
+        words: list[str] = []
+        last_prefix = None
         for gi, g in enumerate(pq.groups):
-            parts = []
+            for ii, item in enumerate(g):
+                for leaf in item.leaves:
+                    for w in leaf.text.split():
+                        if w.isalpha() and w not in words:
+                            words.append(w)
+                if gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok:
+                    last_prefix = item.text  # the word still being typed ("pyth") is matched as a prefix
+        terms = [_Term(w, w == last_prefix, ALIASES.get(w, ())) for w in words]
+        if not terms:
+            return None
+        fixes = self._spelling_fixes(terms, [self._extra_matches(t) for t in terms])
+        if not fixes:
+            return None
+        held, quiet = self._name_words(query, terms, fixes)
+        if quiet:
+            return None
+        fixes = {w: f for w, f in fixes.items() if w not in held}
+        fixed = query
+        for word, fix in fixes.items():
+            fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+        return fixed if fixes and fixed != query else None
+
+    def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
+        """The search for a query with a phrase, an OR or a NEAR: every group must match (AND), a group matches when
+        any of its words or phrases does. It reads the same places a plain search does: the profile (ranked by
+        bm25, the last bare word still a prefix), then, after those, people whose pipeline job, Found via or
+        timeline notes match, newest update first. So an OR never finds fewer people than either side alone."""
+        where, params, filters = self.candidate_filters(**kw)
+        groups, group_conds, group_params, info = [], [], [], {}
+        any_extra = False
+        for gi, g in enumerate(pq.groups):
+            parts, sub, sub_params = [], [], []
             for ii, item in enumerate(g):
                 last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok
-                if last:
-                    parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
+                if item.near:  # NEAR("python" "django", 5): the same part of a profile, at most N words apart
+                    expr = "NEAR(" + " ".join(f'"{_fts_words(o.text)}"' for o in item.near) + f", {int(item.dist)})"
+                elif last:
+                    expr = _Term(item.text, True, ALIASES.get(item.text, ())).fts()
                 else:
-                    parts.append(_item_fts(item.text, item.phrase))
+                    expr = _item_fts(item.text, item.phrase)
+                parts.append(expr)
+                sub.append("c.id IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+                sub_params.append(expr)
+                extra = self._extra_for_item(item, last)
+                if extra:
+                    any_extra = True
+                    sub.append("c.id IN (SELECT value FROM json_each(?))")
+                    sub_params.append(json.dumps(sorted(extra)))
+                    for cid, e in extra.items():
+                        info.setdefault(cid, e)
             groups.append("(" + " OR ".join(parts) + ")" if len(parts) > 1 else parts[0])
+            group_conds.append("(" + " OR ".join(sub) + ")")
+            group_params += sub_params
         match = " AND ".join(groups)
         cond = " AND ".join(["candidates_fts MATCH ?", *where])
         base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
-        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        n_profile = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        extra_where = ""
+        extra_args: list[Any] = []
+        n_extra = 0
+        if any_extra:  # people the profile text alone misses, but a note, a pipeline job or Found via gives
+            extra_where = " AND ".join([*group_conds, *where,
+                                        "c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)"])
+            extra_args = [*group_params, *params, match]
+            n_extra = self._row(f"SELECT count(*) AS n FROM candidates c WHERE {extra_where}", extra_args)["n"]
+        total = n_profile + n_extra
         patterns = [[_word_pattern(w, False) for w in i.text.split()] if i.phrase else [_word_pattern(i.text, False)]
-                    for g in pq.groups for i in g]
+                    for g in pq.groups for item in g for i in item.leaves]
         snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}" for i in _SNIPPET_ORDER)
-        rows = self._rows(
-            f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
-                {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
-            (match, *params, limit, max(0, offset)))
-        hits = []
-        for r in rows:
-            snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
-            score = r.pop("_score")
-            hits.append(SearchHit(candidate=self._hydrate(r), score=score,
-                                  snippet=snippet if HL_START in (snippet or "") else None))
+        skip = max(0, offset)
+        hits: list[SearchHit] = []
+        if skip < n_profile and limit > 0:
+            rows = self._rows(
+                f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                    {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+                (match, *params, limit, skip))
+            for r in rows:
+                snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
+                score = r.pop("_score")
+                hits.append(SearchHit(candidate=self._hydrate(r), score=score,
+                                      snippet=snippet if HL_START in (snippet or "") else None))
+        if n_extra and len(hits) < limit:
+            ids = [r["id"] for r in self._rows(
+                f"SELECT c.id FROM candidates c WHERE {extra_where} ORDER BY c.updated_at DESC, c.id DESC"
+                " LIMIT ? OFFSET ?", (*extra_args, limit - len(hits), max(0, skip - n_profile)))]
+            for cid in ids:
+                reason, body, pattern = info.get(cid, ("Matched a note", None, None))
+                hits.append(SearchHit(candidate=self.get_candidate(cid), reason=reason,
+                                      snippet=_excerpt(body, pattern) if body and pattern else None))
         return SearchResult(hits=hits, total=total, query="", filters=filters, exact_total=total)
 
     def _search_core(
@@ -4257,45 +4897,70 @@ class Store:
 
     def _extra_matches(self, term: _Term) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
         """People one query word finds outside their profile: candidate id -> (reason, note text, pattern).
-
         A job they're in whose title or company has the word, where they were found (Found via), or a note,
         call, email or interview on their timeline that mentions it. Read at query time, so nothing extra is stored."""
-        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
         patterns = [_word_pattern(f, term.prefix) for f in term.forms]
-        likes = ["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in term.forms]
-        any_like = " OR ".join("{col} LIKE ? ESCAPE '\\'" for _ in likes)
 
         def first(text: str) -> re.Pattern[str] | None:
             folded = None if text.isascii() else fold(text)
             return next((p for p in patterns if p.search(text) or (folded and p.search(folded))), None)
 
+        return self._extra_scan([list(term.forms)], first)
+
+    def _extra_scan(self, like_groups: list[list[str]], find: Callable[[str], re.Pattern[str] | None]
+                    ) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """The scan behind _extra_matches. like_groups: every group needs one of its words somewhere in the text
+        (a cheap first cut in SQL); find(text) then decides for real and returns the pattern that matched."""
+        found: dict[int, tuple[str, str | None, re.Pattern[str]]] = {}
+        esc = [["%" + re.sub(r"([%_\\])", r"\\\1", f) + "%" for f in g] for g in like_groups]
+
+        def cond(col: str) -> str:
+            return " AND ".join("(" + " OR ".join(f"{col} LIKE ? ESCAPE '\\'" for _ in g) + ")" for g in esc)
+
+        flat = [x for g in esc for x in g]
+        jobtext = "(coalesce(j.title, '') || ' ' || coalesce(j.company, ''))"
         for r in self._rows(
                 "SELECT a.candidate_id, j.title, j.company FROM applications a JOIN jobs j ON j.id = a.job_id"
-                f" WHERE {any_like.format(col='j.title')} OR {any_like.format(col='j.company')} ORDER BY a.id",
-                (*likes, *likes)):
-            if r["candidate_id"] not in found and first(f"{r['title']} {r['company'] or ''}"):
+                f" WHERE {cond(jobtext)} ORDER BY a.id", flat):
+            hit = find(f"{r['title']} {r['company'] or ''}")
+            if r["candidate_id"] not in found and hit:
                 job = r["title"] + (f" ({r['company']})" if r["company"] else "")
-                found[r["candidate_id"]] = (f"In pipeline: {job}", None, patterns[0])
+                found[r["candidate_id"]] = (f"In pipeline: {job}", None, hit)
         for r in self._rows(  # where they came from ("Referral from Alex")
-                f"SELECT id, source FROM candidates WHERE {any_like.format(col='source')} ORDER BY id", likes):
-            if r["id"] not in found and first(r["source"]):
-                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, patterns[0])
+                f"SELECT id, source FROM candidates WHERE {cond('source')} ORDER BY id", flat):
+            hit = find(r["source"]) if r["source"] else None
+            if r["id"] not in found and hit:
+                found[r["id"]] = (f"Found via: {r['source'].strip()}", None, hit)
         marks = ", ".join("?" for _ in _SEARCHED_KINDS)
         who = "(CASE WHEN json_valid(data) THEN json_extract(data, '$.interviewer') END)"
+        both = f"(coalesce(body, '') || ' ' || coalesce(CASE WHEN kind = 'interview' THEN {who} END, ''))"
         for r in self._rows(  # an interview's interviewer counts too ("priya" finds the people she interviewed)
                 f"SELECT candidate_id, kind, body, {who} AS interviewer FROM timeline WHERE kind IN ({marks}) AND "
                 "NOT (json_valid(data) AND json_extract(data, '$.struck_at') IS NOT NULL) AND "  # struck out: not found
-                f"({any_like.format(col='body')} OR (kind = 'interview' AND ({any_like.format(col=who)})))"
-                " ORDER BY at DESC", (*_SEARCHED_KINDS, *likes, *likes)):
+                f"{cond(both)} ORDER BY at DESC", (*_SEARCHED_KINDS, *flat)):
             if r["candidate_id"] not in found:
                 text = r["body"] or ""
                 if r["kind"] == "interview" and isinstance(r["interviewer"], str) and r["interviewer"].strip():
                     text = (text + " " if text else "") + f"(interviewer: {r['interviewer'].strip()})"
-                hit = first(text)
+                hit = find(text)
                 if hit:
                     an = "an" if r["kind"][0] in "aeiou" else "a"
                     found[r["candidate_id"]] = (f"Matched {an} {r['kind']}", text, hit)
         return found
+
+    def _extra_for_item(self, item: Any, prefix: bool) -> dict[int, tuple[str, str | None, re.Pattern[str]]]:
+        """People a word, a quoted phrase or a NEAR finds outside their profile: in a pipeline job, in Found via
+        or in a timeline note, so that an OR or a phrase covers the same text a plain search does."""
+        if item.near:
+            ops = [[w.lower() for w in _search_tokens(o.text)] for o in item.near]
+            groups = [[w] for w in dict.fromkeys(w for op in ops for w in op)]
+            first_rx = _phrase_pattern(ops[0])
+            return self._extra_scan(groups, lambda text: first_rx if _near_ok(text, ops, item.dist) else None)
+        words = [w.lower() for w in _search_tokens(item.text)]
+        if item.phrase or len(words) > 1:
+            rx = _phrase_pattern(words)
+            return self._extra_scan([[w] for w in dict.fromkeys(words)], lambda text: rx if rx.search(text) else None)
+        return self._extra_matches(_Term(item.text, prefix, ALIASES.get(item.text, ())))
 
     def _extra_ids(self, terms: list[_Term], extras_by_term: list[dict[int, Any]],
                    where: list[str], params: list[Any]) -> list[int]:

@@ -15,8 +15,8 @@ from typing import Any
 from urllib.parse import quote
 
 from . import actions
-from .store import (CHANGE_SOURCES, INTERVIEW_VERDICTS, VERDICT_LABELS, Store, _legacy_verdict, as_local,
-                    interview_note, now_iso, quoted, shown_zone, to_dt)
+from .store import (CHANGE_SOURCES, INTERVIEW_VERDICTS, VERDICT_LABELS, Store, _legacy_verdict, as_local, fold_text,
+                    interview_note, now_iso, quoted, shown_zone, to_dt, zone_named)
 
 SESSION_MINUTES = 45  # interviews have no length saved; two starting closer than this overlap
 
@@ -25,7 +25,11 @@ _LENGTH = re.compile(r"(?<![\w.])(\d{2,3})\s*(?:min|mins|minutes|m)\b", re.I)
 
 
 def session_minutes(t: dict[str, Any]) -> int:
-    """How long a session runs: '(30 min)' or '30 minutes' in its summary, else SESSION_MINUTES."""
+    """How long a session runs: the length saved with it (`duration`), else '(30 min)' or '30 minutes' in its
+    summary, else SESSION_MINUTES."""
+    saved = _data(t).get("minutes") if isinstance(t.get("data"), (dict, str)) else None
+    if isinstance(saved, int) and not isinstance(saved, bool):
+        return min(480, max(10, saved))
     m = _LENGTH.search(str(t.get("body") or ""))
     return min(480, max(10, int(m.group(1)))) if m else SESSION_MINUTES
 
@@ -86,8 +90,10 @@ def _session_rows(store: Store, lo: str, hi: str, cancelled: bool = False) -> li
     name and the job's title and company. Cancelled ones are left out unless asked for."""
     skip = "" if cancelled else " AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
     return store._rows(
-        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
+        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company,
+                  pz.time_zone AS cand_zone FROM timeline t
            JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           LEFT JOIN person_zones pz ON pz.candidate_id = t.candidate_id
            WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ?""" + skip + " ORDER BY t.at, t.id", (lo, hi))
 
 
@@ -98,9 +104,11 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
     monday = week_start(_in_range(start) if start else None)
     lo, hi = _midnight(monday), _midnight(monday + timedelta(days=7))
     rows = _session_rows(store, lo, hi)
+    book = store.interviewer_book()
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    today = as_local(datetime.now(timezone.utc)).date()
     days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
-             "loops": []} for i in range(7)]
+             "today": monday + timedelta(days=i) == today, "loops": []} for i in range(7)]
     loops = []
     chase = _chase_pairs(store, {(t["candidate_id"], t.get("job_id")) for t in rows})
     for g in actions.group_loops(rows):
@@ -138,11 +146,15 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
     for o in owed:
         t = by_id[o["interview_id"]]
         for who in o["feedback"]:
-            email = next((email_of(n) for n in named(t) if display_name(n) == who and email_of(n)), None)
+            email = next((email_for(n, book) for n in named(t) if display_name(n) == who and email_for(n, book)), None)
             entries.append({"who": who, "email": email, "candidate_id": o["candidate_id"], "name": o["name"],
                             "job_id": t.get("job_id"), "job": None, "interview_id": o["interview_id"],
                             "session": o["session"], "at": o["at"], "day": actions.local_time(o["at"], "%a %b %-d")})
+    first_month = monday.replace(day=1)
+    last_month = (monday + timedelta(days=6)).replace(day=1)
+    months = [first_month] if first_month == last_month else [first_month, last_month]
     return {"start": monday, "end": days[-1]["day"], "prev": monday - timedelta(days=7),
+            "months": [{"first": m.isoformat()[:7], "label": actions.day_text(m, "%B %Y")} for m in months],
             "next": monday + timedelta(days=7), "days": days, "loops": loops, "total": len(rows), "clashes": clashes,
             "load": sorted(load.values(), key=lambda e: (-e["count"], e["name"].casefold())), "owed": owed,
             "owed_people": group_owed(entries)}
@@ -193,8 +205,15 @@ def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                      {w.casefold() for w in interviewers(actions.interviewer_of(b))}
             if shared:
                 who = next(w for w in interviewers(actions.interviewer_of(a)) if w.casefold() in shared)
+                sa, sb = actions.interview_name(a) or "Interview", actions.interview_name(b) or "Interview"
+                if a["candidate_id"] != b["candidate_id"]:
+                    what = f"{a['candidate_name']} and {b['candidate_name']}"
+                elif sa.casefold() != sb.casefold():  # one candidate: name them once, and the two sessions
+                    what = f"{a['candidate_name']}'s {sa} and {sb}"
+                else:
+                    what = f"two sessions with {a['candidate_name']}"
                 out.append({"kind": "interviewer", "ids": [a["id"], b["id"]],
-                            "text": f"{who} is booked twice around {when}: {a['candidate_name']} and {b['candidate_name']}"})
+                            "text": f"{who} is booked twice around {when}: {what}"})
             if a["candidate_id"] == b["candidate_id"]:
                 out.append({"kind": "candidate", "ids": [a["id"], b["id"]],
                             "text": f"{a['candidate_name']} has two sessions around {when}"})
@@ -244,6 +263,127 @@ def display_name(who: str) -> str:
 def email_of(who: str) -> str | None:
     m = re.search(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", who or "")
     return m.group(0) if m else None
+
+
+def lookup(book: dict[str, dict[str, Any]] | None, who: str) -> dict[str, Any] | None:
+    """The saved interviewer ({name, email, time_zone}) a name means: an exact name, else the one saved person
+    whose name it fits ('Dana' -> 'Dana Lee' when no other Dana is saved)."""
+    if not book:
+        return None
+    name = display_name(who or "")
+    hit = book.get(fold_text(name))
+    if hit:
+        return hit
+    fits = [r for r in book.values() if name_matches(name, r["name"])]
+    return fits[0] if len(fits) == 1 else None
+
+
+def email_for(who: str, book: dict[str, dict[str, Any]] | None = None) -> str | None:
+    """An interviewer's email: the one typed with the name ('Dana <dana@x.com>'), else the saved one."""
+    return email_of(who) or ((lookup(book, who) or {}).get("email"))
+
+
+def interviewer_zone(t: dict[str, Any], who: str, book: dict[str, dict[str, Any]] | None = None) -> str | None:
+    """The time zone an interviewer is in for this session: set on the session, else saved with their name."""
+    own = _data(t).get("interviewer_tz")
+    if isinstance(own, dict):
+        hit = own.get(display_name(who))
+        if hit is None:
+            hit = next((z for n, z in own.items() if name_matches(display_name(who), n)), None)
+        if hit:
+            return hit
+    return (lookup(book, who) or {}).get("time_zone")
+
+
+def candidate_zone(t: dict[str, Any]) -> str | None:
+    """The candidate's own time zone for this session: set on the session, else the one saved for them."""
+    return _data(t).get("candidate_tz") or t.get("cand_zone") or None
+
+
+def zone_label(dt: datetime) -> str:
+    """'PST', 'IST', 'UTC-3' (a zone with no letters of its own reads as an offset)."""
+    n = dt.tzname() or ""
+    if n[:1] in ("+", "-"):
+        digits = n[1:].replace(":", "")
+        h, m = int(digits[:2] or 0), int(digits[2:4] or 0)
+        return f"UTC{n[0]}{h}" + (f":{m:02d}" if m else "")
+    return n
+
+
+def _fmt(dt: datetime, fmt: str) -> str:
+    return actions.day_text(dt, fmt)
+
+
+def when_for(at: str, zone: str | None = None, all_day: bool = False) -> str:
+    """A session time for one reader: in their zone first, the recruiter's in brackets when it differs ('Tue Nov
+    10, 12:00 PM EST (9:00 AM PST)'). With no zone, or the same clock, just the recruiter's ('Tue Nov 10, 9:00 AM
+    PST'). An all-day entry says so."""
+    dt = to_dt(at)
+    rec = as_local(dt)
+    if all_day:
+        return _fmt(rec, "%a %b %-d") + ", all day"
+    full = "%a %b %-d, %-I:%M %p"
+    z = zone_named(zone) if zone else None
+    if z is None:
+        return f"{_fmt(rec, full)} {zone_label(rec)}"
+    other = dt.astimezone(z)
+    if other.utcoffset() == rec.utcoffset() and zone_label(other) == zone_label(rec):
+        return f"{_fmt(rec, full)} {zone_label(rec)}"
+    mine = _fmt(rec, "%-I:%M %p" if rec.date() == other.date() else full)
+    return f"{_fmt(other, full)} {zone_label(other)} ({mine} {zone_label(rec)})"
+
+
+_EMAIL_FULL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _zone_field(value: Any, label: str) -> str | None:
+    from .store import zone_key  # here to keep the import list short
+    text = str(value or "").strip()
+    if not text:
+        return None
+    key = zone_key(text)
+    if key is None:
+        raise ValueError(f"I don't know the {label} time zone {text!r}. Pick one from the list.")
+    return key
+
+
+SUMMARY_LIMIT = 500  # characters in an interview's note or session name on the web form
+
+
+def form_fields(form: Any) -> dict[str, Any]:
+    """The interview extras of the web log form, checked: {interviewer, interviewer_email, interviewer_tz,
+    candidate_tz, minutes}. Raises ValueError with a plain message, before anything is saved."""
+    who = " ".join(str(form.get("interviewer") or "").split()) or None
+    email = str(form.get("interviewer_email") or "").strip() or None
+    if email and not _EMAIL_FULL.fullmatch(email):
+        raise ValueError(f"{email!r} doesn't look like an email address. Nothing was saved.")
+    if email and not who:
+        raise ValueError("Add the interviewer's name too, so their email can be saved with it. Nothing was saved.")
+    if email and len(interviewers(who)) != 1:
+        raise ValueError("One email goes with one interviewer. Put one name in the interviewer box, or type each "
+                         "as Name <email>. Nothing was saved.")
+    raw = str(form.get("minutes") or "").strip()
+    minutes = None
+    if raw:
+        if not raw.isdigit() or not 10 <= int(raw) <= 480:
+            raise ValueError("Length is a number of minutes from 10 to 480. Nothing was saved.")
+        minutes = int(raw)
+    return {"interviewer": who, "interviewer_email": email, "minutes": minutes,
+            "interviewer_tz": _zone_field(form.get("interviewer_tz"), "interviewer's"),
+            "candidate_tz": _zone_field(form.get("candidate_tz"), "candidate's")}
+
+
+def with_length(body: str, minutes: int | None) -> str:
+    """The summary with its length written the way sessions remember it: 'Onsite: coding (45 min)'."""
+    if not minutes or _LENGTH.search(body or ""):
+        return body
+    return f"{(body or '').strip() or 'Interview'} ({minutes} min)"
+
+
+def save_form_people(store: Store, fields: dict[str, Any]) -> None:
+    """Keep the interviewer's email from the log form (their zone is kept when the interview is logged)."""
+    if fields.get("interviewer_email") and fields.get("interviewer"):
+        store.save_interviewer(display_name(fields["interviewer"]), fields["interviewer_email"])
 
 
 def named(t: dict[str, Any]) -> list[str]:
@@ -531,6 +671,7 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
     mailto, chased}]}, oldest first. recent=True also lists sessions that took place under `hours` ago, as Decide
     does, each owed entry with chased False (Today doesn't ask for those yet)."""
     now = now or datetime.now(timezone.utc)
+    book = store.interviewer_book()
     due = (now - timedelta(hours=hours)).replace(microsecond=0).isoformat()
     hi = now.replace(microsecond=0).isoformat() if recent else due
     lo = (now - timedelta(days=days)).replace(microsecond=0).isoformat()
@@ -555,9 +696,11 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
                 if display_name(who) not in owed_by(t):
                     continue
                 subject, body = request_text(who, first["candidate_name"], session, day)
-                owed.append({"name": display_name(who), "email": email_of(who), "session": session,
+                email = email_for(who, book)
+                owed.append({"name": display_name(who), "email": email, "session": session,
                              "interview_id": t["id"], "subject": subject, "body": body,
-                             "mailto": mailto(who, subject, body), "chased": t["at"] <= due})
+                             "mailto": mailto(f"{display_name(who)} <{email}>" if email else who, subject, body),
+                             "chased": t["at"] <= due})
         if owed:
             out.append({"key": f"feedback_owed:{first['candidate_id']}:{first['job_id']}:"
                                f"{actions.loop_day(first).isoformat()}",
@@ -568,23 +711,63 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
 
 
 def today_items(store: Store, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Today: 'Priya Shah owes feedback on 3 interviews', one per interviewer across all their candidates, with
-    one request (subject, body, mailto) to send."""
+    """Today's feedback cards. Each interviewer gets ONE request covering everything they owe, and each
+    candidate shows up once: people who owe on the same candidates (or one person across several) are one card.
+    'Priya Shah owes feedback on 3 interviews', or 'Kenji Example is waiting on feedback from Dana Lee, Priya
+    Nair and Sam Roe'. Each person on a card has their own request to send (subject, body, mailto)."""
+    rows = feedback_owed(store, now)
+    people = owed_people(rows)
+    names = [p["name"] for p in people]
+    by_name = {p["name"]: p for p in people}
+    parent: dict[str, str] = {}
+
+    def find(k: str) -> str:
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for p in people:  # a person and each candidate they owe on belong to one card
+        for i in p["items"]:
+            parent[find(f"p:{p['name']}")] = find(f"c:{i['candidate_id']}:{i['job_id']}")
+    cards: dict[str, list[dict[str, Any]]] = {}
+    for p in people:
+        cards.setdefault(find(f"p:{p['name']}"), []).append(p)
     out = []
-    for p in owed_people(feedback_owed(store, now)):
-        first = p["items"][0]
-        jobs = list(dict.fromkeys(i["job"] for i in p["items"]))
-        one = len(p["candidates"]) == 1 and len({i["job_id"] for i in p["items"]}) == 1
-        out.append({"key": "feedback_owed:" + re.sub(r"\W+", "-", p["name"].casefold()).strip("-"),
-                    "kind": "feedback_owed", "rank": 1, "when": first["at"], "who": p["name"],
-                    "title": f"{p['name']} owes feedback on {p['count']} interview{'' if p['count'] == 1 else 's'}",
-                    "detail": " · ".join(x for x in (", ".join(jobs), "On " + _and(p["candidates"])) if x),
-                    "owed": [{"name": i["name"], "session": i["session"], "day": i["day"],
-                              "interview_id": i["interview_id"], "candidate_id": i["candidate_id"]} for i in p["items"]],
-                    "subject": p["subject"], "body": p["body"], "mailto": p["mailto"], "email": p["email"],
+    for group in cards.values():
+        group.sort(key=lambda p: (-p["count"], p["name"].casefold()))
+        items = sorted((i for p in group for i in p["items"]), key=lambda i: (i["at"], i["interview_id"]))
+        first = items[0]
+        cands = list(dict.fromkeys(i["name"] for i in items))
+        jobs = list(dict.fromkeys(i["job"] for i in items))
+        one = len(cands) == 1 and len({i["job_id"] for i in items}) == 1
+        who = [p["name"] for p in group]
+        if len(group) == 1:
+            p = group[0]
+            title = f"{p['name']} owes feedback on {p['count']} interview{'' if p['count'] == 1 else 's'}"
+            key = "feedback_owed:" + re.sub(r"\W+", "-", p["name"].casefold()).strip("-")
+        else:
+            title = (f"{cands[0]} is waiting on feedback from {_and(who)}" if len(cands) == 1 else
+                     f"{len(who)} people owe feedback on {len(cands)} candidates")
+            key = "feedback_owed:" + "+".join(re.sub(r"\W+", "-", n.casefold()).strip("-") for n in sorted(who))
+        out.append({"key": key, "kind": "feedback_owed", "rank": 1, "when": first["at"], "who": ", ".join(who),
+                    "title": title,
+                    "detail": " · ".join(x for x in (", ".join(jobs), "On " + _and(cands)) if x),
+                    "people": [{"name": p["name"], "email": p["email"], "subject": p["subject"], "body": p["body"],
+                                "mailto": p["mailto"], "count": p["count"],
+                                "items": [{"name": i["name"], "session": i["session"], "day": i["day"],
+                                           "interview_id": i["interview_id"], "candidate_id": i["candidate_id"]}
+                                          for i in p["items"]]} for p in group],
+                    "owed": [{"name": i["name"], "session": i["session"], "day": i["day"], "who": i["who"],
+                              "interview_id": i["interview_id"], "candidate_id": i["candidate_id"]} for i in items],
+                    "subject": group[0]["subject"] if len(group) == 1 else None,
+                    "body": group[0]["body"] if len(group) == 1 else None,
+                    "mailto": group[0]["mailto"] if len(group) == 1 else None,
+                    "email": group[0]["email"] if len(group) == 1 else None,
                     "candidate_id": first["candidate_id"] if one else None, "job_id": first["job_id"] if one else None,
                     "href": (f"/jobs/{first['job_id']}/decide#c{first['candidate_id']}" if one else "/interviews")})
-    return out
+    return sorted(out, key=lambda i: i["when"])
 
 
 def feedback_owed_text(rows: list[dict[str, Any]]) -> str:
@@ -623,7 +806,8 @@ def future_note(at: str | None, kind: str, now: datetime | None = None) -> str |
             "happened yet, log it after it does, or log it as an interview to book it.")
 
 
-__all__ = ["CHASE_DAYS", "CHASE_HOURS", "VERDICT_CHOICES", "feedback_owed", "feedback_owed_text", "future_note",
+__all__ = ["form_fields", "with_length", "save_form_people", "email_for", "interviewer_zone", "candidate_zone", "when_for", "zone_label", "lookup", "ics_for_week",
+           "CHASE_DAYS", "CHASE_HOURS", "VERDICT_CHOICES", "feedback_owed", "feedback_owed_text", "future_note",
            "give_verdict", "group_owed", "interviewers", "name_matches", "named", "owed_by", "owed_people",
            "pick_interviewer", "resolve_name", "session_minutes", "verdicts_missing", "rollup", "tally", "today_items", "verdict_rows",
            "verdicts", "week", "week_day", "week_start", "week_text"]
@@ -744,35 +928,65 @@ def _ics_time(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def ics_event(t: dict[str, Any], stamp: datetime) -> list[str]:
+_LEN_SUFFIX = re.compile(r"\s*\(\s*\d{1,3}\s*(?:min|mins|minutes|m)\s*\)\s*$", re.I)
+
+
+def ics_summary(t: dict[str, Any]) -> str:
+    """'System design: Grace Example (Dana Lee)': the session, the candidate and who runs it, so every session
+    on a day has a title of its own."""
+    session = _LEN_SUFFIX.sub("", actions.interview_name(t) or "").strip() or "Interview"
+    who = actions.interviewer_of(t)
+    return f"{session}: {t['candidate_name']}" + (f" ({who})" if who else "")
+
+
+def ics_event(t: dict[str, Any], stamp: datetime, book: dict[str, dict[str, Any]] | None = None) -> list[str]:
     """One VEVENT for an interview row (from _session_rows): UID stable per interview, times in UTC, as long as
-    the session runs. Only the session's own summary line and interviewer go in the description, never notes."""
+    the session runs; an all-day entry uses DATE values. The summary names the session, candidate and
+    interviewer. The description has the job, the interviewer and each person's own local time. Never notes."""
     start = to_dt(t["at"])
+    d = actions._iv_data(t)
+    all_day = bool(d.get("all_day"))
     job = actions.job_label(t.get("job_title"), t.get("job_company")) if t.get("job_title") else ""
     who = actions.interviewer_of(t)
-    desc = "; ".join(x for x in (actions.interview_name(t), f"with {who}" if who else "") if x)
-    # Nothing records when an interview was last edited, so each download gets a higher SEQUENCE (minutes since
-    # 2020) and the download time as LAST-MODIFIED: a calendar app that already has the event then takes the
-    # changed times, status or summary instead of keeping the old copy.
-    seq = max(0, int((stamp - datetime(2020, 1, 1, tzinfo=timezone.utc)).total_seconds() // 60))
+    notes = [f"Job: {job}" if job else "", f"Interviewer: {who}" if who else ""]
+    if not all_day:
+        cz = candidate_zone(t)
+        if cz:
+            notes.append(f"{t['candidate_name']}'s time: {when_for(t['at'], cz)}")
+        for w in interviewers(who):
+            z = interviewer_zone(t, w, book)
+            if z:
+                notes.append(f"{display_name(w)}'s time: {when_for(t['at'], z)}")
+    desc = "\n".join(x for x in notes if x)
+    # DTSTAMP and LAST-MODIFIED come from the interview itself (when it was last changed, else when it was
+    # logged) and SEQUENCE is its edit count, so an unchanged interview downloads the same every time and a
+    # calendar app only sees a change when there was one.
+    seq = int(d.get("edits") or 0)
+    made = to_dt(d.get("updated_at") or t.get("created_at")) or stamp
+    stamp = made
+    if all_day:
+        day = date.fromisoformat(d.get("all_day_date") or as_local(start).date().isoformat())
+        when = [f"DTSTART;VALUE=DATE:{day.strftime('%Y%m%d')}",
+                f"DTEND;VALUE=DATE:{(day + timedelta(days=1)).strftime('%Y%m%d')}"]
+    else:
+        when = [f"DTSTART:{_ics_time(start)}", f"DTEND:{_ics_time(start + timedelta(minutes=session_minutes(t)))}"]
     lines = ["BEGIN:VEVENT", f"UID:interview-{t['id']}@talent-search.local", f"DTSTAMP:{_ics_time(stamp)}",
-             f"LAST-MODIFIED:{_ics_time(stamp)}", f"SEQUENCE:{seq}",
-             f"DTSTART:{_ics_time(start)}", f"DTEND:{_ics_time(start + timedelta(minutes=session_minutes(t)))}",
-             "SUMMARY:" + _ics_text(f"Interview: {t['candidate_name']}" + (f" ({job})" if job else ""))]
+             f"LAST-MODIFIED:{_ics_time(stamp)}", f"SEQUENCE:{seq}", *when, "SUMMARY:" + _ics_text(ics_summary(t))]
     if desc:
         lines.append("DESCRIPTION:" + _ics_text(desc))
-    lines.append("STATUS:" + ("CANCELLED" if actions._iv_data(t).get("status") == "cancelled" else "CONFIRMED"))
+    lines.append("STATUS:" + ("CANCELLED" if d.get("status") == "cancelled" else "CONFIRMED"))
     lines.append("END:VEVENT")
     return lines
 
 
-def ics_calendar(rows: list[dict[str, Any]], now: datetime | None = None) -> str:
+def ics_calendar(rows: list[dict[str, Any]], now: datetime | None = None,
+                 book: dict[str, dict[str, Any]] | None = None) -> str:
     """An iCalendar file (CRLF line ends) holding these interview rows."""
     stamp = now or datetime.now(timezone.utc)
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Talent Search//Interviews//EN", "CALSCALE:GREGORIAN",
              "METHOD:PUBLISH", "X-WR-CALNAME:Talent Search interviews"]
     for t in rows:
-        lines += ics_event(t, stamp)
+        lines += ics_event(t, stamp, book)
     lines.append("END:VCALENDAR")
     return "\r\n".join(part for line in lines for part in _ics_fold(line)) + "\r\n"
 
@@ -783,18 +997,30 @@ def ics_for_month(store: Store, first: date | None, cancelled: bool | None = Non
     unless `cancelled` is True)."""
     if first is not None:
         lo, hi = _midnight(first), _midnight(_month_shift(_in_range(first), 1))
-        return ics_calendar(_session_rows(store, lo, hi, cancelled=True if cancelled is None else cancelled))
+        return ics_calendar(_session_rows(store, lo, hi, cancelled=True if cancelled is None else cancelled),
+                            book=store.interviewer_book())
     now = datetime.now(timezone.utc)
     rows = _session_rows(store, _midnight(as_local(now).date()), _FOREVER, cancelled=bool(cancelled))
-    return ics_calendar([t for t in rows if to_dt(t["at"]) + timedelta(minutes=session_minutes(t)) > now])
+    return ics_calendar([t for t in rows if to_dt(t["at"]) + timedelta(minutes=session_minutes(t)) > now],
+                        book=store.interviewer_book())
+
+
+def ics_for_week(store: Store, day: date) -> str:
+    """The interviews in the week (Monday to Sunday, on the recruiter's clock) that holds `day`, cancelled ones
+    marked."""
+    monday = week_start(_in_range(day))
+    rows = _session_rows(store, _midnight(monday), _midnight(monday + timedelta(days=7)), cancelled=True)
+    return ics_calendar(rows, book=store.interviewer_book())
 
 
 def ics_for_interview(store: Store, candidate_id: int, entry_id: int) -> str:
     """One interview as a calendar file; LookupError when it isn't on that profile."""
     t = store._row(
-        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
+        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company,
+                  pz.time_zone AS cand_zone FROM timeline t
            JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           LEFT JOIN person_zones pz ON pz.candidate_id = t.candidate_id
            WHERE t.kind = 'interview' AND t.id = ? AND t.candidate_id = ?""", (entry_id, candidate_id))
     if t is None:
         raise LookupError(f"No interview with id {entry_id} on this profile")
-    return ics_calendar([t])
+    return ics_calendar([t], book=store.interviewer_book())

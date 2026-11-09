@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from html import escape as html_escape
 import json
 import logging
 import os
@@ -49,6 +50,8 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
+REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
+BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -84,8 +87,8 @@ COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best mat
 
 def color_info(color: str | None, who: str = "") -> dict[str, Any]:
     """What a colour bubble says and does: its name, letter, the colours a click and a right-click go to, and
-    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange.
-    Shift+Enter goes back one color." so a list of bubbles has a different name for each."""
+    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange." so a list of bubbles has a
+    different name for each. The tooltip (title) adds that Shift+Enter goes back one color."""
     color = color if color in COLORS else None
     nxt, prev = next_color(color, 1), next_color(color, -1)
     name = color or "none"
@@ -93,7 +96,7 @@ def color_info(color: str | None, who: str = "") -> dict[str, Any]:
     back = "Shift+Enter, Shift-click or right-click goes back one color."
     lead = f"{who}: color" if who else "Color:"
     return {"color": color or "", "name": name, "letter": COLOR_LETTERS.get(color or "", ""),
-            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}. {back}",
+            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}.",
             "title": f"{lead} {name}. {go}. {back}"}
 
 
@@ -101,7 +104,7 @@ TABLE_SORTS = {
     "color": COLOR_RANK_SQL,
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
-    "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at",
+    "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at", "added": "c.id",
 }
 
 
@@ -343,11 +346,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["IV_TIME"] = IV_TIME
     env.globals["color_info"] = color_info
     env.globals["COLORS"] = COLORS
-    env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
+    env.globals["local_zone"] = lambda: interviews.zone_label(as_local(datetime.now(timezone.utc)))
     env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.globals["user_zone"] = lambda: reports.user_zone(store)
     env.globals["shown_zone_name"] = lambda: reports.user_zone(store) or reports.fallback_zone(store)
     env.globals["common_zones"] = reports.COMMON_ZONES
+    env.globals["zone_options"] = reports.zone_options
+    env.globals["computer_on_utc"] = lambda: reports.computer_on_utc()
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
@@ -501,12 +506,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                  "overdue": bool(s.get("due_on") and s["due_on"] < today)} for s in store.open_suggestions(job_id)]
 
     # ------------------------------------------------------------ overview
+    def how_read_line(q: str, result: Any = None) -> str:
+        """'How we read your search', for the Today and Candidates pages alike: the search in plain words, then what
+        needed saying (a mistyped prefix, a repeated prefix, a form filter typed twice). Empty for plain words."""
+        if not (q or "").strip() or store.lookup_exact(q)[0]:
+            return ""
+        pq = searchquery.parse_query(q)
+        notes = list(getattr(result, "notes", None) or pq.notes)
+        if not (pq.structured or pq.operator_mode or notes):
+            return ""
+        return " ".join([pq.explain(), *notes]).strip()
+
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
         searching = bool(q or location or title or tag)
         result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50)
         ctx = dict(result=result, q=q, location=location, title=title, tag=tag, total_all=store.count_candidates(),
-                   searching=searching)
+                   searching=searching, how_read=how_read_line(q, result))
         if is_htmx(request) and request.headers.get("HX-Target") == "results":
             if not searching:
                 return page(request, "_overview.html", **ctx, **overview_ctx())
@@ -515,7 +531,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"saved_searches": store.list_saved_searches(counts=True, limit=6),
+        return {"saved_searches": store.list_saved_searches(counts=True),
                 "today": actions.action_items(store), "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
@@ -527,11 +543,33 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50,
                                offset=offset)
         ctx = dict(result=result, q=q, location=location, title=title, tag=tag, offset=offset,
-                   total_all=store.count_candidates(), searching=True)
+                   total_all=store.count_candidates(), searching=True, how_read=how_read_line(q, result))
         # "Show more" asks for the next cards only, which replace the button.
         return page(request, "_result_cards.html" if offset else "_results.html", **ctx)
 
     # ------------------------------------------------------------ table
+    def color_counts_here(q: str, tag: str, location: str, source: str, member: dict[str, Any], total: int,
+                          color: str) -> dict[str, int]:
+        """The numbers on the color chips: how many people of each color the current search and filters find (the
+        chosen color itself is left out, so the chips still show what the other colors would give). One grouped
+        query without a search; with one, a count per color, and the last color from the total."""
+        base = {k: v for k, v in member.items() if k != "color"}
+        if not q.strip():
+            return store.color_counts(tag=tag or None, location=location or None, source=source or None, **base)
+        out = {c: 0 for c in COLORS}
+        out["none"] = 0
+        all_total = total if not color else search.search(
+            q, tag=tag or None, location=location or None, source=source or None, limit=1, **base, color=None).total
+        if not all_total:
+            return out
+        names = [*COLORS, "none"]
+        for name in names if color else COLORS:
+            out[name] = search.search(q, tag=tag or None, location=location or None, source=source or None, limit=1,
+                                      **base, color=name).total
+        if not color:  # nobody is counted twice, so the untagged are what is left
+            out["none"] = max(0, all_total - sum(out[c] for c in COLORS))
+        return out
+
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
@@ -539,8 +577,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
-              added_days: str = "", has_email: str = "", has_linkedin: str = ""):
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = ""):
         per = 100
+        new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
         # The chips above the table are submit buttons: pressing the colour already chosen clears it.
         color = (color_pick if color_pick != color else "") if color_pick else color
         color = color.strip().lower()
@@ -590,15 +629,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
-        pq = searchquery.parse_query(q) if q.strip() and not store.lookup_exact(q)[0] else None
-        how_read = ""
-        if pq and (pq.structured or pq.operator_mode):  # "How we read your search", built from the parser
-            how_read = " ".join([pq.explain(), *pq.notes]).strip()
+        how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
             range_note = (f"Years of experience at least {more_params['exp_min']} and at most {more_params['exp_max']} "
                           "can't both be true, so nobody matches. Swap the two numbers.")
-        keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
+        keep = {k: v for k, v in dict(new_after="" if new_after_id is None else new_after_id, tag=tag, location=location, source=source, job="" if job_id is None else job_id,
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
@@ -611,12 +647,97 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
-                   colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
+                   new_after=new_after_id, closest=bool(q.strip() and result.closest),
+                   saved_notes=list(result.notes) if q.strip() else [],
+                   colored_first=colored_first and bool(q.strip()),
+                   color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+        return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    def _matching_ids(raw: dict[str, str]) -> list[int]:
+        """Everyone the Candidates table shows for these filters (the same ones its address carries), not only the
+        page on screen, so "all of the results" in the bulk bar means all of them. At most BULK_MAX people."""
+        def get(key: str) -> str:
+            return str(raw.get(key) or "")
+
+        q = get("q").strip()
+        color = get("color").strip().lower()
+        color = color if color in (*COLORS, "none") else ""
+        job = get("job").strip()
+        pipe = get("pipe") if get("pipe") in opsreview.PIPES else ""
+        days = get("days").strip()
+        more_params = searchquery.clean_params({k: get(k) for k in (
+            "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max", "contacted", "contacted_days",
+            "added_days", "has_email", "has_linkedin")})
+        member = dict(job_id=int(job) if job.isdigit() else None, client=get("client") or None,
+                      stage=get("stage") or None, pipe=pipe or None, days=int(days) if days.isdigit() else None,
+                      **searchquery.search_kwargs(more_params))
+        if q:
+            member["color"] = color or None
+            result = search.search(q, tag=get("tag") or None, location=get("location") or None,
+                                   source=get("source") or None, limit=BULK_MAX, offset=0, **member)
+            return [h.candidate["id"] for h in result.hits]
+        conds, params, _ = store.candidate_filters(tag=get("tag") or None, location=get("location") or None,
+                                                   source=get("source") or None, color=color or None, **member)
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        return [r["id"] for r in store._rows(f"SELECT c.id FROM candidates c {where} ORDER BY c.id LIMIT ?",
+                                             (*params, BULK_MAX))]
+
+    @app.post("/candidates/bulk")
+    async def candidates_bulk(request: Request):
+        """App window only: set a color, add to a job or export, for the people ticked on the Candidates table (or
+        every person in the results, when "all of the results" is ticked). There is no bulk delete, and the AI has
+        no tool for any of this."""
+        form = await request.form()
+        action = str(form.get("action") or "")
+        if str(form.get("select_all") or "") == "1":
+            ids = _matching_ids({k[2:]: str(v) for k, v in form.items() if k.startswith("f_")})
+        else:
+            ids = list(dict.fromkeys(int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()))
+        if not ids:
+            return back(request, "/candidates", error="Tick at least one person first.")
+        n = len(ids)
+        who = f"{n} {'person' if n == 1 else 'people'}"
+        if action == "export":
+            stamp = datetime.now().strftime("%Y-%m-%d")
+            return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
+        if action == "color":
+            try:
+                shade = clean_color(str(form.get("color") or ""))
+            except ValueError as exc:
+                return back(request, "/candidates", error=str(exc))
+            done = store.set_color_many(ids, shade)
+            return back(request, "/candidates", notice=(f"Set the color to {shade} for {done} "
+                                                        f"{'person' if done == 1 else 'people'}." if shade else
+                                                        f"Cleared the color for {done} {'person' if done == 1 else 'people'}."))
+        if action == "job":
+            raw_job = str(form.get("job_id") or "")
+            if not raw_job.isdigit():
+                return back(request, "/candidates", error="Pick a job to add them to.")
+            job = job_or_404(int(raw_job))
+            try:
+                stage = store.resolve_stage(job["id"], str(form.get("stage") or "").strip() or None)
+            except ValueError as exc:
+                return back(request, "/candidates", error=f"{exc} Nobody was added.")
+            added = already = 0
+            for cid in ids:
+                if store._row("SELECT 1 AS x FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, job["id"])):
+                    already += 1
+                    continue
+                try:
+                    store.add_to_pipeline(cid, job["id"], stage["name"])
+                    added += 1
+                except NotFound:
+                    continue
+            notice = f"Added {added} {'person' if added == 1 else 'people'} to {job['title']} at {stage['name']}."
+            if already:
+                notice += f" {already} {'was' if already == 1 else 'were'} already in it and stayed where they are."
+            return back(request, "/candidates", notice=notice)
+        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add to a job, or export.")
 
     def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
                      more: dict[str, str]) -> list[dict[str, str]]:
@@ -677,8 +798,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             row = store.get_saved_search(search_id)
         except NotFound:
             raise HTTPException(404, "That saved search isn't there any more.")
+        after = store.saved_search_new_after(row)  # who is new is read before "looked at" moves it forward
         store.mark_search_viewed(search_id)
-        return RedirectResponse("/candidates?" + urlencode(row["params"]), status_code=303)
+        extra = {"new_after": after}
+        if not row["params"].get("q"):  # no search words to rank by: newest saved first, so the new people lead
+            extra.update(sort="added", dir="desc")
+        return RedirectResponse("/candidates?" + urlencode({**row["params"], **extra}), status_code=303)
 
     @app.post("/saved-searches/{search_id}/rename")
     async def saved_search_rename(request: Request, search_id: int):
@@ -691,6 +816,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, "/candidates", error=str(exc))
         return back(request, "/candidates", notice=f"Renamed to “{row['name']}”.")
 
+    @app.post("/saved-searches/{search_id}/pin")
+    def saved_search_pin(request: Request, search_id: int):
+        """Keep a saved search first in the lists."""
+        try:
+            row = store.pin_saved_search(search_id, True)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/", notice=f"Pinned the saved search “{row['name']}”. It stays at the top.")
+
+    @app.post("/saved-searches/{search_id}/unpin")
+    def saved_search_unpin(request: Request, search_id: int):
+        try:
+            row = store.pin_saved_search(search_id, False)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/", notice=f"Unpinned the saved search “{row['name']}”.")
+
     @app.post("/saved-searches/{search_id}/delete")
     def saved_search_delete(request: Request, search_id: int):
         """The recruiter's own action: the AI has no tool that deletes a saved search."""
@@ -701,14 +843,21 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
     # ------------------------------------------------------- duplicates
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
-    def duplicates_page(request: Request, shown: int = 50):
+    def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
         shown = max(50, min(shown, 2000))
-        pairs = duplicates.find_pairs(store)
+        every = duplicates.find_pairs(store)
+        want = duplicates.reason_slug(reason)
+        pairs = duplicates.filter_pairs(every, want)
         total = len(pairs)
         rows = []
         for p in pairs[:shown]:
-            rows.append({**p, "a": store.get_candidate(p["keep"]), "b": store.get_candidate(p["other"])})
-        return page(request, "duplicates.html", rows=rows, total=total, shown=shown,
+            a, b = store.get_candidate(p["keep"]), store.get_candidate(p["other"])
+            la, lb = duplicates.pair_labels(a, b)
+            rows.append({**p, "a": a, "b": b, "a_label": la, "b_label": lb})
+        return page(request, "duplicates.html", rows=rows, total=total, shown=shown, all_total=len(every),
+                    reason=reason if want else "", reason_label=next((x[2] for x in duplicates.REASON_FILTERS
+                                                                      if x[0] == reason), ""),
+                    reasons=duplicates.reason_counts(every),
                     dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)))
 
     def _pair_ids(form: Any) -> list[tuple[int, int]]:
@@ -719,10 +868,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 out.append((int(m[1]), int(m[2])))
         return out
 
+    def _ticked_pairs(form: Any) -> list[tuple[int, int]]:
+        """The pairs to act on: the ticked ones, or, when "every pair that matches this filter" is ticked, every
+        pair the finder shows for the filter right now (not only the ones on the page)."""
+        if str(form.get("all_filtered") or "") == "1":
+            want = duplicates.reason_slug(str(form.get("reason") or ""))
+            return [(p["keep"], p["other"]) for p in duplicates.filter_pairs(duplicates.find_pairs(store), want)]
+        return _pair_ids(form)
+
     @app.get("/candidates/duplicates/merge-exact", response_class=HTMLResponse)
     def duplicates_merge_exact(request: Request):
         """App window only: every pair with the same email or LinkedIn (and a matching name), to tick and merge."""
-        return page(request, "duplicates_exact.html", rows=duplicates.exact_matches(store))
+        rows = []
+        for r in duplicates.exact_matches(store):
+            la, lb = duplicates.pair_labels(r["a"], r["b"])
+            rows.append({**r, "a_label": la, "b_label": lb})
+        return page(request, "duplicates_exact.html", rows=rows)
 
     @app.post("/candidates/duplicates/merge-exact")
     async def duplicates_merge_exact_run(request: Request):
@@ -747,12 +908,73 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += f" {len(res['skipped'])} could not be merged and were left alone."
         return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
 
+    def _current_pairs() -> dict[tuple[int, int], dict[str, Any]]:
+        """Every pair the finder shows right now, either way round, so only real pairs can be merged."""
+        out: dict[tuple[int, int], dict[str, Any]] = {}
+        for p in duplicates.find_pairs(store):
+            out[(p["keep"], p["other"])] = p
+            out[(p["other"], p["keep"])] = p
+        return out
+
+    @app.post("/candidates/duplicates/merge-review", response_class=HTMLResponse)
+    async def duplicates_merge_review(request: Request):
+        """App window only. Step one of "Merge ticked pairs": who is kept in each pair, and what happens to the
+        other one. Nothing changes until the recruiter confirms. The AI has no merge tool."""
+        form = await request.form()
+        known = _current_pairs()
+        seen: set[frozenset[int]] = set()
+        rows = []
+        for a, b in _ticked_pairs(form):
+            if (a, b) not in known or frozenset((a, b)) in seen:
+                continue
+            seen.add(frozenset((a, b)))
+            try:
+                rows.append({**duplicates.pair_details(store, a, b), "reasons": known[(a, b)]["reasons"]})
+            except NotFound:
+                continue
+        if not rows:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        return page(request, "duplicates_review.html", rows=rows[:REVIEW_MAX], count=len(rows),
+                    cut=max(0, len(rows) - REVIEW_MAX))
+
+    @app.post("/candidates/duplicates/merge-ticked")
+    async def duplicates_merge_ticked(request: Request):
+        """App window only. Merges the confirmed pairs with ONE backup for the whole batch. Each pair keeps the
+        person chosen (the more complete one unless the recruiter flipped it) and the main email chosen. The AI has
+        no merge tool, and the store refuses a merge from an AI session too."""
+        form = await request.form()
+        known = _current_pairs()
+        chosen: list[tuple] = []
+        for a, b in _pair_ids(form):  # only what is ticked on the review page, never the whole filter
+            if (a, b) not in known:
+                continue
+            value = f"{a}-{b}"
+            win = str(form.get(f"keep_{value}") or a)
+            keep, other = (b, a) if win == str(b) else (a, b)
+            primary = str(form.get(f"primary_{value}") or "").strip() or None
+            chosen.append((keep, other, primary))
+        if not chosen:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        try:
+            importers.backup_before_import(store, reason="merge")  # one backup for the whole batch
+        except ValueError as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}),
+                                    status_code=303)
+        res = duplicates.merge_pairs(store, chosen)
+        n = res["merged"]
+        notice = f"Merged {n} pair{'' if n == 1 else 's'}. One backup was saved first for all of them."
+        if res["skipped"]:
+            notice += f" {len(res['skipped'])} could not be merged and were left alone."
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
+
     @app.post("/candidates/duplicates/dismiss-many")
     async def duplicates_dismiss_many(request: Request):
         """App window only: the ticked pairs are different people. They never come back."""
         form = await request.form()
         done = 0
-        for a, b in _pair_ids(form):
+        for a, b in _ticked_pairs(form):
             try:
                 duplicates.dismiss(store, a, b)
                 done += 1
@@ -798,6 +1020,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_emails = _split_emails(form.get("other_emails"))
         if other_emails:
             data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
+        bad = _bad_email_fields(data, other_emails)
+        if bad:
+            return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
+                        error="Nothing was saved. " + " ".join(bad.values()), field_errors=bad,
+                        job_id=job_id if job_id.isdigit() else None, status_code=400)
         if (form.get("create_anyway") != "1" and data.get("name")
                 and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None
                 and not any(store.find_duplicate(e) for e in other_emails)):
@@ -834,7 +1061,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         hints = actions.twin_hints(open_jobs)
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
-        return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
+        return page(request, "candidate.html", c=c, summary_limit=interviews.SUMMARY_LIMIT, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
@@ -846,6 +1073,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = _form_fields(form, keep_blank=True)
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
+        bad = _bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else [])
+        if bad:
+            return page(request, "candidate_form.html",
+                        c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
+                        history_text=str(form.get("work_history", "")), error="Nothing was saved. " + " ".join(bad.values()),
+                        field_errors=bad, job_id=None, status_code=400)
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
             if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
@@ -889,6 +1122,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse("/?" + urlencode({"notice": f"Deleted {c['name']}. This can't be undone."}),
                                 status_code=303)
 
+    def _merge_labels(keep_id: int, other_id: int) -> dict[str, Any]:
+        """Names that tell two same-named people apart, and the newer email (the default main email)."""
+        a, b = store.get_candidate(keep_id), store.get_candidate(other_id)
+        la, lb = duplicates.pair_labels(a, b)
+        emails = [*store.all_emails(keep_id), *store.all_emails(other_id)]
+        newest = duplicates.newer_email(a, b)
+        return {"keep_label": la, "other_label": lb, "default_email": newest if newest in emails else ""}
+
     @app.get("/candidates/{candidate_id}/merge/{other_id}", response_class=HTMLResponse)
     def merge_confirm(request: Request, candidate_id: int, other_id: int):
         """App window only: look at two records side by side before merging them."""
@@ -897,19 +1138,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if candidate_id == other_id:
             raise HTTPException(404, "Pick two different people")
         return page(request, "merge.html", keep=store.candidate_detail(candidate_id, timeline_limit=5),
-                    other=store.candidate_detail(other_id, timeline_limit=5))
+                    other=store.candidate_detail(other_id, timeline_limit=5),
+                    emails=list(dict.fromkeys([*store.all_emails(candidate_id), *store.all_emails(other_id)])),
+                    **_merge_labels(candidate_id, other_id))
 
     @app.post("/candidates/{candidate_id}/merge/{other_id}")
-    def merge_form(candidate_id: int, other_id: int):
+    async def merge_form(request: Request, candidate_id: int, other_id: int):
         """App window only. The AI has no merge tool: merging deletes the other record."""
         cand_or_404(candidate_id)
         other = cand_or_404(other_id)
+        form = await request.form()
+        primary = str(form.get("primary_email") or "").strip() or None
         try:
             importers.backup_before_import(store, reason="merge")
-            cand = store.merge_candidates(candidate_id, other_id, by="app")
+            cand = store.merge_candidates(candidate_id, other_id, by="app", primary_email=primary)
         except ValueError as exc:
+            if is_htmx(request):  # from a button on the import result page: one line in place of the pair
+                return HTMLResponse(f'<li class="fine" role="status">Not merged: {html_escape(str(exc))}</li>')
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'flash_error': str(exc)})}",
                                     status_code=303)
+        if is_htmx(request):
+            return HTMLResponse(f'<li class="fine" role="status">Merged {html_escape(other["name"])} into '
+                                f'<a href="/candidates/{candidate_id}">{html_escape(cand["name"])}</a>. Their emails are now '
+                                f'{html_escape(", ".join(store.all_emails(candidate_id)))}. A backup was saved first.</li>')
         m = cand["_merged"]
         bits = [f"filled {_labels(m['filled'])}"] if m["filled"] else []
         if m["timeline"]:
@@ -945,9 +1196,35 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 reply = kind == outreach.REPLY_KIND
                 if job_id is None and kind in (*outreach.OUTREACH_KINDS, outreach.REPLY_KIND):
                     job_id = outreach.job_for(store, candidate_id)
+                at_text, tz = str(form.get("at") or "").strip(), str(form.get("tz") or "").strip()
+                iv = interviews.form_fields(form) if kind == "interview" else {}
+                if kind == "interview":
+                    all_day = str(form.get("all_day") or "") == "1"
+                    if not at_text:  # a blank time would log the interview "now"
+                        raise ValueError("Pick the day of the interview." if all_day else
+                                         "Pick the date and time of the interview. A blank time would log it as "
+                                         "happening right now.")
+                    if all_day:  # a day with no time: all day, kept on that day
+                        at_text, tz = at_text[:10], ""
+                    if len(body.strip()) > interviews.SUMMARY_LIMIT:
+                        raise ValueError(f"The interview note can be up to {interviews.SUMMARY_LIMIT} characters, and "
+                                         f"this one has {len(body.strip()):,}. Nothing was saved. Put the session name "
+                                         "here, like Onsite: coding, and the rest in a note.")
+                    body = interviews.with_length(body, iv["minutes"])
+                at = (f"{at_text} {tz}" if at_text and tz else at_text) or None  # the zone the time was typed in
                 entry = store.log(candidate_id, "message" if reply else kind, body or ("Replied" if reply else None),
-                                  at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+                                  at=at, job_id=job_id, source="App", **(
+                                      {"interviewer": iv["interviewer"], "candidate_tz": iv["candidate_tz"],
+                                       "interviewer_tz": iv["interviewer_tz"]} if kind == "interview" else {}))
                 logged = True
+                if kind == "interview":
+                    interviews.save_form_people(store, iv)
+                    notice = "Logged the interview for " + interviews.when_for(
+                        entry["at"], iv["candidate_tz"] or store.candidate_zone(candidate_id),
+                        bool(interviews._data(entry).get("all_day"))) + "."
+                notes = " ".join(entry.get("when_notes") or [])
+                if notes:
+                    notice = (notice + " " if notice else "") + notes
                 if reply:
                     outreach.mark_reply(store, entry["id"])
                     move = outreach.reply_stage(store, candidate_id, job_id) if job_id is not None else None
@@ -981,8 +1258,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 if not at:
                     raise ValueError("Pick the new date and time.")
                 reason = str(form.get("reason") or "").strip()
-                iv = store.update_interview(entry_id, at=at, reason=reason or None, candidate_id=candidate_id)
-                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}."
+                tz = str(form.get("tz") or "").strip()
+                iv = store.update_interview(entry_id, at=f"{at} {tz}" if tz else at, reason=reason or None,
+                                            candidate_id=candidate_id)
+                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}." + "".join(
+                    " " + n for n in iv.get("when_notes") or [])
             elif op == "cancel":
                 store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
                 notice = "Interview cancelled. It stays on the timeline, marked cancelled."
@@ -1090,14 +1370,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
+        if not guess.get("name"):  # a note about someone: "Spoke with Marcus Lee, ..."
+            noted = _name_in_note(text)
+            if noted:
+                guess["name"] = noted
         found, missing = duplicates.found_fields(guess)
+        hints = importers.paste_hints(text, guess)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
         dupe = duplicates.already_here(store, guess)
         if dupe and len(text.split()) == 1 and guess.get("linkedin_url"):  # just their link: open who has it
             return RedirectResponse(f"/candidates/{dupe['id']}?{urlencode({'notice': f'Already saved: {dupe['name']}.'})}",
                                     status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
-                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing,
+                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing, hints=hints,
                     dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None,
                     dupe_name_differs=bool(dupe and guess.get("name") and store.find_duplicate(
                         guess.get("email"), guess.get("linkedin_url")) is not None
@@ -1149,11 +1434,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except OSError:
             pass  # the panels still show their first lines
 
+    def _email_choices(form: Any) -> tuple[str | None, dict[int, str]]:
+        """The changed-email choices from the form: one for all ("update" or "new", else automatic) and one per
+        row (emailchg_<row>), which win over the one for all."""
+        default = str(form.get("email_default") or "")
+        picks = {int(k[9:]): str(v) for k, v in form.items()
+                 if k.startswith("emailchg_") and k[9:].isdigit() and re.fullmatch(r"update|new|update:\d+", str(v))}
+        return (default if default in ("update", "new") else None), picks
+
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
                  add_stages: bool = True, move_stages: bool = True, client: str | None = None,
                  reopen_jobs: bool = False, replace_stages: bool = True,
-                 allow_backward: bool = False) -> HTMLResponse:
+                 allow_backward: bool = False, email_default: str | None = None,
+                 email_choices: dict[int, str] | None = None) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         prof = importers.sync_profile(store, header)
         client = (client or "").strip()[:120]
@@ -1163,7 +1457,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
                                                    move_stages=move_stages, profile={**(prof or {}), "client": client},
                                                    reopen_jobs=reopen_jobs, replace_stages=replace_stages,
-                                                   allow_backward=allow_backward)
+                                                   allow_backward=allow_backward, email_default=email_default,
+                                                   email_choices=email_choices)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -1178,6 +1473,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
                     replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
                     allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
+                    email_default=email_default or "", email_picks=email_choices or {}, email_changes=(preview or {}).get("email_changes") or [],
                     this_tool=importers.detect_export(header),
                     skipped_email=importers.skipped_email_columns(header, mapping))
 
@@ -1204,7 +1500,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
                         client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
                         replace_stages=form.get("replace_stages") == "1",
-                        allow_backward=form.get("allow_backward") == "1")
+                        allow_backward=form.get("allow_backward") == "1",
+                        email_default=_email_choices(form)[0], email_choices=_email_choices(form)[1])
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -1232,7 +1529,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
                                            profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
-                                           replace_stages=replace_stages, allow_backward=allow_backward)
+                                           replace_stages=replace_stages, allow_backward=allow_backward,
+                                           email_default=_email_choices(form)[0],
+                                           email_choices=_email_choices(form)[1])
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
@@ -1335,7 +1634,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/export.csv")
     def export_csv():
         stamp = datetime.now().strftime("%Y-%m-%d")
-        return Response(importers.export_csv(store), media_type="text/csv; charset=utf-8",
+        return Response(importers.export_csv_bytes(store), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="talent-search-{stamp}.csv"'})
 
     @app.get("/backup")
@@ -1367,7 +1666,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if dp:
             msg += f" Also deleted {', '.join(dp)}."
         if ds:
-            msg += f" Also removed the saved search{'' if len(ds) == 1 else 'es'} {', '.join(ds)}."
+            msg += (f" Also removed the saved search {ds[0]}, which only matched sample people." if len(ds) == 1 else
+                    f" Also removed {len(ds)} saved searches that only matched sample people.")
         empty = [x["name"] for x in store.list_saved_searches(counts=True) if x["count"] == 0]
         if empty:
             msg += (f" {len(empty)} saved search{'' if len(empty) == 1 else 'es'} now match nobody ({', '.join(empty[:3])}"
@@ -2349,25 +2649,28 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
 
     # ------------------------------------------------- the loop planner
-    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
+                   cz: str = ""):
         job = job_or_404(job_id)
         tpl = loops.get_template(store, job_id)
         people = actions.in_play(store, job_id)
         plan, error = None, ""
         if candidate.isdigit() and tpl:
             try:
-                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out))
+                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out),
+                                  candidate_tz=cz or None)
             except (ValueError, NotFound) as exc:
                 error = str(exc)
         return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
                     hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
                     cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
-                    plan_error=error)
+                    plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
 
     @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
-    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
+                  cz: str = ""):
         """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
-        return _loop_page(request, job_id, candidate, start, out)
+        return _loop_page(request, job_id, candidate, start, out, cz)
 
     @app.post("/jobs/{job_id}/loop/template")
     async def loop_template_form(request: Request, job_id: int):
@@ -2398,7 +2701,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                      for n, a, m, w in zip(names, ats, mins, whos) if n.casefold() in tpl and m.isdigit()][:loops.MAX_SESSIONS]
             if not slots:
                 raise ValueError("There is nothing to book. Plan the loop again.")
-            loops.book(store, int(cid), job_id, slots, by="app")
+            loops.book(store, int(cid), job_id, slots, by="app", candidate_tz=str(form.get("candidate_tz") or "") or None)
         except (ValueError, NotFound) as exc:
             return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc), 'candidate': cid})}",
                                     status_code=303)
@@ -2492,8 +2795,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "interviews_month.html", m=interviews.month(store, first), calendar_prompt=calendar_prompt)
 
     @app.get("/interviews.ics")
-    def interviews_ics(month: str = "", cancelled: str = ""):
-        """The month's interviews (or every upcoming one) as a calendar file for the recruiter's own calendar app."""
+    def interviews_ics(month: str = "", cancelled: str = "", week: str = ""):
+        """The month's (or week's) interviews, or every upcoming one, as a calendar file for the recruiter's own
+        calendar app."""
+        if week.strip():
+            try:
+                monday = interviews.week_start(interviews.week_day(week) or interviews.week_start())
+                body = interviews.ics_for_week(store, monday)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return Response(body, media_type="text/calendar; charset=utf-8",
+                            headers={"Content-Disposition": f'attachment; filename="interviews-week-{monday.isoformat()}.ics"'})
         try:
             first = interviews.month_first(month) if month.strip() else None
         except ValueError as exc:
@@ -2526,6 +2838,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         try:
             if not re.fullmatch(r"\d{1,2}:\d{2}", at):
                 raise ValueError("Pick a start time for the new session.")
+            if iv["data"].get("all_day"):
+                raise ValueError("That interview is all day, so there is no clock to add a session to. Give it a "
+                                 "time first.")
             day = _local(iv["at"], "%Y-%m-%d")
             new = store.log(candidate_id, "interview", str(form.get("body") or ""), at=f"{day}T{at}",
                             job_id=iv.get("job_id"), source="App",
@@ -2533,7 +2848,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#iv-{entry_id}",
                                     status_code=303)
-        notice = f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+        notice = (f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+                  + "".join(" " + n for n in new.get("when_notes") or []))
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#iv-{new['id']}",
                                 status_code=303)
 
@@ -2602,6 +2918,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 elif a["kind"].startswith("client_"):
                     d = a.get("new_data") or {}
                     name, href = d.get("_client") or "Client", f"/clients/{reports.slug(d.get('_key') or '')}"
+                elif a["kind"] == "saved_search":
+                    name, href = "Saved search", "/candidates"
                 else:
                     name, href = "To-do", "/"
                 lines = change_lines(a["change_data"]) if a["kind"] == "profile" else []
@@ -2972,6 +3290,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """How far each AI app that has connected is trusted, and what a new one starts as."""
         form = await request.form()
         trust.set_new_apps(store, "suggest" if form.get("new_apps") == "suggest" else "trusted")
+        if form.get("hired_shown"):  # the switch sits in both forms: ticked or not
+            store.set_settings(**{review.TRUSTED_HIRED: "1" if form.get(review.TRUSTED_HIRED) == "1" else "0"})
         changed = 0
         for a in trust.apps(store):
             level = str(form.get(f"trust_{a['id']}") or "")
@@ -2980,7 +3300,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 changed += 1
         msg = ("Saved. " + (f"{changed} AI app{'' if changed == 1 else 's'} changed. " if changed else "")
                + ("New AI apps start at Suggest only." if trust.new_apps_level(store) == "suggest"
-                  else "New AI apps start as Trusted."))
+                  else "New AI apps start as Trusted.")
+               + (" Trusted AI apps can mark people Hired and close jobs." if store.setting(review.TRUSTED_HIRED) == "1"
+                  else " Hired and closing a job wait on Review."))
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
 
     @app.post("/settings/time-zone")
@@ -3143,8 +3465,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             claude_quit=integrations.quit_instruction(),
             codex_on=integrations.codex_connected(),
             lmstudio_on=integrations.lmstudio_connected(),
+            codex_installed=integrations.codex_config_path().parent.is_dir(),
+            lmstudio_installed=integrations.lmstudio_config_path().parent.is_dir(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
+            claude_code_command=integrations.claude_code_command(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),
             desktop_steps=skills.DESKTOP_STEPS[0],
@@ -3350,6 +3675,52 @@ def _and(items: list[str]) -> str:
 def _split_emails(raw: Any) -> list[str]:
     """The Other emails box: one address per line (commas and semicolons work too)."""
     return [e for e in (x.strip() for x in re.split(r"[\n,;]+", str(raw or ""))) if e]
+
+
+_EMAIL_OK = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>.]{2,}")
+_NOTE_WORD = r"[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?"
+_NOTE_NAME = re.compile(rf"\b({_NOTE_WORD}(?:[ \t]+{_NOTE_WORD}){{1,2}})\b")
+_NOTE_CUE = re.compile(r"(?:\bname\s*[:=-]|\bcandidate\s*[:=-]|\b(?:met|meet|met with|spoke with|spoke to|talked to|talked with|"
+                       r"chatted with|call with|caught up with|heard from|referral:?|referred|intro(?:duced)? to|"
+                       r"about|re:?|for)\b)[ \t]+", re.I)
+_NOTE_SKIP = {"the", "this", "that", "these", "those", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+              "sunday", "january", "february", "march", "april", "may", "june", "july", "august", "september",
+              "october", "november", "december", "senior", "junior", "staff", "principal", "lead", "head", "chief",
+              "software", "data", "product", "machine", "full", "front", "back", "great", "good", "nice", "strong",
+              "looks", "seems", "email", "phone", "call", "note", "notes", "linkedin", "github", "talent", "search",
+              "san", "new", "los", "las", "hi", "hello", "dear", "thanks", "thank", "best", "regards", "please"}
+
+
+def _name_in_note(text: str) -> str | None:
+    """A person's name in a free-text note ("Spoke with Marcus Lee about the backend role"): the name after a cue
+    like "name:", "met", "spoke with" or "about", else the first two or three capitalized words in a row. None when
+    nothing reads like a name."""
+    def ok(name: str) -> bool:
+        words = name.split()
+        return 2 <= len(words) <= 3 and words[0].lower() not in _NOTE_SKIP and importers._is_name(name)
+
+    for m in _NOTE_CUE.finditer(text):
+        n = _NOTE_NAME.match(text, m.end())
+        if n and ok(n.group(1)):
+            return " ".join(n.group(1).split())
+    for line in text.splitlines()[:12]:
+        for n in _NOTE_NAME.finditer(line):
+            if ok(n.group(1)):
+                return " ".join(n.group(1).split())
+    return None
+
+
+def _bad_email_fields(data: dict[str, Any], others: list[str]) -> dict[str, str]:
+    """A typed email (or an Other emails line) that isn't an address: {field: message}. Blank is fine."""
+    out: dict[str, str] = {}
+    email = str(data.get("email") or "").strip()
+    if email and not _EMAIL_OK.fullmatch(email):
+        out["email"] = (f"{email[:60]!r} doesn't look like an email address. Use a name@company.com address, or "
+                        "leave it blank.")
+    wrong = [e for e in others if not _EMAIL_OK.fullmatch(e)]
+    if wrong:
+        out["other_emails"] = f"{wrong[0][:60]!r} doesn't look like an email address. Fix that line or delete it."
+    return out
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

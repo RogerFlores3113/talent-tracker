@@ -199,6 +199,21 @@ def _touched_people(store: Store, people: set[int], jobs: set[int]) -> dict[int,
     return touched
 
 
+def _searches_on_sample(store: Store, people: set[int]) -> list[dict[str, Any]]:
+    """The recruiter's own saved searches (not the AI app's) made after the sample people were added that match
+    somebody now. Removing the sample data deletes those that then match nobody, so no dead chip is left. Searches
+    that matched nobody to begin with, were saved earlier, or match a real person always stay."""
+    if not people:
+        return []
+    marks = ",".join("?" * len(people))
+    r = store._row(f"SELECT max(created_at) AS t FROM candidates WHERE id IN ({marks})", tuple(sorted(people)))
+    since = (r or {}).get("t")
+    if not since:
+        return []
+    return [row for row in store.list_saved_searches()
+            if row.get("created_by") != "ai" and row["created_at"] >= since and store.saved_search_counts(row)[0]]
+
+
 def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
     """Remove the sample people and jobs the recruiter never worked with, after a backup.
 
@@ -208,13 +223,15 @@ def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
     Returns {"people", "jobs"} removed, {"kept_people", "kept_jobs"} names, and "backup" (a path).
     """
     people, jobs = sample_ids(store)
-    out: dict[str, Any] = {"people": 0, "jobs": 0, "kept_people": [], "kept_jobs": [], "backup": None}
+    out: dict[str, Any] = {"people": 0, "jobs": 0, "kept_people": [], "kept_jobs": [], "backup": None,
+                           "deleted_searches": []}
     if not people and not jobs:
         _save_ids(store, set(), set())
         return out
     if backup:
         out["backup"] = str(backup_before_import(store, reason="sample removal"))
     kept = _touched_people(store, people, jobs)
+    made = _searches_on_sample(store, people)  # saved while the sample people were here, matching someone
     kept_jobs: dict[int, str] = {}
     for jid in jobs:
         job = store.get_job(jid)
@@ -249,5 +266,12 @@ def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
             store._conn.execute(f"UPDATE candidates SET source = NULL WHERE source = ? AND id IN ({marks})",
                                 (SAMPLE_SOURCE, *ids))
     _save_ids(store, set(), set())  # whatever is left is the recruiter's own now
+    for row in made:  # a saved search that matched only sample people would now open on nobody: remove it
+        try:
+            if not store.saved_search_counts(row)[0]:
+                store.delete_saved_search(row["id"])
+                out["deleted_searches"].append(row["name"])
+        except NotFound:
+            pass
     out["kept_people"], out["kept_jobs"] = sorted(kept.values()), sorted(kept_jobs.values())
     return out

@@ -13,6 +13,7 @@ import os
 import re
 import queue
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -242,7 +243,7 @@ def friendly_error(exc: BaseException) -> str:
         return "Couldn't save the settings file: it's locked or read-only. Quit the app and try again."
     if isinstance(exc, OSError):
         return f"Couldn't read or save the settings file: {exc.strerror or exc}."
-    return "Something unexpected went wrong, so nothing more was changed. Use the settings under \u201cBy hand\u201d instead."
+    return "Something unexpected went wrong, so nothing more was changed. Use the settings under \u201cDetails for technical users\u201d instead."
 
 
 def log_failure(exc: BaseException) -> None:
@@ -309,7 +310,7 @@ def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]
     if back != want:
         raise ValueError(f"We wrote {app_name}'s settings file, but when we read it back Talent Search's entry "
                          "wasn't what we meant to write. Nothing more was changed. Use the settings under "
-                         "\u201cBy hand\u201d instead.")
+                         "\u201cDetails for technical users\u201d instead.")
     return _done(path, backup, app_name, already_connected=already, read_back=True, entry=want,
                  running=app_running("claude") if app_name == "Claude Desktop" else None,
                  quarantine=quarantine_note() if app_name == "Claude Desktop" else None)
@@ -348,6 +349,21 @@ def connect_lmstudio(path: Path | None = None, spec: LaunchSpec | None = None) -
 def lmstudio_connected(path: Path | None = None) -> bool:
     entry = _json_entry(path or lmstudio_config_path())
     return entry is not None and not check_entry(entry)
+
+
+# ------------------------------------------------------------------ Claude Code
+def claude_code_command(spec: LaunchSpec | None = None, windows: bool | None = None) -> str:
+    """The one terminal command that adds our MCP server to Claude Code for every project (user scope).
+
+    Claude Code keeps its own MCP list and reads no file we could safely write, so the person runs this once."""
+    spec = spec or mcp_launch_spec()
+    parts = ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user"]
+    for k, v in spec.env.items():
+        parts += ["--env", f"{k}={v}"]
+    parts += [SERVER_KEY, "--", spec.command, *spec.args]
+    if sys.platform == "win32" if windows is None else windows:
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
 
 
 # ------------------------------------------------------------------ Codex
@@ -411,7 +427,7 @@ def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> d
         back = None
     if not back or {k: back.get(k) for k in ("command", "args", "env")} != want:
         raise ValueError("We wrote Codex's settings file, but when we read it back Talent Search's entry wasn't "
-                         "what we meant to write. Use the settings under \u201cBy hand\u201d instead.")
+                         "what we meant to write. Use the settings under \u201cDetails for technical users\u201d instead.")
     return _done(path, backup, "Codex", read_back=True, entry=want)
 
 

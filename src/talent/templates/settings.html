@@ -1,8 +1,11 @@
 {% extends "base.html" %}
+{% from "_macros.html" import zone_list %}
 {% block title %}Settings · Talent Search{% endblock %}
 {% block body %}
 <h1>Settings</h1>
-{% if saved %}<p class="flash">Saved.</p>{% endif %}
+<nav class="fine" aria-label="Jump to">Jump to:
+  <a href="#look">Look</a> · <a href="#today">Today</a> · <a href="#hiring-for">Who you hire for</a> · <a href="#site-guards">Site guards</a> · <a href="#time-zone">Your time zone</a> · <a href="#backups">Backups</a> · <a href="#cautious">Cautious mode</a> · <a href="#ai-apps">AI apps</a> · <a href="#tour">Tour</a></nav>
+{% if saved %}<p class="flash" role="status">Saved.</p>{% endif %}
 {% if errors %}<p class="flash warn" role="alert">Nothing was saved. Fix the highlighted number{{ 's' if errors | length > 1 }} and save again.</p>{% endif %}
 <form method="post" action="/settings" class="stack">
   <section class="panel" id="look">
@@ -16,8 +19,9 @@
       {% endfor %}
     </div>
   </section>
-  <section class="panel">
+  <section class="panel" id="today">
     <h2>What shows on Today</h2>
+    <p class="fine">Pick which cards Today shows, and how many days pass before someone is flagged as waiting too long.</p>
     <input type="hidden" name="flags_shown" value="1">
     {% for key, label, help in flags %}
     <label class="check"><input type="checkbox" name="{{ key }}" value="1" {{ 'checked' if s[key] == '1' }}>
@@ -38,24 +42,25 @@
     <label class="check"><input type="radio" name="hiring_for" value="own" {{ 'checked' if inhouse() }}> <span>My own company <span class="fine">Says "Hiring team passed" and "Where each team stands".</span></span></label>
     <label class="check"><input type="radio" name="hiring_for" value="clients" {{ 'checked' if not inhouse() }}> <span>Clients <span class="fine">Says "Client passed" and "Status update for the client".</span></span></label>
   </section>
-  <section class="panel">
+  <section class="panel" id="pipeline-view">
     <h2>Pipeline view</h2>
+    <p class="fine">How the people in a job are laid out: as columns you can drag between, or as a list.</p>
     {% for v, label in [('board', 'Board, with a column per stage'), ('table', 'Table, grouped by stage')] %}
     <label class="check"><input type="radio" name="pipeline_view" value="{{ v }}" {{ 'checked' if s.pipeline_view == v }}> <span>{{ label }}</span></label>
     {% endfor %}
   </section>
   <section class="panel" id="site-guards">
     <h2>Stricter site guards</h2>
-    {% include "_site_note.html" %}
+    {% set on_settings = true %}{% include "_site_note.html" %}
     <label class="check"><input type="checkbox" name="strict_site_guards" value="1" {{ 'checked' if s.strict_site_guards == '1' }}>
       <span><strong>Stricter site guards</strong> <span class="fine">Off by default.</span></span></label>
     <p class="fine">Sites on the list: {{ guarded_sites | join(', ') }}.</p>
-    <p class="fine">When this is on, your AI app is told not to browse, crawl or bulk-collect from those sites, and it can save or propose only {{ guard_cap }} new people an hour whose source or profile link is on one of them. It guides and limits your AI app through Talent Search. It can't control what your AI app does elsewhere. Adding people yourself (paste, CSV import, the form) is never limited.</p>
+    <p class="fine">When this is on, your AI app is told to stay off those sites, and it can add only {{ guard_cap }} new people an hour whose source or profile link is on one of them. It guides and limits your AI app through Talent Search. It can't control what your AI app does elsewhere. People you add yourself (paste, CSV import, the form) are never limited.</p>
   </section>
   <div><button class="btn primary" type="submit">Save settings</button></div>
 </form>
 
-<section class="panel">
+<section class="panel" id="data">
   <h2>Your data</h2>
   <p>Everything is in one file on this computer:</p>
   <pre class="code">{{ db_file }}</pre>
@@ -67,8 +72,8 @@
   <h2>Your time zone</h2>
   <p class="fine">Today, timelines, your AI app's replies and times you type use it. Client updates use each client's own zone. Leave it blank to use this computer's ({{ computer_zone() }}){% if shown_zone_name() and not user_zone() %}; for now times show in your company's zone, {{ shown_zone_name() }}, since this computer is on UTC{% endif %}.</p>
   <form method="post" action="/settings/time-zone" class="inline">
-    <label class="inline-label">Time zone <input type="text" name="time_zone" value="{{ user_zone() or '' }}" list="user-zones" placeholder="America/Chicago, or ET, CT, MT, PT"></label>
-    <datalist id="user-zones">{% for z in common_zones %}<option value="{{ z }}">{% endfor %}</datalist>
+    <label class="inline-label">Time zone <input type="text" name="time_zone" value="{{ user_zone() or '' }}" list="zone-list" autocomplete="off" placeholder="America/Chicago, or ET, CT, MT, PT"></label>
+    {{ zone_list() }}
     <button class="btn" type="submit">Save</button>
   </form>
 </section>
@@ -102,7 +107,8 @@
 
 <section class="panel" id="cautious">
   <h2>Cautious mode</h2>
-  <p>When it's on, your AI app's changes to saved details, moves into Hired or out, job and stage changes and closes, the notes, interviews and feedback it logs, interview cancels, new times and outcomes, a client's contacts, a job's hiring manager email (a new one too), marking your own to-dos done, and Mark as sent wait on <a href="/review">Review</a> until you keep or pass them. Filling other empty fields and adding new people still apply straight away. Each AI session can be kept or passed in one go.</p>
+  <p>Cautious mode makes your AI app ask you before it makes bigger changes. For example, it can't move someone to Hired until you press Keep on Review.</p>
+  <p class="fine">In detail, when it's on, your AI app's changes to saved details, moves into Hired or out, job and stage changes and closes, the notes, interviews and feedback it logs, interview cancels, new times and outcomes, a client's contacts, a job's hiring manager email (a new one too), marking your own to-dos done, and Mark as sent wait on <a href="/review">Review</a> until you keep or pass them. Filling other empty fields and adding new people still apply straight away. Each AI session can be kept or passed in one go.</p>
   <p class="fine">Other stage moves, a move to Offer included, are not held unless you turn on Hold every stage move.</p>
   <form method="post" action="/settings/cautious" class="stack">
     <label class="check"><input type="checkbox" name="ai_cautious" value="1" {{ 'checked' if s.ai_cautious == '1' }}>
@@ -110,18 +116,18 @@
     <label class="check"><input type="checkbox" name="ai_hold_contacts" value="1" {{ 'checked' if s.ai_hold_contacts == '1' }}>
       <span><strong>Hold new emails and phones too</strong> <span class="fine">An email or phone your AI app adds to someone saved waits, not only one it replaces.</span></span></label>
     <label class="check"><input type="checkbox" name="ai_hold_moves" value="1" {{ 'checked' if s.ai_hold_moves == '1' }}>
-      <span><strong>Hold every stage move</strong> <span class="fine">Every move waits, a move to Offer included, not only moves into Hired or out.</span></span></label>
+      <span><strong>Hold every stage move</strong> <span class="fine">Every stage move waits for your Keep, even a move to Offer. Without this, only moves into Hired or out wait.</span></span></label>
     <div><button class="btn" type="submit">Save</button> <a class="btn ghost" href="/review">Review AI changes</a></div>
   </form>
 </section>
 
 <section class="panel" id="ai-apps">
   <h2>AI apps</h2>
-  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and Keep makes it once. <strong>Trusted</strong> apps follow the rules above: Cautious mode, the hourly limits and Undo.</p>
+  <p>Each AI app that connects is listed here, by the name it gives itself. <strong>Read only</strong> apps can search and read but can't change anything. <strong>Suggest only</strong> apps send every change to <a href="/review">Review</a>, and nothing happens until you press Keep. <strong>Trusted</strong> apps can make changes on their own, within the Cautious mode rules above, and you can Undo anything they do. A move to Hired and a job close still wait on Review, unless you turn on the switch below.</p>
   {% if ai_apps %}
   <form method="post" action="/settings/ai-apps" class="stack">
     <div class="table-wrap"><table class="table">
-      <thead><tr><th>AI app</th><th>First seen</th><th>Last seen</th><th>Writes</th><th>Trust</th></tr></thead>
+      <thead><tr><th>AI app</th><th>First seen</th><th>Last seen</th><th>Changes made</th><th>What it may do</th></tr></thead>
       <tbody>
       {% for a in ai_apps %}
         <tr>
@@ -135,14 +141,20 @@
       </tbody>
     </table></div>
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
-      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Tick this to have every new AI app wait for your Keep on each change until you trust it. Left unticked, a new app can make changes as soon as it connects, unless another app here is already set to Read only or Suggest only.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% else %}
   <p class="fine">No AI app has connected yet. Once one does, it shows up here.</p>
   <form method="post" action="/settings/ai-apps" class="stack">
     <label class="check"><input type="checkbox" name="new_apps" value="suggest" {{ 'checked' if new_apps_level == 'suggest' }}>
-      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Off by default, so a new app starts as Trusted. Even then, a new app starts at Suggest only while any app above is set to Read only or Suggest only, so a renamed app can't slip past.</span></span></label>
+      <span><strong>New AI apps start at Suggest only</strong> <span class="fine">Tick this to have every new AI app wait for your Keep on each change until you trust it. Left unticked, a new app can make changes as soon as it connects, unless another app here is already set to Read only or Suggest only.</span></span></label>
+    <input type="hidden" name="hired_shown" value="1">
+    <label class="check"><input type="checkbox" name="ai_trusted_hired" value="1" {{ 'checked' if s.ai_trusted_hired == '1' }}>
+      <span><strong>Let trusted AI apps mark people Hired and close jobs</strong> <span class="fine">Off by default, so a move to Hired and a job close wait on Review even for a Trusted app.</span></span></label>
     <div><button class="btn" type="submit">Save</button></div>
   </form>
   {% endif %}
@@ -163,9 +175,9 @@
 
 <section class="panel" id="tour">
   <h2>Take the tour</h2>
-  <p>A short walk through the pages, with the buttons to connect your AI app. It only looks: it never adds or removes anything.</p>
+  <p>A short walk through the pages. It only looks: it never adds or removes anything.</p>
   <form method="post" action="/tour/start" class="actions-inline"><input type="hidden" name="mode" value="short"><button class="btn" type="submit">Take the tour</button></form>
-  <p class="fine">Want the first-run version, with made-up demo people to click on? It adds them only if you say so, and clears them when it ends. People you worked with are kept unless you tick the box to delete them.</p>
+  <p class="fine">Want to practice on made-up people? The full tour adds some only if you say so, and clears them when it ends.</p>
   <form method="post" action="/tour/start"><input type="hidden" name="mode" value="full"><button class="btn" type="submit">Take the full tour</button></form>
 </section>
 

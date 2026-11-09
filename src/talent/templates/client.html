@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import zone_list %}
 {% set word = 'company' if inhouse() else 'client' %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
@@ -59,7 +60,7 @@
 <section class="panel">
   <h2>Funnel</h2>
   <table class="dense">
-    <thead><tr><th>Stage group</th><th>In play now</th><th>Moved in this period</th></tr></thead>
+    <thead><tr><th scope="col">Stage group</th><th scope="col">In play now</th><th scope="col">Moved in this period</th></tr></thead>
     <tbody>{% for g, label in groups %}{% if rep.stand[g] or rep.period[g] %}
     <tr><td>{{ labels[g] }}</td><td>{{ rep.stand[g] if g not in ('hired', 'out') else '' }}</td><td>{{ rep.period[g] }}</td></tr>
     {% endif %}{% endfor %}</tbody>
@@ -87,7 +88,7 @@
   <h2>Submittals</h2>
   {% if submittals %}
   <table class="dense">
-    <thead><tr><th>Date</th><th>Person</th><th>Job</th><th>Stage</th></tr></thead>
+    <thead><tr><th scope="col">Date</th><th scope="col">Person</th><th scope="col">Job</th><th scope="col">Stage</th></tr></thead>
     <tbody>{% for s in submittals %}
     <tr><td class="nowrap">{% if s.undated %}<span class="muted">Date unknown (imported)</span>{% else %}{{ in_zone(s.at, None, '%b %-d, %Y') }}{% if s.imported %} <span class="muted">imported</span>{% endif %}{% endif %}</td><td><a href="/candidates/{{ s.candidate_id }}">{{ s.name }}</a></td><td>{{ s.job }}</td><td>{{ s.stage }}</td></tr>
     {% endfor %}</tbody>
@@ -101,8 +102,8 @@
   <form class="form" method="post" action="/clients/{{ c.slug }}">
     <label>Name<input type="text" name="name" value="{{ c.name }}" maxlength="200"></label>
     <label>Update day<select name="update_day"><option value="">No set day</option>{% for d in days %}<option value="{{ d }}" {{ 'selected' if c.update_day == d }}>{{ d }}</option>{% endfor %}</select></label>
-    <label>Time zone<input type="text" name="time_zone" value="{{ c.time_zone or '' }}" list="zones" placeholder="America/New_York, or ET, CT, MT, PT"></label>
-    <datalist id="zones">{% for z in zones %}<option value="{{ z }}">{% endfor %}</datalist>
+    <label>Time zone<input type="text" name="time_zone" value="{{ c.time_zone or '' }}" list="zone-list" autocomplete="off" placeholder="America/New_York, or ET, CT, MT, PT"></label>
+    {{ zone_list() }}
     <label class="wide">Contacts (one per line; Email this update goes to the first email, with the others on Cc)<textarea name="contacts" rows="3" maxlength="3000">{{ c.contacts or '' }}</textarea></label>
     <label class="wide">Notes<textarea name="notes" rows="4" maxlength="5000">{{ c.notes or '' }}</textarea></label>
     <div class="actions"><button class="btn primary" type="submit">Save</button></div>

@@ -7,8 +7,13 @@
   <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a></div>
 </div>
 <p class="lead">People who may be saved twice: the same email or LinkedIn, the same name and phone or company, or a name that could be the same person at the same company. Nothing changes until you press Compare and merge, and you see both profiles first. A backup is saved before every merge.</p>
+{% if reasons | length > 1 or reason %}<p class="filter-chips" role="group" aria-label="Show pairs by reason">
+  <span class="fine">Show:</span>
+  <a class="chip{{ ' on' if not reason }}" href="/candidates/duplicates"{% if not reason %} aria-current="true"{% endif %}>All pairs ({{ all_total }})</a>
+  {% for r in reasons %}<a class="chip{{ ' on' if reason == r.slug }}" href="/candidates/duplicates?reason={{ r.slug }}"{% if reason == r.slug %} aria-current="true"{% endif %}>{{ r.label }} ({{ r.count }})</a>{% endfor %}
+</p>{% endif %}
 {% if not total %}
-<p class="panel">No likely duplicates right now.</p>
+<p class="panel">{% if reason %}No pairs with this reason right now. <a href="/candidates/duplicates">Show all pairs</a>.{% else %}No likely duplicates right now.{% endif %}</p>
 {% else %}
 {% macro person(c) -%}
 <div class="dup-person">
@@ -20,26 +25,29 @@
 <div class="actions-inline dup-bulk">
   {% if exact_count %}<a class="btn" href="/candidates/duplicates/merge-exact">Merge all exact email or LinkedIn matches ({{ exact_count }})</a>{% endif %}
   <form method="post" action="/candidates/duplicates/dismiss-many" id="bulk-dismiss" class="inline">
+    <input type="hidden" name="reason" value="{{ reason }}">
     <label class="check"><input type="checkbox" data-check-all data-check-name="pair" aria-label="Tick every pair shown"> <span class="fine">Tick every pair shown</span></label>
+    {% if total > rows | length %}<label class="check"><input type="checkbox" name="all_filtered" value="1"> <span class="fine">Use all {{ total }} pairs{% if reason %} for "{{ reason_label }}"{% endif %}, not only the {{ rows | length }} shown</span></label>{% endif %}
+    <button class="btn primary" type="submit" formaction="/candidates/duplicates/merge-review">Merge ticked pairs</button>
     <button class="btn" type="submit">Not the same person, for the ticked pairs</button>
   </form>
 </div>
 <ul class="items dup-list">
   {% for r in rows %}
   <li class="panel dup-pair">
-    {% set why = r.reasons | join(', ') %}<p class="fine"><label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" form="bulk-dismiss" aria-label="Pick the pair {{ r.a.name }} and {{ r.b.name }}"> <strong>{{ why[:1] | upper }}{{ why[1:] }}</strong></label></p>
+    {% set why = r.reasons | join(', ') %}<p class="fine"><label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" form="bulk-dismiss" aria-label="Pick the pair {{ r.a_label }} and {{ r.b_label }}"> <strong>{{ why[:1] | upper }}{{ why[1:] }}</strong></label></p>
     <div class="connect-grid">{{ person(r.a) }}{{ person(r.b) }}</div>
     <div class="actions-inline">
-      <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}" aria-label="Compare and merge {{ r.a.name }} and {{ r.b.name }}">Compare and merge</a>
+      <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}" aria-label="Compare and merge {{ r.a_label }} and {{ r.b_label }}">Compare and merge</a>
       <form method="post" action="/candidates/duplicates/dismiss" class="inline">
         <input type="hidden" name="a" value="{{ r.keep }}"><input type="hidden" name="b" value="{{ r.other }}">
-        <button class="btn" type="submit" aria-label="Not the same person: {{ r.a.name }} and {{ r.b.name }}">Not the same person</button>
+        <button class="btn" type="submit" aria-label="Not the same person: {{ r.a_label }} and {{ r.b_label }}">Not the same person</button>
       </form>
     </div>
   </li>
   {% endfor %}
 </ul>
-{% if total > shown %}<p class="pager"><a href="/candidates/duplicates?shown={{ shown + 50 }}">Show more ({{ total - shown }} left)</a></p>{% endif %}
+{% if total > shown %}<p class="pager"><a href="/candidates/duplicates?shown={{ shown + 50 }}{{ '&reason=' ~ reason if reason }}">Show more ({{ total - shown }} left)</a></p>{% endif %}
 {% endif %}
 {% if dismissed %}
 <form method="post" action="/candidates/duplicates/reset" class="inline" data-confirm="Show the {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} you said are different people again?">

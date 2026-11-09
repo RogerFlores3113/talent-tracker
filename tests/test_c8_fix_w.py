@@ -77,7 +77,11 @@ def test_sequence_goes_up(store):
     a = interviews.ics_event(row, datetime(2026, 11, 1, tzinfo=timezone.utc))
     b = interviews.ics_event(row, datetime(2026, 11, 2, tzinfo=timezone.utc))
     seq = lambda ev: int(next(x for x in ev if x.startswith("SEQUENCE:")).split(":")[1])
-    assert seq(b) > seq(a)
+    assert a == b  # cycle 10 wave 2: an unchanged interview downloads the same whenever it is downloaded
+    store.update_interview(t["id"], at="2999-01-06T15:00:00+00:00")
+    row2 = store._row("""SELECT t.*, c.name AS candidate_name, NULL AS job_title, NULL AS job_company FROM timeline t
+                         JOIN candidates c ON c.id = t.candidate_id WHERE t.id = ?""", (t["id"],))
+    assert seq(interviews.ics_event(row2, datetime(2026, 11, 3, tzinfo=timezone.utc))) > seq(a)
 
 
 def test_week_start_is_monday_on_or_before():

@@ -113,7 +113,10 @@ profile can't blank out what the recruiter filled in.
   Francisco, `swe` to software engineer, etc.). User input is tokenized, never
   passed as FTS syntax, so quotes or operators can't break it.
 - **Query language (`searchquery.py`):** `"machine learning"` (phrase), `python OR go`
-  (OR in capitals, or a lowercase `or` between two words), `-recruiter` or `NOT manager`
+  (OR in capitals, or a lowercase `or` between two words), `python NEAR django` /
+  `NEAR/3` (FTS5 NEAR; only capital NEAR or NEAR/n counts, a bare "near" is a word; mistyped
+  prefixes like `skil:` get a "Did you mean" and are searched as plain words; OR/phrase/NEAR
+  searches get typo help as a suggestion only), `-recruiter` or `NOT manager`
   (leave out people who have that exact word, not stems), and field prefixes
   `title:`, `company:`, `location:`, `skill:`/`tag:`, `source:` that set the same
   filters as the Candidates bar. Prefix values keep their punctuation (`skill:c++`,
@@ -124,7 +127,12 @@ profile can't blank out what the recruiter filled in.
   built from quoted pieces, so nothing typed is ever syntax; a lone OR, an unbalanced
   quote or `title:` with nothing after it is dropped or read as plain words. Parentheses
   are not supported (ignored). Plain words keep the everyday search (typo help, notes,
-  closest matches); a phrase or OR uses a simpler operator search on profile text only.
+  closest matches); a phrase, OR or NEAR uses the operator search, which reads the same places (profile, pipeline
+  jobs, Found via and timeline notes) but offers typo fixes as "Did you mean" only, so it never finds fewer people
+  than its parts. c#, c++, f# and .net are words of their own: the index reads them as csharp, cplusplus and dotnet
+  (SQL function `tt_sym`, applied through the `candidates_sym` view and the triggers; migration v10q), and the
+  excerpts show them back as typed. A prefix typed twice, or typed while the same More filters field is set, means
+  either value (OR), and the read-back line says so.
   Exclusions and prefixes work with both. A query that uses any of this, or any newer
   filter, is answered by FTS5 even when Typesense is on.
 - **Newer filters** (`candidate_filters`, the Candidates "More filters", `search_candidates`):

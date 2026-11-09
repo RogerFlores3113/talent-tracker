@@ -31,7 +31,7 @@
       {% for i in p.interviews %}
       <div class="iv" id="iv-{{ i.interview_id }}">
         <div><strong>{{ i.name }}</strong>{% if i.interviewer %} <span class="fine">with {{ i.interviewer }}</span>{% endif %}</div>
-        <div class="fine">{{ i.at | local(IV_TIME) }} · <span class="badge{{ ' overdue' if i.needs_outcome }}">{{ i.outcome }}</span></div>
+        <div class="fine">{{ i.at_local }} · <span class="badge{{ ' overdue' if i.needs_outcome }}">{{ i.outcome }}</span></div>
         {% if i.verdicts | length > 1 or (i.verdicts and i.verdicts | selectattr('label') | list) %}
         <div class="fine">{% for v in i.verdicts %}{{ v.name or 'Unnamed' }}: {{ v.label or 'not recorded' }}{{ ' · ' if not loop.last }}{% endfor %}</div>
         {% endif %}

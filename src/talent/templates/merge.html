@@ -2,8 +2,6 @@
 {% from "_macros.html" import chips, sub %}
 {% block title %}Merge {{ other.name }} into {{ keep.name }} · Talent Search{% endblock %}
 {% block body %}
-{% set same_name = keep.name | trim | lower == other.name | trim | lower %}
-{% macro nm(c, clash) %}{{ c.name }}{% if clash %} (id {{ c.id }}){% endif %}{% endmacro %}
 {% macro person(c, heading, clash) -%}
 <section class="panel">
   <p class="fine">{{ heading }}{% if clash %} (id {{ c.id }}){% endif %}</p>
@@ -21,14 +19,20 @@
 </section>
 {%- endmacro %}
 <h1>Merge these two?</h1>
-<p class="lead">Talent Search keeps {{ nm(keep, same_name) }}, fills in anything that profile is missing from {{ nm(other, same_name) }}, adds their skills, and moves their timeline, work history and jobs over. Where both have a different value, {{ nm(keep, same_name) }}'s value is kept and {{ nm(other, same_name) }}'s is written on the timeline. Then {{ nm(other, same_name) }} is deleted. If both are in the same job, the further stage is kept. A backup is saved first.</p>
+<p class="lead">Talent Search keeps {{ keep_label }}, fills in anything that profile is missing from {{ other_label }}, adds their skills, and moves their timeline, work history and jobs over. Where both have a different value, {{ keep_label }}'s value is kept and {{ other_label }}'s is written on the timeline. Then {{ other_label }} is deleted. If both are in the same job, the further stage is kept. A backup is saved first.</p>
 <div class="connect-grid">
-  {{ person(keep, 'Keep this one', same_name) }}
-  {{ person(other, 'Merge in and delete this one', same_name) }}
+  {{ person(keep, 'Keep this one', keep_label != keep.name) }}
+  {{ person(other, 'Merge in and delete this one', other_label != other.name) }}
 </div>
-<form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="actions-inline">
-  <button class="btn primary" type="submit">Merge into {{ nm(keep, same_name) }}</button>
-  <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ nm(other, same_name) }} instead</a>
+<form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="stack">
+  {% if emails | length > 1 %}<fieldset class="panel"><legend>Which email is their main one?</legend>
+    <p class="fine">Every address is kept. The one you pick is shown first and used for email. The rest stay as other emails.</p>
+    {% for e in emails %}<label class="check"><input type="radio" name="primary_email" value="{{ e }}" {{ 'checked' if e == default_email or (loop.first and not default_email) }}> <span>{{ e }}</span></label>
+    {% endfor %}</fieldset>{% endif %}
+  <div class="actions-inline">
+  <button class="btn primary" type="submit">Merge into {{ keep_label }}</button>
+  <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ other_label }} instead</a>
   <a class="btn" href="/candidates/{{ keep.id }}">Cancel</a>
+  </div>
 </form>
 {% endblock %}

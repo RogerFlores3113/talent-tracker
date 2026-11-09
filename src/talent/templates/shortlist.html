@@ -34,7 +34,7 @@
       <div class="prospect-main">
         <strong>{{ p.name }}</strong>
         <span class="muted">{{ p.title or '' }}{% if p.company %} at {{ p.company }}{% endif %}{% if p.location %} · {{ p.location }}{% endif %}</span>
-        {% if p.linkedin_url %}<a href="{{ p.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ p.linkedin_url | profile_label }}</a>{% endif %}
+        {% if p.linkedin_url %}<a href="{{ p.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ p.linkedin_url | profile_label }}<span class="sr-only"> (opens in a new tab)</span></a>{% endif %}
         {% if p.fit %}<div class="fit">{{ p.fit }}</div>{% endif %}
         {% if p.tags %}<div class="fine">Skills: {{ p.tags | join(', ') }}</div>{% endif %}
         {% for line in p.check_lines %}<div class="fine check">{% if line.startswith('Passed on for ') %}<strong>{{ line }}</strong>{% else %}{{ line }}{% endif %}</div>{% endfor %}
