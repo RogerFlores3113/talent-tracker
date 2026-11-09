@@ -74,7 +74,7 @@ def test_connect_page_and_button(store, tmp_path, monkeypatch):
     r = c.post("/connect/claude")
     assert "Quit Claude Desktop completely" in r.text and "Settings &gt; Developer" in r.text
     assert (tmp_path / "claude.json").exists()
-    assert "Connected." in c.get("/connect").text
+    assert "Added to Claude Desktop's settings." in c.get("/connect").text
     assert "Restart Codex" in c.post("/connect/codex").text
     assert c.post("/connect/nope").status_code == 404
 
