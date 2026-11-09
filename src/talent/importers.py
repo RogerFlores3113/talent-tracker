@@ -34,44 +34,52 @@ EXPORT_NOTES_CHARS = 5000   # and at most this much text
 # Header words people use in spreadsheets, mapped to our fields. An exact header match beats a
 # partial one, and a longer hint beats a shorter one ("Job Title" is a title before "Role" is).
 _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("email", ("email", "e-mail", "mail", "email address", "e-mail address", "work email", "personal email")),
-    ("linkedin_url", ("linkedin", "profile url", "li url", "linkedin url", "linkedin profile")),
-    ("phone", ("phone", "mobile", "cell", "tel", "telephone", "phone number", "cellphone")),
+    ("email", ("email", "e-mail", "mail", "email address", "e-mail address", "work email", "personal email",
+               "emails", "primary email", "email addresses")),
+    ("linkedin_url", ("linkedin", "profile url", "li url", "linkedin url", "linkedin profile",
+                      "public profile url", "linkedin profile url", "linkedin link", "profile link")),
+    ("phone", ("phone", "mobile", "cell", "tel", "telephone", "phone number", "cellphone", "phones",
+               "phone numbers", "mobile phone", "primary phone")),
     ("website", ("website", "github", "portfolio", "site", "url", "homepage")),
     ("current_title", ("title", "role", "position", "headline", "job title", "current title", "current role",
-                       "current position", "job")),
+                       "current position", "job", "current job title", "latest title", "present title")),
     ("current_company", ("company", "employer", "organization", "organisation", "current company",
                          "current employer", "company name")),
-    ("location", ("location", "city", "based", "based in", "country", "region", "state", "province")),
-    ("tags", ("skills", "tags", "keywords", "tech", "stack", "tech stack")),
+    ("location", ("location", "city", "based", "based in", "country", "region", "state", "province", "address",
+                  "current location", "geography", "metro area")),
+    ("tags", ("skills", "tags", "keywords", "tech", "stack", "tech stack", "labels", "skill set", "top skills")),
     ("note", ("notes", "note", "comments", "comment", "salary", "salary expectation", "notice", "notice period",
-              "feedback", "connected on", "date connected")),
-    ("about", ("about", "summary", "bio", "description")),
+              "feedback", "connected on", "date connected", "years of experience", "years experience",
+              "experience years", "total experience", "yoe")),
+    ("about", ("about", "summary", "bio", "description", "profile summary")),
     ("source", ("source", "found via", "referral", "channel", "where we met", "met at", "how we met", "met via",
-                "how found", "found through", "lead source")),
+                "how found", "found through", "lead source", "sources", "candidate source")),
     ("last_contacted_at", ("last contacted", "last contact", "contacted", "last spoke", "last spoken",
                            "last touch", "last reached out")),
     # A colour tag (red, orange, yellow, green, blue, purple). "Flag" only when it is the whole header.
     ("color", ("color", "colour", "flag", "color tag", "colour tag")),
     # Pipeline columns: which job a row is for, at which client, and where they are in it.
     ("job_title", ("requisition", "req", "job req", "opening", "job opening", "position applied", "applied for",
-                   "role", "job")),
+                   "role", "job", "posting", "project", "job name", "job applied", "applied job")),
     ("job_company", ("client", "client company", "client name", "hiring company", "account")),
-    ("stage", ("status", "stage", "pipeline stage", "pipeline status", "candidate status")),
+    ("stage", ("status", "stage", "pipeline stage", "pipeline status", "candidate status", "current stage",
+               "stage name", "application status", "application stage")),
     # Dates: when the person was first added, and when they reached their stage. Exact headers only, so a
     # "Created by" or "Added by" column is never read as a date.
     ("created_at", ("date added", "added", "added on", "created", "created at", "created on", "date created",
-                    "date entered", "created date", "creation date")),
+                    "date entered", "created date", "creation date", "application date", "applied at", "applied on",
+                    "date applied", "applied date", "application created at", "application created",
+                    "application created date")),
     ("stage_changed_at", ("stage date", "date moved", "last stage change", "stage changed", "stage changed at",
                           "status date", "status changed", "date of last stage change", "moved on",
                           "stage entered", "date stage entered", "stage entered date", "stage entered on",
                           "entered stage", "date entered stage", "status entered", "status entered date")),
     # Who owns the person in the ATS: kept as a tag ("Recruiter: Marcus"), so it can be searched.
-    ("tag_column", ("recruiter", "recruiter name", "assigned recruiter")),
+    ("tag_column", ("recruiter", "recruiter name", "assigned recruiter", "sourced by", "sourcer", "coordinator")),
 )
 _EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
-_PIPELINE_ONLY_HINTS = {"role", "job"}
+_PIPELINE_ONLY_HINTS = {"role", "job", "project"}
 _MULTI_TARGETS = {"location", "note", "tag_column"}  # several columns may feed these
 # A note column with one of these headers holds the note itself; any other note column ("Connected On",
 # "Salary") keeps its header in front of the value, so the note still says what it is.
@@ -80,7 +88,8 @@ _PLAIN_NOTE_HEADERS = {"notes", "note", "comments", "comment", "feedback", "rema
 _DATED_NOTE_HEADERS = {"connected on", "date connected"}
 FIRST_NAME = ("first name", "firstname", "given name", "first")
 LAST_NAME = ("last name", "lastname", "surname", "family name", "last")
-FULL_NAME = ("name", "full name", "candidate", "candidate name", "contact", "contact name")
+FULL_NAME = ("name", "full name", "candidate", "candidate name", "contact", "contact name", "applicant",
+             "applicant name", "candidate full name")
 
 # "note" is not a candidate field: it becomes a note on the candidate's timeline. "notes" is our own
 # export's Notes column (several notes split by " | "). job_title, job_company and stage put the person
@@ -171,6 +180,43 @@ def looks_like_linkedin_export(header: list[str]) -> bool:
     return {"first name", "last name", "url"} <= low and ("connected on" in low or "position" in low)
 
 
+def detect_export(header: list[str]) -> str | None:
+    """Which tool a file was exported from, from its column headers: "LinkedIn connections", "Lever",
+    "Greenhouse", "Ashby", "Gem", "Workable", "SeekOut", "hireEZ" or "LinkedIn Recruiter". None when it isn't a
+    shape we know. Only used to say so on the preview ("Looks like a Lever export"): the columns are matched
+    by name either way."""
+    h = {_norm_header(x) for x in header}
+    if looks_like_linkedin_export(header):
+        return "LinkedIn connections"
+    if looks_like_our_export(header):
+        return None
+    if {"emails", "phones"} <= h and h & {"links", "origin", "posting", "sources", "owner", "stage"}:
+        return "Lever"
+    if ("candidate id" in h or "candidate name" in h) and h & {"current stage", "recruiter", "coordinator",
+                                                               "application date"}:
+        return "Greenhouse"
+    if "sourced by" in h and h & {"project", "stage", "date added"}:
+        return "Gem"
+    if "application created at" in h or ({"phone number", "linkedin url", "stage", "job"} <= h and "name" in h):
+        return "Ashby"
+    if {"work email", "personal email"} & h and ("profile url" in h or "mobile phone" in h):
+        return "hireEZ"
+    if {"city", "state", "country", "current company", "years of experience"} <= h:
+        return "SeekOut"
+    if "public profile url" in h or ({"first name", "last name", "headline", "current company", "current title"} <= h):
+        return "LinkedIn Recruiter"
+    if {"candidate", "headline", "stage", "job"} <= h:
+        return "Workable"
+    return None
+
+
+def export_phrase(name: str | None) -> str:
+    """'a Lever export', 'an Ashby export', 'a LinkedIn connections export'."""
+    if not name:
+        return ""
+    return f"{'an' if name[:1] in 'AEIOU' else 'a'} {name} export"
+
+
 def looks_like_our_export(header: list[str]) -> bool:
     return {EXPORT_HEADERS[k] for k in ("name", "jobs", "notes", "created_at", "updated_at")} <= set(header)
 
@@ -186,6 +232,9 @@ def _hint_score(low: str, hint: str) -> int:
     if re.search(rf"(?<![a-z]){re.escape(hint)}(?![a-z])", low):
         return 10 * len(hint) + 5
     return 10 * len(hint) if len(hint) >= 4 and hint in low else 0
+
+
+_EXTRA_CONTACT = re.compile(r"^(?:[a-z]+ )?(?:e ?mail|phone|mobile|cell)(?: (?:address|number|\d))?$")
 
 
 def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> list[str]:
@@ -232,9 +281,17 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
             continue
         out[col] = f
         used.add(f)
+    for col, low in enumerate(lows):  # a second email or phone column ("Work Email" after "Email"): kept as a note
+        if not out[col] and header[col].strip() and (_EXTRA_CONTACT.match(low) or low == "headline"):
+            out[col] = "note"
     if "job_title" not in used:  # a client or status means nothing without the job itself
         out = ["" if f in ("job_company", "stage") else f for f in out]
     return out
+
+
+_LOC_RANK = {"city": 0, "town": 0, "state": 1, "province": 1, "region": 1, "county": 1, "state province": 1,
+             "country": 2, "country region": 2}
+_PHONE_SPLIT = re.compile(r"\s*[;|\n]\s*|,\s+(?=[+(\d])")
 
 
 def _cell(v: str) -> str:
@@ -300,6 +357,8 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
         dates: dict[str, str] = {}
         job = {"job_title": "", "job_company": "", "stage": ""}
         first = last = ""
+        loc_parts: list[tuple[int, str]] = []
+        site = ""
         for col, target in enumerate(mapping):
             if not target or col >= len(r):
                 continue
@@ -355,12 +414,32 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 job[target] = v
             elif target == "jobs":
                 jobs.extend((t, c, s, True, n) for t, c, s in _parse_jobs_cell(v))
-            elif target == "location" and target in data:
-                data[target] = f"{data[target]}, {v}"
+            elif target == "location":  # City, State, Country columns: one location, small to large
+                loc_parts.append((_LOC_RANK.get(_norm_header(col_name), 0), v))
+            elif target == "email" and "email" not in data and len(set(_EMAIL.findall(v))) > 1:
+                first_email, *more = dict.fromkeys(e.lower() for e in _EMAIL.findall(v))
+                data["email"] = first_email  # several in one cell: the first is theirs, the rest stay as a note
+                notes.append("Other emails: " + ", ".join(more))
+            elif target == "phone" and "phone" not in data and len(_PHONE_SPLIT.split(v)) > 1:
+                first_phone, *more_phones = [x.strip() for x in _PHONE_SPLIT.split(v) if x.strip()]
+                data["phone"] = first_phone
+                if more_phones:
+                    notes.append("Other phones: " + ", ".join(more_phones))
+            elif (target == "linkedin_url" and "linkedin_url" not in data and not _LINKEDIN.fullmatch(v)
+                  and (_LINKEDIN.search(v) or _URL.search(v))):
+                # Lever's Links cell: "linkedin.com/in/x; github.com/x". The LinkedIn one is theirs, another is a site.
+                li = _LINKEDIN.search(v)
+                if li:
+                    data["linkedin_url"] = li.group(0)
+                site = site or _website(v.replace(li.group(0), " ") if li else v) or ""
             elif target == "about" and target in data:
                 data[target] = f"{data[target]}\n{v}"
             elif target not in data:
                 data[target] = v
+        if loc_parts:
+            data["location"] = ", ".join(dict.fromkeys(v for _, v in sorted(loc_parts, key=lambda x: x[0])))
+        if site and "website" not in data:
+            data["website"] = site
         if not data.get("name") and (first or last):
             data["name"] = f"{first} {last}".strip()
         if data.get("current_title") and not data.get("current_company"):
@@ -1816,6 +1895,8 @@ def _skills_section(lines: list[str]) -> list[str]:
                     break
                 body.append(nxt)
         tags = []
+        body = [b for b in body if not re.match(r"(?i)^(?:show|see|view)\s+(?:all|more)\b|^\+\s*\d+|^endorsed by\b",
+                                                b.strip())]
         for part in re.split(r"[,;|•·]|\s{2,}", " , ".join(body)):
             t = re.sub(r"^[-*–\s]+|\s*\(?\d+\s*endorsements?\)?$", "", part.strip(), flags=re.I).strip(" .")
             if t and len(t) <= 40 and len(t.split()) <= 4 and not re.search(r"endorse|\d{3,}", t, re.I):
@@ -1823,6 +1904,13 @@ def _skills_section(lines: list[str]) -> list[str]:
         if tags:
             return split_tags(tags)[:40]
     return []
+
+
+_EMPLOY = r"(?:full-time|part-time|contract|freelance|self-employed|internship|seasonal|apprenticeship|temporary)"
+# "3 yrs 2 mos", "Full-time · 3 yrs": a company's total time on LinkedIn, before the roles listed under it.
+_TOTAL_TIME = re.compile(rf"^(?:{_EMPLOY}\s*·\s*)?\d+\s*(?:yrs?|years?)(?:\s+\d+\s*(?:mos?|months?))?$"
+                         rf"|^(?:{_EMPLOY}\s*·\s*)?\d+\s*(?:mos?|months?)$", re.I)
+_EMPLOYMENT = re.compile(rf"·\s*{_EMPLOY}\b", re.I)
 
 
 def _experience_section(lines: list[str]) -> list[dict[str, str]]:
@@ -1840,11 +1928,27 @@ def _experience_section(lines: list[str]) -> list[dict[str, str]]:
         body.append(line)
     out: list[dict[str, str]] = []
     used = -1
+    group = ""  # LinkedIn's one company, several roles layout: company, its total time, then each role
     for i, line in enumerate(body):
         m = _RANGE.search(line)
         if not m:
+            if i + 1 < len(body) and _TOTAL_TIME.match(body[i + 1].strip()) and not _TOTAL_TIME.match(line.strip()):
+                group = re.split(r"\s+·\s+", line)[0].strip()
+                used = i + 1
             continue
-        span = {"start": m["start"].strip(), "end": "now" if m["end"].lower() in ("present", "now", "current", "today")
+        dates_only = not re.sub(r"\s*·?\s*\d+\s*(?:yrs?|years?)(?:\s+\d+\s*(?:mos?|months?))?\b|\s*·?\s*\d+\s*(?:mos?|months?)\b",
+                                "", _RANGE.sub("", line), flags=re.I).strip(" ·-–|")
+        if group and dates_only and i - 1 > used and _EMPLOYMENT.search(body[i - 1]):
+            group = ""  # title, then "Company · Full-time", then dates: the usual layout again
+        if group and dates_only and i - 1 > used:
+            title = body[i - 1].strip()
+            if title and len(title) <= 80 and not re.search(r"\b\d+\s*(?:yrs?|mos?)\b", title, re.I):
+                out.append({"title": title, "company": group, "start": m["start"].strip(),
+                            "end": "now" if m["end"].lower() in ("present", "now", "current", "today")
+                            else m["end"].strip()})
+                used = i
+                continue
+        span ={"start": m["start"].strip(), "end": "now" if m["end"].lower() in ("present", "now", "current", "today")
                 else m["end"].strip()}
         rest = (line[:m.start()] + " " + line[m.end():]).strip()
         rest = re.sub(r"\s*·\s*\d+\s*(?:yrs?|mos?|years?|months?)\b.*$", "", rest, flags=re.I)
@@ -1917,7 +2021,8 @@ def _website(text: str) -> str | None:
 
 def _is_name(line: str) -> bool:
     return (len(line) <= 60 and not _EMAIL.search(line) and "http" not in line and not _BARE.search(line.lower())
-            and 1 <= len(line.split()) <= 5 and not any(ch.isdigit() for ch in line))
+            and 1 <= len(line.split()) <= 5 and not any(ch.isdigit() for ch in line)
+            and not (len(line.split()) >= 4 and line == line.lower()))
 
 
 _HEADER = re.compile(r"(?im)^\s*(from|to|cc|bcc|reply-to|sent|date|subject)\s*:\s*(.*)$")
@@ -2001,6 +2106,47 @@ def _intro_email(text: str) -> dict[str, Any] | None:
     return out
 
 
+_STATE = re.compile(r"^[A-Z][\w.'-]*(?: [\w.'-]+){0,3}, ?(?:[A-Z]{2}|[A-Z]\.[A-Z]\.)(?:, ?[A-Z][\w .'-]*)?$")
+_COUNTRIES = ("united states", "usa", "us", "united kingdom", "uk", "canada", "germany", "france", "india", "ireland",
+              "netherlands", "spain", "australia", "singapore", "brazil", "mexico", "israel", "poland", "sweden")
+_CLOSING = re.compile(r"(?i)^(?:thanks|thank you|best|best regards|kind regards|regards|cheers|sincerely|warmly|"
+                      r"talk soon|many thanks|--+)[,.! ]*$")
+
+
+def _strict_place(part: str) -> bool:
+    """A place we're sure about, for text that isn't a LinkedIn page: 'Portland, OR', 'Austin, TX',
+    'Berlin, Germany', 'San Francisco Bay Area', 'Remote'. A plain 'Python, Spark' is not one."""
+    part = part.strip()
+    if not part or len(part) > 60 or any(ch.isdigit() for ch in part):
+        return False
+    if part.lower() in ("remote", "remote, us", "remote, usa"):
+        return True
+    if _STATE.match(part):
+        return True
+    segs = [x.strip().lower() for x in part.split(",")]
+    if len(segs) >= 2 and segs[-1] in _COUNTRIES and all(x for x in segs):
+        return True
+    return bool(re.match(r"^(?:Greater )?[A-Z][\w.'-]*(?: [\w.'-]+){0,3} (?:Bay |Metropolitan |Metro )?Area$", part))
+
+
+def _signature_lines(text: str) -> list[str] | None:
+    """The lines of an email signature (the last paragraph with a way to reach someone in it), starting at the
+    name, after any 'Thanks,' or '--' line above it. None when the text doesn't end in one."""
+    paras = [[l.strip() for l in p.splitlines() if l.strip()] for p in re.split(r"\n\s*\n", text.strip())]
+    paras = [p for p in paras if p]
+    for para in reversed(paras):
+        if not any(_EMAIL.search(l) or _PHONE.search(l) or _LINKEDIN.search(l) for l in para):
+            continue
+        lines = list(para)
+        while lines and _CLOSING.match(lines[0]):
+            lines.pop(0)
+        if len(lines) >= 2 and re.fullmatch(r"[^\W\d_][\w'.-]*(?: [^\W\d_][\w'.-]*){1,3}", lines[0]) \
+                and lines[0][:1].isupper() and not _CLOSING.match(lines[0]):
+            return [c for c in (_clean_line(l) for l in lines) if c]
+        return None
+    return None
+
+
 def quick_parse(text: str) -> dict[str, Any]:
     """Pull the obvious bits out of pasted text without any AI. The recruiter reviews before saving.
     An intro email gives the introduced person (not its From or To) and "Referral from" its writer."""
@@ -2034,29 +2180,52 @@ def quick_parse(text: str) -> dict[str, Any]:
         out["website"] = site
     raw = [l.strip() for l in text.splitlines() if l.strip()]
     lines = [c for c in (_clean_line(l) for l in raw) if c]
-    if lines and _is_name(lines[0]):
-        name = lines[0]
+    head = lines
+    if lines and (not _is_name(lines[0]) or re.search(r"[,.!?:]$|, ", lines[0])):
+        head = _signature_lines(text) or lines  # an email's signature: the name is at its top, not the text's
+    if head and _is_name(head[0]):
+        name = head[0]
         out["name"] = name.title() if name.isupper() else name
-        rest = [l for l in lines[1:] if l.lower() != name.lower()]  # LinkedIn often repeats the name
+        rest = [l for l in head[1:] if l.lower() != name.lower()]  # LinkedIn often repeats the name
+        plain = not _looks_like_linkedin(text)
         if rest and len(rest[0]) <= 160 and not _EMAIL.search(rest[0]) and rest[0].lower() not in _SECTIONS:
             headline = rest[0]
             sep = " at " if " at " in headline else " @ " if " @ " in headline else None
-            if sep:
+            contact = bool(_PHONE.search(headline)) or _strict_place(headline.split(" | ")[0])
+            if contact:
+                pass  # "Portland, OR | 555 0100": contact details, not a headline
+            elif sep:
                 t, _, c = headline.partition(sep)
                 out["current_title"], out["current_company"] = t.strip(" |-"), c.split("|")[0].strip(" |-")
             else:
-                out["current_title"] = headline.split("|")[0].strip()
-            if loc := _header_location(headline):
+                parts = [p.strip() for p in headline.split("|")]
+                out["current_title"] = parts[0]
+                # "VP of Engineering | Northwind Labs": a signature or resume puts the company second. A LinkedIn
+                # headline's second part is more often skills or a tagline, so it is left alone there.
+                if (plain and len(parts) >= 2 and 1 < len(parts[1]) <= 60 and "," not in parts[1]
+                        and not _strict_place(parts[1]) and not _PHONE.search(parts[1])
+                        and not _EMAIL.search(parts[1]) and "http" not in parts[1]):
+                    out["current_company"] = parts[1]
+            if contact:
+                pass
+            elif len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]) and not plain:
+                out["location"] = rest[1].split(" · ")[0]
+            elif loc := _header_location(headline):
                 out["location"] = loc
             elif len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]):
                 out["location"] = rest[1].split(" · ")[0]
+        if "location" not in out:
+            for line in head[1:9]:  # a resume's contact line ("Portland, OR | me@x.com") or a signature's city
+                if place := next((p for p in re.split(r"\s+[|·•]\s+|\s{2,}", line) if _strict_place(p.strip())), None):
+                    out["location"] = place.strip()
+                    break
     marks = _linkedin_marks(text)
     # A resume carries a LinkedIn link next to an email or phone; a profile paste (or its link alone) doesn't.
     resume_like = out.get("email") or out.get("phone") or re.search(r"(?i)\b(resume|curriculum vitae)\b", text)
     if marks >= 2 or (out.get("linkedin_url") and (marks or not resume_like)):
         out["source"] = "LinkedIn"
     elif marks == 0:
-        out["source"] = "Resume"
+        out["source"] = "Resume" if head is lines else "Email signature"
     # A link pasted under Skills (often the profile URL LinkedIn puts at the end) is never a skill.
     url_like = re.compile(r"(?i)://|^www\.|@|^[\w-]+(\.[\w-]+)*\.[a-z]{2,}/|"
                           r"^[\w-]+(\.[\w-]+)*\.(com|org|net|edu|gov|co\.uk)$")
@@ -2073,6 +2242,6 @@ def quick_parse(text: str) -> dict[str, Any]:
     about = _about_section(raw)
     if about:
         out["about"] = about
-    elif out.get("source") != "LinkedIn":  # a resume or a note: the text itself; a profile's About only
+    elif out.get("source") != "LinkedIn" and head is lines:  # a resume or a note: the text itself; a profile's About only
         out["about"] = text[:1500]
     return out

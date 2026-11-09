@@ -571,3 +571,6 @@ td.colorcell, th.colorcell { width: 1%; white-space: nowrap; text-align: center;
 .search-tips { margin-top: var(--space-2); }
 .search-tips .tips { margin: var(--space-2) 0; padding-left: var(--space-4); font-size: var(--fs-sm); }
 .search-tips code { background: var(--surface-2); padding: 0 var(--space-1); border-radius: var(--radius-sm); }
+/* Possible duplicates page */
+.dup-person { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; overflow-wrap: anywhere; }
+.dup-pair .actions-inline { margin-top: 0.6rem; }

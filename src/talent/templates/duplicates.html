@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sub %}
+{% block title %}Possible duplicates · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <h1>Possible duplicates {% if total %}<span class="muted">{{ total }}</span>{% endif %}</h1>
+  <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a></div>
+</div>
+<p class="lead">People who may be saved twice: the same email or LinkedIn, the same name and phone or company, or a name that could be the same person at the same company. Nothing changes until you press Compare and merge, and you see both profiles first. A backup is saved before every merge.</p>
+{% if not total %}
+<p class="panel">No likely duplicates right now.</p>
+{% else %}
+{% macro person(c) -%}
+<div class="dup-person">
+  <a href="/candidates/{{ c.id }}"><strong>{{ c.name }}</strong></a>
+  <span class="muted">{{ sub(c) }}</span>
+  <span class="fine">{{ [c.email, c.phone, c.linkedin_url] | select | join(' · ') }}</span>
+</div>
+{%- endmacro %}
+<ul class="items dup-list">
+  {% for r in rows %}
+  <li class="panel dup-pair">
+    <p class="fine"><strong>{{ r.reasons | join(', ') | capitalize }}</strong></p>
+    <div class="connect-grid">{{ person(r.a) }}{{ person(r.b) }}</div>
+    <div class="actions-inline">
+      <a class="btn primary" href="/candidates/{{ r.keep }}/merge/{{ r.other }}">Compare and merge</a>
+      <form method="post" action="/candidates/duplicates/dismiss" class="inline">
+        <input type="hidden" name="a" value="{{ r.keep }}"><input type="hidden" name="b" value="{{ r.other }}">
+        <button class="btn" type="submit">Not the same person</button>
+      </form>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% if total > shown %}<p class="pager"><a href="/candidates/duplicates?shown={{ shown + 50 }}">Show more ({{ total - shown }} left)</a></p>{% endif %}
+{% endif %}
+{% if dismissed %}
+<form method="post" action="/candidates/duplicates/reset" class="inline" data-confirm="Show the {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} you said are different people again?">
+  <p class="fine">You marked {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} as different people. <button class="btn small" type="submit">Show them again</button></p>
+</form>
+{% endif %}
+{% endblock %}
