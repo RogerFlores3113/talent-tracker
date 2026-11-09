@@ -42,7 +42,7 @@
         <td><strong>{{ h or '(no header)' }}</strong></td>
         <td><select name="col{{ i }}" aria-label="Field for {{ h }}">
           {% for t in targets %}<option value="{{ t }}" {{ 'selected' if mapping[i] == t }}>{{ labels.get(t, t) }}</option>{% endfor %}
-        </select></td>
+        </select>{% if i in years_cols %}<div class="fine">Years (kept as a note): there is no years field.</div>{% endif %}</td>
         <td class="fine">{% for r in rows[:3] if r[i] %}<div>{{ r[i][:40] }}</div>{% endfor %}</td>
       </tr>
     {% endfor %}

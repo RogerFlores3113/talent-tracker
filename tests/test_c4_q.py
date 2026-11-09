@@ -1,4 +1,5 @@
 """Cycle 4 fixer Q: interviews, time and hiring managers."""
+import re
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -250,8 +251,8 @@ def test_today_interview_rows_link_to_reschedule_and_outcome(store):
     started = store.log(dana, "interview", "Coffee", at=_at(0, -1), job_id=job["id"])
     c = local_client(store)
     home = c.get("/").text
-    assert f'href="/candidates/{dana}?iv={soon["id"]}#iv-{soon["id"]}">Reschedule</a>' in home
-    assert f'?iv={started["id"]}#iv-{started["id"]}">Record outcome</a>' in home
+    assert re.search(rf'href="/candidates/{dana}\?iv={soon["id"]}#iv-{soon["id"]}"[^>]*>Reschedule</a>', home)
+    assert re.search(rf'\?iv={started["id"]}#iv-{started["id"]}"[^>]*>Record outcome</a>', home)
     assert f'?iv={soon["id"]}#iv-{soon["id"]}">Record outcome' not in home  # not before it happens
     page = c.get(f"/candidates/{dana}?iv={soon['id']}").text
     assert f'id="iv-{soon["id"]}" open' in page and f'id="iv-{started["id"]}" >' in page

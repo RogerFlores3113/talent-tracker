@@ -1,0 +1,6 @@
+Name,Email,Job,Client,Stage,Years of experience,Status,Other links,Title,Company
+Zoe Whitaker,zoe.w@example.com,Data Analyst,Globex,Screened,7 years,Active,"https://github.com/zoew; https://zoe.dev/blog",Analyst,Initech
+Marc Delroy,marc.d@example.com,Data Analyst,Globex,Interview,12,Passive,https://x.com/marcd,Lead,Hooli
+Pia Frost,pia.f@example.com,Data Analyst,Globex,Offer,3.5,Active,,Analyst,Acme
+Quin Abel,quin.a@example.com,Data Analyst,Globex,Hired,5,Placed,,Analyst,Acme
+Ray Tolle,ray.t@example.com,Data Analyst,Globex,New,,Not interested,,,

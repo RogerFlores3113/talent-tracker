@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import quote
 
 from . import actions
+from .paths import app_url
 from .store import (CHANGE_SOURCES, INTERVIEW_VERDICTS, VERDICT_LABELS, Store, _legacy_verdict, as_local, fold_text,
                     interview_note, now_iso, quoted, shown_zone, to_dt, zone_named)
 
@@ -215,12 +216,41 @@ def _clashes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     what = f"{a['candidate_name']}'s {sa} and {sb}"
                 else:
                     what = f"two sessions with {a['candidate_name']}"
-                out.append({"kind": "interviewer", "ids": [a["id"], b["id"]],
+                out.append({"kind": "interviewer", "ids": [a["id"], b["id"]], "who": who,
                             "text": f"{who} is booked twice around {when}: {what}"})
             if a["candidate_id"] == b["candidate_id"]:
                 out.append({"kind": "candidate", "ids": [a["id"], b["id"]],
                             "text": f"{a['candidate_name']} has two sessions around {when}"})
     return out
+
+
+def _clash_lines(w: dict[str, Any]) -> list[str]:
+    """One line per interviewer who is booked at once ("Lee Chen is booked 3 times at once: A, B, C"), then the
+    candidates with two sessions at once, one line each."""
+    by_id = {x["interview_id"]: (lp, x) for lp in w["loops"] for x in lp["sessions"]}
+    clusters: list[dict[str, Any]] = []  # {who, ids}: sessions of one interviewer that overlap, joined up
+    for c in w["clashes"]:
+        if c["kind"] != "interviewer":
+            continue
+        hit = [k for k in clusters if k["who"] == c["who"] and k["ids"] & set(c["ids"])]
+        if hit:
+            hit[0]["ids"] |= set(c["ids"])
+            for extra in hit[1:]:
+                hit[0]["ids"] |= extra["ids"]
+                clusters.remove(extra)
+        else:
+            clusters.append({"who": c["who"], "ids": set(c["ids"])})
+    lines = []
+    for k in clusters:
+        names = []
+        for i in sorted(k["ids"], key=lambda i: by_id[i][1]["at"] if i in by_id else ""):
+            if i in by_id:
+                lp, x = by_id[i]
+                names.append(f"{lp['name']}'s {x['name']} at {actions.local_time(x['at'], '%-I:%M %p %Z').strip()} "
+                             f"(interview id {i})")
+        lines.append(f"Clash: {k['who']} is booked {len(k['ids'])} times at once: " + ", ".join(names) + ".")
+    lines += [f"Clash: {c['text']}." for c in w["clashes"] if c["kind"] != "interviewer"]
+    return lines
 
 
 def week_text(w: dict[str, Any]) -> str:
@@ -232,12 +262,16 @@ def week_text(w: dict[str, Any]) -> str:
             continue
         lines.append(d["label"] + ":")
         for lp in d["loops"]:
-            parts = [f"{actions.local_time(x['at'], '%-I:%M %p %Z').strip()} {x['name']}"
-                     + (f" (with {x['interviewer']})" if x["interviewer"] else "") for x in lp["sessions"]]
-            lines.append(f"- {lp['name']}" + (f", {lp['job']}" if lp["job"] else "") + ": " + "; ".join(parts))
+            parts = [f"{actions.local_time(x['at'], '%-I:%M %p %Z').strip()} {x['name']} (interview id "
+                     f"{x['interview_id']}, {app_url(x['href'])})"
+                     + (f" with {x['interviewer']}" if x["interviewer"] else "") for x in lp["sessions"]]
+            who = f"{lp['name']} (id {lp['candidate_id']}, {app_url('/candidates/' + str(lp['candidate_id']))})"
+            job = (f", {lp['job']} (job_id {lp['job_id']}, {app_url('/jobs/' + str(lp['job_id']))})"
+                   if lp["job"] and lp.get("job_id") else f", {lp['job']}" if lp["job"] else "")
+            lines.append(f"- {who}{job}: " + "; ".join(parts))
     if w["load"]:
         lines.append("Interviewer load: " + ", ".join(f"{e['name']} {e['count']}" for e in w["load"]) + ".")
-    lines += [f"Clash: {c['text']}." for c in w["clashes"]]
+    lines += _clash_lines(w)
     for p in w.get("owed_people") or []:
         lines.append(f"Feedback owed: {p['summary']}.")
     for o in w.get("owed") or []:
@@ -510,7 +544,7 @@ def owed_by(t: dict[str, Any]) -> list[str]:
 def _verdict_key(value: str) -> str:
     key = re.sub(r"[\s_-]+", " ", (value or "").strip().lower()).strip(" .!")
     if key not in INTERVIEW_VERDICTS:
-        raise ValueError("A verdict is one of: strong yes, yes, mixed, no, strong no.")
+        raise ValueError("A verdict is one of: strong yes, yes, lean yes, mixed, lean no, no, strong no.")
     return key
 
 
@@ -637,7 +671,7 @@ def request_text(who: str, candidate: str, session: str, day: str) -> tuple[str,
     what = session if session and session != "Interview" else "interview"
     subject = f"Feedback on {candidate} ({what}, {day})"
     body = (f"Hi {first},\n\nCould you send me your feedback on {candidate} from the {what} on {day}? A few lines "
-            "on how it went and your verdict (strong yes, yes, mixed, no or strong no) is plenty.\n\nThanks!")
+            "on how it went and your verdict (strong yes, yes, lean yes, mixed, lean no, no or strong no) is plenty.\n\nThanks!")
     return subject, body
 
 
@@ -660,7 +694,7 @@ def person_request(who: str, items: list[dict[str, Any]]) -> tuple[str, str]:
     lines = "\n".join(f"- {i['name']}: {i['session']}, {i['day']}" for i in items)
     subject = "Feedback on " + _and(names)
     body = (f"Hi {first},\n\nCould you send me your feedback on these interviews? A few lines on how each went and "
-            f"your verdict (strong yes, yes, mixed, no or strong no) is plenty.\n\n{lines}\n\nThanks!")
+            f"your verdict (strong yes, yes, lean yes, mixed, lean no, no or strong no) is plenty.\n\n{lines}\n\nThanks!")
     return subject, body
 
 
@@ -829,9 +863,13 @@ def feedback_owed_text(rows: list[dict[str, Any]]) -> str:
     lines += ["By interviewer:"] + [f"- {p['summary']}" + (f" <{p['email']}>" if p["email"] else "")
                                     + f". Suggested subject: {p['subject']}" for p in people]
     for r in rows:
-        lines.append(f"## {r['name']} (candidate id {r['candidate_id']}), {r['job']}, {r['day']}")
+        job = (f", {r['job']} (job_id {r['job_id']}, {app_url('/jobs/' + str(r['job_id']))})" if r.get("job_id")
+               else f", {r['job']}")
+        lines.append(f"## {r['name']} (candidate id {r['candidate_id']}, "
+                     f"{app_url('/candidates/' + str(r['candidate_id']))}){job}, {r['day']}")
         lines += [f"- {o['name']}" + (f" <{o['email']}>" if o["email"] else "") + f" owes feedback on {o['session']} "
-                  f"(interview id {o['interview_id']})"
+                  f"(interview id {o['interview_id']}, "
+                  f"{app_url('/candidates/' + str(r['candidate_id']) + '?iv=' + str(o['interview_id']) + '#iv-' + str(o['interview_id']))})"
                   + ("" if o.get("chased", True) else f", not chased yet (under {CHASE_HOURS} hours ago)")
                   for o in r["owed"]]
     return "\n".join(lines)

@@ -59,6 +59,8 @@ PLUGIN_MANIFEST: dict[str, Any] = {
     "homepage": f"https://github.com/{REPO}",
     "keywords": ["recruiting", "hiring", "candidates", "talent-search"],
 }
+# Typed inside Claude Code (the app's Connect page shows these)
+CLAUDE_CODE_SLASH_COMMANDS = (f"/plugin marketplace add {REPO}", f"/plugin install {PLUGIN_NAME}@{MARKETPLACE_NAME}")
 CLAUDE_CODE_PLUGIN_COMMANDS = (f"claude plugin marketplace add {REPO}",
                                f"claude plugin install {PLUGIN_NAME}@{MARKETPLACE_NAME}")
 

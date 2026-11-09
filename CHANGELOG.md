@@ -116,6 +116,18 @@ All notable changes to Talent Search. Newest first.
 - In-chat views: a stopped request keeps what you were looking at, times show in your Settings time zone ("Times in PST"), Refresh on every list view, the card carousel can be focused with a hint for the arrow keys, flipping cards tells Claude who you are looking at, and controls the chat app can't support are hidden.
 - In-chat Interviews shows one clash line per interviewer with the load strip on top, Finalists has Days in process and "Advance to Offer", saved people and the Shortlist show email, phone and website, the "needs your answer" card uses plain words, and Duplicates sides are labelled by person and email.
 - In-chat views: screen reader and keyboard fixes (names on repeated buttons, headings read the person's name, one Tab stop in the avatar strip, focus after sending).
+- Chat apps without MCP Apps no longer see the candidate_cards tool.
+- Text replies match the screen: links in list_interviews, list_feedback_owed and job_pipeline, email, LinkedIn and website in search lines, a "Showing 10 of 13. Ask for the next 3." hint, and no double period after a snippet. A missing id says "Tell me which job (job_id). list_jobs shows them."
+- Searching "backend engineer in Boston": singular and plural rank the same, people matching both come first, the close list is capped, and when nobody matches both it says "Nobody is a backend engineer in Boston. Closest: ..." with counts of who matches the role and the place and who matches part of it.
+- Counts say "in the pipeline" everywhere; "in process" is only the client update's number, with a note when they differ. "Jobs without a client" replaces "No company".
+- Connect: the Claude plugin comes first and alone for the Claude app, says what it adds and that the connection is still needed, shows the steps once with the full install command and a "Check it worked" line, and the Claude Code card no longer shows step 2 under a collapsed step 1. After Install skills, the "found" line refreshes. marketplace.json has a description. install-skills with no terminal and no --yes starts with "Nothing installed yet. Run again with --yes to install."
+- Candidates: Stage and Job columns you can sort, Shift-click to tick a range, and a "N people from your chat." banner with "Show everyone" when you arrive with ?ids=.
+- CSV import: "Years of experience" is named as a note in the preview; with both Stage and Status columns, Stage sets the stage and Status is kept as a tag; near stage names (Interview, Screened, Offered) land in the stages you have; Work history survives export then import.
+- save_candidate and save_candidates accept linkedin, website, site and url, and the save_candidates text lists each person's email and website.
+- Interview feedback: the verdict hints list all seven verdicts, list_interviews text carries interview ids and links, a double-booked interviewer gets one clash line, and plan_loop says when it skips an interviewer for working hours.
+- The welcome tour: "Skip tour" ends it in one click with nothing left dimmed, it steps aside while you type in a box and never starts over one, and after it ends focus goes to the page heading.
+- Time zone: while unset, /interviews and the loop planner say "Times are in UTC. Set your time zone in Settings."
+- Today: verdict buttons and Reschedule name their person and interview in a labelled group, the time zone banner is not focused on first Tab, and "Skip to today's list" is the first Tab stop.
 
 
 ## [0.1.1] - 2026-11-09

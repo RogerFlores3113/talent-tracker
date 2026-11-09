@@ -1439,10 +1439,49 @@ class SearchResult:
     corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
     notes: list[str] = field(default_factory=list)  # how the search was read, when something needed saying
     understood: str | None = None  # "Looking for backend engineer in Boston, MA": a role and a place, split apart
+    summary: str | None = None  # a role and a place: the counts in plain words (shared by the AI's reply and the web page)
+    message: str | None = None  # a role and a place with nobody matching both: "Nobody is a ... Closest: ..."
+    partial_total: int = 0  # a role and a place: people who match only part of it and are not listed
 
     def __post_init__(self) -> None:
         if self.exact_total is None:
             self.exact_total = 0 if self.closest else self.total
+
+
+ROLE_PLACE_CLOSE = 10  # a role-and-place search lists at most this many close people after the exact ones
+ROLE_PLACE_PARTIAL = 5  # ...and when nobody is close either, this many who match only part of it
+
+
+def _a(role: str) -> str:
+    """'a backend engineer', 'an engineer'; a role that is not a job title ('python') reads 'matches python'."""
+    return ("an " if role[:1].lower() in "aeiou" else "a ") + role
+
+
+def _role_place_words(role: str, place: str, exact: list[Any], ordered: list[Any], shown_close: int,
+                      unlisted: int, only_place: int) -> tuple[str, str | None]:
+    """(the counts of a role-and-place search in plain words, and the 'Nobody is ...' message when no one matches
+    both). Closest people are named, so the line stands on its own."""
+    last = role.split()[-1].lower() if role.split() else ""
+    titled = last.endswith(("er", "or", "ist", "ant", "ian", "ect", "ive", "ger", "lead", "head")) or last in (
+        "lead", "head", "director", "intern", "vp", "cto", "ceo", "cfo", "coo")
+    if not exact:
+        who = f"Nobody is {_a(role)} in {place}." if titled else f"Nobody matches \"{role}\" in {place}."
+        if not ordered:
+            return who, who
+        named = ", ".join(
+            f"{h.candidate['name']} ({', '.join(x for x in (h.candidate.get('current_title'), h.candidate.get('location')) if x)})"
+            for h in ordered[:3])
+        more = f" {unlisted} more match only part of it." if unlisted else ""
+        return f"{who} Closest: {named}.{more}", f"{who} Closest: {named}."
+    n = len(exact)
+    text = f"Looking for {role} in {place}: {n} match{'es' if n == 1 else ''} the role and the place"
+    if shown_close:
+        text += (f", plus {shown_close} close ({'the role in another place, or the place with part of the role'})")
+    if unlisted:
+        text += f", and {unlisted} more match only part of it"
+        if only_place:
+            text += f" ({only_place} are in {place} with a different role)"
+    return text + ".", None
 
 
 def _clean(value: Any) -> Any:
@@ -1777,6 +1816,15 @@ def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     body = r"\s+".join(re.escape(p) for p in base.split())
     tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
     return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _same_stem(form: str, folded: str) -> bool:
+    """engineers ~ engineering: a long word's stem (no -er, -ers, -ing, -es, -s) starting a word in the text."""
+    f = form.lower()
+    for suffix in ("ers", "ing", "er", "es", "s"):
+        if f.endswith(suffix) and len(f) - len(suffix) >= 5:
+            return re.search(rf"\b{re.escape(f[:-len(suffix)])}", folded) is not None
+    return False
 
 
 def _phrase_pattern(words: list[str]) -> re.Pattern[str]:
@@ -4094,7 +4142,7 @@ class Store:
             value = INTERVIEW_OUTCOMES.get(key) or INTERVIEW_VERDICTS.get(key)
             if value is None:
                 raise ValueError("Outcome must be one of: passed, not passed, no show, or the interviewer's word: "
-                                 "strong yes, yes, mixed, no, strong no.")
+                                 "strong yes, yes, lean yes, mixed, lean no, no, strong no.")
             if new_at > ts:
                 raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
                                  "went after it takes place, or change its time first.")
@@ -4746,14 +4794,16 @@ class Store:
             seen.add(c["id"])
             hay = " ".join(str(v) for v in (c.get("name"), c.get("current_title"), c.get("current_company"),
                                            c.get("about"), c.get("source"), " ".join(c.get("tags") or [])) if v)
+            for w in c.get("work_history") or self.work_history(c["id"]):  # earlier roles count, as they do in the everyday search
+                hay += " " + " ".join(str(w.get(k) or "") for k in ("title", "company"))
             folded = fold(hay)
-            found = [t for t in terms if any(_word_pattern(f, t.prefix).search(folded)
-                                             for f in (*t.forms, *t.names))]
-            whole = not h.closest
-            if whole:
-                found = list(terms)
+            found = [t for t in terms if any(_word_pattern(f, pre).search(folded) or _same_stem(f, folded)
+                                             for f in (*t.forms, *t.names) for pre in {t.prefix, False})]
+            whole = not h.closest and len(found) == len(terms)  # the words are in the profile, not only a pipeline job
             in_place = place.matches(c.get("location"))
-            tier = 0 if (in_place and whole) else 1 if in_place and found else 2 if whole else 3
+            # both parts, then the whole role in another place, then the place with part of the role, then part of
+            # the role elsewhere (people with only the place come last, below)
+            tier = 0 if (in_place and whole) else 1 if whole else 2 if in_place and found else 3
             h.closest = tier != 0
             h.reason = note(h, found, in_place) + (f" ({h.reason})" if h.reason and tier else "")
             tiers[tier].append(h)
@@ -4772,12 +4822,25 @@ class Store:
             h = SearchHit(candidate=self.get_candidate(r["id"]), closest=True)
             h.reason = note(h, [], True)
             tiers[4].append(h)
-        # Like the everyday search: with 3 or more people who match both parts, only they are listed.
-        ordered = tiers[0] if len(tiers[0]) >= 3 else [h for tier in tiers for h in tier]
-        exact = len(tiers[0])
+        # Like the everyday search: with 3 or more people who match both parts, only they are listed. Otherwise the
+        # exact ones, then at most ROLE_PLACE_CLOSE people who are genuinely close (the whole role in another place,
+        # or the place with part of the role). People with only part of it are listed only when nobody else is.
+        exact = tiers[0]
+        close_all = tiers[1] + tiers[2]
+        partial = tiers[3] + tiers[4]
+        if len(exact) >= 3:
+            ordered = list(exact)
+        else:
+            ordered = [*exact, *close_all[:ROLE_PLACE_CLOSE]]
+            if not ordered:
+                ordered = partial[:ROLE_PLACE_PARTIAL]
+        shown_close = len(ordered) - len(exact) if close_all else 0
+        unlisted = len(tiers[1]) + len(tiers[2]) + len(partial) - (len(ordered) - len(exact))
         res = SearchResult(hits=ordered[offset:offset + limit], total=len(ordered), query=query, filters=base.filters,
-                           closest=exact == 0 and bool(ordered), exact_total=exact,
-                           understood=f"Looking for {role_q} in {place.label}")
+                           closest=len(exact) == 0 and bool(ordered), exact_total=len(exact),
+                           understood=f"Looking for {role_q} in {place.label}", partial_total=max(0, unlisted))
+        res.summary, res.message = _role_place_words(role_q, place.label, exact, ordered, shown_close, unlisted,
+                                                     len(tiers[4]))
         if base.suggestion:
             fixed = (re.sub(re.escape(role_q), lambda _m: base.suggestion, query, count=1, flags=re.I)
                      if re.search(re.escape(role_q), query, re.I) else f"{base.suggestion} {place.label}")

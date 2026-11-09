@@ -153,6 +153,8 @@ CARD_LIMIT = ("Nothing changed: the AI app has used its hourly limit on Keep and
               "Search, on the Shortlist, or try again later.")
 CARD_KEYS_KEPT = 500  # keys waiting at once, per session; the oldest go first
 CARD_TOOLS = ("keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects", "shortlist_card_key")
+# App-only tools that only read: hidden from chat apps without MCP Apps, but any trust level may call them.
+APP_ONLY_READ = ("candidate_cards",)
 # A press on a card in a chat app that didn't say it shows Talent Search cards.
 CARD_NO_APPS = ("This chat app didn't say it shows Talent Search cards, so Keep and Pass work in Talent Search "
                 "instead. Open the Shortlist there.")
@@ -289,8 +291,8 @@ class PersonIn(BaseModel):
     name: str
     email: str | None = None
     phone: str | None = None
-    linkedin_url: str | None = None
-    website: str | None = None
+    linkedin_url: str | None = Field(None, validation_alias=AliasChoices("linkedin_url", "linkedin", "linkedin_profile"))
+    website: str | None = Field(None, validation_alias=AliasChoices("website", "site", "url", "web"))
     current_title: str | None = Field(None, validation_alias=AliasChoices("current_title", "title"))
     current_company: str | None = Field(None, validation_alias=AliasChoices("current_company", "company"))
     location: str | None = None
@@ -527,6 +529,23 @@ def _line(c: dict[str, Any]) -> str:
     role = " at ".join(x for x in (c.get("current_title"), c.get("current_company")) if x)
     bits = [f"{c['name']} (id {c['id']}, {app_url('/candidates/' + str(c['id']))})", role, c.get("location")]
     return ", ".join(b for b in bits if b)
+
+
+def _then(line: str, more: str) -> str:
+    """line + ". more", without a double period when the line already ends in one (or in an ellipsis)."""
+    return line + (" " if line.rstrip().endswith((".", "…", "!", "?")) else ". ") + more
+
+
+def _contact_bits(c: dict[str, Any]) -> str:
+    """'email a@b.com, LinkedIn https://..., website https://...' for what is known (empty when nothing is)."""
+    bits = []
+    if c.get("email"):
+        bits.append(f"email {c['email']}")
+    if c.get("linkedin_url"):
+        bits.append(f"LinkedIn {c['linkedin_url']}")
+    if c.get("website"):
+        bits.append(f"website {c['website']}")
+    return ", ".join(bits)
 
 
 def _local(iso: str | None, all_day: bool = False) -> str:
@@ -1113,8 +1132,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             head = f"Exact match for that {what}:" if results else (
                 f"No saved candidate has that {what}. Try searching their name too.")
         elif getattr(res, "understood", None):  # a role and a place, read apart: say plainly what was understood
-            n_close = res.total - exact_total
-            head = f"{res.understood}: {exact_total} exact, {n_close} close:"
+            head = res.summary or res.understood
         elif res.closest:
             head = "No exact matches. Closest matches:"
         else:
@@ -1131,18 +1149,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         seen_jobs: set[int] = set()
         for c in results:
             line = f"- {_line(c)}"
+            if _contact_bits(c):
+                line += ", " + _contact_bits(c)
             if c.get("reason"):
-                line += f". {c['reason']}" + (f": {c['match']}" if c.get("match") else "")
+                line = _then(line, c["reason"] + (f": {c['match']}" if c.get("match") else ""))
             elif c.get("match"):
-                line += f". Match: {c['match']}"
+                line = _then(line, f"Match: {c['match']}")
             if c.get("closest") and not res.closest:
                 line += " (closest match)"
             if c.get("other_name") and not nobody:
                 line += " (a different name)"
             if c.get("jobs"):
-                line += ". In: " + "; ".join(
+                line = _then(line, "In: " + "; ".join(
                     f"{j['job']} [job_id {j['job_id']}{'' if j['job_id'] in seen_jobs else ', ' + app_url('/jobs/' + str(j['job_id']))}], {j['stage']}"
-                    for j in c["jobs"])
+                    for j in c["jobs"]))
                 seen_jobs.update(j["job_id"] for j in c["jobs"])
             lines.append(line)
         if results:  # the people found, between a marker made fresh for this reply
@@ -1150,6 +1170,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if not results and not is_id:
             lines = [f"No one named {quoted(q)} is saved." if named else
                      "No saved candidates match. Try fewer or different words, or no filters."]
+        listed_total = res.total
+        shown_n = len(results)
+        if results and not is_id and listed_total > offset + shown_n:
+            left = listed_total - offset - shown_n
+            nxt = min(left, limit)
+            lines.append(f"Showing {offset + shown_n} of {listed_total}. Ask for the next {nxt}"
+                         + f" (offset {offset + shown_n}).")
         if res.suggestion and not res.corrected:
             lines.append(f"Did you mean {res.suggestion}?")
         lines.extend(f"Note: {n}" for n in res.notes)
@@ -1157,7 +1184,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.insert(0, heading)
         return _result("\n".join(lines), {
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
-            "exact": res.exact, "understood": getattr(res, "understood", None), "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
+            "exact": res.exact, "understood": getattr(res, "understood", None),
+            **({"message": res.message} if getattr(res, "message", None) else {}),
+            **({"partial_total": res.partial_total} if getattr(res, "understood", None) else {}), "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
             "offset": offset, "shown": len(results) - n_closest,
             **({"no_one_named": q} if nobody else {}),
             "app_url": app_url(app_path or _search_path(res.suggestion if res.corrected else q, kw))})
@@ -2355,7 +2384,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         def line(j: dict[str, Any]) -> str:
             openings, hired = j.get("openings") or 1, j.get("hired_count", 0)
             seats = f"{openings} opening{'' if openings == 1 else 's'}"
-            bits = [f"{j.get('active_count', 0)} in play",
+            bits = [f"{j.get('active_count', 0)} in the pipeline",
                     f"{hired} hired for {seats} (over by {hired - openings})" if hired > openings
                     else f"{hired} of {openings} hired" if openings > 1 else f"{hired} hired"]
             if j.get("hiring_manager"):
@@ -2761,7 +2790,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         booked = _booked_left_out(stages, left_out)
         content = [TextContent(type="text", text=text)]
         if total:  # the note, and who was left out (for the recruiter only), sit apart from the paste text
-            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}." if hidden else "")
+            gap = (f"\nThe update says {shown['active']} in process. {nums['active']} are in the pipeline: the update "
+                   "leaves out the stages named above." if shown["active"] != nums["active"] else "")
+            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}.{gap}" if hidden else "")
                                        + (f"\n{booked['text']}" if booked else "")))
         seen = []  # verdicts and feedback owed, which the board cards show: for the recruiter, never pasted
         for st in stages:
@@ -2778,6 +2809,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         offer_lines = offers.recruiter_lines(store, job_id)  # status words only, never pasted
         if offer_lines:
             content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} offers: " + "; ".join(offer_lines) + "."))
+        content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} open this job in Talent Search: "
+                                   f"{app_url('/jobs/' + str(job_id))}"))
         if limit is not None:
             cap = max(1, min(limit, 500))
             for st in stages:
@@ -3242,7 +3275,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     # Only hosts that say they show MCP Apps views (and hide app-only tools from the model) see the card tools.
     async def listed_tools() -> list[Any]:
         tools = await FastMCP.list_tools(mcp)
-        return tools if _client_apps(mcp) is True else [t for t in tools if t.name not in CARD_TOOLS]
+        return tools if _client_apps(mcp) is True else [t for t in tools if t.name not in CARD_TOOLS + APP_ONLY_READ]
 
     mcp.list_tools = listed_tools  # type: ignore[method-assign]
     mcp._mcp_server.list_tools()(listed_tools)
@@ -3370,6 +3403,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 role = " at ".join(x for x in (r.get("current_title"), r.get("current_company")) if x)
                 if role or r.get("location"):
                     line += ", " + ", ".join(x for x in (role, r.get("location")) if x)
+                if _contact_bits(r):
+                    line += ", " + _contact_bits(r)
                 if r.get("no_contact"):
                     line += ". No email or LinkedIn saved, so there is no way to reach them yet"
                 if r.get("saved_status") and key == "updated":
@@ -4087,10 +4122,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 # Other names AI apps often send for a field, per tool.
 ARG_ALIASES = {
     "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
-                       "summary": "about", "linkedin": "linkedin_url"},
+                       "summary": "about", "linkedin": "linkedin_url", "linkedin_profile": "linkedin_url",
+                       "site": "website", "url": "website", "web": "website"},
     "set_candidate_color": {"colour": "color", "flag": "color", "id": "candidate_id"},
     "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
-                         "summary": "about", "linkedin": "linkedin_url"},
+                         "summary": "about", "linkedin": "linkedin_url", "linkedin_profile": "linkedin_url",
+                         "site": "website", "url": "website", "web": "website"},
     "record_offer": {"base_salary": "salary", "base": "salary", "compensation": "salary", "comp": "salary",
                      "start": "start_date", "starts": "start_date", "deadline": "answer_by",
                      "respond_by": "answer_by", "answer_date": "answer_by", "note": "notes", "terms": "notes"},
@@ -4201,8 +4238,20 @@ def _check_arguments(mcp: FastMCP) -> None:
         except ToolError as exc:
             if not isinstance(exc.__cause__, ValidationError):
                 raise
-            bad = list(dict.fromkeys(str(e["loc"][0]) for e in exc.__cause__.errors() if e.get("loc")))
+            errs = [e for e in exc.__cause__.errors() if e.get("loc")]
+            bad = list(dict.fromkeys(str(e["loc"][0]) for e in errs))
             read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
+            missing = list(dict.fromkeys(str(e["loc"][0]) for e in errs if e.get("type") == "missing"))
+            if missing and len(missing) == len(bad):  # nothing sent for a required value: say what to send
+                asks = []
+                for k in missing:
+                    if k.endswith("_id"):
+                        where = ID_SOURCES.get(k)
+                        asks.append(f"Tell me which {k[:-3].replace('_', ' ')} ({k})."
+                                    + (f" {where} shows them." if where else ""))
+                    else:
+                        asks.append(f"{k} is needed.")
+                raise ToolError(("" if read_only else "No change made. ") + " ".join(asks)) from None
             raise ToolError(("" if read_only else "No change made. ") + f"{name} couldn't use "
                             + (", ".join(bad) if bad else "that input") + ": wrong kind of value."
                             + (f" It accepts: {', '.join(accepted)}." if accepted else "")) from None

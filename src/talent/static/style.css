@@ -432,7 +432,7 @@ section.welcome.panel { margin-bottom: var(--space-5); }
 /* Onsite loops on Today: one card, its sessions inside */
 .sessions { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); }
 .sessions li { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-.session-acts { display: inline-flex; gap: var(--space-1); }
+.session-acts { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }
 .session-acts form { margin: 0; }
 /* Decide view and Interviews week */
 .decide { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-4); }
@@ -627,6 +627,8 @@ main:focus { outline: none; }
 /* Bulk actions on the Candidates table (tick people, then set a color, add to a job or export). */
 .bulkbar { margin: 0 0 var(--space-3); }
 .bulk-actions { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2) var(--space-3); }
+.bulk-actions select { max-width: 100%; min-width: 0; }
+.bulk-actions label { max-width: 100%; }
 td.pickcell, th.pickcell { width: 1%; text-align: center; }
 
 /* ==== Access ==== */

@@ -93,6 +93,8 @@ QSORTS = {
     "contacted": (lambda c: c.get("last_contacted_at") or "", True),
     "updated": (lambda c: c.get("updated_at") or "", True),
     "added": (lambda c: c.get("id") or 0, True),
+    "job": (lambda c: (c.get("main_job") or "\U0010ffff").casefold(), False),
+    "stage": (lambda c: (c.get("main_stage") or "\U0010ffff").casefold(), False),
 }
 COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
 
@@ -117,7 +119,13 @@ TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
     "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at", "added": "c.id",
+    # the person's main job (an open one first, then the latest move) and the stage they are in there
+    "job": "lower(coalesce((SELECT j.title FROM applications a JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id = c.id "
+           "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC LIMIT 1), ''))",
+    "stage": "lower(coalesce((SELECT a.stage FROM applications a JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id = c.id "
+             "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC LIMIT 1), ''))",
 }
+EMPTY_LAST = ("job", "stage")  # people with no job sort after everyone, in either direction
 
 
 class CandidateIn(BaseModel):
@@ -531,7 +539,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         notes = list(getattr(result, "notes", None) or pq.notes)
         said = getattr(result, "understood", None)
         if said:  # "Looking for backend engineer in Boston, MA: 0 exact, 3 close"
-            return f"{said}: {result.exact_total} exact, {result.total - result.exact_total} close."
+            return getattr(result, "summary", None) or said
         if not (pq.structured or pq.operator_mode or notes):
             return ""
         return " ".join([pq.explain(), *notes]).strip()
@@ -589,6 +597,24 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             out["none"] = max(0, all_total - sum(out[c] for c in COLORS))
         return out
 
+    def _attach_jobs(rows: list[dict[str, Any]]) -> None:
+        """Give each person row main_job, main_job_id, main_stage and more_jobs (an open job first, then the latest move)."""
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        by: dict[int, list[dict[str, Any]]] = {}
+        for a in store._rows(
+                f"SELECT a.candidate_id, a.job_id, a.stage, j.title, j.company, j.status FROM applications a "
+                f"JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id IN ({marks}) "
+                "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC", tuple(ids)):
+            by.setdefault(a["candidate_id"], []).append(a)
+        for r in rows:
+            mine = by.get(r["id"]) or []
+            if mine:
+                r["main_job"] = mine[0]["title"] + (f" ({mine[0]['company']})" if mine[0]["company"] else "")
+                r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
+
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
@@ -643,6 +669,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
                                        limit=COLORED_FIRST_POOL, offset=0, **member)
+                _attach_jobs([h.candidate for h in result.hits])
                 key, desc_first = QSORTS[qsort]
                 reverse = (qdir != "asc") if desc_first else (qdir == "desc")
                 ranked = sorted(result.hits, key=lambda h: key(h.candidate), reverse=reverse)
@@ -661,11 +688,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
             if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
                 order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
+            elif sort in EMPTY_LAST:
+                order = f"({sql_sort} = '') ASC, {sql_sort} {direction}, c.id DESC"
             else:
                 order = f"{sql_sort} {direction}, c.id DESC"
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        _attach_jobs(rows)
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -677,7 +707,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       days="" if not pipe or day_n is None else day_n,
                                       ids=",".join(map(str, id_list)),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, ticked=set(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
@@ -1559,6 +1589,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             _save_lists(token, "preview", preview)
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
+                    years_cols={i for i, h in enumerate(header) if mapping[i] == "note"
+                                and importers._norm_header(h) in importers._YEARS_HEADERS},
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     export_phrase=importers.export_phrase(importers.detect_export(header)),
                     preview_lines=importers.preview_lines(preview) if preview else [],
@@ -3553,6 +3585,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
     # ----------------------------------------------------- AI app setup
+    def _plugin_where() -> str:
+        """Where the plugin file goes: the Downloads folder, or (with none) the folder it really goes to."""
+        folder = skills.downloads_dir()
+        return "your Downloads folder" if folder.name.lower() == "downloads" else f"the folder {folder} (there is no Downloads folder here)"
+
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
         status = integrations.claude_status()
@@ -3581,12 +3618,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             plugin_saved=(skills.downloads_dir() / skills.PLUGIN_FILE).is_file(),
             skill_info=skills.skill_info(),
             plugin_steps=skills.PLUGIN_STEPS,
-            plugin_commands=skills.CLAUDE_CODE_PLUGIN_COMMANDS,
+            plugin_commands=skills.CLAUDE_CODE_SLASH_COMMANDS,
+            plugin_where=_plugin_where(),
             marketplace_repo=skills.REPO,
             can_open_claude=skills.claude_app_command() is not None,
             skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
                         for n in skills.skill_names()],
         )
+
+    def _found_ctx() -> dict[str, Any]:
+        """What the 'Claude Code: found. No skills yet.' list needs, so an install can refresh it in place."""
+        return {"skill_status": [skills.status(t) for t in skills.TARGETS], "detected": skills.detected_targets()}
 
     @app.get("/connect/skills/{name}.zip")
     def skill_zip(name: str):
@@ -3617,7 +3659,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             integrations.log_failure(exc)
             return page(request, "_skills_plugin_result.html", error=integrations.friendly_error(exc))
         shown = skills.reveal(path)
-        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown, steps=skills.PLUGIN_STEPS,
+        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown,
                     can_open_claude=skills.claude_app_command() is not None, plugin_file=skills.PLUGIN_FILE)
 
     @app.post("/connect/skills/claude-app/open", response_class=HTMLResponse)
@@ -3643,7 +3685,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             integrations.log_failure(exc)
             return page(request, "_skills_all_result.html", action="error", error=integrations.friendly_error(exc))
         return page(request, "_skills_all_result.html", action=action, result=result,
-                    labels=skills.TARGET_LABELS, targets_csv=",".join(result["targets"]))
+                    labels=skills.TARGET_LABELS, targets_csv=",".join(result["targets"]), **_found_ctx())
 
     @app.post("/connect/skills/{target}/{action}", response_class=HTMLResponse)
     def connect_skills(request: Request, target: str, action: str):
@@ -3664,7 +3706,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             integrations.log_failure(exc)
             return page(request, "_skills_result.html", action="error", target=target,
                         error=integrations.friendly_error(exc))
-        return page(request, "_skills_result.html", action=action, target=target, result=result)
+        return page(request, "_skills_result.html", action=action, target=target, result=result, **_found_ctx())
 
     @app.post("/connect/claude/report", response_class=HTMLResponse)
     def connect_report(request: Request):

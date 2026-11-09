@@ -369,7 +369,7 @@ def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], 
                     if len(todo) < len(g) else f"{len(g)} sessions")
             out.append({
                 "key": _loop_key("interview_outcome_loop", g), "kind": "interview_outcome", "rank": 1,
-                "when": todo[0]["at"], "loop": True,
+                "when": todo[0]["at"], "loop": True, "candidate_name": first["candidate_name"],
                 "title": f"How did {first['candidate_name']}'s interviews on {local_time(first['at'], '%a %b %-d')} go?",
                 "detail": " · ".join(x for x in (label(first.get("job_id"), first.get("job_title")), left) if x),
                 "interview_id": todo[0]["id"], "interview_ids": [t["id"] for t in todo],
@@ -384,6 +384,7 @@ def _outcome_asks(store: Store, now: datetime, jobs: dict[int, dict[str, Any]], 
         bits = [label(t.get("job_id"), t.get("job_title")), interview_name(t), f"with {who}" if who else None]
         out.append({
             "key": f"interview_outcome:{t['id']}", "kind": "interview_outcome", "rank": 1, "when": t["at"],
+            "candidate_name": t["candidate_name"], "session_name": interview_name(t),
             "title": f"How did {t['candidate_name']}'s interview on {local_time(t['at'], '%a %b %-d')} go?",
             "detail": " · ".join(x for x in bits if x), "interview_id": t["id"], "interviewer": who or None,
             "candidate_id": t["candidate_id"], "job_id": t.get("job_id"),
@@ -1635,7 +1636,7 @@ def status_digest(store: Store, company: str | None = None, now: datetime | None
         return f"{n} open job{'' if n == 1 else 's'}, {g['active']} in process, {g['filled_text']}."
 
     if len(groups) > 1:
-        none = "No hiring manager" if group_by_manager else "No company"
+        none = "Jobs without a hiring manager" if group_by_manager else "Jobs without a client"
         lines += [f"- {g['company'] or none}: {summary(g)}" for g in groups]
     elif groups and len(groups[0]["jobs"]) > 1:  # one company: its total, without repeating its name
         lines.append(summary(groups[0]))

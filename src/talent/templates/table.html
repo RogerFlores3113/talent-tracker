@@ -59,6 +59,7 @@
   </details>
 </form>
 {% include "_search_tips.html" %}
+{% if from_chat %}<p class="panel ids-banner" role="status"><strong>{{ from_chat }} {{ 'person' if from_chat == 1 else 'people' }} from your chat.</strong> <a href="/candidates">Show everyone</a></p>{% endif %}
 {% if q or keep %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
@@ -124,7 +125,7 @@
   <thead><tr>
     {% if total %}<th scope="col" class="pickcell"><input type="checkbox" form="bulk-form" data-check-all data-check-name="candidate_ids" aria-label="Tick everyone on this page"></th>{% endif %}
     <th scope="col" class="colorcell"{% if not q and sort == 'color' %} aria-sort="{{ 'ascending' if dir == 'asc' else 'descending' }}"{% endif %}>{% if q %}Color{% else %}<a href="/candidates?{{ dict(keep, sort='color', dir='desc' if sort == 'color' and dir == 'asc' else 'asc') | urlencode }}">Color{% if sort == 'color' %} <span aria-hidden="true">{{ '▲' if dir == 'asc' else '▼' }}</span>{% endif %}</a>{% endif %}</th>
-    {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated'),('added','Added')] %}
+    {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('job','Job'),('stage','Stage'),('location','Location'),('contacted','Last contacted'),('updated','Updated'),('added','Added')] %}
     <th scope="col"{% if not q and sort == key %} aria-sort="{{ 'ascending' if dir == 'asc' else 'descending' }}"{% elif q and qsort == key %} aria-sort="{{ 'ascending' if qdir == 'asc' else 'descending' }}"{% endif %}>{% if q and not colored_first %}<a href="/candidates?{{ dict(keep, q=q, qsort=key, qdir=('asc' if qdir == 'desc' else 'desc') if qsort == key else ('desc' if key in ('contacted','updated','added') else 'asc')) | urlencode }}">{{ label }}{% if qsort == key %} <span aria-hidden="true">{{ '▲' if qdir == 'asc' else '▼' }}</span>{% endif %}</a>{% elif q %}{{ label }}{% else %}<a href="/candidates?{{ dict(keep, sort=key, dir= 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated','added') else 'asc'))) | urlencode }}">{{ label }}{% if sort == key %} <span aria-hidden="true">{{ '▲' if dir == 'asc' else '▼' }}</span>{% endif %}</a>{% endif %}</th>
     {% endfor %}
     <th scope="col">Skills</th>

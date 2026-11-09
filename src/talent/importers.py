@@ -87,6 +87,8 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tag_column", ("recruiter", "recruiter name", "assigned recruiter", "sourced by", "sourcer", "coordinator",
                     "origin")),
 )
+_STAGE_ONLY = {"stage", "pipeline stage", "current stage", "stage name", "application stage"}
+_STATUS_ONLY = {"status", "candidate status", "pipeline status", "application status"}
 _EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color", "other_emails", "links"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
 _PIPELINE_ONLY_HINTS = {"role", "job", "project"}
@@ -108,7 +110,7 @@ FULL_NAME = ("name", "full name", "candidate", "candidate name", "contact", "con
 # created_at and stage_changed_at date the person and their place in the job.
 IMPORT_TARGETS = (("", "name", "first_name", "last_name") + tuple(f for f in CANDIDATE_FIELDS if f != "name")
                   + ("tag_column", "created_at", "note", "notes", "job_title", "job_company", "stage",
-                     "stage_changed_at", "jobs", "other_emails", "stage_dates"))
+                     "stage_changed_at", "jobs", "other_emails", "stage_dates", "work_history"))
 TARGET_LABELS = {
     "": "Skip this column", "name": "Full name", "first_name": "First name", "last_name": "Last name",
     "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn URL", "website": "Website",
@@ -121,6 +123,7 @@ TARGET_LABELS = {
     "links": "Other links (GitHub, portfolio...)",
     "color": "Color tag", "created_at": "Date added", "stage_changed_at": "Date they reached that stage",
     "stage_dates": "Stage dates, as exported (one per job)",
+    "work_history": "Work history, as exported (Title at Company (2019-2022); ...)",
 }
 BACKUPS_KEPT = 10
 
@@ -290,6 +293,8 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
             pairs.append((5000, col, "stage_dates"))
         if ours and header[col] == EXPORT_HEADERS["notes"]:
             pairs.append((5000, col, "notes"))
+        if header[col].strip() == EXPORT_HEADERS["work_history"]:  # our export's column; read back as it was written
+            pairs.append((5000, col, "work_history"))
         values = [r[col].strip() for r in (rows or [])[:50] if col < len(r) and r[col].strip()]
         if values and sum("linkedin.com/" in v.lower() for v in values) * 2 >= len(values):
             pairs.append((3000, col, "linkedin_url"))
@@ -320,6 +325,13 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
         if not out[col] and header[col].strip() and (_EXTRA_CONTACT.match(low) or low == "headline"
                                                       or _looks_email_header(low)):
             out[col] = "note"
+    # A file with both a Stage and a Status column: Stage is the stage, Status (Active, Passive...) is kept as a tag.
+    stage_cols = [c for c, low in enumerate(lows) if low in _STAGE_ONLY]
+    status_cols = [c for c, low in enumerate(lows) if low in _STATUS_ONLY and low not in _STAGE_ONLY]
+    if stage_cols and status_cols:
+        out[stage_cols[0]] = "stage"
+        for c in status_cols:
+            out[c] = "tag_column"
     if "job_title" not in used:  # a client means nothing without the job; a Stage or Status is kept as a tag
         out = ["tag_column" if f == "stage" else "" if f == "job_company" else f for f in out]
     return out
@@ -503,6 +515,12 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 job[target] = v
             elif target == "jobs":
                 jobs.extend((t, c, s, True, n) for t, c, s in _parse_jobs_cell(v))
+            elif target == "work_history":
+                history = parse_work_history(v)
+                if history:
+                    data["work_history"] = history
+                else:
+                    warnings.append(f"left {col_name} blank, couldn't read it as Title at Company (2019-2022); ...")
             elif target == "stage_dates":
                 job_dates_raw = [x.strip() for x in v.split(";")]
             elif target == "location":  # City, State, Country columns: one location, small to large
@@ -962,6 +980,43 @@ def _on_job(store: Store, candidate_id: int, rec_jobs: list[tuple]) -> bool:
     return False
 
 
+_HIST_DATES = re.compile(r"\s*\((?P<s>\d{4}(?:-\d{1,2})?|)-(?P<e>\d{4}(?:-\d{1,2})?|now|present|)\)\s*$", re.I)
+_HIST_LOOSE = re.compile(r"\s*\((?P<s>[^-()]*)-(?P<e>[^-()]*)\)\s*$")
+
+
+def parse_work_history(text: str) -> list[dict[str, Any]]:
+    """Our export's Work history cell ("Engineer at Acme (2019-2022); Analyst at Foo (2016-now)") as entries:
+    [{"title", "company", "start", "end"}], newest first as written. An entry with no " at " is a title."""
+    out: list[dict[str, Any]] = []
+    for part in (text or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        start = end = None
+        m = _HIST_DATES.search(part) or _HIST_LOOSE.search(part)
+        if m:
+            part = part[:m.start()].strip()
+            start = m.group("s").strip() or None
+            end = (m.group("e") or "").strip() or None
+            if end and end.lower() in ("now", "present"):
+                end = None
+        title, _, company = part.partition(" at ")
+        entry = {"title": title.strip() or None, "company": company.strip() or None, "start": start, "end": end}
+        if entry["title"] or entry["company"]:
+            out.append(entry)
+    return out
+
+
+def _keep_saved_history(store: Store, data: dict[str, Any]) -> dict[str, Any]:
+    """A file's work history fills a person who has none; it never replaces the one already saved."""
+    if not data.get("work_history"):
+        return data
+    have = store.find_duplicate(data.get("email"), data.get("linkedin_url"))
+    if have and store.work_history(have["id"]):
+        return {k: v for k, v in data.items() if k != "work_history"}
+    return data
+
+
 def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict[str, Any]:
     """The same merge rules as a save by email or LinkedIn, for someone matched by name."""
     cur = store.get_candidate(candidate_id)
@@ -979,6 +1034,9 @@ def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict
             out[k] = v
         elif k == "last_contacted_at":
             if not cur.get(k) or v > cur[k]:
+                out[k] = v
+        elif k == "work_history":  # saved history is never replaced by a file
+            if not store.work_history(candidate_id):
                 out[k] = v
         elif not cur.get(k):
             out[k] = v
@@ -1344,7 +1402,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                 # The file's email is theirs now. The old one stays as another address, so nothing is lost.
                 keep_data = {k: v for k, v in {**data, "email": match["email"]}.items() if v not in (None, "")}
                 new = change["new_email"]
-                res = store.upsert_candidate(by="import", other_emails=[new, *more], **keep_data)
+                res = store.upsert_candidate(by="import", other_emails=[new, *more], **_keep_saved_history(store, keep_data))
                 cand, created = res[0], False
                 with store._lock, store._conn:
                     store._promote_email(cand["id"], new)
@@ -1358,7 +1416,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                 if match:  # same name and company or phone: save into them through their email or LinkedIn
                     data = {**data, "email": match["email"], "linkedin_url": match["linkedin_url"]}
                     data = {k: v for k, v in data.items() if v not in (None, "")}
-                res = store.upsert_candidate(by="import", other_emails=more, **data)
+                res = store.upsert_candidate(by="import", other_emails=more, **_keep_saved_history(store, data))
                 cand, created = res[0], bool(res[1])
         except Exception as exc:  # one bad row must never stop the rest
             if change in email_changes:
@@ -1461,6 +1519,8 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             "dry_run": False}
 
 
+_YEARS_HEADERS = {"years of experience", "years experience", "experience years", "total experience", "yoe", "years",
+                  "yrs", "years exp", "yrs exp", "years of exp", "experience"}
 _STAGE_WORDS = {_norm_header(w) for f, ws in _HEADER_HINTS if f == "stage" for w in ws}
 
 
@@ -1470,15 +1530,27 @@ def column_lines(header: list[str], mapping: list[str], rows: list[list[str]] | 
     out: list[str] = []
     stage_cols = [i for i, m in enumerate(mapping) if m == "tag_column" and i < len(header)
                   and _norm_header(header[i]) in _STAGE_WORDS]
+    has_stage = "stage" in mapping
     for i in stage_cols:
         counts: Counter[str] = Counter(r[i].strip() for r in rows or [] if i < len(r) and r[i].strip())
         top = ", ".join(f"{v} ({n:,})" for v, n in counts.most_common(8))
+        if has_stage:
+            out.append(f"{header[i].strip()} was kept as a tag on each person (\"{header[i].strip()}: value\"), not as a "
+                       "pipeline stage, because this file also has a Stage column, which sets the stage."
+                       + (f" Values: {top}." if top else ""))
+            continue
         out.append(f"{header[i].strip()} was kept as a tag on each person (\"{header[i].strip()}: value\"), not as a "
                    "pipeline stage, because this file has no job column and Talent Search keeps stages per job. "
                    "No stages were made and nobody was put in a pipeline."
                    + (f" Values: {top}." if top else ""))
+    years = [header[i].strip() for i, m in enumerate(mapping) if m == "note" and i < len(header)
+             and _norm_header(header[i]) in _YEARS_HEADERS]
+    for h in years:
+        out.append(f"{h} (kept as a note): there is no years field, so each person gets a note like \"{h}: 16\". "
+                   "The Years of experience search filter reads dated work history, not this note.")
     notes = [header[i].strip() for i, m in enumerate(mapping) if m == "note" and i < len(header)
-             and _norm_header(header[i]) not in _PLAIN_NOTE_HEADERS and header[i].strip()]
+             and _norm_header(header[i]) not in _PLAIN_NOTE_HEADERS and header[i].strip()
+             and header[i].strip() not in years]
     if notes:
         out.append(f"Kept as a note on each person (with the column name in front): {', '.join(notes[:8])}.")
     return out
@@ -1504,6 +1576,25 @@ def _date_note(stage_dated: int, placed: int, created: int) -> str:
 
 def _stage_words(name: str) -> list[str]:
     return [w for w in re.split(r"[^a-z0-9]+", _fold(name)) if len(w) >= 3]
+
+
+def _stem(name: str) -> str:
+    """A stage name down to its stem, so near spellings meet: Interview and Interviewing, Screen and Screened,
+    Offer and Offered."""
+    word = re.sub(r"[^a-z0-9]+", "", _fold(name))
+    for tail in ("ing", "ed", "s"):
+        if word.endswith(tail) and len(word) - len(tail) >= 4:
+            return word[: -len(tail)]
+    return word
+
+
+def _same_stage(name: str, stages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The one stage of the job that is this name in another form (not an exact match), or None."""
+    key = _stem(name)
+    if not key or any(s["name"].casefold() == name.strip().casefold() for s in stages):
+        return None
+    hits = [s for s in stages if _stem(s["name"]) == key]
+    return hits[0] if len(hits) == 1 else None
 
 
 def closest_stage(name: str, stages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1541,6 +1632,11 @@ def _place(store: Store, jobs: _Jobs, cand: dict[str, Any], title: str, company:
     stages = store.job_stages(job["id"])
     want = stages[0]
     if stage:
+        same = _same_stage(stage, stages)  # "Interview" is the job's "Interviewing", "Offered" its "Offer"
+        if same and same["name"].casefold() != stage.strip().casefold():
+            if moves is not None:
+                moves[f"{stage.strip()} to {same['name']} on {job_label(job)}"] += 1
+            stage = same["name"]
         key = stage.strip().casefold()
         exact = [s for s in stages if s["name"].casefold() == key]
         starts = [s for s in stages if s["name"].casefold().startswith(key)]
