@@ -53,7 +53,7 @@ def test_same_name_and_phone_in_different_formats(store):
 
 def test_same_name_and_company(store):
     a = store.add_candidate(name="José Álvarez", current_company="Acme Corp.", email="j@a.com")["id"]
-    b = store.add_candidate(name="Jose Alvarez", current_company="acme corp", email="j2@a.com")["id"]
+    b = store.add_candidate(name="Jose Alvarez", current_company="acme corp")["id"]  # (two different emails: see test_c8_fix_y)
     store.add_candidate(name="Jose Alvarez", current_company="Globex")  # same name, other company: not flagged
     assert reasons(store) == {frozenset((a, b)): ["same name and company"]}
 

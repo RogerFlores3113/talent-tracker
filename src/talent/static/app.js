@@ -8,6 +8,8 @@
 //   data-move-url="/jobs/1/move"   on the pipeline: drag a card to another column to move it
 //   data-add-step             on a button in the follow-up steps form: show the next empty step row
 //   data-check-all            on a checkbox: tick or untick every person (name candidate_ids) in its form
+//   data-check-name="pair"    on a data-check-all box: tick the boxes with that name instead (they may sit outside the
+//                             form element and point at it with the form attribute)
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
 //                             (a submit button's own data-busy wins when that button sent it)
@@ -97,7 +99,9 @@
   document.addEventListener("change", e => {
     const all = e.target.closest && e.target.closest("input[data-check-all]");
     if (!all) return;
-    all.form.querySelectorAll("input[name=candidate_ids]").forEach(b => { b.checked = all.checked; });
+    const name = all.dataset.checkName || "candidate_ids";
+    Array.from(all.form.elements).filter(b => b.name === name && b.type === "checkbox")
+      .forEach(b => { b.checked = all.checked; });
   });
 
   // The time zone banner: suggest the zone this browser is in, so saving it is one click.

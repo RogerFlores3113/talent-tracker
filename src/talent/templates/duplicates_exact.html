@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sub %}
+{% block title %}Merge exact matches · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <h1>Merge exact matches {% if rows %}<span class="muted">{{ rows | length }}</span>{% endif %}</h1>
+  <div class="actions-inline"><a class="btn" href="/candidates/duplicates">Back to possible duplicates</a></div>
+</div>
+<p class="lead">These pairs share the same email or the same LinkedIn page, and their names fit. For each pair, the more complete profile is kept, anything it is missing is filled in from the other, the timeline and jobs move over, and the other profile is deleted. Untick any pair you want to look at first. A backup is saved before anything is merged.</p>
+{% if not rows %}
+<p class="panel">No exact email or LinkedIn matches right now.</p>
+{% else %}
+<form method="post" action="/candidates/duplicates/merge-exact" class="stack" id="merge-exact"
+      data-confirm="Merge the ticked pairs? Each pair becomes one profile and the other one is deleted. A backup is saved first.">
+  <label class="check"><input type="checkbox" data-check-all data-check-name="pair" checked aria-label="Tick every pair"> <span>Tick every pair</span></label>
+  <ul class="items dup-list">
+    {% for r in rows %}
+    <li class="panel dup-pair">
+      <label class="check"><input type="checkbox" name="pair" value="{{ r.keep }}-{{ r.other }}" checked
+        aria-label="Merge {{ r.b.name }} into {{ r.a.name }}"> <span class="fine"><strong>{{ r.reasons | join(', ') | capitalize }}</strong></span></label>
+      <div class="connect-grid">
+        <div class="dup-person"><span class="fine">Kept</span> <a href="/candidates/{{ r.a.id }}"><strong>{{ r.a.name }}</strong></a>
+          <span class="muted">{{ sub(r.a) }}</span>
+          <span class="fine">{{ [r.a.email, r.a.phone, r.a.linkedin_url] | select | join(' · ') }}</span></div>
+        <div class="dup-person"><span class="fine">Merged in and deleted</span> <a href="/candidates/{{ r.b.id }}"><strong>{{ r.b.name }}</strong></a>
+          <span class="muted">{{ sub(r.b) }}</span>
+          <span class="fine">{{ [r.b.email, r.b.phone, r.b.linkedin_url] | select | join(' · ') }}</span></div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="actions-inline"><button class="btn primary" type="submit">Merge the ticked pairs</button>
+    <a class="btn" href="/candidates/duplicates">Cancel</a></div>
+</form>
+{% endif %}
+{% endblock %}

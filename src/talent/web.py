@@ -40,7 +40,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
-from .store import as_local, parse_when
+from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
 from .store import COLORS, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
@@ -696,7 +696,60 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         for p in pairs[:shown]:
             rows.append({**p, "a": store.get_candidate(p["keep"]), "b": store.get_candidate(p["other"])})
         return page(request, "duplicates.html", rows=rows, total=total, shown=shown,
-                    dismissed=len(duplicates.dismissed(store)))
+                    dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)))
+
+    def _pair_ids(form: Any) -> list[tuple[int, int]]:
+        out = []
+        for v in form.getlist("pair"):
+            m = re.fullmatch(r"(\d+)-(\d+)", str(v))
+            if m:
+                out.append((int(m[1]), int(m[2])))
+        return out
+
+    @app.get("/candidates/duplicates/merge-exact", response_class=HTMLResponse)
+    def duplicates_merge_exact(request: Request):
+        """App window only: every pair with the same email or LinkedIn (and a matching name), to tick and merge."""
+        return page(request, "duplicates_exact.html", rows=duplicates.exact_matches(store))
+
+    @app.post("/candidates/duplicates/merge-exact")
+    async def duplicates_merge_exact_run(request: Request):
+        """App window only. Merges the ticked pairs, and only pairs that are still exact matches right now.
+        The AI has no merge tool."""
+        form = await request.form()
+        ok = {(r["keep"], r["other"]) for r in duplicates.exact_matches(store)}
+        ok |= {(b, a) for a, b in ok}
+        chosen = [(a, b) for a, b in _pair_ids(form) if (a, b) in ok]
+        if not chosen:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        try:
+            importers.backup_before_import(store, reason="merge")
+        except ValueError as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}),
+                                    status_code=303)
+        res = duplicates.merge_pairs(store, chosen)
+        n = res["merged"]
+        notice = f"Merged {n} pair{'' if n == 1 else 's'}. A backup was saved first."
+        if res["skipped"]:
+            notice += f" {len(res['skipped'])} could not be merged and were left alone."
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
+
+    @app.post("/candidates/duplicates/dismiss-many")
+    async def duplicates_dismiss_many(request: Request):
+        """App window only: the ticked pairs are different people. They never come back."""
+        form = await request.form()
+        done = 0
+        for a, b in _pair_ids(form):
+            try:
+                duplicates.dismiss(store, a, b)
+                done += 1
+            except (NotFound, ValueError):
+                continue
+        if not done:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        return RedirectResponse("/candidates/duplicates?" + urlencode(
+            {"notice": f"Got it. {done} pair{'' if done == 1 else 's'} won't show up again."}), status_code=303)
 
     @app.post("/candidates/duplicates/dismiss")
     async def duplicates_dismiss(request: Request):
@@ -765,7 +818,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
                     inject_warnings=injection.candidate_warnings(c),
-                    dupes=store.possible_duplicates(candidate_id),
+                    dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
                     refresh_prompt=recipes.refresh_candidate(c))
 
@@ -1023,7 +1076,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                     status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
                     from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing,
-                    dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None)
+                    dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None,
+                    dupe_name_differs=bool(dupe and guess.get("name") and store.find_duplicate(
+                        guess.get("email"), guess.get("linkedin_url")) is not None
+                        and not same_person_name(dupe["name"], guess["name"])))
 
     # ----------------------------------------------------------- csv
     @app.get("/import", response_class=HTMLResponse)
@@ -1049,10 +1105,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         mapping, prof = importers.mapping_for(store, header, rows)
+        # A file from a different tool than the last import doesn't move stages unless the recruiter ticks it.
         return map_step(request, token, header, rows, mapping,
                         (prof or {}).get("source") or importers.default_source(header), _file_name(upload.filename),
                         add_stages=bool((prof or {}).get("add_stages", True)),
-                        move_stages=True, client=(prof or {}).get("client"),
+                        move_stages=importers.other_tool(store, header) is None, client=(prof or {}).get("client"),
                         replace_stages=bool((prof or {}).get("replace_stages", True)))
 
     def _file_name(name: Any) -> str:
@@ -1073,7 +1130,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
                  add_stages: bool = True, move_stages: bool = True, client: str | None = None,
-                 reopen_jobs: bool = False, replace_stages: bool = True) -> HTMLResponse:
+                 reopen_jobs: bool = False, replace_stages: bool = True,
+                 allow_backward: bool = False) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         prof = importers.sync_profile(store, header)
         client = (client or "").strip()[:120]
@@ -1082,7 +1140,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             try:
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
                                                    move_stages=move_stages, profile={**(prof or {}), "client": client},
-                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages)
+                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages,
+                                                   allow_backward=allow_backward)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -1095,7 +1154,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
-                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping)
+                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
+                    allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
+                    this_tool=importers.detect_export(header),
+                    skipped_email=importers.skipped_email_columns(header, mapping))
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -1119,7 +1181,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
                         add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
                         client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
-                        replace_stages=form.get("replace_stages") == "1")
+                        replace_stages=form.get("replace_stages") == "1",
+                        allow_backward=form.get("allow_backward") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -1134,19 +1197,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         add_stages = form.get("add_stages") == "1"
         move_stages = form.get("move_stages") == "1"
         reopen_jobs, replace_stages = form.get("reopen_jobs") == "1", form.get("replace_stages") == "1"
+        allow_backward = form.get("allow_backward") == "1"
         client = str(form.get("client") or "").strip()[:120]
         filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
             return map_step(request, token, header, rows, mapping, source, filename,
                             error="Pick which column holds the name.", add_stages=add_stages,
                             move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
-                            replace_stages=replace_stages)
+                            replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
                                            profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
-                                           replace_stages=replace_stages)
+                                           replace_stages=replace_stages, allow_backward=allow_backward)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
