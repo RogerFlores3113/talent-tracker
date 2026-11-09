@@ -36,6 +36,7 @@ from . import outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
+from . import searchquery
 from .paths import app_url
 from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
@@ -147,6 +148,7 @@ CARD_NO_APPS = ("This chat app didn't say it shows Talent Search cards, so Keep 
                 "instead. Open the Shortlist there.")
 # How many to-dos the AI app may add in an hour.
 AI_TODO_CAP = 20
+AI_SAVED_SEARCH_CAP = 20  # searches the AI app may save in total; the recruiter deletes them
 # How an MCP Apps host says it shows in-chat views (client capabilities, under extensions).
 UI_EXTENSION = "io.modelcontextprotocol/ui"
 
@@ -714,6 +716,44 @@ def _timeline_line(t: dict[str, Any]) -> str:
     return f"{_local(t['at'])} {line}"
 
 
+def _search_filters(*, company: Any, skills: Any, skill_mode: Any, remote: Any, min_years: Any, max_years: Any,
+                    contacted: Any, contacted_days: Any, added_days: Any, has_email: Any,
+                    has_linkedin: Any) -> dict[str, Any]:
+    """The newer search filters an AI app passed, checked and ready for the store. Empty values are left out."""
+    out: dict[str, Any] = {}
+    if company and str(company).strip():
+        out["company"] = str(company).strip()
+    names = [str(x).strip() for x in (skills or []) if str(x).strip()][:12]
+    if names:
+        mode = str(skill_mode or "any").strip().lower()
+        if mode not in ("any", "all"):
+            raise ValueError("skill_mode is any or all.")
+        out["skills"], out["skill_mode"] = names, mode
+    for key, val in (("remote", remote), ("has_email", has_email), ("has_linkedin", has_linkedin)):
+        if val:
+            out[key] = True
+    for key, val in (("exp_min", min_years), ("exp_max", max_years), ("added_days", added_days)):
+        if val is not None:
+            if int(val) < 0:
+                raise ValueError("Years and days can't be negative.")
+            if key == "added_days" and not int(val):
+                continue
+            out[key] = int(val)
+    if contacted and str(contacted).strip():
+        c = str(contacted).strip().lower()
+        if c not in searchquery.CONTACTED_CHOICES:
+            raise ValueError("contacted is never, older (more than contacted_days ago) or within (the last "
+                             "contacted_days).")
+        if c != "never" and not contacted_days:
+            raise ValueError(f"Say how many days with contacted_days (contacted is {c}).")
+        out["contacted"] = c
+        if c != "never":
+            out["contacted_days"] = int(contacted_days)
+    if (out.get("exp_min") is not None and out.get("exp_max") is not None) and out["exp_min"] > out["exp_max"]:
+        raise ValueError("min_years is more than max_years, so nobody could match.")
+    return out
+
+
 def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     search = search or SearchService(store, TypesenseIndex.from_env())
     mcp = FastMCP("talent-search", instructions=INSTRUCTIONS)
@@ -732,7 +772,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def search_candidates(query: str = "", location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, limit: int = 10,
                           job_id: int | None = None, client: str | None = None,
-                          stage: str | None = None) -> CallToolResult:
+                          stage: str | None = None, company: str | None = None,
+                          skills: list[str] | None = None, skill_mode: str = "any", remote: bool | None = None,
+                          min_years: int | None = None, max_years: int | None = None,
+                          contacted: str | None = None, contacted_days: int | None = None,
+                          added_days: int | None = None, has_email: bool | None = None,
+                          has_linkedin: bool | None = None) -> CallToolResult:
         """Search saved candidates by any words: skills, past or current companies, titles, names, places,
         the jobs they're in (title or company, like "Acme Fintech") and their timeline notes and interviews.
 
@@ -740,27 +785,45 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Matches whole words and their forms ("engineers" finds "engineer"), with the last word as a prefix
         ("pyth" finds "Python"). Filler words like "who" or "people" are ignored. Shorthand like sf, nyc, la,
         bay area, ml, js, k8s, golang, postgres or frontend also matches the other spelling.
+        Query syntax: words all have to match; "machine learning" in quotes is a phrase; python OR go (OR in
+        capitals) is either; -recruiter or NOT manager leaves people out; title:, company:, location:, skill: (or
+        tag:) and source: narrow to one field, like title:engineer. A phrase or OR searches profile text only.
         Fewer than 3 people with every word: the closest matches (some of the words) follow, marked as such.
         A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?".
         Leave query empty to list the most recently updated candidates.
-        location / title narrow by part of those fields (shorthand works, case doesn't matter);
+        location / title / company narrow by part of those fields (shorthand works, case doesn't matter);
         tag narrows to one skill tag; source to one exact "Found via" value (like Referral). Words in Found via
         ("referral", "alex" for "Referral from Alex") also match the query. Each hit lists the jobs the person
         is in and their stage there, so "already in my pipeline?" takes one call.
         job_id, client and stage narrow to people in that job, on that client's jobs, or in that stage name
         (they all have to hold in the same pipeline, so job_id 4 with stage "Onsite" is who is in Onsite on job 4).
+        More filters: skills is a list of skill tags (skill_mode "any" or "all"); remote=true means the location
+        says remote or they have a Remote tag; min_years / max_years are years of experience worked out from
+        dated work history (people with no dated history are left out when min_years is set);
+        contacted is "never", "older" (last contact more than contacted_days ago) or "within" (in the last
+        contacted_days); added_days is saved in the last N days; has_email / has_linkedin are true to require one.
         With no query this lists them, most recently updated first.
         """
         q = (query or "").strip()
-        is_id, _ = store.lookup_exact(q)
         limit = max(1, min(limit, 50))
         member = {"job_id": job_id, "client": client, "stage": stage}
         if stage and stage.strip() and job_id:
             store.resolve_stage(job_id, stage)  # a stage the job doesn't have gets the plain error
         elif job_id:
             store.get_job(job_id)
+        more = _search_filters(company=company, skills=skills, skill_mode=skill_mode, remote=remote,
+                               min_years=min_years, max_years=max_years, contacted=contacted,
+                               contacted_days=contacted_days, added_days=added_days, has_email=has_email,
+                               has_linkedin=has_linkedin)
+        return _search_reply(q, {"location": location, "title": title, "tag": tag, "source": source,
+                                 **member, **more}, limit)
+
+    def _search_reply(q: str, kw: dict[str, Any], limit: int, heading: str | None = None,
+                      app_path: str | None = None) -> CallToolResult:
+        """The reply search_candidates and run_saved_search share: the people found, as text and structured."""
+        is_id, _ = store.lookup_exact(q)
         res = (store.search_candidates(q, limit=limit) if is_id
-               else search.search(q, location=location, title=title, tag=tag, source=source, limit=limit, **member))
+               else search.search(q, limit=limit, **kw))
         results = []
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
@@ -825,11 +888,75 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                      "No saved candidates match. Try fewer or different words, or no filters."]
         if res.suggestion and not res.corrected:
             lines.append(f"Did you mean {res.suggestion}?")
+        if heading:
+            lines.insert(0, heading)
         return _result("\n".join(lines), {
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
             "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q,
             **({"no_one_named": q} if nobody else {}),
-            "app_url": app_url("/?q=" + quote(res.suggestion if res.corrected else q))})
+            "app_url": app_url(app_path or "/?q=" + quote(res.suggestion if res.corrected else q))})
+
+    @mcp.tool(annotations=READ)
+    def list_saved_searches() -> CallToolResult:
+        """List the recruiter's saved searches (the quick links on their Candidates page): each one's id, name,
+        what it searches for in plain words, how many people match now, and how many of those are new since the
+        recruiter last opened it. Run one with run_saved_search. You can't delete or rename them."""
+        rows = store.list_saved_searches(counts=True)
+        items = [_slim({"id": r["id"], "name": r["name"], "search": searchquery.describe(r["params"]),
+                        "matches": r["count"], "new_since_opened": r["new"],
+                        "saved_by": "your AI app" if r["created_by"] == "ai" else "the recruiter"}) for r in rows]
+        if not items:
+            return _result("No saved searches yet. save_search keeps one the recruiter can open from their "
+                           "Candidates page.", {"saved_searches": [], "app_url": app_url("/candidates")})
+        lines = [f"{len(items)} saved search{'' if len(items) == 1 else 'es'}:"]
+        lines += [f"- [id {i['id']}] {quoted(i['name'])}: {i['search']}. {i['matches']} match"
+                  f"{'' if i['matches'] == 1 else 'es'}" + (f", {i['new_since_opened']} new" if i.get("new_since_opened") else "")
+                  for i in items]
+        return _result("\n".join(lines), {"saved_searches": items, "app_url": app_url("/candidates")})
+
+    @mcp.tool(annotations=READ, meta=tool_meta("results"))
+    def run_saved_search(name_or_id: str | int, limit: int = 10) -> CallToolResult:
+        """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches) and show the
+        people who match now, like search_candidates. Running it does not mark it as looked at in the app."""
+        limit = max(1, min(limit, 50))
+        row = store.get_saved_search(int(name_or_id) if str(name_or_id).strip().isdigit() else str(name_or_id))
+        q, kw = store._saved_kwargs(row)
+        return _search_reply(q, kw, limit, heading=f"Saved search {quoted(row['name'])} "
+                             f"({searchquery.describe(row['params'])}):", app_path=f"/saved-searches/{row['id']}")
+
+    @mcp.tool(annotations=WRITE)
+    def save_search(name: str, query: str = "", location: str | None = None, title: str | None = None,
+                    tag: str | None = None, source: str | None = None, company: str | None = None,
+                    skills: list[str] | None = None, skill_mode: str = "any", remote: bool | None = None,
+                    min_years: int | None = None, max_years: int | None = None, contacted: str | None = None,
+                    contacted_days: int | None = None, added_days: int | None = None, has_email: bool | None = None,
+                    has_linkedin: bool | None = None) -> CallToolResult:
+        """Keep a search the recruiter will want again, under a short name, as a quick link on their Candidates
+        page ("Senior Python in SF"). Takes the same query and filters as search_candidates. It never replaces
+        or deletes a saved search: a name already in use is refused, and only the recruiter can rename or delete
+        one in the app. Check list_saved_searches first so you don't save the same search twice."""
+        more = _search_filters(company=company, skills=skills, skill_mode=skill_mode, remote=remote,
+                               min_years=min_years, max_years=max_years, contacted=contacted,
+                               contacted_days=contacted_days, added_days=added_days, has_email=has_email,
+                               has_linkedin=has_linkedin)
+        params = {"q": (query or "").strip(), "location": location, "title": title, "tag": tag, "source": source,
+                  "company": more.get("company"),
+                  "skills": ", ".join(more.get("skills", [])) or None,
+                  "skill_mode": more.get("skill_mode"), "remote": "1" if more.get("remote") else None,
+                  "exp_min": more.get("exp_min"), "exp_max": more.get("exp_max"), "contacted": more.get("contacted"),
+                  "contacted_days": more.get("contacted_days"), "added_days": more.get("added_days"),
+                  "has_email": "1" if more.get("has_email") else None,
+                  "has_linkedin": "1" if more.get("has_linkedin") else None}
+        mine = [r for r in store.list_saved_searches() if r["created_by"] == "ai"]
+        if len(mine) >= AI_SAVED_SEARCH_CAP:
+            raise ValueError(f"No search saved. Your AI app has already saved {AI_SAVED_SEARCH_CAP} searches. Ask "
+                             "the recruiter which ones to keep, or to delete some in the app.")
+        row = store.save_search(name, params, by="ai")
+        what = searchquery.describe(row["params"])
+        data = {"id": row["id"], "name": row["name"], "search": what, "note": "Saved by your AI app",
+                "app_url": app_url("/candidates")}
+        return _said(f"Saved the search {quoted(row['name'])} ({what}) on the recruiter's Candidates page. "
+                     "Saved by your AI app.", data)
 
     def candidate_view(candidate_id: int) -> dict[str, Any]:
         """One candidate as get_candidate and save_candidate show it (and the in-chat candidate view reads)."""

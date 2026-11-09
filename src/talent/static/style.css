@@ -474,3 +474,23 @@ section.welcome.panel { margin-bottom: var(--space-5); }
 #claude-panel details { margin-top: var(--space-3); }
 #claude-panel pre.code { max-height: 220px; overflow: auto; }
 .claude-open { border-left: 3px solid var(--line); padding-left: var(--space-3); }
+
+/* Candidates: More filters, active-filter chips, saved searches; Today: Search tips (cycle 8, D) */
+.more-filters { flex-basis: 100%; }
+.more-filters summary, .search-tips summary, .save-search summary { color: var(--muted); font-size: var(--fs-sm); cursor: pointer; }
+.more-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--space-2) var(--space-3); margin-top: var(--space-2); }
+.more-grid label { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); color: var(--muted); }
+.more-grid .more-checks { display: flex; flex-direction: column; gap: var(--space-1); justify-content: flex-end; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.chip.removable { cursor: pointer; }
+.chip.removable:hover { border-color: var(--bad); }
+.savedbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
+.saved-today { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.saved-link .badge.new { background: var(--accent); color: var(--accent-text); }
+.save-search .inline-form { display: inline-flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+.saved-manage { list-style: none; padding: 0; margin: var(--space-2) 0 0; display: grid; gap: var(--space-2); }
+.saved-manage li { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.saved-manage .inline-form { display: inline-flex; gap: var(--space-2); }
+.search-tips { margin-top: var(--space-2); }
+.search-tips .tips { margin: var(--space-2) 0; padding-left: var(--space-4); font-size: var(--fs-sm); }
+.search-tips code { background: var(--surface-2); padding: 0 var(--space-1); border-radius: var(--radius-sm); }

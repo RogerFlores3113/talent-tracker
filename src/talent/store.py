@@ -630,6 +630,19 @@ _MIGRATIONS: tuple[Any, ...] = (
         trust      TEXT NOT NULL DEFAULT 'trusted' CHECK (trust IN ('read_only', 'suggest', 'trusted'))
     );
     """,
+    # v8d: saved searches (searchquery.py): a name and the search's own parameters as JSON, when it was last opened
+    # (for "new since you looked"), and who saved it (the app window or an AI app).
+    """
+    CREATE TABLE saved_searches (
+        id             INTEGER PRIMARY KEY,
+        name           TEXT NOT NULL,
+        params         TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        last_viewed_at TEXT,
+        created_by     TEXT NOT NULL DEFAULT 'app'
+    );
+    CREATE UNIQUE INDEX saved_searches_name_uq ON saved_searches(name COLLATE NOCASE);
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1378,6 +1391,15 @@ def _query_terms(text: str) -> list[_Term]:
         group |= {nick for formal in _NICK_GROUPS[first.form] for nick in _NICKNAMES[formal].split()}
         terms[0] = _Term(first.form, first.prefix, (), tuple(sorted(group - {first.form})))
     return terms
+
+
+def _item_fts(text: str, phrase: bool) -> str:
+    """One parsed word or phrase as FTS5 text, every piece quoted. A word keeps its shorthand ('sf' also finds
+    San Francisco); a phrase must sit together. `text` holds only letters, digits and spaces."""
+    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    if phrase or " " in text:
+        return f'"{text}"'
+    return _Term(text, False, ALIASES.get(text, ())).fts()
 
 
 def _query_groups(text: str) -> list[str]:
@@ -3424,19 +3446,32 @@ class Store:
     def candidate_filters(self, *, location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, job_id: int | None = None,
                           client: str | None = None, stage: str | None = None, pipe: str | None = None,
-                          days: int | None = None) -> tuple[list[str], list[Any], dict]:
-        """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
-        bay area, swe) and ignore case and accents; tag and source ignore case."""
+                          days: int | None = None, company: str | None = None,
+                          skills: list[str] | None = None, skill_mode: str = "any", remote: bool = False,
+                          exp_min: int | None = None, exp_max: int | None = None,
+                          contacted: str | None = None, contacted_days: int | None = None,
+                          added_days: int | None = None, added_since: str | None = None,
+                          has_email: bool = False, has_linkedin: bool = False,
+                          exclude: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[Any], dict]:
+        """SQL conditions on `c` for the search filters. Location, title and company take shorthand (sf, nyc,
+        la, bay area, swe) and ignore case and accents; tag and source ignore case.
+
+        skills: several skill tags, any of them or (skill_mode "all") every one. remote: the location says
+        remote, or a tag does. exp_min / exp_max: years of work from the work history (people with no dated
+        history are left out when exp_min is set). contacted: "never", "older" (last contact more than
+        contacted_days ago) or "within". added_days / added_since: when they were saved. exclude: (words, is a
+        phrase) that must not appear anywhere in the profile."""
         where: list[str] = []
         params: list[Any] = []
         filters: dict[str, str] = {}
-        for col, value, singular in (("location", location, False), ("current_title", title, True)):
+        for col, value, singular in (("location", location, False), ("current_title", title, True),
+                                     ("current_company", company, False)):
             if value and value.strip():
                 forms = _filter_forms(value, singular=singular)
                 where.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
                 for f in forms:
                     params += [f, int(len(f) <= 3)]
-                filters["title" if col == "current_title" else col] = value
+                filters[{"current_title": "title", "current_company": "company"}.get(col, col)] = value
         if tag and tag.strip():
             where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
             params.append(tag.strip())
@@ -3445,6 +3480,10 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        self._more_filters(where, params, filters, skills=skills, skill_mode=skill_mode, remote=remote,
+                           exp_min=exp_min, exp_max=exp_max, contacted=contacted, contacted_days=contacted_days,
+                           added_days=added_days, added_since=added_since, has_email=has_email,
+                           has_linkedin=has_linkedin, exclude=exclude)
         from .opsreview import PIPES, pipe_sql
         pipe = pipe if pipe in PIPES else None  # a column of the Ops review: in process, stuck, offers out...
         if job_id or (client and client.strip()) or (stage and stage.strip()) or pipe:
@@ -3476,6 +3515,178 @@ class Store:
                          + " AND ".join(sub) + ")")
             params += sp
         return where, params, filters
+
+    def _more_filters(self, where: list[str], params: list[Any], filters: dict[str, str], *, skills, skill_mode,
+                      remote, exp_min, exp_max, contacted, contacted_days, added_days, added_since, has_email,
+                      has_linkedin, exclude) -> None:
+        """The newer filters of candidate_filters: more than one skill, remote, years, contact and added dates,
+        has email / LinkedIn, and words to leave out."""
+        names = [x.strip() for x in (skills or []) if x and x.strip()]
+        if names:
+            marks = ", ".join("?" for _ in names)
+            if skill_mode == "all":
+                where.append(f"(SELECT count(DISTINCT lower(tag)) FROM candidate_tags WHERE candidate_id = c.id"
+                             f" AND tag IN ({marks}) COLLATE NOCASE) = ?")
+                params += [*names, len({x.lower() for x in names})]
+            else:
+                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
+                params += names
+            filters["skills"] = (" and " if skill_mode == "all" else " or ").join(names)
+        if remote:
+            where.append("(tt_has(c.location, 'remote', 1) OR c.id IN (SELECT candidate_id FROM candidate_tags"
+                         " WHERE tag IN ('remote', 'open to remote', 'remote ok') COLLATE NOCASE))")
+            filters["remote"] = "yes"
+        if exp_min is not None or exp_max is not None:
+            years = self.experience_years()
+            lo = float(exp_min) if exp_min is not None else None
+            hi = float(exp_max) if exp_max is not None else None
+            # No dated history: left out when a minimum is set (we can't say they have it), kept for a maximum.
+            ids = [cid for cid, y in years.items()
+                   if (lo is None or (y is not None and y >= lo)) and (hi is None or y is None or y <= hi)]
+            if lo is None:
+                ids += [r["id"] for r in self._rows("SELECT id FROM candidates WHERE id NOT IN"
+                                                    " (SELECT DISTINCT candidate_id FROM work_history)")]
+            where.append("c.id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(ids))
+            filters["experience"] = (f"{exp_min} to {exp_max} years" if exp_min is not None and exp_max is not None
+                                     else f"{exp_min}+ years" if exp_min is not None else f"up to {exp_max} years")
+        if contacted == "never":
+            where.append("(c.last_contacted_at IS NULL OR trim(c.last_contacted_at) = '')")
+            filters["contacted"] = "never"
+        elif contacted in ("older", "within") and contacted_days is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=int(contacted_days))).replace(microsecond=0).isoformat()
+            if contacted == "older":
+                where.append("(c.last_contacted_at IS NOT NULL AND trim(c.last_contacted_at) <> ''"
+                             " AND datetime(c.last_contacted_at) < datetime(?))")
+            else:
+                where.append("(c.last_contacted_at IS NOT NULL AND datetime(c.last_contacted_at) >= datetime(?))")
+            params.append(cutoff)
+            filters["contacted"] = f"{contacted} {contacted_days} days"
+        since = added_since
+        if added_days is not None:
+            since = (datetime.now(timezone.utc) - timedelta(days=int(added_days))).replace(microsecond=0).isoformat()
+            filters["added"] = f"last {added_days} days"
+        if since:
+            where.append(f"datetime(c.created_at) {'>=' if added_days is not None else '>'} datetime(?)")
+            params.append(since)
+        if has_email:
+            where.append("(c.email IS NOT NULL AND trim(c.email) <> '')")
+            filters["has_email"] = "yes"
+        if has_linkedin:
+            where.append("(c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) <> '')")
+            filters["has_linkedin"] = "yes"
+        if exclude:
+            expr = " OR ".join(_item_fts(text, phrase) for text, phrase in exclude)
+            where.append("c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+            params.append(expr)
+            filters["without"] = ", ".join(t for t, _ in exclude)
+
+    def experience_years(self) -> dict[int, float | None]:
+        """Years of work for everyone with a work history: candidate id -> years (None when no role has dates
+        that can be read). Overlapping roles count once and a role with no end date runs to today."""
+        from .searchquery import years_of_experience
+        roles: dict[int, list[tuple[str | None, str | None]]] = {}
+        for r in self._rows('SELECT candidate_id, start, "end" AS finish FROM work_history'):
+            roles.setdefault(r["candidate_id"], []).append((r["start"], r["finish"]))
+        return {cid: years_of_experience(rs) for cid, rs in roles.items()}
+
+    # ---------------------------------------------------------- saved searches
+    SAVED_SEARCH_LIMIT = 50
+
+    @staticmethod
+    def _search_name(name: Any) -> str:
+        n = " ".join(str(name or "").split())
+        if not n:
+            raise ValueError("Give the saved search a name, like Senior Python in SF.")
+        if len(n) > 60:
+            raise ValueError("A saved search's name can be up to 60 characters.")
+        return n
+
+    def _saved_row(self, r: dict[str, Any]) -> dict[str, Any]:
+        try:
+            params = json.loads(r["params"])
+        except (TypeError, ValueError):
+            params = {}
+        from .searchquery import clean_params
+        return {**r, "params": clean_params(params if isinstance(params, dict) else {})}
+
+    def save_search(self, name: str, params: dict[str, Any], *, by: str = "app") -> dict[str, Any]:
+        """Keep a search (its words and filters) under a name. A name already in use is refused, never replaced."""
+        from .searchquery import clean_params
+        n = self._search_name(name)
+        p = clean_params(params)
+        if not p:
+            raise ValueError("There is nothing to save yet: type a search or pick a filter first.")
+        with self._write():
+            if self._row("SELECT 1 AS x FROM saved_searches WHERE name = ? COLLATE NOCASE", (n,)):
+                raise ValueError(f"You already have a saved search called {n}. Pick another name, or rename that one.")
+            if self._row("SELECT count(*) AS n FROM saved_searches")["n"] >= self.SAVED_SEARCH_LIMIT:
+                raise ValueError(f"You have {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
+                                 "Delete one you don't use first.")
+            now = now_iso()
+            cur = self._conn.execute(
+                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
+                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app"))
+        return self.get_saved_search(cur.lastrowid)
+
+    def get_saved_search(self, ref: int | str) -> dict[str, Any]:
+        """By id, or by name (ignoring case). NotFound when there is none."""
+        r = None
+        if isinstance(ref, int) or str(ref).strip().isdigit():
+            r = self._row("SELECT * FROM saved_searches WHERE id = ?", (int(str(ref).strip()),))
+        if r is None and not isinstance(ref, int):
+            r = self._row("SELECT * FROM saved_searches WHERE name = ? COLLATE NOCASE", (" ".join(str(ref).split()),))
+        if r is None:
+            raise NotFound("That saved search isn't there any more.")
+        return self._saved_row(r)
+
+    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
+        """Saved searches, newest first. counts=True adds `count` (people who match now) and `new` (of those, saved
+        since the search was last opened)."""
+        rows = [self._saved_row(r) for r in self._rows(
+            "SELECT * FROM saved_searches ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
+        if counts:
+            for r in rows:
+                r["count"], r["new"] = self.saved_search_counts(r)
+        return rows
+
+    def _saved_kwargs(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        from .searchquery import search_kwargs
+        return row["params"].get("q", ""), search_kwargs(row["params"])
+
+    def run_saved_search(self, ref: int | str, *, limit: int = 25, offset: int = 0) -> tuple[dict[str, Any], SearchResult]:
+        row = self.get_saved_search(ref)
+        q, kw = self._saved_kwargs(row)
+        return row, self.search_candidates(q, limit=limit, offset=offset, **kw)
+
+    def saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
+        """(people who match now, how many of them were saved after the search was last opened)."""
+        q, kw = self._saved_kwargs(row)
+        total = self.search_candidates(q, limit=1, fix_typos=False, **kw).exact_total or 0
+        since = row.get("last_viewed_at") or row["created_at"]
+        new = self.search_candidates(q, limit=1, fix_typos=False, added_since=since, **kw).exact_total or 0 if total else 0
+        return total, new
+
+    def rename_saved_search(self, search_id: int, name: str) -> dict[str, Any]:
+        n = self._search_name(name)
+        self.get_saved_search(search_id)
+        with self._write():
+            other = self._row("SELECT id FROM saved_searches WHERE name = ? COLLATE NOCASE AND id <> ?", (n, search_id))
+            if other:
+                raise ValueError(f"You already have a saved search called {n}. Pick another name.")
+            self._conn.execute("UPDATE saved_searches SET name = ? WHERE id = ?", (n, search_id))
+        return self.get_saved_search(search_id)
+
+    def mark_search_viewed(self, search_id: int) -> None:
+        with self._write():
+            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ? WHERE id = ?", (now_iso(), search_id))
+
+    def delete_saved_search(self, search_id: int) -> dict[str, Any]:
+        """The recruiter's own action in the app window. No AI tool calls this."""
+        row = self.get_saved_search(search_id)
+        with self._write():
+            self._conn.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+        return row
 
     def membership_choices(self, job_id: int | None = None) -> dict[str, Any]:
         """Job, client and stage choices for the Candidates filter bar. Stages follow the chosen job."""
@@ -3515,15 +3726,106 @@ class Store:
         stage: str | None = None,
         pipe: str | None = None,
         days: int | None = None,
+        **more: Any,
     ) -> SearchResult:
         """Ranked search, best matches first; empty query lists most recent.
 
-        Order: people with every word in their profile (ranked), then people who have every word once
-        their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
-        matches with some of the words. A word nobody has gets a spelling fix from the saved words.
+        The query may use quotes ("machine learning"), OR (python OR go), a leading minus or NOT to leave
+        people out, and field prefixes (title:, company:, location:, skill:, tag:, source:). See searchquery.py.
+        Whatever is typed is parsed into pieces and the FTS5 text is built here from quoted pieces, so nothing
+        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase or an OR uses
+        the operator search (profile text only, no typo help or note matching).
+
+        `more` takes the newer filters of candidate_filters (company, skills, skill_mode, remote, exp_min,
+        exp_max, contacted, contacted_days, added_days, added_since, has_email, has_linkedin).
+
+        Everyday search order: people with every word in their profile (ranked), then people who have every
+        word once their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the
+        closest matches with some of the words. A word nobody has gets a spelling fix from the saved words.
         """
+        from . import searchquery as sq
+        kw: dict[str, Any] = dict(location=location, title=title, tag=tag, source=source, job_id=job_id,
+                                  client=client, stage=stage, pipe=pipe, days=days, **more)
+        is_id, _ = self.lookup_exact(query)
+        pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
+        if not pq.structured and not pq.operator_mode:
+            return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+        # Field prefixes fill the matching filter when the form did not set it; skills add to the skill list.
+        for fld, key in (("title", "title"), ("company", "company"), ("location", "location"), ("source", "source")):
+            if pq.fields.get(fld) and not kw.get(key):
+                kw[key] = pq.fields[fld][-1]
+        if pq.fields.get("skill"):
+            have = list(kw.get("skills") or [])
+            kw["skills"] = [*have, *(x for x in pq.fields["skill"] if x.lower() not in {h.lower() for h in have})]
+            if pq.skill_any and not have:
+                kw["skill_mode"] = "any"
+            elif not have:
+                kw["skill_mode"] = "all"
+        if pq.exclude:
+            kw["exclude"] = [(i.text, i.phrase) for i in pq.exclude]
+        if pq.operator_mode:
+            res = self._search_operators(pq, limit=limit, offset=offset, **kw)
+        else:
+            res = self._search_core(pq.bare, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+            if res.suggestion and pq.bare:
+                res.suggestion = sq.rewrite_suggestion(query, pq.bare, res.suggestion)
+        res.query = query
+        return res
+
+    def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
+        """The search for a query with a phrase or an OR: every group must match (AND), a group matches when any
+        of its words or phrases does. Profile text only, ranked by bm25; the last bare word is still a prefix."""
+        where, params, filters = self.candidate_filters(**kw)
+        groups = []
+        for gi, g in enumerate(pq.groups):
+            parts = []
+            for ii, item in enumerate(g):
+                last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and not item.phrase
+                if last and " " not in item.text:
+                    parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
+                else:
+                    parts.append(_item_fts(item.text, item.phrase))
+            groups.append("(" + " OR ".join(parts) + ")" if len(parts) > 1 else parts[0])
+        match = " AND ".join(groups)
+        cond = " AND ".join(["candidates_fts MATCH ?", *where])
+        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
+        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        patterns = [[_word_pattern(w, False) for w in i.text.split()] if i.phrase else [_word_pattern(i.text, False)]
+                    for g in pq.groups for i in g]
+        snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}" for i in _SNIPPET_ORDER)
+        rows = self._rows(
+            f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+            (match, *params, limit, max(0, offset)))
+        hits = []
+        for r in rows:
+            snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
+            score = r.pop("_score")
+            hits.append(SearchHit(candidate=self._hydrate(r), score=score,
+                                  snippet=snippet if HL_START in (snippet or "") else None))
+        return SearchResult(hits=hits, total=total, query="", filters=filters, exact_total=total)
+
+    def _search_core(
+        self,
+        query: str = "",
+        *,
+        location: str | None = None,
+        title: str | None = None,
+        tag: str | None = None,
+        source: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        fix_typos: bool = True,
+        job_id: int | None = None,
+        client: str | None = None,
+        stage: str | None = None,
+        pipe: str | None = None,
+        days: int | None = None,
+        **more: Any,
+    ) -> SearchResult:
         where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source,
-                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days,
+                                                         **more)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
@@ -3550,24 +3852,24 @@ class Store:
                     fixed = query
                     for word, fix in all_fixes.items():
                         fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
-                    res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                                 limit=limit, offset=offset, fix_typos=False,
-                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                    res = self._search_core(query, location=location, title=title, tag=tag, source=source,
+                                               limit=limit, offset=offset, fix_typos=False,
+                                               job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                     res.suggestion = fixed
                     return res
             if fixes:
                 fixed = query
                 for word, fix in fixes.items():
                     fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
-                res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                res = self._search_core(fixed, location=location, title=title, tag=tag, source=source,
+                                           limit=limit, offset=offset, fix_typos=False,
+                                           job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                 if res.exact_total:
                     res.query, res.suggestion, res.corrected = query, fixed, True
                     return res
-                res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                res = self._search_core(query, location=location, title=title, tag=tag, source=source,
+                                           limit=limit, offset=offset, fix_typos=False,
+                                           job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                 res.suggestion = fixed
                 return res
 

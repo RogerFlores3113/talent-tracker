@@ -112,6 +112,27 @@ profile can't blank out what the recruiter filled in.
   is a prefix so results update as you type. Shorthand expands (`sf` to San
   Francisco, `swe` to software engineer, etc.). User input is tokenized, never
   passed as FTS syntax, so quotes or operators can't break it.
+- **Query language (`searchquery.py`):** `"machine learning"` (phrase), `python OR go`
+  (OR in capitals), `-recruiter` or `NOT manager` (leave out), and field prefixes
+  `title:`, `company:`, `location:`, `skill:`/`tag:`, `source:` that set the same
+  filters as the Candidates bar. Typed text is parsed into pieces and the FTS5 text is
+  built from quoted pieces, so nothing typed is ever syntax; a lone OR, an unbalanced
+  quote or `title:` with nothing after it is dropped or read as plain words. Parentheses
+  are not supported (ignored). Plain words keep the everyday search (typo help, notes,
+  closest matches); a phrase or OR uses a simpler operator search on profile text only.
+  Exclusions and prefixes work with both. A query that uses any of this, or any newer
+  filter, is answered by FTS5 even when Typesense is on.
+- **Newer filters** (`candidate_filters`, the Candidates "More filters", `search_candidates`):
+  several skills (any or all), remote (the location says remote, or a Remote tag),
+  years of experience (computed from `work_history` dates: overlaps count once, an open
+  end runs to today, unreadable dates are skipped; people with no dated history are left
+  out only when a minimum is set), last contacted (never, over N days ago, within N days),
+  added in the last N days, has email, has LinkedIn.
+- **Saved searches** (`saved_searches` table: name, params JSON, last viewed, who saved it):
+  quick links on Candidates and Today with a match count and "new since you last opened it".
+  The recruiter saves, renames and deletes them in the app; the AI has `list_saved_searches`,
+  `run_saved_search` and `save_search` (a write, so it follows trust levels; it never
+  replaces a name and has no delete or rename).
 - **UI:** HTMX fires on input with a 120 ms debounce; the results fragment
   comes back from the same `/` route. On a laptop this is well under a frame of
   work for tens of thousands of rows.
@@ -131,7 +152,8 @@ clearing a field with an empty string) and move stages, never delete.
 
 | tool | purpose |
 |---|---|
-| `search_candidates(query, location?, title?, tag?, limit)` | ranked search with highlighted match; in-chat results view |
+| `search_candidates(query, location?, title?, tag?, limit, ...)` | ranked search with highlighted match; takes the query syntax and the newer filters; in-chat results view |
+| `list_saved_searches`, `run_saved_search(name_or_id, limit)`, `save_search(name, query, ...)` | the recruiter's saved searches (read, read, additive write) |
 | `get_candidate(id)` | full record, work history, jobs, timeline; in-chat card |
 | `save_candidate(name, ..., work_history?)` | add or merge by email/LinkedIn; warns on same-name matches |
 | `update_candidate(id, ...)` | edit fields; empty string clears |
