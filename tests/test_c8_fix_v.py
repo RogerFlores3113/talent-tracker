@@ -271,20 +271,26 @@ def test_new_person_form_matches_on_an_other_email(store):
 
 
 # ------------------------------------------------------------------ MCP
-def test_get_candidate_shows_other_emails_and_save_candidate_adds_never_removes(store):
-    a = store.add_candidate(name="Ana Diaz", email="ana@work.com")["id"]
+def test_get_candidate_shows_other_emails_and_the_ai_adds_them_only_to_someone_new(store):
     server = build_server(store)
     res = call(server, "save_candidate", name="Ana Diaz", email="ana@work.com",
                other_emails=["Ana.Home@gmail.com", "nonsense"])
+    a = res.structuredContent["id"]
     assert store.other_emails(a) == ["ana.home@gmail.com"]
     got = call(server, "get_candidate", candidate_id=a)
     assert got.structuredContent["other_emails"] == ["ana.home@gmail.com"]
     assert "Other emails: ana.home@gmail.com" in got.content[0].text
-    call(server, "save_candidate", name="Ana Diaz", email="ana@work.com", other_emails=["ana.old@yahoo.com"])
-    assert store.other_emails(a) == ["ana.home@gmail.com", "ana.old@yahoo.com"]  # nothing removed
+    # An address says who someone is: on a person already saved, the AI's new one is reported, not added.
+    again = call(server, "save_candidate", name="Ana Diaz", email="ana@work.com", other_emails=["evil@evil.example"])
+    assert store.other_emails(a) == ["ana.home@gmail.com"]
+    assert again.structuredContent["other_emails_not_added"] == ["evil@evil.example"]
+    assert "Not added: evil@evil.example" in again.content[0].text
     # saving with only the other address finds the same person
-    r2 = call(server, "save_candidate", name="Ana Diaz", email="ana.old@yahoo.com")
+    r2 = call(server, "save_candidate", name="Ana Diaz", email="ana.home@gmail.com")
     assert r2.structuredContent["id"] == a and store.count_candidates() == 1
+    # the recruiter can add one in the app
+    store.add_other_emails(a, ["ana.old@yahoo.com"])
+    assert store.other_emails(a) == ["ana.home@gmail.com", "ana.old@yahoo.com"]
     tools = {t.name: t for t in anyio.run(server.list_tools)}
     assert not [n for n in tools if "email" in n and ("remove" in n or "delete" in n)]
 

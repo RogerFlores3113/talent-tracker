@@ -288,7 +288,7 @@ class PersonIn(BaseModel):
     tags: list[str] | None = Field(None, validation_alias=AliasChoices("tags", "skills"))
     work_history: list[WorkEntry] | None = None
     source: str | None = None
-    other_emails: list[str] | None = Field(None, description="More email addresses for them; added, never removed")
+    other_emails: list[str] | None = Field(None, description="More email addresses for someone new; never added to a person already saved")
     create_anyway: bool = False
 
 
@@ -1074,9 +1074,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     ) -> CallToolResult:
         """Add a candidate, or update the existing one if the email or LinkedIn URL already exists.
 
-        other_emails: more addresses for the same person (a personal one next to the work one). They are added to
-        the person and count when matching, so a saved person is found by any of their addresses. You can add
-        addresses here but never remove one: the recruiter does that in the app.
+        other_emails: more addresses for someone new (a personal one next to the work one). They count when
+        matching, so a saved person is found by any of their addresses. You can't add an address to a person who
+        is already saved, or remove one: an address says who someone is, so the recruiter does that in the app.
 
         On a match, blanks never erase what's saved: title, company and location take your new values, empty
         fields are filled, and the saved name, source and about are kept (the result lists what changed and what
@@ -1231,6 +1231,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 out["identity_kept"] = held
                 notes.append(f"Not saved: {_labels(held)}. These say who the person is, and {held_why}. "
                              "Ask the recruiter to confirm in the app.")
+            if cand.get("other_emails_not_added"):
+                out["other_emails_not_added"] = cand["other_emails_not_added"]
+                notes.append(f"Not added: {', '.join(cand['other_emails_not_added'])}. An email says who someone "
+                             "is, so you can't add one to a person who is already saved. Ask the recruiter to add "
+                             "it on their page if it is theirs.")
+                kept = [k for k in kept if k != "email"]
             if kept:
                 out["kept"] = kept
                 out["note"] = (f"Already saved, so these saved values were kept: {_labels(kept)}. "

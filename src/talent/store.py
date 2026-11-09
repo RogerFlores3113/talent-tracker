@@ -2394,6 +2394,12 @@ class Store:
                             derived=() if work_history or history is None else ("work_history",))
         cand["_kept"] = kept
         newer = [e for e in [_clean(data.get("email")), *extra] if e]  # a different address of theirs is kept too
+        if by == "ai":  # an address says who someone is: the AI app never adds one to a person already saved
+            have = set(self.all_emails(existing["id"]))
+            skipped = [e for e in dict.fromkeys(x.lower() for x in newer) if e not in have]
+            if skipped:
+                cand["other_emails_not_added"] = skipped
+            newer = []
         if newer and self.add_other_emails(existing["id"], newer, strict=False):
             cand["_changed"] = [*cand["_changed"], "other_emails"]
             cand["other_emails_added"] = True
