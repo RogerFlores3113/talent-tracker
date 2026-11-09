@@ -2,11 +2,9 @@
 
 All notable changes to Talent Search. Newest first.
 
-## [0.2.0] - 2026-11-09
+## [Unreleased]
 
 ### Search
-- Search shorthand: `skill:`, `title:`, `company:` and other prefixes, `-word` to leave things out, quoted phrases, `OR`, and a line that says how the app read your search.
-- Saved searches, shown on Today and on the Candidates table. Saved searches can include a color tag.
 - NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
 - "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
 - Phrase, OR and NEAR searches look in notes too, so a wider search never finds fewer people.
@@ -23,11 +21,6 @@ All notable changes to Talent Search. Newest first.
 - Today lists every saved search, with pinning. Each count says what it counts.
 - Opening a saved search marks the people who are new since you last looked, and the table has an Added column. Someone added in the same second now counts.
 
-### Candidates
-- Color tag bubbles. Click a bubble to cycle red, orange, yellow, green, blue, purple and off. Tagged people sort to the top.
-- A duplicate finder with bulk actions. Every email a person has now counts for duplicates, imports, merges and search.
-- Pasting a profile or an email signature fills in more fields, including "Title, Company" lines.
-
 ### Importing and duplicates
 - A re-import that brings someone back with a new email offers to update them instead of adding a copy.
 - Merge many duplicate pairs at once, with one backup, and pick which email stays main.
@@ -39,7 +32,6 @@ All notable changes to Talent Search. Newest first.
 - Import tidies names: spaces trimmed, ALL CAPS or all lowercase turned into Title Case (McDonald and de la Cruz are left alone). "Other emails" are kept in their own field, not repeated in Notes.
 
 ### Interviews and time zones
-- A month calendar, with the week view kept as an alternate. Download interviews as a calendar (.ics) file for your own calendar app.
 - Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
 - A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
 - A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
@@ -48,9 +40,6 @@ All notable changes to Talent Search. Newest first.
 ### Paste and connect
 - Pasting a resume reads every role with its dates, and a note reads name, title and company. The check page says what wasn't found.
 - The Connect AI page asks which app you use, says when an app isn't installed, keeps technical details in a fold, and gives Claude Code its one-line connect command.
-
-### First run
-- A guided tour that can load sample data and clear it again. Skip it at any time, or replay a short version from the footer or Settings.
 
 ### Keyboard, screen reader and first-time use
 - The month calendar links only days that have interviews, so Tab skips the empty days.
@@ -65,9 +54,6 @@ All notable changes to Talent Search. Newest first.
 - Better contrast on Rejected and Withdrawn columns.
 
 ### Working with AI apps
-- Ready-made skills for Claude Code, Codex and Claude Desktop, installed from the app or by following INSTALL-SKILLS.md.
-- Prompt-injection guards: text that tries to give the AI orders is flagged, held for your review, and shown with a warning. The AI still can never delete anything, and it never adds an email to a person who is already saved.
-- Scraping is no longer ruled out. A "Stricter site guards" switch in Settings (off by default) asks the AI app to stay off sites whose terms forbid scraping and lowers its hourly cap. Some sites' terms forbid scraping, so check before you point an AI app at them.
 - Saved searches made by an AI app are on Changes and can be undone.
 - Interview replies say which time zone was used and name any clash. An interview needs a start time.
 - Held-for-review replies say exactly what went through and what waits.
@@ -80,6 +66,26 @@ All notable changes to Talent Search. Newest first.
 - A move to Hired and a job close wait on Review even for Trusted apps. A Settings switch lets trusted apps do them.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
+
+## [0.1.1] - 2026-11-09
+
+### Search and candidates
+- Search syntax: OR groups, exclusions and field prefixes, with a note on how your search was read. More filters, and saved searches you can color.
+- Color tags on the Candidates table, each person's page, CSV exports and the AI app.
+- A duplicate finder with bulk actions, better paste-a-profile parsing, and CSV export aliases.
+- Imports never skip an email column, re-imports only move forward, and every email a person has counts. Tags like `c#` and `f#` stay whole.
+
+### Interviews
+- A month calendar, with the week view still available, and calendar (`.ics`) downloads.
+
+### Your AI app
+- Talent Search skills for Claude Code, Codex and Claude Desktop, installed from inside the app.
+- Guards against instructions hidden in profiles and pages: warnings in the app, and the AI app can never delete anything.
+- A Settings switch that tells the AI app to stay off sites whose terms forbid scraping, with a lower hourly cap.
+- The AI app never adds an email to a person already saved, and says which ones it left out. It refuses more than 60 years of experience.
+
+### Getting started
+- A first-run guided tour with demo data that you can skip or replay.
 
 ## [0.1.0] - 2026-11-09
 
