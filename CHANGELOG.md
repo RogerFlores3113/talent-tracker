@@ -67,6 +67,10 @@ All notable changes to Talent Search. Newest first.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
 
+### Other links
+- Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
+
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates

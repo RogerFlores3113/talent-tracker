@@ -444,8 +444,8 @@ EXPORTS = {
                     "job_title", "source", "tag_column", "tags"]),
     "Lever": (["Contact ID", "Name", "Headline", "Emails", "Phones", "Location", "Links", "Stage", "Tags", "Sources",
                "Posting", "Created At", "Years of Experience"],
-              ["", "name", "current_title", "email", "phone", "location", "", "stage", "tags", "source",
-               "job_title", "created_at", "note"]),
+              ["", "name", "current_title", "email", "phone", "location", "links", "stage", "tags", "source",
+               "job_title", "created_at", "note"]),  # c11: a Links column is now read (other links)
     "Ashby": (["Name", "Email", "Phone Number", "Location", "LinkedIn URL", "Current Company", "Current Title",
                "Source", "Stage", "Job", "Application Created At"],
               ["name", "email", "phone", "location", "linkedin_url", "current_company", "current_title", "source",

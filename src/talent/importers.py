@@ -13,21 +13,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .links import merge_links, split_links, stored_links
 from .paths import backups_dir
-from .store import (clean_color, CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
+from .store import (web_link, clean_color, CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
                     IdentityConflict, Store, normalize_linkedin, now_iso, parse_when, same_person_name,
                     split_tags, stage_outcome, to_dt)
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
-    "tags", "about", "source", "last_contacted_at", "created_at", "updated_at", "color",
+    "tags", "about", "source", "last_contacted_at", "created_at", "updated_at", "color", "links",
 )
 EXPORT_HEADERS = {
     "name": "Name", "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn", "website": "Website",
     "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills",
     "about": "About", "source": "Source", "last_contacted_at": "Last contacted", "created_at": "Added",
     "updated_at": "Last updated", "color": "Color", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
-    "other_emails": "Other emails", "stage_dates": "Stage changed",
+    "other_emails": "Other emails", "stage_dates": "Stage changed", "links": "Other links",
 }
 EXPORT_NOTES_KEPT = 20      # newest notes per person in the export's Notes column
 EXPORT_NOTES_CHARS = 5000   # and at most this much text
@@ -43,7 +44,11 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
                       "public profile url", "linkedin profile url", "linkedin link", "profile link")),
     ("phone", ("phone", "mobile", "cell", "tel", "telephone", "phone number", "cellphone", "phones",
                "phone numbers", "mobile phone", "primary phone")),
-    ("website", ("website", "github", "portfolio", "site", "url", "homepage")),
+    ("website", ("website", "site", "homepage", "web site", "personal website", "personal site", "url")),
+    # Other links: a column of addresses, or one per site (GitHub, X, Scholar). Several columns feed one list.
+    ("links", ("links", "other links", "urls", "other urls", "more links", "github", "gitlab", "portfolio",
+               "twitter", "x", "scholar", "google scholar", "blog", "social", "socials", "social links",
+               "github url", "github profile", "portfolio url", "twitter url", "x url", "website url")),
     ("current_title", ("title", "role", "position", "headline", "job title", "current title", "current role",
                        "current position", "job", "current job title", "latest title", "present title")),
     ("current_company", ("company", "employer", "organization", "organisation", "current company",
@@ -81,10 +86,10 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tag_column", ("recruiter", "recruiter name", "assigned recruiter", "sourced by", "sourcer", "coordinator",
                     "origin")),
 )
-_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color", "other_emails"}
+_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color", "other_emails", "links"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
 _PIPELINE_ONLY_HINTS = {"role", "job", "project"}
-_MULTI_TARGETS = {"location", "note", "tag_column"}  # several columns may feed these
+_MULTI_TARGETS = {"location", "note", "tag_column", "links"}  # several columns may feed these
 # A note column with one of these headers holds the note itself; any other note column ("Connected On",
 # "Salary") keeps its header in front of the value, so the note still says what it is.
 _PLAIN_NOTE_HEADERS = {"notes", "note", "comments", "comment", "feedback", "remarks"}
@@ -112,6 +117,7 @@ TARGET_LABELS = {
     "job_title": "Job they're up for", "job_company": "Client (the job's company)", "stage": "Stage in that job",
     "jobs": "Jobs, as exported", "tag_column": "A tag, as Column: value (like Owner: Marcus)",
     "other_emails": "Other emails (kept as more addresses for them)",
+    "links": "Other links (GitHub, portfolio...)",
     "color": "Color tag", "created_at": "Date added", "stage_changed_at": "Date they reached that stage",
     "stage_dates": "Stage dates, as exported (one per job)",
 }
@@ -305,6 +311,10 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
             continue
         out[col] = f
         used.add(f)
+    for col, low in enumerate(lows):  # a second site column ("URL" after "Website") is one more link
+        if not out[col] and low in ("url", "website", "site", "homepage", "web site", "personal website",
+                                    "personal site", "website url") and "website" in used:
+            out[col] = "links"
     for col, low in enumerate(lows):  # a second email or phone column ("Work Email" after "Email"): kept as a note
         if not out[col] and header[col].strip() and (_EXTRA_CONTACT.match(low) or low == "headline"
                                                       or _looks_email_header(low)):
@@ -412,6 +422,8 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
         loc_parts: list[tuple[int, str]] = []
         extra_emails: list[str] = []  # addresses beyond the first in a cell or a second Email column
         email_cols: list[tuple[str, str]] = []  # "Work Email", "a@work.com": from a column kept as a note
+        link_cells: list[str] = []
+        li_cells: list[str] = []
         more_emails: list[str] = []  # an "Other emails" column, and the addresses of the note lines below
         site = ""
         for col, target in enumerate(mapping):
@@ -471,6 +483,15 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                         pass
             elif target == "other_emails":
                 more_emails.extend(e.lower() for e in _EMAIL.findall(v))
+            elif target == "links":  # several columns (GitHub, X, Links) make one list
+                for tok in split_links(v):
+                    if _LINKEDIN.fullmatch(tok):  # Lever's Links cell: their LinkedIn is not "another" link
+                        li_cells.append(tok)
+                        continue
+                    try:
+                        link_cells.append(web_link(tok))
+                    except ValueError:
+                        warnings.append(f"left a link out of {col_name}, {tok[:40]!r} isn't a web address")
             elif target == "notes":
                 for line in reversed(_split_notes_cell(v)):  # oldest first, so the newest ends up on top
                     if (found := other_emails_line(line)) is not None:
@@ -525,6 +546,10 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             data["location"] = ", ".join(dict.fromkeys(v for _, v in sorted(loc_parts, key=lambda x: x[0])))
         if site and "website" not in data:
             data["website"] = site
+        if li_cells and not data.get("linkedin_url"):
+            data["linkedin_url"] = li_cells[0]
+        if link_cells:
+            data["links"] = merge_links(link_cells, exclude=(data.get("linkedin_url"), data.get("website")))
         if not data.get("name") and (first or last):
             data["name"] = f"{first} {last}".strip()
         if data.get("name"):
@@ -619,6 +644,8 @@ def _merge_records(a: dict[str, Any], b: dict[str, Any]) -> None:
             a["data"][k] = split_tags((cur or []) + v)
         elif k == "last_contacted_at":
             a["data"][k] = max(cur or "", v)
+        elif k == "links":
+            a["data"][k] = merge_links(cur, v)
         else:
             if cur not in (None, "") and _fold(str(cur)) != _fold(str(v)):
                 a["differs"][k] = b["rows"][0]
@@ -935,6 +962,10 @@ def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict
             continue
         if k == "tags":
             out[k] = split_tags(cur["tags"] + split_tags(v))
+        elif k == "links":  # added to the saved ones, none dropped
+            both = merge_links(cur.get("links"), v, exclude=(cur.get("linkedin_url"), cur.get("website")))
+            if both != cur.get("links"):
+                out[k] = both
         elif k in MERGE_OVERWRITES:
             out[k] = v
         elif k == "last_contacted_at":
@@ -2139,7 +2170,8 @@ def export_csv(store: Store, ids: Iterable[int] | None = None) -> str:
             + (f" ({h['start'] or ''}-{h['end'] or 'now'})" if h["start"] or h["end"] else "")
             for h in store.work_history(c["id"])
         )
-        row = [", ".join(c[f]) if f == "tags" else (c.get(f) or "") for f in EXPORT_FIELDS]
+        row = [", ".join(c[f]) if f == "tags" else " ".join(c[f]) if f == "links" else (c.get(f) or "")
+               for f in EXPORT_FIELDS]
         row += [", ".join(others.get(c["id"], [])), _jobs_text(store, c["id"]), _stage_dates_text(store, c["id"]),
                 _notes_text(store, c["id"]), history]
         w.writerow([_safe_cell(v) for v in row])
