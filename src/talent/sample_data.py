@@ -54,6 +54,16 @@ HISTORY = {
     "Omar Example": [("Data Engineer", "Streamwise", "2022", ""), ("Analytics Engineer", "Squarespace", "2019", "2022")],
 }
 
+# A few sample people have other links, so the candidate card and page have something to show.
+LINKS = {
+    "Maya Example": ["https://github.com/maya-example", "https://maya-example.dev"],
+    "Daniel Example": ["https://github.com/daniel-example", "https://dribbble.com/daniel-example"],
+    "Priya Example": ["https://scholar.google.com/citations?user=priya-example", "https://priya-example.substack.com"],
+    "Tomás Example": ["https://github.com/tomas-example", "https://huggingface.co/tomas-example"],
+    "Chloe Example": ["https://chloe-example.design", "https://www.behance.net/chloe-example"],
+    "Kenji Example": ["https://github.com/kenji-example"],
+}
+
 JOBS = [
     ("Senior Backend Engineer", "Acme Payments", "Austin, TX or remote",
      "Go or Rust, payments or ledger experience, 6+ years. Owns the settlement service.",
@@ -84,6 +94,7 @@ def load_sample_data(store: Store) -> int:
         cand, created = store.upsert_candidate(
             work_history=history or None, name=name, current_title=title, current_company=company,
             location=location, about=about, tags=tags, email=f"{slug}@example.com", source=SAMPLE_SOURCE,
+            links=LINKS.get(name),
         )
         ids[name] = cand["id"]
         added += created

@@ -36,6 +36,7 @@
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
     {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}<span class="sr-only"> (opens in a new tab)</span></a></dd>{% endif %}
     {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}<span class="sr-only"> (opens in a new tab)</span></a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
+    {% for u in c.links or [] %}<dt>{{ u | link_label }}</dt><dd><a href="{{ u }}" target="_blank" rel="noopener noreferrer">{{ u | replace('https://', '') | replace('http://', '') | replace('www.', '') }}<span class="sr-only"> (opens in a new tab)</span></a></dd>{% endfor %}
     {% if c.source %}<dt>Found via</dt><dd>{{ c.source }}</dd>{% endif %}
     <dt>Profile updated</dt><dd>{{ c.updated_at | date }} ({{ c.updated_at | ago }})</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>

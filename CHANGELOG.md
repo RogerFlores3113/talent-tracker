@@ -81,6 +81,10 @@ All notable changes to Talent Search. Newest first.
 - `talent install-skills` with no options installs into every app it finds (after listing the files); `--plugin [PATH]` writes the plugin file, and replaces `--zip`.
 - Connect page: long commands wrap and the three app cards stack on mid-size screens, the first-run tour no longer opens over the install buttons, and each app card lists connect and skills as steps 1 and 2.
 
+### Other links
+- Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
+
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates
