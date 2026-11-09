@@ -39,10 +39,15 @@
   {{ start_options(False) }}
 </section>
 {% endif %}
+{% macro saved_chip(sv) %}<span class="saved-item"><a class="chip saved-link" href="/saved-searches/{{ sv.id }}" aria-label="Saved search {{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }} {% if sv.count is not none %}<span class="fine">{{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a><form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}" class="inline-form pin-form"><button class="btn small linkish" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin' }} saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin' }}</button></form></span>{% endmacro %}
 {% if saved_searches %}<section class="saved-today" aria-label="Saved searches">
   <span class="fine">Saved searches:</span>
-  {% for sv in saved_searches %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}
-  <a class="fine" href="/candidates">All</a>
+  {% for sv in saved_searches[:6] %}{{ saved_chip(sv) }}{% endfor %}
+  {% if saved_searches | length > 6 %}<details class="saved-more">
+    <summary>Show all {{ saved_searches | length }} saved searches</summary>
+    <div class="saved-today">{% for sv in saved_searches[6:] %}{{ saved_chip(sv) }}{% endfor %}</div>
+  </details>{% endif %}
+  <a class="fine" href="/candidates#saved-searches">Rename or delete saved searches</a>
 </section>{% endif %}
 <div class="overview">
   <section class="today">

@@ -61,12 +61,14 @@
     <p class="fine">Remote means the location says remote, or the person has a Remote tag. Years of experience are worked out from the dates in each work history (overlapping jobs count once, a job with no end date runs to today). People with no dated work history are left out when you set a minimum.</p>
   </details>
 </form>
+{% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
+{% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
 {% if range_note %}<p class="suggest">{{ range_note }}</p>{% endif %}
 {% if active_chips %}<p class="filter-chips" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
-<div class="savedbar">
+<div class="savedbar" id="saved-searches">
   {% if saved %}<span class="fine">Saved searches:</span>
-  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" aria-label="{{ sv.name }}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% if sv.new %}, {{ sv.new }} new{% endif %}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
+  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" aria-label="{{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% endif %}{% if sv.new %}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }}{% if sv.count is not none %} <span class="fine">{{ sv.count }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
   {% if save_params %}<details class="save-search">
     <summary>Save this search</summary>
     <form method="post" action="/saved-searches" class="inline-form">
@@ -83,7 +85,8 @@
         <input type="text" name="search_name" value="{{ sv.name }}" maxlength="60" aria-label="New name for saved search {{ sv.name }}">
         <button class="btn small" type="submit" aria-label="Rename saved search {{ sv.name }}">Rename</button>
       </form>
-      <span class="fine">{{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
+      <span class="fine">{% if sv.count is not none %}{{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% endif %}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
+      <form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}"><button class="btn small" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin' }} saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin to top' }}</button></form>
       <form method="post" action="/saved-searches/{{ sv.id }}/delete" data-confirm="Delete the saved search {{ sv.name }}? The people stay."><button class="btn small" type="submit" aria-label="Delete saved search {{ sv.name }}">Delete</button></form>
     </li>{% endfor %}
     </ul>
@@ -103,8 +106,8 @@
 <table class="dense">
   <thead><tr>
     <th class="colorcell">{% if q %}Color{% else %}<a href="/candidates?{{ dict(keep, sort='color', dir='desc' if sort == 'color' and dir == 'asc' else 'asc') | urlencode }}">Color{% if sort == 'color' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
-    {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated')] %}
-    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ dict(keep, sort=key, dir= 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))) | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
+    {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated'),('added','Added')] %}
+    <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ dict(keep, sort=key, dir= 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated','added') else 'asc'))) | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
     {% endfor %}
     <th>Skills</th>
   </tr></thead>

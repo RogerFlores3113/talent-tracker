@@ -101,7 +101,7 @@ TABLE_SORTS = {
     "color": COLOR_RANK_SQL,
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
-    "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at",
+    "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at", "added": "c.id",
 }
 
 
@@ -515,7 +515,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"saved_searches": store.list_saved_searches(counts=True, limit=6),
+        return {"saved_searches": store.list_saved_searches(counts=True, count_first=6),
                 "today": actions.action_items(store), "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
@@ -539,8 +539,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
-              added_days: str = "", has_email: str = "", has_linkedin: str = ""):
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = ""):
         per = 100
+        new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
         # The chips above the table are submit buttons: pressing the colour already chosen clears it.
         color = (color_pick if color_pick != color else "") if color_pick else color
         color = color.strip().lower()
@@ -598,7 +599,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
             range_note = (f"Years of experience at least {more_params['exp_min']} and at most {more_params['exp_max']} "
                           "can't both be true, so nobody matches. Swap the two numbers.")
-        keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
+        keep = {k: v for k, v in dict(new_after="" if new_after_id is None else new_after_id, tag=tag, location=location, source=source, job="" if job_id is None else job_id,
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
@@ -607,10 +608,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
-                   saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
+                   saved=store.list_saved_searches(counts=True, count_first=6), save_params=searchquery.clean_params({**keep, "q": q}),
                    min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
+                   new_after=new_after_id, closest=bool(q.strip() and result.closest),
+                   saved_notes=list(result.notes) if q.strip() else [],
                    colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
@@ -677,8 +680,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             row = store.get_saved_search(search_id)
         except NotFound:
             raise HTTPException(404, "That saved search isn't there any more.")
+        after = store.saved_search_new_after(row)  # who is new is read before "looked at" moves it forward
         store.mark_search_viewed(search_id)
-        return RedirectResponse("/candidates?" + urlencode(row["params"]), status_code=303)
+        extra = {"new_after": after}
+        if not row["params"].get("q"):  # no search words to rank by: newest saved first, so the new people lead
+            extra.update(sort="added", dir="desc")
+        return RedirectResponse("/candidates?" + urlencode({**row["params"], **extra}), status_code=303)
 
     @app.post("/saved-searches/{search_id}/rename")
     async def saved_search_rename(request: Request, search_id: int):
@@ -690,6 +697,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return back(request, "/candidates", error=str(exc))
         return back(request, "/candidates", notice=f"Renamed to “{row['name']}”.")
+
+    @app.post("/saved-searches/{search_id}/pin")
+    def saved_search_pin(request: Request, search_id: int):
+        """Keep a saved search first in the lists."""
+        try:
+            row = store.pin_saved_search(search_id, True)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/", notice=f"Pinned the saved search “{row['name']}”. It stays at the top.")
+
+    @app.post("/saved-searches/{search_id}/unpin")
+    def saved_search_unpin(request: Request, search_id: int):
+        try:
+            row = store.pin_saved_search(search_id, False)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/", notice=f"Unpinned the saved search “{row['name']}”.")
 
     @app.post("/saved-searches/{search_id}/delete")
     def saved_search_delete(request: Request, search_id: int):
