@@ -77,13 +77,18 @@
           </details>
           {% endif %}
           {% if i.kind == 'feedback_owed' %}
-          <ul class="sessions">
-          {% for o in i.owed %}
-            <li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a> <span class="fine">{{ o.session }}, {{ o.day }}</span></li>
+          {% for p in i.people %}
+          <div class="owed-person">
+            {% if i.people | length > 1 %}<strong>{{ p.name }}</strong> <span class="fine">owes {{ p.count }}</span>{% endif %}
+            <ul class="sessions">
+            {% for o in p['items'] %}
+              <li><a href="/candidates/{{ o.candidate_id }}?iv={{ o.interview_id }}#iv-{{ o.interview_id }}">{{ o.name }}</a> <span class="fine">{{ o.session }}, {{ o.day }}</span></li>
+            {% endfor %}
+            </ul>
+            <a class="link small" href="{{ p.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ p.name }}</a>{% if not p.email %} <span class="fine">(no email saved)</span>{% endif %}
+            <button type="button" class="link small" data-copy-text="{{ p.subject }}&#10;&#10;{{ p.body }}">Copy request</button>
+          </div>
           {% endfor %}
-          </ul>
-          <a class="link small" href="{{ i.mailto }}" title="Opens your own mail app with one request filled in. Nothing is sent until you send it.">Email {{ i.who }}</a>
-          <button type="button" class="link small" data-copy-text="{{ i.subject }}&#10;&#10;{{ i.body }}">Copy request</button>
           {% endif %}
         </div>
         <div class="item-acts">

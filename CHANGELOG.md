@@ -6,6 +6,12 @@ All notable changes to Talent Search. Newest first.
 
 The first release. Talent Search is a candidate database that lives on your own computer, that opens in your web browser for you and tools for your AI app.
 
+### Interviews and time zones
+- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
+- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
+- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
+- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
+
 ### Search and candidates
 - Fast search across names, titles, companies, locations and "about" text, with highlights. Shorthand like `sf`, `nyc` and `swe` works.
 - Candidate pages with a timeline of calls and notes, follow-up dates, duplicate merging and paste-a-profile.

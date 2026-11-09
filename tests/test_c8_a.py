@@ -173,7 +173,9 @@ def test_ics_month_download(store):
     assert f"UID:interview-{a['id']}@talent-search.local" in lines
     assert "DTSTART:20270210T180000Z" in lines and "DTEND:20270210T183000Z" in lines  # (30 min) in the summary
     assert "DTEND:20270211T184500Z" in lines  # no length given: 45 minutes
-    assert "SUMMARY:Interview: Lee\\, Ana\\; Jr (Eng\\, Platform\\; Core\\, Acme)" in lines
+    assert "SUMMARY:Tech screen: Lee\\, Ana\\; Jr (Kim Lee)" in lines  # c10 I: session, candidate, interviewer
+    assert "SUMMARY:Final: Lee\\, Ana\\; Jr" in lines
+    assert "DESCRIPTION:Job: Eng\\, Platform\\; Core\\, Acme\\nInterviewer: Kim Lee" in lines
     assert lines.count("STATUS:CANCELLED") == 1 and lines.count("STATUS:CONFIRMED") == 1
     assert "March one" not in r.text and "secret second line" not in r.text
     assert all(not ln.startswith("DESCRIPTION") or "second line" not in ln for ln in lines)

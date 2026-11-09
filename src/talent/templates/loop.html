@@ -27,6 +27,7 @@
   <form method="get" action="/jobs/{{ job.id }}/loop" class="stack">
     <label>Candidate <select name="candidate" required><option value="">Pick someone</option>{% for a in people %}<option value="{{ a.candidate_id }}"{{ ' selected' if a.candidate_id == cand_id }}>{{ a.candidate_name }}</option>{% endfor %}</select></label>
     <label>First day to try (optional) <input type="date" name="start" value="{{ start }}"></label>
+    <label>Candidate's time zone (optional) <select name="cz"><option value="">{{ 'Saved or same as mine' }}</option>{% for z in common_zones %}<option value="{{ z }}"{{ ' selected' if z == cz }}>{{ z | replace('_', ' ') }}</option>{% endfor %}</select></label>
     <label>Who is out (optional, names separated by commas) <input type="text" name="out" value="{{ out }}" maxlength="200"></label>
     <button class="btn primary" type="submit">Propose slots</button>
   </form>
@@ -39,6 +40,8 @@
     <li>
       <strong>{{ x.name }}</strong> <span class="fine">({{ x.minutes }} min)</span>:
       {% if x.placed %}{{ x.at_local }}{% if x.interviewer %}, with {{ x.interviewer }}{% else %}, interviewer not set{% endif %}
+      {% if x.candidate_tz and x.at_for_candidate != x.at_local %}<span class="fine">Candidate sees {{ x.at_for_candidate }}.</span>{% endif %}
+      {% if x.interviewer_tz and x.at_for_interviewer != x.at_local %}<span class="fine">{{ x.interviewer }} sees {{ x.at_for_interviewer }}.</span>{% endif %}
       {% if x.others %}<span class="fine">Free to swap in: {{ x.others | join(', ') }}</span>{% endif %}
       {% elif x.already %}already booked{% else %}no slot found{% endif %}
       {% for w in x.warnings %}<div class="fine"><span class="badge warn">Heads up</span> {{ w }}</div>{% endfor %}
@@ -49,7 +52,7 @@
   {% set placed = plan.sessions | selectattr('placed') | list %}
   {% if placed %}
   <form method="post" action="/jobs/{{ job.id }}/loop/book" class="stack" data-confirm="Log these {{ placed | length }} interviews on {{ plan.candidate.name }}'s timeline? Nothing is sent and no calendar is changed.">
-    <input type="hidden" name="candidate_id" value="{{ plan.candidate.id }}">
+    <input type="hidden" name="candidate_id" value="{{ plan.candidate.id }}"><input type="hidden" name="candidate_tz" value="{{ plan.candidate_tz or '' }}">
     {% for x in placed %}<input type="hidden" name="s_name" value="{{ x.name }}"><input type="hidden" name="s_at" value="{{ x.at }}"><input type="hidden" name="s_min" value="{{ x.minutes }}"><input type="hidden" name="s_who" value="{{ x.interviewer or '' }}">{% endfor %}
     <button class="btn primary" type="submit">Log these interviews</button>
   </form>
@@ -60,7 +63,7 @@
   <ul>
     {% for v in plan.invites %}
     <li>{{ v.interviewer }}, {{ v.session }}
-      <a class="link small" href="{{ v.mailto }}">Open in your mail</a>
+      <a class="link small" href="{{ v.mailto }}">Open in your mail</a>{% if not v.email %} <span class="fine">(no email saved for them: add it in the interviewer details when you log an interview)</span>{% endif %}
       <button type="button" class="link small" data-copy-text="{{ v.subject }}&#10;&#10;{{ v.body }}">Copy invite</button></li>
     {% endfor %}
     {% if plan.candidate_invite %}

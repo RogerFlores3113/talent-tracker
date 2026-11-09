@@ -77,16 +77,27 @@
   {% if (request.state.flash or {}).get('error') %}<p class="error">{{ request.state.flash.get('error') }}</p>{% endif %}
   <form method="post" action="/candidates/{{ c.id }}/log" class="logform">
     <select name="kind" aria-label="Kind">{% for k in kinds %}<option value="{{ k }}">{{ k | capitalize }}</option>{% endfor %}</select>
-    <input type="text" name="body" placeholder="What happened? (for an interview, add the date)" aria-label="Note">
-    <input type="datetime-local" name="at" aria-label="When (leave blank for now)" title="When, in {{ local_zone() }} (leave blank for now)"><span class="fine zone">{{ local_zone() }}</span>
+    <input type="text" name="body" placeholder="What happened? For an interview, the session, like Onsite: coding" aria-label="Note">
+    <input type="datetime-local" name="at" aria-label="When (leave blank for now, but an interview needs a time)" title="When (leave blank for now). An interview needs a date and a time."><select name="tz" aria-label="Time zone of that time" title="The time zone the date and time are in"><option value="">{{ local_zone() or 'My time zone' }} (mine)</option>{% for z in common_zones %}<option value="{{ z }}">{{ z | replace('_', ' ') }}</option>{% endfor %}</select>
     {% if c.pipelines %}<select name="job_id" aria-label="Job"><option value="">No job</option>{% for p in c.pipelines %}<option value="{{ p.job_id }}">{{ job_label(p.job_title, p.job_company) }}</option>{% endfor %}</select>{% endif %}
     <label class="followup">Follow up on <input type="date" name="follow_up" aria-label="Follow up on (optional)" title="Optional. Adds a follow-up to Today on this day."></label>
+    <details class="iv-extras fine" style="flex-basis:100%">
+      <summary>Interview details (who runs it, how long, time zones)</summary>
+      <div class="logform">
+        <input type="text" name="interviewer" placeholder="Interviewer (names separated by commas)" aria-label="Interviewer" maxlength="200">
+        <input type="email" name="interviewer_email" placeholder="Their email (saved for invites)" aria-label="Interviewer email" maxlength="200">
+        <input type="number" name="minutes" min="10" max="480" placeholder="Length (min)" aria-label="Length in minutes" style="width:9rem">
+        <label class="followup">Interviewer's zone <select name="interviewer_tz" aria-label="Interviewer's time zone"><option value="">Same as mine</option>{% for z in common_zones %}<option value="{{ z }}">{{ z | replace('_', ' ') }}</option>{% endfor %}</select></label>
+        <label class="followup">Candidate's zone <select name="candidate_tz" aria-label="Candidate's time zone"><option value="">{{ ('Saved: ' ~ (c_zone | replace('_', ' '))) if c_zone else 'Same as mine' }}</option>{% for z in common_zones %}<option value="{{ z }}">{{ z | replace('_', ' ') }}</option>{% endfor %}</select></label>
+      </div>
+      <p class="fine">For an interview, invites and calendar files show each person the time on their own clock. A zone you pick is remembered for that person.</p>
+    </details>
     <button class="btn small primary" type="submit">Add</button>
   </form>
   {% if c.timeline %}
   <ul class="timeline">
     {% for t in c.timeline %}
-    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ 'reply' if t.data is mapping and t.data.reply else t.kind }}</span> <span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') else '%b %-d, %Y') }}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
+    <li class="t-{{ t.kind }}{{ ' cancelled' if t.status == 'cancelled' }}{{ ' struck' if t.struck }}"><span class="kind">{{ 'reply' if t.data is mapping and t.data.reply else t.kind }}</span> {% set allday = t.kind == 'interview' and t.data is mapping and t.data.all_day %}<span class="when" title="{{ t.at | local(IV_TIME) }}">{{ t.at | local('%b %-d, %Y, %-I:%M %p %Z' if t.kind in ('interview', 'meeting') and not allday else '%b %-d, %Y') }}{% if allday %}, all day{% endif %}</span>{% if t.job_title %} <span class="muted">· {{ t.job_title }}</span>{% endif %}
       {% if t.kind == 'interview' %}{% set ivd = t.data or {} %}{% if t.status == 'cancelled' %} <span class="badge">Cancelled</span>{% elif t.status in interview_outcomes %} <span class="badge">{{ interview_label(ivd) or interview_outcomes[t.status] }}</span>{% endif %}{% if ivd.rescheduled_from %} <span class="fine">moved from {{ ivd.rescheduled_from[-1] | local }}</span>{% endif %}{% endif %}
       {% set lines = t.data | change_lines if t.kind == 'change' else [] %}
       {% if t.data and t.data.merged %}<div>{{ t.body }}</div>{% endif %}
@@ -100,7 +111,7 @@
       {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">
-          <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
+          <input type="datetime-local" name="at" value="{{ t.at | local('%Y-%m-%dT%H:%M') }}" aria-label="New date and time" required><select name="tz" aria-label="Time zone of that time"><option value="">{{ local_zone() or 'My time zone' }} (mine)</option>{% for z in common_zones %}<option value="{{ z }}">{{ z | replace('_', ' ') }}</option>{% endfor %}</select>
           <input type="text" name="reason" value="" placeholder="Reason (optional)" aria-label="Reason for the new time" maxlength="500">
           <button class="btn small" type="submit">Reschedule</button>
         </form>
@@ -124,7 +135,7 @@
         </form>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}/session" class="inline">
           <input type="text" name="body" placeholder="Next session, like Onsite: coding" aria-label="Session name" maxlength="200" required>
-          <input type="time" name="time" aria-label="Start time, {{ local_zone() }}" required>
+          <input type="time" name="time" aria-label="Start time, {{ local_zone() }}" title="Start time, {{ local_zone() }}" required><span class="fine zone">{{ local_zone() }}</span>
           <input type="text" name="interviewer" placeholder="Interviewer (optional)" aria-label="Interviewer" maxlength="200">
           <button class="btn small" type="submit" title="Builds an onsite loop: same day and job">Add another session that day</button>
         </form>

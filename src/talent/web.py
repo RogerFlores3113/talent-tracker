@@ -343,7 +343,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["IV_TIME"] = IV_TIME
     env.globals["color_info"] = color_info
     env.globals["COLORS"] = COLORS
-    env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
+    env.globals["local_zone"] = lambda: interviews.zone_label(as_local(datetime.now(timezone.utc)))
     env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.globals["user_zone"] = lambda: reports.user_zone(store)
     env.globals["shown_zone_name"] = lambda: reports.user_zone(store) or reports.fallback_zone(store)
@@ -834,7 +834,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         hints = actions.twin_hints(open_jobs)
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
-        return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
+        return page(request, "candidate.html", c=c, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
@@ -945,9 +945,27 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 reply = kind == outreach.REPLY_KIND
                 if job_id is None and kind in (*outreach.OUTREACH_KINDS, outreach.REPLY_KIND):
                     job_id = outreach.job_for(store, candidate_id)
+                at_text, tz = str(form.get("at") or "").strip(), str(form.get("tz") or "").strip()
+                iv = interviews.form_fields(form) if kind == "interview" else {}
+                if kind == "interview":
+                    if not at_text:  # a blank time would log the interview "now"
+                        raise ValueError("Pick the date and time of the interview. A blank time would log it as "
+                                         "happening right now.")
+                    body = interviews.with_length(body, iv["minutes"])
+                at = (f"{at_text} {tz}" if at_text and tz else at_text) or None  # the zone the time was typed in
                 entry = store.log(candidate_id, "message" if reply else kind, body or ("Replied" if reply else None),
-                                  at=str(form.get("at") or "") or None, job_id=job_id, source="App")
+                                  at=at, job_id=job_id, source="App", **(
+                                      {"interviewer": iv["interviewer"], "candidate_tz": iv["candidate_tz"],
+                                       "interviewer_tz": iv["interviewer_tz"]} if kind == "interview" else {}))
                 logged = True
+                if kind == "interview":
+                    interviews.save_form_people(store, iv)
+                    notice = "Logged the interview for " + interviews.when_for(
+                        entry["at"], iv["candidate_tz"] or store.candidate_zone(candidate_id),
+                        bool(interviews._data(entry).get("all_day"))) + "."
+                notes = " ".join(entry.get("when_notes") or [])
+                if notes:
+                    notice = (notice + " " if notice else "") + notes
                 if reply:
                     outreach.mark_reply(store, entry["id"])
                     move = outreach.reply_stage(store, candidate_id, job_id) if job_id is not None else None
@@ -981,8 +999,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 if not at:
                     raise ValueError("Pick the new date and time.")
                 reason = str(form.get("reason") or "").strip()
-                iv = store.update_interview(entry_id, at=at, reason=reason or None, candidate_id=candidate_id)
-                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}."
+                tz = str(form.get("tz") or "").strip()
+                iv = store.update_interview(entry_id, at=f"{at} {tz}" if tz else at, reason=reason or None,
+                                            candidate_id=candidate_id)
+                notice = f"Moved the interview to {_local(iv['at'], IV_TIME)}." + "".join(
+                    " " + n for n in iv.get("when_notes") or [])
             elif op == "cancel":
                 store.update_interview(entry_id, cancel=True, candidate_id=candidate_id)
                 notice = "Interview cancelled. It stays on the timeline, marked cancelled."
@@ -2349,25 +2370,28 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(f"/jobs/{job_id}?{urlencode({'notice': notice})}#pipeline", status_code=303)
 
     # ------------------------------------------------- the loop planner
-    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+    def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
+                   cz: str = ""):
         job = job_or_404(job_id)
         tpl = loops.get_template(store, job_id)
         people = actions.in_play(store, job_id)
         plan, error = None, ""
         if candidate.isdigit() and tpl:
             try:
-                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out))
+                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out),
+                                  candidate_tz=cz or None)
             except (ValueError, NotFound) as exc:
                 error = str(exc)
         return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
                     hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
                     cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
-                    plan_error=error)
+                    plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
 
     @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
-    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = ""):
+    def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
+                  cz: str = ""):
         """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
-        return _loop_page(request, job_id, candidate, start, out)
+        return _loop_page(request, job_id, candidate, start, out, cz)
 
     @app.post("/jobs/{job_id}/loop/template")
     async def loop_template_form(request: Request, job_id: int):
@@ -2398,7 +2422,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                      for n, a, m, w in zip(names, ats, mins, whos) if n.casefold() in tpl and m.isdigit()][:loops.MAX_SESSIONS]
             if not slots:
                 raise ValueError("There is nothing to book. Plan the loop again.")
-            loops.book(store, int(cid), job_id, slots, by="app")
+            loops.book(store, int(cid), job_id, slots, by="app", candidate_tz=str(form.get("candidate_tz") or "") or None)
         except (ValueError, NotFound) as exc:
             return RedirectResponse(f"/jobs/{job_id}/loop?{urlencode({'flash_error': str(exc), 'candidate': cid})}",
                                     status_code=303)
@@ -2492,8 +2516,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "interviews_month.html", m=interviews.month(store, first), calendar_prompt=calendar_prompt)
 
     @app.get("/interviews.ics")
-    def interviews_ics(month: str = "", cancelled: str = ""):
-        """The month's interviews (or every upcoming one) as a calendar file for the recruiter's own calendar app."""
+    def interviews_ics(month: str = "", cancelled: str = "", week: str = ""):
+        """The month's (or week's) interviews, or every upcoming one, as a calendar file for the recruiter's own
+        calendar app."""
+        if week.strip():
+            try:
+                monday = interviews.week_start(interviews.week_day(week) or interviews.week_start())
+                body = interviews.ics_for_week(store, monday)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return Response(body, media_type="text/calendar; charset=utf-8",
+                            headers={"Content-Disposition": f'attachment; filename="interviews-week-{monday.isoformat()}.ics"'})
         try:
             first = interviews.month_first(month) if month.strip() else None
         except ValueError as exc:
@@ -2526,6 +2559,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         try:
             if not re.fullmatch(r"\d{1,2}:\d{2}", at):
                 raise ValueError("Pick a start time for the new session.")
+            if iv["data"].get("all_day"):
+                raise ValueError("That interview is all day, so there is no clock to add a session to. Give it a "
+                                 "time first.")
             day = _local(iv["at"], "%Y-%m-%d")
             new = store.log(candidate_id, "interview", str(form.get("body") or ""), at=f"{day}T{at}",
                             job_id=iv.get("job_id"), source="App",
@@ -2533,7 +2569,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#iv-{entry_id}",
                                     status_code=303)
-        notice = f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+        notice = (f"Added a session at {_local(new['at'], IV_TIME)}. It shows with the others as one loop."
+                  + "".join(" " + n for n in new.get("when_notes") or []))
         return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'notice': notice})}#iv-{new['id']}",
                                 status_code=303)
 

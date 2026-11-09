@@ -96,7 +96,10 @@ def test_the_migration_fills_other_emails_from_the_importers_notes(tmp_path):
     s.close()
     con = sqlite3.connect(path)
     con.execute("DROP TABLE candidate_emails")
-    version_before = len(__import__("talent.store", fromlist=["x"])._MIGRATIONS) - 1
+    migrations = __import__("talent.store", fromlist=["x"])._MIGRATIONS
+    # the migration just before v9a's data step runs again, whatever later cycles appended after it
+    version_before = next(i for i, m in enumerate(migrations) if isinstance(m, tuple)
+                          and getattr(m[1], "__name__", "") == "_migrate_v9a_data")
     con.execute(f"PRAGMA user_version = {version_before}")
     con.commit()
     con.close()

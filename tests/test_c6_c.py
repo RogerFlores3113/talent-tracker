@@ -203,8 +203,9 @@ def test_feedback_chase_today_item_mailto_and_mcp(store):
                    interviewer="Kim Lee, Alex Ruiz <alex@lumen.com>")["id"]
     store.log(cid, "interview", "Fresh one", at=_ago(3), job_id=jid, interviewer="Dana Whitfield")  # under a day
     items = [i for i in actions.action_items(store)["items"] if i["kind"] == "feedback_owed"]
-    assert len(items) == 2  # c7 B: one item per interviewer, not per loop
-    by = {i["who"]: i for i in items}
+    assert len(items) == 1  # c10 I: Kim and Alex owe on the same candidate, so one card; Dana's is under a day old
+    by = {p["name"]: {**p, "owed": p["items"]} for p in items[0]["people"]}
+    assert set(by) == {"Kim Lee", "Alex Ruiz"}
     assert [o["name"] for o in by["Kim Lee"]["owed"]] == ["Tomas Okafor"]
     assert by["Alex Ruiz"]["mailto"].startswith("mailto:alex@lumen.com?subject=") and by["Kim Lee"]["mailto"].startswith("mailto:?")
     assert "Tomas Okafor" in by["Kim Lee"]["body"] and "—" not in by["Kim Lee"]["body"]
