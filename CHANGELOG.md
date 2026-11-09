@@ -89,6 +89,10 @@ All notable changes to Talent Search. Newest first.
 - Better keyboard and screen reader support, stronger contrast in dark mode, and a Refresh button on read-only views.
 - Four more in-chat views: Jobs (a card per job with people in each stage, last activity, next interview and a link to its pipeline), Saved searches (what each one looks for, how many are new, and Run shows the people right there), Follow-ups (grouped Overdue, Today, This week and Later, with the text to send) and Status and client updates (the update as the client sees it, a Copy update button that copies only that part, and your own notes kept apart below).
 - list_jobs now answers in plain bulleted lines with a link per job instead of a block of JSON.
+- Interviews in chat: a week agenda by day (Today, Tomorrow, then each weekday) with times in your time zone (and the candidate's when it differs), interviewers, a status for each session, clash warnings and each interviewer's load. Record feedback with a verdict, reschedule or cancel from the view: it sends your request to the chat, so the usual review rules apply.
+- Feedback owed in chat: who owes feedback, grouped by interviewer, with days overdue, a Copy nudge button that copies a short reminder in your voice, and Log feedback or Mark chased requests.
+- Duplicates in chat: each possible pair as two side-by-side cards with the matching email, LinkedIn, name or company marked. Merging and "not the same person" still happen in Talent Search, never from the view.
+- add_interview_feedback with a wrong interview id now says to use list_interviews to find the right one, and takes lean yes and lean no (also written lean_yes, lean_no).
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 

@@ -1,0 +1,14 @@
+/* Duplicates view: one pair per row, two compact cards side by side (stacked under 560px). */
+article.pair{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+article.pair h2.ph{font-size:.9375rem;text-transform:none;letter-spacing:0;color:var(--text);margin:0 0 6px}
+.pair .why{display:flex;flex-wrap:wrap;gap:4px;list-style:none;margin:0 0 8px;padding:0}
+.sides{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media (max-width:559px){.sides{grid-template-columns:1fr}}
+.side{border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0;overflow-wrap:anywhere}
+.side h3{font-size:.9375rem;margin:0}
+.side dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 10px;margin:6px 0 0;font-size:.8125rem}
+.side dt{color:var(--muted)}.side dd{margin:0;min-width:0}
+.pair mark{padding:0 2px}
+.pair .hint{font-size:.75rem;color:var(--muted);margin-top:6px}
+html[data-mode=fullscreen] .pairs{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:10px;align-items:start}
+html[data-mode=fullscreen] article.pair{margin-bottom:0}

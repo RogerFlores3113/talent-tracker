@@ -43,7 +43,7 @@ from .links import MAX_LINKS, clean_links, fold_link_args, link_label, stored_li
 from .store import (clean_color, clean_duration, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
-                    to_dt)
+                    shown_zone, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -1223,7 +1223,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data = {"cards": untag(cards), "missing": missing}
         return _result(f"{len(cards)} card{'' if len(cards) == 1 else 's'}.", data)
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("duplicates"))
     def find_duplicates(limit: int = 20) -> CallToolResult:
         """People who may be saved twice, across the whole database: the same email, LinkedIn, name and phone,
         name and company, or a similar name at the same company. Strongest matches first, each with the reason and
@@ -1234,7 +1234,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         pairs = duplicates.find_pairs(store)
         out = []
         for p in pairs[:limit]:
-            people = [brief(store.get_candidate(p[k])) for k in ("keep", "other")]
+            people = []
+            for k in ("keep", "other"):
+                c = store.get_candidate(p[k])
+                people.append({**brief(c), **_slim({"source": c.get("source"), "created_at": c.get("created_at"),
+                                                    "app_url": app_url(f"/candidates/{c['id']}")})})
             out.append({"reasons": p["reasons"], "people": people,
                         "compare_and_merge_url": app_url(f"/candidates/{p['keep']}/merge/{p['other']}")})
         data = {"data_note": DATA_NOTE, "total": len(pairs), "shown": len(out), "pairs": untag(out),
@@ -1942,19 +1946,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=WRITE)
     def add_interview_feedback(interview_id: int, feedback: str, interviewer: str | None = None,
                                verdict: Annotated[str | None, WithJsonSchema({
-                                   "anyOf": [{"type": "string", "enum": [v for v, _ in interviews.VERDICT_CHOICES]},
+                                   "anyOf": [{"type": "string", "description": "strong yes, yes, lean yes, mixed, lean no, "
+                                              "no or strong no (underscores like lean_yes work too)"},
                                              {"type": "null"}], "default": None})] = None) -> CallToolResult:
         """Save one interviewer's feedback on an interview, in their own words (free text, no rubric).
 
         interview_id is from get_candidate's timeline or log_activity (logged.id). `interviewer` is who said it
         (for a panel, call once per person). verdict, only when that person gave one, is their own verdict on
-        the session (strong yes, yes, mixed, no, strong no); on a joint or panel session each person keeps theirs,
+        the session (strong yes, yes, lean yes, mixed, lean no, no, strong no); on a joint or panel session each person keeps theirs,
         and the session's outcome rolls up from everyone's latest (all yes is the least sure yes, a split is
         mixed). Feedback is kept with the interview, shows in the app's Decide view and in compare_finalists.
         The same words from the same person twice are kept once. The recruiter sees it under Changes and can
         undo it there.
         """
-        before = store.get_interview(interview_id)
+        try:
+            before = store.get_interview(interview_id)
+        except NotFound:
+            raise ValueError(f"There is no interview with id {interview_id}. Use list_interviews to see session ids "
+                             "(or get_candidate for one person's interviews).") from None
         _check_note_cap(store, before["candidate_id"], "Nothing saved")
         if verdict is not None:
             interviews._verdict_key(verdict)  # a bad word is refused before anything waits or is saved
@@ -2008,7 +2017,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             "interviewer": iv["data"].get("interviewer"), "feedback": notes}),
             "app_url": app_url(f"/candidates/{iv['candidate_id']}#iv-{iv['id']}")})
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("interviews"))
     def list_interviews(week: str | None = None) -> CallToolResult:
         """Every interview booked that week across all jobs (Monday to Friday, plus Saturday and Sunday when
         something is booked then), grouped into onsite loops, with each interviewer's load, clashes (an
@@ -2017,14 +2026,23 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         "next"; empty means this week (next week on a weekend)."""
         day = interviews.week_day(week)
         w = interviews.week(store, day)
+        zone = shown_zone()
         data = {"start": w["start"].isoformat(), "end": w["end"].isoformat(), "total": w["total"],
+                "tz": getattr(zone, "key", None), "now": now_iso(),
                 "loops": [{**{k: lp[k] for k in ("candidate_id", "name", "job_id", "job", "size")},
-                           "sessions": [_slim({"interview_id": x["interview_id"], "at_local": _local(x["at"]),
-                                               "name": x["name"], "interviewer": x["interviewer"], "status": x["status"],
+                           "candidate_url": app_url(f"/candidates/{lp['candidate_id']}"),
+                           "job_url": app_url(f"/jobs/{lp['job_id']}") if lp.get("job_id") else None,
+                           "sessions": [_slim({"interview_id": x["interview_id"], "at": x["at"], "end": x.get("end"),
+                                               "at_local": _local(x["at"]), "all_day": x.get("all_day") or None,
+                                               "candidate_tz": x.get("candidate_tz"),
+                                               "name": x["name"], "interviewer": x["interviewer"],
+                                               "interviewers": x.get("interviewers"), "status": x["status"],
+                                               "result": x.get("result"),
                                                "needs_outcome": x["needs_outcome"] or None,
                                                "feedback_owed_by": x["owed"] or None,
                                                "feedback_due": x.get("feedback_due"),
-                                               "feedback_overdue": x.get("feedback_overdue") or None}) for x in lp["sessions"]]}
+                                               "feedback_overdue": x.get("feedback_overdue") or None,
+                                               "app_url": app_url(x["href"])}) for x in lp["sessions"]]}
                           for lp in w["loops"]],
                 "load": [{"interviewer": e["name"], "sessions": e["count"]} for e in w["load"]],
                 "clashes": [{"kind": c["kind"], "text": c["text"], "interview_ids": c["ids"]} for c in w["clashes"]],
@@ -2179,7 +2197,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 "warning": " ".join(warn) or None, "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
         return (_said if waiting else _plain)(sentence, _slim(data))
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("owed"))
     def list_feedback_owed(job_id: int | None = None) -> CallToolResult:
         """Interviewers who still owe feedback on sessions that have taken place (up to two weeks back), for
         people still in play on an open job, the same people Decide and compare_finalists name. A session under a
@@ -2196,7 +2214,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                               "chased")}) for o in r["owed"]]} for r in rows],
             "people": [{"name": p["name"], "email": p["email"], "owes": p["count"], "candidates": p["candidates"],
                         "interview_ids": [i["interview_id"] for i in p["items"]], "subject": p["subject"],
-                        "body": p["body"]} for p in interviews.owed_people(rows)],
+                        "body": p["body"], "chased": p["chased"],
+                        "items": [_slim({"interview_id": i["interview_id"], "candidate_id": i["candidate_id"],
+                                         "candidate": i["name"], "job": i.get("job"), "session": i["session"],
+                                         "day": i["day"], "at": i["at"], "days_overdue": i.get("days_overdue"),
+                                         "chased": i.get("chased", True),
+                                         "candidate_url": app_url(f"/candidates/{i['candidate_id']}"),
+                                         "job_url": app_url(f"/jobs/{i['job_id']}") if i.get("job_id") else None})
+                                  for i in p["items"]]} for p in interviews.owed_people(rows)],
             "app_url": app_url("/interviews")}
         return _result(DATA_NOTE + "\n" + interviews.feedback_owed_text(rows), data)
 

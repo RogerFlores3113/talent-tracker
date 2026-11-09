@@ -31,6 +31,9 @@ URIS = {
     "searches": "ui://talent-search/saved-searches.html",
     "followups": "ui://talent-search/followups.html",
     "digest": "ui://talent-search/digest.html",
+    "interviews": "ui://talent-search/interviews.html",
+    "owed": "ui://talent-search/feedback-owed.html",
+    "duplicates": "ui://talent-search/duplicates.html",
 }
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
@@ -48,7 +51,9 @@ def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
-    css = _read("kit.css") + ("\n" + _read("people.css") if name in ("people", "searches") else "")
+    own = _DIR / (name + ".css")  # a view may bring its own styles (people.css, interviews.css ...)
+    css = (_read("kit.css") + ("\n" + _read("people.css") if name == "searches" else "")  # searches shows the People view
+           + ("\n" + own.read_text(encoding="utf-8") if own.exists() else ""))
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     # Saved searches shows the People view inside itself: people.js loads first, its two entry points are kept,
