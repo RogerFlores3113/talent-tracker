@@ -448,3 +448,11 @@ section.welcome.panel { margin-bottom: 20px; }
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   .btn:hover, .card:hover, .option:hover, .pc:hover, .theme-card:hover .sw { transform: none !important; }
 }
+
+/* ---- connect checks (fixer A) ---- */
+.checking { display: none; color: var(--muted); font-size: 13px; margin-left: var(--space-2); }
+.checking.htmx-request { display: inline; }
+#claude-panel code { word-break: break-all; font-size: 13px; }
+#claude-panel details { margin-top: var(--space-3); }
+#claude-panel pre.code { max-height: 220px; overflow: auto; }
+.claude-open { border-left: 3px solid var(--line); padding-left: var(--space-3); }
