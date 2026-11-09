@@ -27,6 +27,10 @@ URIS = {
     "shortlist": "ui://talent-search/shortlist.html",
     "saved": "ui://talent-search/batch-save.html",
     "decide": "ui://talent-search/finalists.html",
+    "jobs": "ui://talent-search/jobs.html",
+    "searches": "ui://talent-search/saved-searches.html",
+    "followups": "ui://talent-search/followups.html",
+    "digest": "ui://talent-search/digest.html",
 }
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
@@ -44,16 +48,20 @@ def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
-    css = _read("kit.css") + ("\n" + _read("people.css") if name == "people" else "")
+    css = _read("kit.css") + ("\n" + _read("people.css") if name in ("people", "searches") else "")
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
+    # Saved searches shows the People view inside itself: people.js loads first, its two entry points are kept,
+    # then searches.js takes over render and draw (see searches.js).
+    scripts = (_read("people.js") + "\n</script><script>const renderPeople=render,drawPeople=draw;</script><script>\n"
+               if name == "searches" else "") + _read(name + ".js")
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Talent Search</title>"
         f"<style>{css}</style></head><body><main id='main'><p class='empty'>Loading...</p></main>"
         "<div id='drawer' hidden></div><div id='linknote'></div>"
         "<div id='live' class='sr' role='status' aria-live='polite'></div>"
-        f"<script>{kit}\n{_read(name + '.js')}</script></body></html>"
+        f"<script>{kit}\n{scripts}</script></body></html>"
     )
 
 

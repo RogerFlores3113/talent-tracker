@@ -87,6 +87,8 @@ All notable changes to Talent Search. Newest first.
 - "Load next 50" pages through long searches, and "Open in Talent Search" carries the search and filters. The Candidates page also opens a list of exact people with `?ids=1,2,3`, ticked.
 - Clicking a person in the pipeline, finalists and saved views opens their card in place. If your chat app won't open a link, the address is shown with a Copy button.
 - Better keyboard and screen reader support, stronger contrast in dark mode, and a Refresh button on read-only views.
+- Four more in-chat views: Jobs (a card per job with people in each stage, last activity, next interview and a link to its pipeline), Saved searches (what each one looks for, how many are new, and Run shows the people right there), Follow-ups (grouped Overdue, Today, This week and Later, with the text to send) and Status and client updates (the update as the client sees it, a Copy update button that copies only that part, and your own notes kept apart below).
+- list_jobs now answers in plain bulleted lines with a link per job instead of a block of JSON.
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 

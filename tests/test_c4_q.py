@@ -183,7 +183,8 @@ def test_update_interview_and_list_jobs_reply_in_plain_lines(store):
     lines = text(res).splitlines()
     assert lines[0] == "1 open job:" and lines[1].startswith("- Backend Engineer (Acme) (job id")
     assert "Screening 1" in lines[1]
-    assert json.loads(lines[-1])[0]["id"] == job["id"] and structured(res)["jobs"][0]["id"] == job["id"]
+    assert lines[-1].startswith("  Open it: http") and "/jobs/" in lines[-1]  # c11 J: bulleted text with a link, no JSON dump
+    assert structured(res)["jobs"][0]["id"] == job["id"]
 
 
 # ---------------------------------------------- 7. filled: offer to close

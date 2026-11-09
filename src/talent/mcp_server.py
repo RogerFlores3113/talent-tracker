@@ -1095,7 +1095,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             **({"no_one_named": q} if nobody else {}),
             "app_url": app_url(app_path or _search_path(res.suggestion if res.corrected else q, kw))})
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("searches"))
     def list_saved_searches() -> CallToolResult:
         """List the recruiter's saved searches (the quick links on their Candidates page): each one's id, name,
         what it searches for in plain words, how many people match now, and how many of those are new since the
@@ -1103,6 +1103,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         rows = store.list_saved_searches(counts=True)
         items = [_slim({"id": r["id"], "name": r["name"], "search": searchquery.describe(r["params"]),
                         "matches": r["count"], "new_since_opened": r["new"],
+                        "color": r["params"].get("color"), "last_opened": r.get("last_viewed_at"),
+                        "app_url": app_url(f"/saved-searches/{r['id']}"),
                         "saved_by": "your AI app" if r["created_by"] == "ai" else "the recruiter"}) for r in rows]
         if not items:
             return _result("No saved searches yet. save_search keeps one the recruiter can open from their "
@@ -1110,7 +1112,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         lines = [f"{len(items)} saved search{'' if len(items) == 1 else 'es'}:"]
         lines += [f"- [id {i['id']}] {quoted(i['name'])}: {i['search']}. {i['matches']} match"
                   f"{'' if i['matches'] == 1 else 'es'}" + (f", {i['new_since_opened']} new" if i.get("new_since_opened") else "")
-                  for i in items]
+                  + (f". Last opened in the app {_local(i['last_opened'])}" if i.get("last_opened") else ". Not opened in the app yet")
+                  + f". Open it: {i['app_url']}" for i in items]
         return _result("\n".join(lines), {"saved_searches": items, "app_url": app_url("/candidates")})
 
     @mcp.tool(annotations=READ, meta=tool_meta("people"))
@@ -2219,16 +2222,23 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result(decide.finalists_text(d), data)
 
     # ------------------------------------------------------------------ jobs
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("jobs"))
     def list_jobs(status: str | None = "open") -> CallToolResult:
         """Jobs with their stages and how many candidates are in each. status: open, on_hold, closed, or null for all.
-        The text has one line per job, then the jobs as JSON."""
+        The text has one bulleted line per job with its link, and the structured result has every job."""
         jobs = [_job_out(_slim({**j, "stage_counts": {s["name"]: s["count"] for s in j["stage_counts"]}}))
                 for j in store.list_jobs(status)]
+        soon: dict[int, str] = {}
+        for iv in store.upcoming_interviews(days=60):  # the next interview on each job, for the in-chat Jobs view
+            if iv.get("job_id") and iv["job_id"] not in soon:
+                soon[iv["job_id"]] = iv["at"]
         for j in jobs:  # Cautious mode: what waits for the recruiter is read back as waiting
             waiting = review.ai_lines(store, job_id=j["id"])
             if waiting:
                 j["pending_review"] = waiting
+            j["app_url"] = app_url(f"/jobs/{j['id']}")
+            if j["id"] in soon:
+                j["next_interview"] = soon[j["id"]]
 
         def line(j: dict[str, Any]) -> str:
             openings, hired = j.get("openings") or 1, j.get("hired_count", 0)
@@ -2242,12 +2252,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return (f"- {_job_name(j)} (job id {j['id']}, {str(j.get('status', 'open')).replace('_', ' ')}): "
                     + ", ".join(bits) + (f". In stages: {stages}." if stages else ". No one in the pipeline yet.")
                     + (" Waiting for the recruiter's review, not applied yet: " + "; ".join(j["pending_review"]) + "."
-                       if j.get("pending_review") else ""))
+                       if j.get("pending_review") else "")
+                    + (f" Next interview: {_local(j['next_interview'])}." if j.get("next_interview") else "")
+                    + f"\n  Open it: {j['app_url']}")
 
         which = {"open": "open ", "on_hold": "on-hold ", "closed": "closed "}.get(status or "", "")
         head = f"{len(jobs)} {which}job{'' if len(jobs) == 1 else 's'}" + (":" if jobs else ".")
-        text = "\n".join([head, *(line(j) for j in jobs), json.dumps(jobs, ensure_ascii=False, default=str)])
-        return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent={"jobs": jobs})
+        text = "\n".join([head, *(line(j) for j in jobs)])
+        return CallToolResult(content=[TextContent(type="text", text=text)],
+                              structuredContent={"jobs": jobs, "app_url": app_url("/jobs")})
 
     @mcp.tool(annotations=WRITE)
     def create_job(title: str, company: str | None = None, location: str | None = None,
@@ -2645,7 +2658,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             data["interviews_left_out"] = booked["people"]
         return CallToolResult(content=content, structuredContent=data)
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("digest"))
     def status_digest(company: str | None = None, omit_stages: list[str] | None = None,
                       hiring_manager: str | None = None) -> CallToolResult:
         """One paste-ready status update for every open job, or only one company's (a client or team) or one
@@ -2673,6 +2686,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
                            "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup if hiring_manager is None],
             "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
+            # for the in-chat Digest view: the client-safe update, the notes that are not part of it, and job links
+            "update_text": text, "recruiter_notes": hidden,
+            "job_links": [{"id": j["id"], "title": j["title"], "company": j.get("company"), "app_url": app_url(f"/jobs/{j['id']}")}
+                          for r in rollup for j in r["jobs"]] + [{"id": j["id"], "title": j["title"], "company": j.get("company"),
+                                                                  "app_url": app_url(f"/jobs/{j['id']}")} for j in held],
             "app_url": app_url("/jobs")}
         if over:
             data["hired_over_openings"] = [{k: o[k] for k in ("job_id", "title", "hired", "openings")} for o in over]
@@ -2781,7 +2799,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                              "keep_stages": shortlist.keep_stages(store, job_id)}),
                               job_id, [p["id"] for p in rows if p.get("status") == "proposed"])
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("followups"))
     def list_followups(job_id: int | None = None, days_ahead: int = 0) -> CallToolResult:
         """Follow-ups due today or earlier, from each job's outreach sequence (set on the job page in the app),
         with the text to paste for each. days_ahead: also list the ones due in the next N days. The app sends
@@ -2796,7 +2814,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         rows = outreach.due(store, job_id, days_ahead=ahead)
         out = [{"candidate_id": p["candidate_id"], "name": p["name"], "job_id": p["job_id"], "job": p["job"],
                 "step": p["step"], "steps": p["steps"], "label": p["label"], "due_on": p["due_on"],
-                "due": outreach.due_text(p), "draft": p["draft"]} for p in rows]
+                "due": outreach.due_text(p), "draft": p["draft"],
+                "candidate_url": app_url(f"/candidates/{p['candidate_id']}"),
+                "app_url": app_url(f"/jobs/{p['job_id']}/outreach")} for p in rows]
         if not out:
             return _result("No follow-ups due" + (f" in the next {ahead} days" if ahead else " today") + ".",
                            {"followups": [], "app_url": app_url("/")})
@@ -3246,7 +3266,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 **({"site_guard_note": site_guard.result_note(guard_site)} if guard_site else {})}
         return _said("\n".join(lines), data)
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("digest"))
     def client_report(client: str | None = None, since: str | None = None, hiring_manager: str | None = None,
                       company: str | None = None) -> CallToolResult:
         """A client's update for a period: where people stand by stage group (each person once), who moved (from
@@ -3308,6 +3328,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data.update({"client": rep["client"]["name"], "time_zone": rep["client"].get("time_zone"),
                      "last_update_sent_at": rep["client"].get("last_update_sent_at"),
                      "jobs": rep["jobs"], "moves": rep["moves"][:100], "upcoming_interviews": rep["upcoming"],
+                     "updates": [{"for": (r["manager"] or "jobs with no hiring manager") if len(parts) > 1 else None,
+                                  "text": reports.report_text(r)} for r in parts],
+                     "recruiter_notes": notes,
+                     "job_links": [{"id": j["id"], "title": j["title"], "company": rep["client"]["name"],
+                                    "app_url": app_url(f"/jobs/{j['id']}")} for j in rep["jobs"]],
                      "left_out": rep["not_shown"], "overfilled": rep["overfilled"],
                      "app_url": app_url(f"/clients/{quote(rep['client']['slug'])}")})
         if rep.get("manager") is not None or len(parts) > 1:
