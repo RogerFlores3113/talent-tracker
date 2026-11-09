@@ -89,7 +89,7 @@ class ParsedQuery:
 
         label = {"skill": "skill", "title": "title", "company": "company", "location": "location",
                  "source": "found via"}
-        many = len(self.groups) + len(self.fields) > 1
+        many = len(self.groups) + len(self.fields) + len(self.exclude) + len(self.not_fields) > 1
         parts = []
         for g in self.groups:
             one = " OR ".join(show(i) for i in g)
