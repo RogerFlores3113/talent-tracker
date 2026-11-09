@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import actions, reports
+from . import actions, injection, reports
 from . import sessions as ledger
 from .store import (AI_KEPT, AI_SOURCE, FIELD_LABELS, INTERVIEW_OUTCOME_LABELS, INTERVIEW_OUTCOMES, INTERVIEW_VERDICTS,
                     JOB_FIELD_LABELS, JOB_STATUS_LABELS, NotFound, Store, _labels, now_iso, parse_when, quoted)
@@ -44,9 +44,18 @@ WAIT_NOTE = ("Nothing changed yet: Cautious mode is on, so the recruiter keeps o
              "(Review). Don't send it again.")
 
 
+def cautious_setting(store: Store) -> bool:
+    """Whether the recruiter turned Cautious mode on in Settings."""
+    return store.setting(SETTING) == "1"
+
+
 def cautious(store: Store) -> bool:
+    """Whether the AI app's overwrites, moves into Hired or out, job changes and logged activity wait for review:
+    Cautious mode is on, or this AI session was shown text that looked like instructions to an AI (injection.py)."""
     from .trust import REPLAY  # here: trust imports this module
-    return store.setting(SETTING) == "1" and not REPLAY.get()  # a request the recruiter just kept doesn't wait again
+    if REPLAY.get():  # a request the recruiter just kept doesn't wait again
+        return False
+    return cautious_setting(store) or injection.ACTIVE.get()
 
 
 def set_cautious(store: Store, on: bool) -> None:
@@ -63,11 +72,11 @@ def set_options(store: Store, **on: bool) -> None:
 
 
 def hold_contacts(store: Store) -> bool:
-    return cautious(store) and store.setting(HOLD_CONTACTS) == "1"
+    return cautious_setting(store) and store.setting(HOLD_CONTACTS) == "1" and cautious(store)
 
 
 def hold_moves(store: Store) -> bool:
-    return cautious(store) and store.setting(HOLD_MOVES) == "1"
+    return cautious_setting(store) and store.setting(HOLD_MOVES) == "1" and cautious(store)
 
 
 def extra_holds_text(store: Store) -> str:
@@ -126,6 +135,11 @@ def pending(store: Store, candidate_id: int | None = None, job_id: int | None = 
             WHERE {' AND '.join(where)} ORDER BY r.id""", params)]
 
 
+def pending_in(store: Store, session: str | None) -> int:
+    """How many changes from this AI session wait for review."""
+    return store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending' AND session = ?", (session,))["n"]
+
+
 def count(store: Store) -> int:
     return store._row("SELECT count(*) AS n FROM ai_review WHERE status = 'pending'")["n"]
 
@@ -137,7 +151,7 @@ def _job(r: dict[str, Any]) -> str:
 
 def _dedupe_key(payload: dict[str, Any]) -> str:
     """What makes two waiting changes the same: the payload, less what it marks as loose (a note's default time)."""
-    loose = set(payload.get("_loose") or ())
+    loose = set(payload.get("_loose") or ()) | {"held_because"}
     return json.dumps({k: v for k, v in payload.items() if k not in loose}, sort_keys=True, default=str)
 
 
@@ -147,6 +161,8 @@ def _queue(store: Store, kind: str, summary: str, payload: dict[str, Any], *, ca
         store.get_candidate(candidate_id)  # a plain "not found", never a database error
     if job_id is not None:
         store.get_job(job_id)
+    if injection.ACTIVE.get() and not payload.get("held_because"):  # why it waits: the session read flagged text
+        payload = {**payload, "held_because": "injection"}
     body = json.dumps(payload, sort_keys=True, default=str)
     key = _dedupe_key(json.loads(body))
     with store._write():

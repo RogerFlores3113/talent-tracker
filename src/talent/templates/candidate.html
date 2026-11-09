@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble %}
+{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble, injection_box %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
+{{ injection_box(inject_warnings) }}
 {% if dupes %}
 <section class="panel" id="duplicates">
   <h2>Same person?</h2>
