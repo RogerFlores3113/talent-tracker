@@ -422,10 +422,13 @@ def test_duplicates_reasons_keep_linkedin_capitalized(store):
 
 
 def test_duplicates_reasons_keep_their_capitals(store):
-    store.add_candidate(name="Kim Lo", current_company="Acme", email="a@x.com")
-    store.add_candidate(name="Kim Lo", current_company="Acme", email="b@x.com")
+    from talent.store import normalize_linkedin, now_iso
+    for name, url in (("Jo Park", "https://www.linkedin.com/in/jo-park/"), ("Joanna Park", "http://linkedin.com/in/Jo-Park")):
+        with store._lock, store._conn:  # two rows with one LinkedIn, the way an old import could leave them
+            store._conn.execute("INSERT INTO candidates(name, created_at, updated_at, linkedin_url, linkedin_key) "
+                                "VALUES (?, ?, ?, ?, ?)", (name, now_iso(), now_iso(), url, normalize_linkedin(url)))
     page = local_client(store).get("/candidates/duplicates").text
-    assert "<strong>Same name and company</strong>" in page
+    assert "<strong>Same LinkedIn</strong>" in page
 
 
 def test_merge_shows_ids_only_when_the_names_match(store):
