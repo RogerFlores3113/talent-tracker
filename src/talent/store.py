@@ -156,7 +156,7 @@ def clean_color(value: Any) -> str | None:
         return v
     if v in ("none", "no color", "no colour", "clear", ""):
         return None
-    raise ValueError(f"{str(value)[:30]!r} isn't a colour. Use one of: {', '.join(COLORS)} (or none to clear it).")
+    raise ValueError(f"{str(value)[:30]!r} isn't a color. Use one of: {', '.join(COLORS)} (or none to clear it).")
 
 
 def next_color(color: str | None, step: int = 1) -> str | None:

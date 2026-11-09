@@ -27,10 +27,8 @@ MODES = (FULL, SHORT)
 #   can really try it during the tour.
 STEPS: list[dict[str, Any]] = [
     {"id": "welcome", "title": "Welcome to Talent Search", "path": None, "target": [], "modes": (FULL,),
-     "body": "This is your own candidate database, kept on this computer. Your AI app does the typing: you "
-             "ask it in plain English and it saves, searches and updates people here. The tour takes about two "
-             "minutes. Sample people you add yourself with the Try it with sample data button on Today are yours: "
-             "this tour never clears them."},
+     "body": "This is your own candidate list, kept on this computer. Your AI app can do the typing: ask it "
+             "in plain words and it saves, searches and updates people here. The tour takes about two minutes."},
     {"id": "today", "title": "Today", "path": "/", "target": ["section.today", "main h1"], "modes": (SHORT,),
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
     {"id": "claude", "title": "Connect Claude Desktop", "path": "/connect", "target": ["#claude-panel"],

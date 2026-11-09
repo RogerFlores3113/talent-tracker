@@ -6,7 +6,7 @@
 <p class="lead">{% if inhouse() %}One row per company your jobs name. Open one for a hiring update to share: where people stand, who moved, how long each stage takes and the interviews coming up.{% else %}One row per client, from the company on each job. Open one for its update: where people stand, who moved since your last update, how long each stage takes and the interviews coming up.{% endif %}</p>
 {% if rows %}
 <div class="table-wrap"><table class="dense clients-table">
-  <thead><tr><th>{{ 'Company' if inhouse() else 'Client' }}</th><th>Open jobs</th><th>In play (incl. sourced)</th><th>Interviews this week</th><th>Last update sent</th></tr></thead>
+  <thead><tr><th scope="col">{{ 'Company' if inhouse() else 'Client' }}</th><th scope="col">Open jobs</th><th scope="col">In play (incl. sourced)</th><th scope="col">Interviews this week</th><th scope="col">Last update sent</th></tr></thead>
   <tbody>{% for r in rows %}
   <tr>
     <td><a href="/clients/{{ r.slug }}">{{ r.name }}</a>{% if r.due %} <span class="badge overdue">Update due</span>{% endif %}</td>

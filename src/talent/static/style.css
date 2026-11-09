@@ -109,6 +109,8 @@
 
 /* ==== Scales (shared by every theme) ==== */
 :root {
+  /* Borders of form boxes: at least 3:1 against the page in every theme (the soft --line is for decoration only). */
+  --input-line: color-mix(in oklab, var(--text) 58%, var(--surface));
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
   --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 22px; --fs-2xl: 28px;
   --radius-sm: 8px; --radius: 12px; --radius-pill: 999px;
@@ -223,7 +225,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { box-shadow: 
 .form .wide, .form .actions { grid-column: 1 / -1; justify-content: flex-start; }
 .form.three { grid-template-columns: 1fr 1fr 1fr; margin-top: var(--space-3); }
 .form input, .form textarea, .form select, select, .stack textarea, .stack input[type=text], .tablebar input, .logform input, .addbar input, .stages-table input, .addstage input, .filters input {
-  font: inherit; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); border: 1px solid var(--line);
+  font: inherit; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); border: 1px solid var(--input-line);
   background: var(--surface); color: var(--text); transition: border-color var(--ease), box-shadow var(--ease); }
 .form input[type=checkbox], .form input[type=radio] { padding: 0; }
 select { padding: var(--space-2) var(--space-2); }
@@ -620,3 +622,20 @@ main:focus { outline: none; }
 .bulkbar { margin: 0 0 var(--space-3); }
 .bulk-actions { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2) var(--space-3); }
 td.pickcell, th.pickcell { width: 1%; text-align: center; }
+
+/* ==== Access ==== */
+[hidden] { display: none !important; }
+:where(input:not([type=checkbox], [type=radio], [type=hidden], [type=submit]), select, textarea) { border: 1px solid var(--input-line); }
+.reason-note { font-weight: 600; color: var(--warn); }
+.stage-form.unsent select[data-stage-pick], #tbl-move.unsent { border-style: dashed; }
+.cal span.cal-num { cursor: default; }
+@media (prefers-contrast: more) {
+  :root { --input-line: var(--text); }
+}
+@media (forced-colors: active) {
+  input, select, textarea, .btn, button, .chip, .card, .panel, .option, .cal-day, .cal-chip, .col, .pc, .flash { border: 1px solid CanvasText; }
+  :focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
+  .cal-day.today { outline: 3px solid Highlight; outline-offset: -3px; }
+  .cal-chip.clash { border-width: 3px; }
+  .stage-form.unsent select[data-stage-pick], #tbl-move.unsent { border-style: dashed; }
+}

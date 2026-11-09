@@ -4,6 +4,15 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Keyboard, screen reader and first-time use
+- The month calendar links only days that have interviews, so Tab skips the empty days.
+- Choosing Rejected or Withdrawn on the board and tabbing away now says "Not moved yet", shows a dashed menu, and puts the keyboard in the reason box.
+- After a save that reloads the page (Pin, Check again on Import, Settings), the keyboard lands on the notice so it is read out.
+- Time zone boxes take any zone (type a city or zone name) and show its offset. Interview forms name their session. "All day" interviews can be logged on the web form, and the interview note has a 500 character limit.
+- Input borders reach 3:1 in every theme, and forced colors and high contrast settings are handled. Esc closes a menu without closing the tour. No autofocus on Today or the add forms.
+- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish has one box for its saved searches.
+- A bad email on the add or edit form is refused next to the field. Pasting a note that names someone fills the name.
+
 ### Search
 - NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
 - "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.

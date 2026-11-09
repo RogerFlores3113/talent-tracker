@@ -135,11 +135,11 @@ def test_month_day_links_have_distinct_names_and_weeks_are_named(store):
     _seed(store)
     html = local_client(store).get("/interviews?view=month&month=2027-03").text
     assert "Wednesday March 10, 1 interview, week of Mar 8</span>" in html
-    assert "Thursday March 11, 0 interviews, week of Mar 8</span>" in html
+    assert "0 interviews" not in html  # a day with nothing booked is plain text, not a link (c10 w4)
     names = re.findall(r'<a class="cal-num"[^>]*>.*?<span class="cal-vh">([^<]*)</span></a>', html)
-    assert len(names) >= 28 and len(set(names)) == len(names)
+    assert names and len(set(names)) == len(names)
     assert re.findall(r'<ul class="cal-week" aria-label="Week of [A-Z][a-z]{2} \d+">', html)
-    assert 'role="group" aria-label="Interviews in' in html and 'role="group" aria-label="Colour key"' in html
+    assert 'role="group" aria-label="Interviews in' in html and 'role="group" aria-label="Color key"' in html
 
 
 def test_today_link_marks_the_current_month_and_week_marks_today(store):
@@ -184,7 +184,8 @@ def test_interview_forms_on_a_person_page_name_their_session(store):
     assert 'aria-label="Feedback on Onsite: system design"' in html
     assert 'aria-label="Next session after Onsite: system design"' in html
     # only the new-entry form's own Interviewer box keeps the short name; every per-session box names its session
-    assert html.count('aria-label="Interviewer"') == 1 and 'aria-label="Session name"' not in html
+    assert html.count('aria-label="Interviewer (names separated by commas) for a new interview"') == 1
+    assert 'aria-label="Session name"' not in html
 
 
 # ---------------------------------------------------------------- app.js and css

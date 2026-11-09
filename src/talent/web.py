@@ -351,6 +351,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["user_zone"] = lambda: reports.user_zone(store)
     env.globals["shown_zone_name"] = lambda: reports.user_zone(store) or reports.fallback_zone(store)
     env.globals["common_zones"] = reports.COMMON_ZONES
+    env.globals["zone_options"] = reports.zone_options
+    env.globals["computer_on_utc"] = lambda: reports.computer_on_utc()
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
@@ -1018,6 +1020,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_emails = _split_emails(form.get("other_emails"))
         if other_emails:
             data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
+        bad = _bad_email_fields(data, other_emails)
+        if bad:
+            return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
+                        error="Nothing was saved. " + " ".join(bad.values()), field_errors=bad,
+                        job_id=job_id if job_id.isdigit() else None, status_code=400)
         if (form.get("create_anyway") != "1" and data.get("name")
                 and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None
                 and not any(store.find_duplicate(e) for e in other_emails)):
@@ -1054,7 +1061,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         hints = actions.twin_hints(open_jobs)
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
-        return page(request, "candidate.html", c=c, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
+        return page(request, "candidate.html", c=c, summary_limit=interviews.SUMMARY_LIMIT, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
@@ -1066,6 +1073,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = _form_fields(form, keep_blank=True)
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
+        bad = _bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else [])
+        if bad:
+            return page(request, "candidate_form.html",
+                        c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
+                        history_text=str(form.get("work_history", "")), error="Nothing was saved. " + " ".join(bad.values()),
+                        field_errors=bad, job_id=None, status_code=400)
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
             if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
@@ -1186,9 +1199,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 at_text, tz = str(form.get("at") or "").strip(), str(form.get("tz") or "").strip()
                 iv = interviews.form_fields(form) if kind == "interview" else {}
                 if kind == "interview":
+                    all_day = str(form.get("all_day") or "") == "1"
                     if not at_text:  # a blank time would log the interview "now"
-                        raise ValueError("Pick the date and time of the interview. A blank time would log it as "
+                        raise ValueError("Pick the day of the interview." if all_day else
+                                         "Pick the date and time of the interview. A blank time would log it as "
                                          "happening right now.")
+                    if all_day:  # a day with no time: all day, kept on that day
+                        at_text, tz = at_text[:10], ""
+                    if len(body.strip()) > interviews.SUMMARY_LIMIT:
+                        raise ValueError(f"The interview note can be up to {interviews.SUMMARY_LIMIT} characters, and "
+                                         f"this one has {len(body.strip()):,}. Nothing was saved. Put the session name "
+                                         "here, like Onsite: coding, and the rest in a note.")
                     body = interviews.with_length(body, iv["minutes"])
                 at = (f"{at_text} {tz}" if at_text and tz else at_text) or None  # the zone the time was typed in
                 entry = store.log(candidate_id, "message" if reply else kind, body or ("Replied" if reply else None),
@@ -1349,6 +1370,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
+        if not guess.get("name"):  # a note about someone: "Spoke with Marcus Lee, ..."
+            noted = _name_in_note(text)
+            if noted:
+                guess["name"] = noted
         found, missing = duplicates.found_fields(guess)
         hints = importers.paste_hints(text, guess)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
@@ -3644,6 +3669,52 @@ def _and(items: list[str]) -> str:
 def _split_emails(raw: Any) -> list[str]:
     """The Other emails box: one address per line (commas and semicolons work too)."""
     return [e for e in (x.strip() for x in re.split(r"[\n,;]+", str(raw or ""))) if e]
+
+
+_EMAIL_OK = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>.]{2,}")
+_NOTE_WORD = r"[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?"
+_NOTE_NAME = re.compile(rf"\b({_NOTE_WORD}(?:[ \t]+{_NOTE_WORD}){{1,2}})\b")
+_NOTE_CUE = re.compile(r"(?:\bname\s*[:=-]|\bcandidate\s*[:=-]|\b(?:met|meet|met with|spoke with|spoke to|talked to|talked with|"
+                       r"chatted with|call with|caught up with|heard from|referral:?|referred|intro(?:duced)? to|"
+                       r"about|re:?|for)\b)[ \t]+", re.I)
+_NOTE_SKIP = {"the", "this", "that", "these", "those", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+              "sunday", "january", "february", "march", "april", "may", "june", "july", "august", "september",
+              "october", "november", "december", "senior", "junior", "staff", "principal", "lead", "head", "chief",
+              "software", "data", "product", "machine", "full", "front", "back", "great", "good", "nice", "strong",
+              "looks", "seems", "email", "phone", "call", "note", "notes", "linkedin", "github", "talent", "search",
+              "san", "new", "los", "las", "hi", "hello", "dear", "thanks", "thank", "best", "regards", "please"}
+
+
+def _name_in_note(text: str) -> str | None:
+    """A person's name in a free-text note ("Spoke with Marcus Lee about the backend role"): the name after a cue
+    like "name:", "met", "spoke with" or "about", else the first two or three capitalized words in a row. None when
+    nothing reads like a name."""
+    def ok(name: str) -> bool:
+        words = name.split()
+        return 2 <= len(words) <= 3 and words[0].lower() not in _NOTE_SKIP and importers._is_name(name)
+
+    for m in _NOTE_CUE.finditer(text):
+        n = _NOTE_NAME.match(text, m.end())
+        if n and ok(n.group(1)):
+            return " ".join(n.group(1).split())
+    for line in text.splitlines()[:12]:
+        for n in _NOTE_NAME.finditer(line):
+            if ok(n.group(1)):
+                return " ".join(n.group(1).split())
+    return None
+
+
+def _bad_email_fields(data: dict[str, Any], others: list[str]) -> dict[str, str]:
+    """A typed email (or an Other emails line) that isn't an address: {field: message}. Blank is fine."""
+    out: dict[str, str] = {}
+    email = str(data.get("email") or "").strip()
+    if email and not _EMAIL_OK.fullmatch(email):
+        out["email"] = (f"{email[:60]!r} doesn't look like an email address. Use a name@company.com address, or "
+                        "leave it blank.")
+    wrong = [e for e in others if not _EMAIL_OK.fullmatch(e)]
+    if wrong:
+        out["other_emails"] = f"{wrong[0][:60]!r} doesn't look like an email address. Fix that line or delete it."
+    return out
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

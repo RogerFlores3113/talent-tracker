@@ -5,7 +5,7 @@
     <a class="option" href="/connect"><strong>Connect your AI app</strong><span>Then paste a LinkedIn link into Claude and say “save this person”.</span></a>
     <a class="option" href="/import"><strong>Import a spreadsheet</strong><span>Bring in a CSV from Excel, Google Sheets or another tool.</span></a>
     <a class="option" href="/paste"><strong>Paste a resume</strong><span>We pull out the name, email and links for you to check.</span></a>
-    {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button. The first-run tour never clears data you add this way.</span></button></form>{% endif %}
+    {% if with_sample %}<form method="post" action="/sample-data" class="option-form"><button class="option" type="submit"><strong>Try it with sample data</strong><span>16 made-up candidates and 2 jobs. Remove them any time with one button.</span></button></form>{% endif %}
   </div>
 {%- endmacro %}
 {% macro loop_sessions(i) -%}
