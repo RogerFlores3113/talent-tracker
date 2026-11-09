@@ -1,0 +1,16 @@
+<details class="search-tips">
+  <summary>Search tips</summary>
+  <ul class="tips">
+    <li><code>react python</code> finds people who have both words (this is the default).</li>
+    <li><code>"machine learning"</code> in quotes finds those words together.</li>
+    <li><code>python OR go</code> (or <code>python or go</code> in small letters) finds people with either word.</li>
+    <li><code>python NEAR django</code> finds people where the two words are close together (within 5 words, either order). <code>python NEAR/3 django</code> sets how close, from 1 to 50. Only a capital <code>NEAR</code> (or <code>near/3</code>) counts, so <code>lives near boston</code> still searches for the word near.</li>
+    <li>Every kind of search, including quotes, OR and NEAR, reads the same places: the profile, pipeline jobs, where they were found, and timeline notes.</li>
+    <li><code>c#</code>, <code>c++</code>, <code>f#</code> and <code>.net</code> are words of their own, so <code>c#</code> does not find people who only know C or C++.</li>
+    <li><code>-recruiter</code> or <code>NOT manager</code> leaves out people who have that exact word.</li>
+    <li><code>title:engineer</code>, <code>company:acme</code>, <code>location:sf</code>, <code>skill:python</code> and <code>source:referral</code> narrow to one field. Punctuation stays, so <code>skill:c++</code> and <code>skill:node.js</code> work, and <code>skill:python OR go</code> means either skill. Typing the same prefix twice, like <code>company:google company:meta</code>, means either one, and so does a prefix typed together with the same filter in More filters.</li>
+    <li><code>-title:manager</code> or <code>NOT source:referral</code> leaves out people whose Title or Found via has it.</li>
+    <li>Example: <code>title:engineer "machine learning" python OR go -recruiter</code>. Brackets are ignored. Under the search box we show how your search was read. If a prefix is mistyped, like <code>skil:python</code>, you get a "Did you mean" link.</li>
+  </ul>
+  {% if tips_more_link %}<p class="fine">More filters (skills, remote, years of experience, last contacted) are on the <a href="/candidates">Candidates</a> page, where you can also save a search.</p>{% endif %}
+</details>

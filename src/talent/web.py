@@ -501,12 +501,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                  "overdue": bool(s.get("due_on") and s["due_on"] < today)} for s in store.open_suggestions(job_id)]
 
     # ------------------------------------------------------------ overview
+    def how_read_line(q: str, result: Any = None) -> str:
+        """'How we read your search', for the Today and Candidates pages alike: the search in plain words, then what
+        needed saying (a mistyped prefix, a repeated prefix, a form filter typed twice). Empty for plain words."""
+        if not (q or "").strip() or store.lookup_exact(q)[0]:
+            return ""
+        pq = searchquery.parse_query(q)
+        if not (pq.structured or pq.operator_mode):
+            return ""
+        notes = list(getattr(result, "notes", None) or pq.notes)
+        return " ".join([pq.explain(), *notes]).strip()
+
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, q: str = "", location: str = "", title: str = "", tag: str = ""):
         searching = bool(q or location or title or tag)
         result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50)
         ctx = dict(result=result, q=q, location=location, title=title, tag=tag, total_all=store.count_candidates(),
-                   searching=searching)
+                   searching=searching, how_read=how_read_line(q, result))
         if is_htmx(request) and request.headers.get("HX-Target") == "results":
             if not searching:
                 return page(request, "_overview.html", **ctx, **overview_ctx())
@@ -527,7 +538,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         result = search.search(q, location=location or None, title=title or None, tag=tag or None, limit=50,
                                offset=offset)
         ctx = dict(result=result, q=q, location=location, title=title, tag=tag, offset=offset,
-                   total_all=store.count_candidates(), searching=True)
+                   total_all=store.count_candidates(), searching=True, how_read=how_read_line(q, result))
         # "Show more" asks for the next cards only, which replace the button.
         return page(request, "_result_cards.html" if offset else "_results.html", **ctx)
 
@@ -591,10 +602,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
-        pq = searchquery.parse_query(q) if q.strip() and not store.lookup_exact(q)[0] else None
-        how_read = ""
-        if pq and (pq.structured or pq.operator_mode):  # "How we read your search", built from the parser
-            how_read = " ".join([pq.explain(), *pq.notes]).strip()
+        how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
             range_note = (f"Years of experience at least {more_params['exp_min']} and at most {more_params['exp_max']} "
@@ -617,7 +625,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+        return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
 

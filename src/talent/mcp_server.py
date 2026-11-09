@@ -820,7 +820,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         a mistyped prefix like skil:python is left off, searched as plain words, and answered with "Did you mean
         skill:python?" (also in the structured "suggestion" and "notes");
         -title:manager or NOT source:referral leaves out people whose own field has it. source: also matches a
-        word of the Found via label (source:sample finds "Sample data"). A phrase or OR searches profile text only.
+        word of the Found via label (source:sample finds "Sample data"). A phrase, OR or NEAR reads the same places as plain words (profile, pipeline jobs, Found via and timeline notes),
+        and c#, c++, f# and .net are words of their own (c# does not find people who only know C). Repeating a prefix
+        (company:google company:meta) means either one.
         Fewer than 3 people with every word: the closest matches (some of the words) follow, marked as such.
         A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?" (in a
         search with OR, quotes or NEAR it is only ever a "Did you mean", never applied for you).

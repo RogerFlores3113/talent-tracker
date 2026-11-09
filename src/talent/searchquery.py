@@ -19,6 +19,9 @@ What the box understands (AND stays the default):
                               word, so "lives near boston" and "near me" still search for those words.
                               NEAR works within one part of a profile (the same title, the same about text...)
     -title:manager            a minus or NOT before a prefix leaves out people whose field has it
+    company:google company:meta   the same prefix twice means either one (OR); skill: twice still needs both
+    c#, c++, f#, .net         whole words of their own (not the letter c or the word net), in plain words,
+                              quotes, OR and NEAR alike
 Parentheses are not supported: they are ignored, so `(python OR go)` reads as `python OR go`.
 """
 from __future__ import annotations
@@ -33,6 +36,51 @@ FIELD_ALIASES = {"title": "title", "company": "company", "location": "location",
                  "tag": "skill", "tags": "skill", "source": "source"}
 _FIELD_AT = re.compile(r"([A-Za-z]+):")
 _WORD = re.compile(r"\w+", re.UNICODE)
+# Words that carry a symbol stay whole: c#, c++, f# and .net are skills of their own, not the letter c or the word net.
+_TOKEN = re.compile(r"(?<!\w)\.net(?!\w)|(?<!\w)\w+(?:\+\+|#)(?![\w#+])|\w+", re.UNICODE | re.IGNORECASE)
+_SYM_INDEX = re.compile(r"(?<!\w)\.(net)(?!\w)|(?<!\w)(\w+)(\+\+|#)(?![\w#+])", re.UNICODE | re.IGNORECASE)
+
+
+def tokens(text: str | None) -> list[str]:
+    """The words of a text, as typed: ordinary words, and c#, c++, f# and .net kept whole."""
+    return _TOKEN.findall(text or "")
+
+
+def fts_token(token: str) -> str:
+    """The word the search index holds for a token: c# -> csharp, c++ -> cplusplus, .net -> dotnet."""
+    t = token.lower()
+    if t == ".net":
+        return "dotnet"
+    if t.endswith("++"):
+        return t[:-2] + "plusplus"
+    if t.endswith("#"):
+        return t[:-1] + "sharp"
+    return t
+
+
+def sym_text(text: str | None) -> str | None:
+    """A profile's text as the search index reads it: c# becomes csharp, c++ becomes cplusplus and .net becomes
+    dotnet, so they are separate words from c and net. Capitals are kept, and None stays None."""
+    if text is None:
+        return None
+    return _SYM_INDEX.sub(lambda m: "dot" + m.group(1) if m.group(1) else m.group(2) + (
+        "sharp" if m.group(3) == "#" else "plusplus"), str(text))
+
+
+_UNSYM = (
+    (re.compile(r"(?<!\w)dot(net)(?!\w)", re.I), r".\1"),
+    (re.compile(r"(?<!\w)(\w+)plusplus(?!\w)", re.I), r"\1++"),
+    (re.compile(r"(?<!\w)([A-Za-z])sharp(?!\w)", re.I), r"\1#"),
+)
+
+
+def unsym_text(text: str | None) -> str | None:
+    """sym_text the other way, for the excerpts shown under a match."""
+    if not text:
+        return text
+    for rx, back in _UNSYM:
+        text = rx.sub(back, text)
+    return text
 _NEAR_TOKEN = re.compile(r"(?:NEAR|[Nn][Ee][Aa][Rr]/\d{1,3})")  # NEAR, or NEAR/3 in any case. Bare "near" is a word.
 NEAR_DEFAULT, NEAR_MAX = 5, 50
 MAX_TOKENS = 40  # a pasted paragraph is not a query; the rest is ignored
@@ -54,7 +102,7 @@ class Item:
 
     @classmethod
     def of(cls, raw: str, phrase: bool = False) -> "Item | None":
-        typed = _WORD.findall(raw or "")
+        typed = tokens(raw)
         words = [w.lower() for w in typed]
         if not words:
             return None
@@ -177,7 +225,7 @@ def parse_query(text: str | None) -> ParsedQuery:
         if i < n and s[i] == '"':
             j = s.find('"', i + 1)
             if j == -1:  # unbalanced: the quote is dropped and the rest reads as plain words
-                for w in _WORD.findall(s[i + 1:]):
+                for w in tokens(s[i + 1:]):
                     toks.append(("word", w, neg, fld))
                     neg = False
                 break
@@ -213,6 +261,7 @@ def parse_query(text: str | None) -> ParsedQuery:
             pq.used_syntax = True
 
     pending_or = pending_not = False
+    repeated: set[str] = set()
     last: str | None = None  # the prefix of the value just before (None after a plain word or phrase)
     for kind, value, neg, fld in toks:
         if kind == "op":
@@ -255,8 +304,15 @@ def parse_query(text: str | None) -> ParsedQuery:
                                     f"like {fld}:a OR {fld}:b, so it was read as AND.")
                 if fld == "skill":
                     vals.append(text)
+                elif vals:  # company:google company:meta: either one
+                    if text not in vals:
+                        vals.append(text)
+                    if fld not in repeated:
+                        repeated.add(fld)
+                        pq.notes.append(f"{fld}: was typed more than once, so people who match any of the values "
+                                        "are shown (OR).")
                 else:
-                    pq.fields[fld] = [text]  # the last one given wins
+                    vals.append(text)
             last, pending_or = fld, False
             continue
         if pending_or and last and not item.near:  # skill:python OR go: the word joins that prefix

@@ -143,9 +143,11 @@ def test_field_prefixes_map_onto_the_filters(store, people):
     assert names(store.search_candidates("skill:python OR skill:rust")) == ["Ana Ruiz", "Ben Cole", "Cy Dee"]
 
 
-def test_a_form_filter_beats_the_prefix_in_the_box(store, people):
+def test_a_form_filter_and_the_prefix_in_the_box_both_count(store, people):
+    # cycle 10 (fixer Q): neither is dropped any more; a person who matches either one is shown, and the read-back says so
     res = store.search_candidates("title:engineer", title="designer")
-    assert names(res) == ["Di Fox"]  # the form's Title filter stays, the prefix does not override it
+    assert "Di Fox" in names(res) and "Ana Ruiz" in names(res)
+    assert any("either one" in n for n in res.notes)
 
 
 def test_prefix_matching_on_the_last_word_and_shorthand_still_work(store, people):
