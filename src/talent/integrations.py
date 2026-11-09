@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import tomllib
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,12 +54,45 @@ def mcp_launch_spec() -> LaunchSpec:
 
 
 # ----------------------------------------------------------------- Claude
-def claude_config_path() -> Path:
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Claude" / "claude_desktop_config.json"
-    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+def _msix_claude_dirs(env: dict[str, str] | None = None, home: Path | None = None) -> list[Path]:
+    """Claude Desktop from the Microsoft Store keeps (and reads) its settings in a virtualized copy under
+    %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude. Existing ones, most recently changed first."""
+    env = os.environ if env is None else env
+    local = env.get("LOCALAPPDATA")
+    base = Path(local) if local else (home or Path.home()) / "AppData" / "Local"
+    try:
+        found = [d for d in (base / "Packages").glob("Claude_*") if (d / "LocalCache" / "Roaming" / "Claude").is_dir()]
+    except OSError:
+        return []
+    dirs = [d / "LocalCache" / "Roaming" / "Claude" for d in found]
+    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return dirs
+
+
+def claude_config_dir(platform: str | None = None, env: dict[str, str] | None = None,
+                      home: Path | None = None) -> Path:
+    """The folder Claude Desktop keeps its settings in on this computer."""
+    platform = platform or sys.platform
+    env = os.environ if env is None else env
+    home = home or Path.home()
+    if platform == "darwin":
+        return home / "Library" / "Application Support" / "Claude"
+    if platform == "win32":
+        if store := _msix_claude_dirs(env, home):
+            return store[0]
+        return Path(env.get("APPDATA") or home / "AppData" / "Roaming") / "Claude"
+    return home / ".config" / "Claude"
+
+
+def claude_config_path(platform: str | None = None, env: dict[str, str] | None = None,
+                       home: Path | None = None) -> Path:
+    return claude_config_dir(platform, env, home) / "claude_desktop_config.json"
+
+
+def is_store_claude(path: Path) -> bool:
+    """True when this settings file is the Microsoft Store copy of Claude Desktop's."""
+    parts = [p.lower() for p in path.parts]
+    return "localcache" in parts and any(p.startswith("claude_") for p in parts)
 
 
 def quit_instruction(platform: str | None = None) -> str:
@@ -74,14 +108,14 @@ def quit_instruction(platform: str | None = None) -> str:
 
 
 def claude_where_to_look() -> str:
-    return ("Then open Settings > Developer: Talent Search should be listed there as running. Its tools are under "
-            "the + button (Search and tools) in a chat.")
+    return ("Then open Settings > Developer: look for talent-search, which should be listed there as running. "
+            "Its tools are under the + button (Search and tools) in a chat.")
 
 
 # Where to look once connected, per app.
 NEXT_STEPS = {
     "Claude Desktop": f"{quit_instruction()} {claude_where_to_look()}",
-    "Codex": "Restart Codex, then type /mcp to see Talent Search in the list.",
+    "Codex": "Restart Codex, then type /mcp to see talent-search in the list.",
     "LM Studio": "Restart LM Studio, then open the Program tab on the right of a chat and turn on mcp/talent-search.",
 }
 
@@ -131,8 +165,8 @@ def quarantine_note(platform: str | None = None, exe: str | None = None) -> str 
         return None
     if done.returncode != 0:
         return None
-    return ("If Claude Desktop says Talent Search failed to start, open Talent Search once from Applications "
-            "with right-click > Open first.")
+    return ("Before opening Claude Desktop, open Talent Search once from Applications with right-click > Open, "
+            "so macOS lets Claude start it.")
 
 
 def app_running(app: str = "claude") -> bool | None:
@@ -162,28 +196,63 @@ def _not_installed(path: Path, app_name: str) -> dict[str, Any] | None:
                        "then try again."}
 
 
-def _backup(path: Path, ours_already: bool = False) -> Path | None:
-    """One backup next to the file (config.json.bak). When the file already has our entry, the
-    backup from before we first connected is kept, so pressing Connect again never loses it."""
+def _backup(path: Path) -> Path | None:
+    """One backup next to the file (config.json.bak), made only when there isn't one yet. An existing .bak is
+    the copy from before Talent Search first touched the file, so it is never overwritten."""
     if not path.exists():
         return None
     dest = path.with_name(f"{path.name}.bak")
-    if ours_already and dest.exists():
-        return dest
-    shutil.copy2(path, dest)  # copy2 keeps the original permissions
+    if not dest.exists():
+        shutil.copy2(path, dest)  # copy2 keeps the original permissions
     return dest
 
 
+def locked_message(path: Path) -> str:
+    return (f"Couldn't save Claude Desktop's settings file ({path}): it's locked or read-only. "
+            "Quit Claude Desktop and try again.")
+
+
 def _write(path: Path, text: str) -> None:
-    """Replace the file in one step, keeping its permissions (new files are owner-only)."""
+    """Replace the file in one step, keeping its permissions (new files are owner-only). No BOM."""
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    if os.name != "nt":
-        os.chmod(tmp, mode)  # os.open's mode is filtered by the umask
-    tmp.replace(path)
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        if os.name != "nt":
+            os.chmod(tmp, mode)  # os.open's mode is filtered by the umask
+        tmp.replace(path)
+    except PermissionError as exc:
+        raise OSError(locked_message(path)) from exc
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def friendly_error(exc: BaseException) -> str:
+    """What to tell a person about a failed connect or check. ValueError and OSError text is already plain."""
+    if isinstance(exc, ValueError):
+        return str(exc)
+    if isinstance(exc, PermissionError):
+        return "Couldn't save the settings file: it's locked or read-only. Quit the app and try again."
+    if isinstance(exc, OSError):
+        return f"Couldn't read or save the settings file: {exc.strerror or exc}."
+    return "Something unexpected went wrong, so nothing more was changed. Use the settings under \u201cBy hand\u201d instead."
+
+
+def log_failure(exc: BaseException) -> None:
+    """Put the full traceback in app.log (never on screen). Never raises."""
+    try:
+        with open(data_dir() / "app.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " ERROR connect: "
+                    + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
 
 
 def _done(path: Path, backup: Path | None, app_name: str, **extra: Any) -> dict[str, Any]:
@@ -195,36 +264,53 @@ def _refused(path: Path, problem: str) -> dict[str, Any]:
     return {"path": str(path), "installed": True, "ok": False, "problem": problem, "backup": None}
 
 
+def _read_json_config(path: Path, app_name: str) -> dict[str, Any]:
+    """The settings file as a dict ({} when missing or empty). Reads past a BOM. Raises ValueError, with a plain
+    message, for anything we shouldn't touch."""
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        return {}
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{app_name}'s settings file isn't valid JSON, so we left it alone ({exc.msg}, line {exc.lineno})."
+        ) from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"{app_name}'s settings file has an unexpected shape, so we left it alone.")
+    if "mcpServers" in config and not isinstance(config["mcpServers"], dict):
+        raise ValueError(f"{app_name}'s settings file has mcpServers in an unexpected shape, so we left it alone.")
+    return config
+
+
 def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]:
     """Add or refresh our entry in an `mcpServers` JSON file, keeping everything else. Reads it back to check."""
     if missing := _not_installed(path, app_name):
         return missing
     if problem := launch_problem(spec):
         return _refused(path, problem)
-    config: dict[str, Any] = {}
-    if path.exists() and path.read_text(encoding="utf-8").strip():
-        try:
-            config = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"{app_name}'s settings file isn't valid JSON, so we left it alone ({exc.msg}, line {exc.lineno})."
-            ) from exc
-        if not isinstance(config, dict):
-            raise ValueError(f"{app_name}'s settings file has an unexpected shape, so we left it alone.")
-    backup = _backup(path, ours_already=SERVER_KEY in (config.get("mcpServers") or {}))
+    config = _read_json_config(path, app_name)  # validated before anything is touched
     servers = config.setdefault("mcpServers", {})
-    already = servers.get(SERVER_KEY) == spec.as_json_entry()
-    servers[SERVER_KEY] = spec.as_json_entry()
-    _write(path, json.dumps(config, indent=2) + "\n")
+    want = spec.as_json_entry()
+    already = servers.get(SERVER_KEY) == want
+    backup = None
+    if already:
+        backup = path.with_name(f"{path.name}.bak") if path.with_name(f"{path.name}.bak").exists() else None
+    else:
+        backup = _backup(path)
+        servers[SERVER_KEY] = want
+        _write(path, json.dumps(config, indent=2) + "\n")
     try:
-        back = json.loads(path.read_text(encoding="utf-8"))["mcpServers"][SERVER_KEY]
+        back = json.loads(path.read_text(encoding="utf-8-sig"))["mcpServers"][SERVER_KEY]
     except (OSError, ValueError, KeyError, TypeError):
         back = None
-    if back != spec.as_json_entry():
+    if back != want:
         raise ValueError(f"We wrote {app_name}'s settings file, but when we read it back Talent Search's entry "
                          "wasn't what we meant to write. Nothing more was changed. Use the settings under "
                          "\u201cBy hand\u201d instead.")
-    return _done(path, backup, app_name, already_connected=already, read_back=True, entry=spec.as_json_entry(),
+    return _done(path, backup, app_name, already_connected=already, read_back=True, entry=want,
                  running=app_running("claude") if app_name == "Claude Desktop" else None,
                  quarantine=quarantine_note() if app_name == "Claude Desktop" else None)
 
@@ -232,7 +318,7 @@ def _connect_json(path: Path, spec: LaunchSpec, app_name: str) -> dict[str, Any]
 def _json_entry(path: Path) -> dict[str, Any] | None:
     """Our entry in an `mcpServers` JSON file, or None (missing file, broken JSON, no entry)."""
     try:
-        entry = json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {}).get(SERVER_KEY)
+        entry = json.loads(path.read_text(encoding="utf-8-sig")).get("mcpServers", {}).get(SERVER_KEY)
     except (OSError, ValueError, AttributeError):
         return None
     return entry if isinstance(entry, dict) else None
@@ -307,20 +393,20 @@ def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> d
         return missing
     if problem := launch_problem(spec or mcp_launch_spec()):
         return _refused(path, problem)
-    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    original = path.read_text(encoding="utf-8-sig") if path.exists() else ""
     if original.strip():
         try:
             tomllib.loads(original)
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"Codex's settings file isn't valid TOML, so we left it alone ({exc}).") from exc
-    backup = _backup(path, ours_already=_strip_our_section(original) != original)
+    backup = _backup(path)
     base = _strip_our_section(original).rstrip()
     text = (base + "\n\n" if base else "") + codex_snippet(spec)
     tomllib.loads(text)  # never write something Codex can't read
     _write(path, text)
     want = (spec or mcp_launch_spec()).as_json_entry()
     try:
-        back = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"][SERVER_KEY]
+        back = tomllib.loads(path.read_text(encoding="utf-8-sig"))["mcp_servers"][SERVER_KEY]
     except (OSError, ValueError, KeyError):
         back = None
     if not back or {k: back.get(k) for k in ("command", "args", "env")} != want:
@@ -331,7 +417,7 @@ def connect_codex(path: Path | None = None, spec: LaunchSpec | None = None) -> d
 
 def _codex_entry(path: Path) -> dict[str, Any] | None:
     try:
-        entry = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers", {}).get(SERVER_KEY)
+        entry = tomllib.loads(path.read_text(encoding="utf-8-sig")).get("mcp_servers", {}).get(SERVER_KEY)
     except (OSError, tomllib.TOMLDecodeError, AttributeError):
         return None
     return dict(entry) if isinstance(entry, dict) else None
@@ -483,7 +569,8 @@ def test_launch(entry: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
                     code = None
             if code is not None:
                 return f"It stopped right away (exit code {code}), before it said hello."
-            msg = f"It started but didn't answer within {timeout:g} seconds ({waiting_for})."
+            msg = (f"It started but didn't answer within {timeout:g} seconds ({waiting_for}). The first start "
+                   "after installing can be slow while macOS checks the app. Press Test connection again.")
             if out["stray_stdout"]:
                 msg += (" It printed text that isn't part of the protocol, which gets in Claude Desktop's way: "
                         + out["stray_stdout"][0][:160])
@@ -542,6 +629,10 @@ def test_launch(entry: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
             _stop(proc)
 
 
+HEALTHY_LINE = "Added to Claude Desktop's settings and tested: Talent Search starts and answers."
+REOPEN_LINE = "If Claude Desktop was open, quit it completely and reopen it to finish."
+
+
 def result_line(result: dict[str, Any]) -> str:
     """One sentence for a test_launch result."""
     if result.get("ok"):
@@ -554,9 +645,7 @@ def result_line(result: dict[str, Any]) -> str:
 def claude_logs_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Logs" / "Claude"
-    if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Claude" / "logs"
-    return Path.home() / ".config" / "Claude" / "logs"
+    return claude_config_dir() / "logs"  # Windows (Store copy included) and Linux keep logs beside the settings
 
 
 def claude_log_tail(lines: int = 15) -> list[str]:
@@ -594,20 +683,71 @@ def claude_status(path: Path | None = None, spec: LaunchSpec | None = None) -> d
     spec = spec or mcp_launch_spec()
     entry = _json_entry(path)
     others: list[str] = []
+    config_error = None
     try:
-        servers = json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {})
-        others = sorted(k for k in servers if k != SERVER_KEY)
-    except (OSError, ValueError, AttributeError):
+        others = sorted(k for k in _read_json_config(path, "Claude Desktop").get("mcpServers", {}) if k != SERVER_KEY)
+    except ValueError as exc:
+        config_error = str(exc)
+    except OSError:
         pass
     problems = check_entry(entry) if entry is not None else []
     return {
         "config_path": str(path), "config_exists": path.exists(), "installed": path.parent.is_dir(),
+        "store_version": is_store_claude(path), "config_error": config_error, "logs_dir": str(claude_logs_dir()),
         "entry": entry, "entry_problems": problems,
         "matches_this_app": entry == spec.as_json_entry() if entry is not None else False,
         "launch_problem": launch_problem(spec), "claude_running": app_running("claude"),
+        "quarantine": quarantine_note(),
         "other_servers": others, "log_tail": claude_log_tail(),
         "connected": entry is not None and not problems,
     }
+
+
+def claude_report(status: dict[str, Any] | None = None, test: dict[str, Any] | None = None) -> str:
+    """Everything we know about the Claude Desktop hookup as plain text to paste into a bug report. Runs a fresh
+    launch test unless one is given. The web page and `check-claude` print this same text."""
+    from . import __version__
+
+    status = status or claude_status()
+    entry = status["entry"]
+    if test is None:
+        test = test_launch(entry) if entry else None
+    yes = lambda v: "yes" if v else "no"  # noqa: E731
+    lines = [f"Talent Search {__version__} on {sys.platform}, {'packaged app' if is_frozen() else 'developer run'}",
+             f"Claude Desktop settings file: {status['config_path']}"
+             + (" (Microsoft Store copy of Claude Desktop)" if status["store_version"] else ""),
+             f"File exists: {yes(status['config_exists'])}. Claude Desktop folder exists: {yes(status['installed'])}."]
+    if status.get("config_error"):
+        lines.append(f"Settings file problem: {status['config_error']}")
+    if entry is None:
+        lines.append("talent-search entry: not in the settings file")
+    else:
+        lines += ["talent-search entry:", f"  command: {entry.get('command')}",
+                  f"  args: {' '.join(map(str, entry.get('args') or []))}",
+                  f"  data folder: {(entry.get('env') or {}).get('TALENT_DATA_DIR') if isinstance(entry.get('env'), dict) else None}",
+                  f"  same as this app would write now: {yes(status['matches_this_app'])}"]
+    for problem in status["entry_problems"]:
+        lines.append(f"Problem: {problem}")
+    if status["launch_problem"]:
+        lines.append(f"Where the app runs from: {status['launch_problem']}")
+    running = status["claude_running"]
+    lines.append("Claude Desktop is open right now." if running else "Claude Desktop is not open."
+                 if running is False else "Couldn't tell whether Claude Desktop is open.")
+    lines.append("Other servers in the file: " + (", ".join(status["other_servers"]) or "none"))
+    if status["quarantine"]:
+        lines.append(status["quarantine"])
+    lines.append(f"Claude's logs folder: {status['logs_dir']}")
+    if status["log_tail"]:
+        lines += ["End of Claude Desktop's log for talent-search:", *[f"  {ln}" for ln in status["log_tail"]]]
+    if test is None:
+        lines.append("Launch test: not run (no entry to start).")
+    else:
+        lines.append("Launch test: " + result_line(test))
+        if not test["ok"]:
+            lines += [f"  {ln}" for ln in test["stderr_tail"][-10:]]
+        if test["stray_stdout"]:
+            lines.append("It also printed text that isn't part of the protocol: " + test["stray_stdout"][0][:160])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------- self-repair at start
@@ -629,3 +769,9 @@ def repair_stale_entries() -> list[str]:
         except Exception:  # starting the app must never fail because of this
             continue
     return fixed
+
+
+def repair_if_packaged() -> list[str]:
+    """Startup self-repair, only for the packaged app: a developer run must never point an installed app's
+    entry at a dev environment."""
+    return repair_stale_entries() if is_frozen() else []

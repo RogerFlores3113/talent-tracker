@@ -11,22 +11,27 @@
       <p class="flash warn">{{ claude.launch_problem }}</p>
       <button class="btn primary" type="button" disabled>Connect Claude Desktop</button>
     {% elif claude.entry and claude.entry_problems %}
-      <p class="flash warn"><strong>Talent Search is in Claude Desktop's settings, but it can't start:</strong></p>
+      <p class="flash warn"><strong>talent-search is in Claude Desktop's settings, but it can't start:</strong></p>
       <ul class="plain">{% for p in claude.entry_problems %}<li>{{ p }}</li>{% endfor %}</ul>
       <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Repair Claude Desktop</button>
     {% elif claude.entry %}
-      <p><span class="ok">Connected.</span> Settings file: <code>{{ claude.config_path }}</code></p>
+      <p><span class="ok">Added to Claude Desktop's settings.</span> Settings file: <code>{{ claude.config_path }}</code>{% if claude.store_version %} (the Microsoft Store copy of Claude Desktop){% endif %}</p>
+      <p class="fine">Press Test connection to check that it starts. Then look for <strong>talent-search</strong> in Claude Desktop under Settings > Developer.</p>
+      {% if claude.quarantine %}<p class="flash warn">{{ claude.quarantine }}</p>{% endif %}
       <button class="btn primary" hx-post="/connect/claude/test" hx-target="#claude-result" hx-indicator="#claude-busy">Test connection</button>
       <button class="btn" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Reconnect</button>
     {% else %}
-      <p>Adds Talent Search to Claude. Results show up as cards right in the chat.</p>
+      <p>Adds Talent Search to Claude. It shows up in Claude Desktop as <strong>talent-search</strong>, and results appear as cards right in the chat.</p>
       <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Connect Claude Desktop</button>
     {% endif %}
     {% if claude.claude_running %}
     <p class="fine claude-open">Claude Desktop is open. After connecting, {{ claude_quit[0]|lower }}{{ claude_quit[1:] }}</p>
     {% endif %}
+    {% if claude.config_error %}<p class="flash warn">{{ claude.config_error }}</p>{% endif %}
     <span class="checking" id="claude-busy">Checking...</span>
     <div id="claude-result" aria-live="polite"></div>
+    <p><button class="btn" hx-post="/connect/claude/report" hx-target="#claude-report" hx-indicator="#claude-busy">Show full report</button></p>
+    <div id="claude-report" aria-live="polite"></div>
     {% if claude.entry %}
     <details class="fine">
       <summary>What was written</summary>
@@ -46,7 +51,7 @@
       ('lmstudio', 'LM Studio', lmstudio_on, 'For local models. Pick one that supports tool use, like Qwen 3 or Llama 3.1.')] %}
   <section class="panel">
     <h2>{{ name }}</h2>
-    <p>{% if on %}<span class="ok">Connected.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
+    <p>{% if on %}<span class="ok">Added to its settings.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
     <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result" hx-indicator="#{{ key }}-busy">{{ 'Reconnect' if on else 'Connect' }} {{ name }}</button>
     {% if on %}<button class="btn" hx-post="/connect/{{ key }}/test" hx-target="#{{ key }}-result" hx-indicator="#{{ key }}-busy">Test connection</button>{% endif %}
     <span class="checking" id="{{ key }}-busy">Checking...</span>

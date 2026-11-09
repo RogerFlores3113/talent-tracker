@@ -6,13 +6,21 @@
 <p class="flash warn">{{ result.problem }}</p>
 <p class="fine">Nothing was changed in {{ app }}'s settings.</p>
 {% elif ok %}
+{% if target == 'claude' and check and check.ok %}
+<p class="ok">{{ healthy_line }}</p>
+{% elif result.already_connected %}
+<p class="ok">Already set up. Talent Search's entry is in <code>{{ result.path }}</code>, so nothing was rewritten.</p>
+{% elif target == 'claude' %}
+<p class="ok">Added to Claude Desktop's settings, in <code>{{ result.path }}</code>.</p>
+{% else %}
 <p class="ok">Done. Saved to <code>{{ result.path }}</code>.</p>
+{% endif %}
 {% if result.read_back %}<p class="fine">We read the file back and checked that Talent Search's entry is what we meant to write.</p>{% endif %}
 {% if target == 'claude' %}
-<p class="flash warn"><strong>One more step:</strong> {{ quit_text }}</p>
+{% if result.quarantine %}<p class="flash warn">{{ result.quarantine }}</p>{% endif %}
+<p class="flash warn"><strong>One more step:</strong> {{ reopen_line }} {{ quit_text }}</p>
 {% if result.running %}<p class="fine">Claude Desktop is open right now, so it hasn't seen the change yet.</p>{% endif %}
 <p>{{ look_text }}</p>
-{% if result.quarantine %}<p class="fine">{{ result.quarantine }}</p>{% endif %}
 {% else %}
 <p>{{ result.next_step or ('Restart ' ~ app ~ ' to load Talent Search.') }}</p>
 {% endif %}
@@ -20,13 +28,13 @@
   {% if check.ok %}
   <p class="ok">{{ check.line }}</p>
   {% else %}
-  <p class="error">{{ check.line }}</p>
+  <p class="error">Added, but the test failed. {{ check.line }}</p>
   <details open class="fine"><summary>What the program said</summary>
     <pre class="code">{{ check.stderr_tail|join('\n') or '(nothing)' }}</pre></details>
   {% endif %}
   {% if check.stray_stdout %}<p class="fine">It also printed text that isn't part of the protocol, which can get in the app's way: {{ check.stray_stdout[0][:160] }}</p>{% endif %}
 {% endif %}
-{% if result.backup %}<p class="fine">Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
+{% if result.backup and not result.already_connected %}<p class="fine">Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
 {% else %}
 <p class="error">That didn't work: {{ error }}</p>
 <p class="fine">You can still connect by hand with the settings under “By hand”.</p>

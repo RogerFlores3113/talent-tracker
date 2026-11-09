@@ -4,6 +4,7 @@
 {% else %}
   {% for p in problems %}<p class="error">{{ p }}</p>{% endfor %}
   {% if check.ok %}
+  {% if target == 'claude' and not problems %}<p class="ok">{{ healthy_line }}</p>{% endif %}
   <p class="ok">{{ check.line }}</p>
   {% else %}
   <p class="error">{{ check.line }}</p>
@@ -11,5 +12,8 @@
     <pre class="code">{{ check.stderr_tail|join('\n') or '(nothing)' }}</pre></details>
   {% endif %}
   {% if check.stray_stdout %}<p class="fine">It also printed text that isn't part of the protocol, which can get in the app's way: {{ check.stray_stdout[0][:160] }}</p>{% endif %}
-  {% if target == 'claude' and check.ok %}<p class="fine">If Claude Desktop still can't see it, {{ quit_text[0]|lower }}{{ quit_text[1:] }}</p>{% endif %}
+  {% if target == 'claude' and check.ok %}
+  <p class="fine">{{ reopen_line }} {{ quit_text }}</p>
+  <p>{{ look_text }}</p>
+  {% endif %}
 {% endif %}
