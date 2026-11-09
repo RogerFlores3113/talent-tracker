@@ -707,6 +707,12 @@ _MIGRATIONS: tuple[Any, ...] = (
         """,
         _migrate_v9a_data,
     ),
+    # v10n: saved searches can be pinned (they stay first), and remember the newest candidate id when they were last
+    # opened, so "new since you looked" counts people saved after that point even in the same second.
+    """
+    ALTER TABLE saved_searches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE saved_searches ADD COLUMN seen_max_id INTEGER;
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1212,6 +1218,7 @@ class SearchResult:
     exact_total: int | None = None  # hits with every word; the rest of total are closest matches
     suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
     corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
+    notes: list[str] = field(default_factory=list)  # how the search was read, when something needed saying
 
     def __post_init__(self) -> None:
         if self.exact_total is None:
@@ -1885,6 +1892,8 @@ class Store:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._depth = 0  # > 0 inside _write(): nested writes join the outer transaction
+        self._saved_counts: dict[Any, tuple[int, int]] = {}  # saved search counts, good until anything is written
+        self._saved_counts_stamp: Any = None
         self._open()
 
     def _open(self) -> None:
@@ -3703,7 +3712,8 @@ class Store:
                           has_email: bool = False, has_linkedin: bool = False,
                           exclude: list[tuple[str, bool]] | None = None,
                           field_any: dict[str, list[str]] | None = None,
-                          field_not: dict[str, list[str]] | None = None) -> tuple[list[str], list[Any], dict]:
+                          field_not: dict[str, list[str]] | None = None,
+                          after_id: int | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location, title and company take shorthand (sf, nyc,
         la, bay area, swe) and ignore case and accents; tag and source ignore case.
 
@@ -3733,6 +3743,9 @@ class Store:
             params.append(source.strip())
             filters["source"] = source
         self._prefix_filters(where, params, filters, field_any or {}, field_not or {})
+        if after_id is not None:  # saved after a known point (a saved search's high-water mark), however close in time
+            where.append("c.id > ?")
+            params.append(int(after_id))
         if color and color.strip():  # one of the six colours, or "none" for people with no colour
             want = clean_color(color)
             where.append("c.color = ?" if want else "c.color IS NULL")
@@ -3931,8 +3944,10 @@ class Store:
                 raise ValueError(problem)
             now = now_iso()
             cur = self._conn.execute(
-                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
-                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app"))
+                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by, seen_max_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app",
+                 self._candidate_high_water()))
         return self.get_saved_search(cur.lastrowid)
 
     def get_saved_search(self, ref: int | str) -> dict[str, Any]:
@@ -3946,14 +3961,25 @@ class Store:
             raise NotFound("That saved search isn't there any more.")
         return self._saved_row(r)
 
-    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
-        """Saved searches, newest first. counts=True adds `count` (people who match now) and `new` (of those, saved
-        since the search was last opened)."""
+    def _candidate_high_water(self) -> int:
+        """The highest candidate id used so far (deleted ones too): everyone saved later gets a higher id."""
+        mark = self._row("SELECT value FROM settings WHERE key = ?", (ID_MARKS["candidates"],))
+        top = self._row("SELECT coalesce(max(id), 0) AS n FROM candidates")["n"]
+        return max(int(mark["value"]) if mark and str(mark["value"]).isdigit() else 0, top)
+
+    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None,
+                            count_first: int | None = None) -> list[dict[str, Any]]:
+        """Saved searches: pinned ones first, then newest first. counts=True adds `count` (people who match now)
+        and `new` (of those, saved since the search was last opened). count_first: only the first N get counts
+        (the rest have count and new as None), so a long list stays quick."""
         rows = [self._saved_row(r) for r in self._rows(
-            "SELECT * FROM saved_searches ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
+            "SELECT * FROM saved_searches ORDER BY pinned DESC, id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
         if counts:
-            for r in rows:
-                r["count"], r["new"] = self.saved_search_counts(r)
+            for i, r in enumerate(rows):
+                if count_first is not None and i >= count_first:
+                    r["count"] = r["new"] = None
+                else:
+                    r["count"], r["new"] = self.saved_search_counts(r)
         return rows
 
     def _saved_kwargs(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -3967,14 +3993,36 @@ class Store:
 
     def saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
         """(people who match now, how many of them were saved after the search was last opened)."""
+        # Same answer until something is written (here or by the AI app's own connection): kept, so the pages that
+        # show the chips on every click stay quick.
+        stamp = (self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0])
+        if stamp != self._saved_counts_stamp:
+            self._saved_counts, self._saved_counts_stamp = {}, stamp
+        key = (row["id"], json.dumps(row["params"], sort_keys=True), row.get("seen_max_id"), row.get("last_viewed_at"))
+        if key not in self._saved_counts:
+            self._saved_counts[key] = self._saved_search_counts(row)
+        return self._saved_counts[key]
+
+    def saved_search_new_after(self, row: dict[str, Any]) -> int:
+        """The candidate id the search was last opened at: people with a higher id are new since then."""
+        if row.get("seen_max_id") is not None:
+            return int(row["seen_max_id"])
+        since = row.get("last_viewed_at") or row["created_at"]  # saved before ids were tracked: by time
+        r = self._row("SELECT coalesce(max(id), 0) AS n FROM candidates WHERE datetime(created_at) <= datetime(?)", (since,))
+        return int(r["n"])
+
+    def _saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
         q, kw = self._saved_kwargs(row)
         # the same search as opening it (typo help included), so the count matches what the page then shows
         res = self.search_candidates(q, limit=1, **kw)
         total = res.exact_total if res.exact_total is not None else res.total
-        since = row.get("last_viewed_at") or row["created_at"]
         new = 0
         if total:
-            res = self.search_candidates(q, limit=1, added_since=since, **kw)
+            if row.get("seen_max_id") is not None:  # people saved after the last look, by id (the same second counts)
+                res = self.search_candidates(q, limit=1, after_id=row["seen_max_id"], **kw)
+            else:  # saved before ids were tracked: by time
+                res = self.search_candidates(q, limit=1, added_since=row.get("last_viewed_at") or row["created_at"],
+                                             **kw)
             new = res.exact_total if res.exact_total is not None else res.total
         return total or 0, new or 0
 
@@ -3990,7 +4038,15 @@ class Store:
 
     def mark_search_viewed(self, search_id: int) -> None:
         with self._write():
-            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ? WHERE id = ?", (now_iso(), search_id))
+            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ?, seen_max_id = ? WHERE id = ?",
+                               (now_iso(), self._candidate_high_water(), search_id))
+
+    def pin_saved_search(self, search_id: int, pinned: bool = True) -> dict[str, Any]:
+        """Keep a saved search at the top of the lists (or let it sort by age again)."""
+        self.get_saved_search(search_id)
+        with self._write():
+            self._conn.execute("UPDATE saved_searches SET pinned = ? WHERE id = ?", (int(bool(pinned)), search_id))
+        return self.get_saved_search(search_id)
 
     def delete_saved_search(self, search_id: int) -> dict[str, Any]:
         """The recruiter's own action in the app window. No AI tool calls this."""
@@ -4080,12 +4136,78 @@ class Store:
             kw["exclude"] = [(i.text, i.phrase) for i in pq.exclude]
         if pq.operator_mode:
             res = self._search_operators(pq, limit=limit, offset=offset, **kw)
+            if fix_typos:  # offered as "Did you mean", never applied: an operator search is run as typed
+                res.suggestion = self._operator_typo_hint(pq, query)
         else:
             res = self._search_core(pq.bare, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
             if res.suggestion and pq.bare:
                 res.suggestion = sq.rewrite_suggestion(query, pq.bare, res.suggestion)
+        if not res.corrected:  # skill:pyhton -> the closest skill somebody has
+            vfix = self._skill_value_hint(pq, res.suggestion or query)
+            if vfix:
+                res.suggestion = vfix
+        if pq.hints and not res.corrected:  # skil:python -> "Did you mean skill:python?" (spelling fixes carry over)
+            fixed = pq.fix_prefixes(res.suggestion or query)
+            if fixed:
+                res.suggestion = fixed
+        res.notes = list(pq.notes)
         res.query = query
         return res
+
+    def _skill_value_hint(self, pq: Any, text: str) -> str | None:
+        """skill:pyhton when nobody has that skill but somebody has Python: the text with the closest saved skill
+        swapped in, or None. Only ever a suggestion."""
+        wanted = [v for v in pq.fields.get("skill", []) if v.isalpha() and _typo_cap(v)]
+        if not wanted:
+            return None
+        known: list[str] | None = None
+        out = text
+        for v in dict.fromkeys(wanted):
+            if self._row("SELECT 1 AS x FROM candidate_tags WHERE tag = ? COLLATE NOCASE LIMIT 1", (v,)):
+                continue
+            if known is None:
+                known = [r["tag"] for r in self._rows(
+                    "SELECT tag FROM candidate_tags GROUP BY lower(tag) ORDER BY count(*) DESC")]
+            cap = _typo_cap(v)
+            best = None
+            for tag in known:
+                t = tag.lower()
+                if t != v and abs(len(t) - len(v)) <= cap:
+                    d = _distance(v, t, cap)
+                    if d <= cap and (best is None or d < best[0]):
+                        best = (d, tag)
+            if best:
+                out = re.sub(rf"(?<!\w){re.escape(v)}(?!\w)", best[1], out, flags=re.I)
+        return out if out != text else None
+
+    def _operator_typo_hint(self, pq: Any, query: str) -> str | None:
+        """For a search with a phrase, an OR or a NEAR: the typed query with misspelled words fixed, or None. Words
+        nobody has (in a profile, a pipeline job or a note) that are one or two slips from a saved word. Only ever
+        offered as a suggestion."""
+        words: list[str] = []
+        last_prefix = None
+        for gi, g in enumerate(pq.groups):
+            for ii, item in enumerate(g):
+                for leaf in item.leaves:
+                    for w in leaf.text.split():
+                        if w.isalpha() and w not in words:
+                            words.append(w)
+                if gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok:
+                    last_prefix = item.text  # the word still being typed ("pyth") is matched as a prefix
+        terms = [_Term(w, w == last_prefix, ALIASES.get(w, ())) for w in words]
+        if not terms:
+            return None
+        fixes = self._spelling_fixes(terms, [self._extra_matches(t) for t in terms])
+        if not fixes:
+            return None
+        held, quiet = self._name_words(query, terms, fixes)
+        if quiet:
+            return None
+        fixes = {w: f for w, f in fixes.items() if w not in held}
+        fixed = query
+        for word, fix in fixes.items():
+            fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
+        return fixed if fixes and fixed != query else None
 
     def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
         """The search for a query with a phrase or an OR: every group must match (AND), a group matches when any
@@ -4096,7 +4218,9 @@ class Store:
             parts = []
             for ii, item in enumerate(g):
                 last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok
-                if last:
+                if item.near:  # NEAR("python" "django", 5): the same part of a profile, at most N words apart
+                    parts.append("NEAR(" + " ".join(f'"{o.text}"' for o in item.near) + f", {int(item.dist)})")
+                elif last:
                     parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
                 else:
                     parts.append(_item_fts(item.text, item.phrase))
@@ -4106,7 +4230,7 @@ class Store:
         base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
         total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
         patterns = [[_word_pattern(w, False) for w in i.text.split()] if i.phrase else [_word_pattern(i.text, False)]
-                    for g in pq.groups for i in g]
+                    for g in pq.groups for item in g for i in item.leaves]
         snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}" for i in _SNIPPET_ORDER)
         rows = self._rows(
             f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score

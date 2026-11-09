@@ -113,7 +113,10 @@ profile can't blank out what the recruiter filled in.
   Francisco, `swe` to software engineer, etc.). User input is tokenized, never
   passed as FTS syntax, so quotes or operators can't break it.
 - **Query language (`searchquery.py`):** `"machine learning"` (phrase), `python OR go`
-  (OR in capitals, or a lowercase `or` between two words), `-recruiter` or `NOT manager`
+  (OR in capitals, or a lowercase `or` between two words), `python NEAR django` /
+  `NEAR/3` (FTS5 NEAR; only capital NEAR or NEAR/n counts, a bare "near" is a word; mistyped
+  prefixes like `skil:` get a "Did you mean" and are searched as plain words; OR/phrase/NEAR
+  searches get typo help as a suggestion only), `-recruiter` or `NOT manager`
   (leave out people who have that exact word, not stems), and field prefixes
   `title:`, `company:`, `location:`, `skill:`/`tag:`, `source:` that set the same
   filters as the Candidates bar. Prefix values keep their punctuation (`skill:c++`,

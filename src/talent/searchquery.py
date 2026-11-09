@@ -12,6 +12,12 @@ What the box understands (AND stays the default):
     title:engineer            the same as the Title filter (also company:, location:, skill: or tag:, source:);
                               punctuation stays, so skill:c++ and skill:node.js work
     skill:python OR go        an OR after a prefix value joins that same prefix (skill:python OR skill:go)
+    python NEAR django        both words close together, within 5 words of each other, in either order
+    python NEAR/3 django      the same, within 3 words (1 to 50). Quoted phrases work as either side, and
+                              a chain like a NEAR b NEAR c needs all of them close together.
+                              Only a capital NEAR, or NEAR/n in any case, counts: a plain "near" is an ordinary
+                              word, so "lives near boston" and "near me" still search for those words.
+                              NEAR works within one part of a profile (the same title, the same about text...)
     -title:manager            a minus or NOT before a prefix leaves out people whose field has it
 Parentheses are not supported: they are ignored, so `(python OR go)` reads as `python OR go`.
 """
@@ -27,6 +33,8 @@ FIELD_ALIASES = {"title": "title", "company": "company", "location": "location",
                  "tag": "skill", "tags": "skill", "source": "source"}
 _FIELD_AT = re.compile(r"([A-Za-z]+):")
 _WORD = re.compile(r"\w+", re.UNICODE)
+_NEAR_TOKEN = re.compile(r"(?:NEAR|[Nn][Ee][Aa][Rr]/\d{1,3})")  # NEAR, or NEAR/3 in any case. Bare "near" is a word.
+NEAR_DEFAULT, NEAR_MAX = 5, 50
 MAX_TOKENS = 40  # a pasted paragraph is not a query; the rest is ignored
 
 
@@ -36,6 +44,13 @@ class Item:
     phrase: bool = False  # two or more words that must sit together
     raw: str = ""  # the same words as typed (capitals kept: "Dana Okafor" reads as a name)
     plain: bool = True  # typed as ordinary letters and digits (no c++, c#, o'brien)
+    near: tuple["Item", ...] = ()  # python NEAR django: the words or phrases that must sit close together
+    dist: int = 0  # ... and how many words apart at most
+
+    @property
+    def leaves(self) -> tuple["Item", ...]:
+        """The words and phrases this stands for: itself, or the operands of a NEAR."""
+        return self.near or (self,)
 
     @classmethod
     def of(cls, raw: str, phrase: bool = False) -> "Item | None":
@@ -61,11 +76,14 @@ class ParsedQuery:
     not_fields: dict[str, list[str]] = field(default_factory=dict)  # -title:x, NOT skill:x
     notes: list[str] = field(default_factory=list)  # things that could not be read as typed, in plain words
     used_syntax: bool = False  # quotes, OR, NOT, a minus or a field prefix was understood
+    hints: list[tuple[str, str]] = field(default_factory=list)  # (typed prefix, the prefix it looks like): skil -> skill
+    unknown_prefix: bool = False  # something like foo:bar, which is read as plain words
 
     @property
     def operator_mode(self) -> bool:
         """A phrase or an OR needs the operator search; plain words keep the everyday search (typo help, notes)."""
-        return any(i.phrase for g in self.groups for i in g) or any(len(g) > 1 for g in self.groups)
+        return (any(i.phrase or i.near for g in self.groups for i in g)
+                or any(len(g) > 1 for g in self.groups))
 
     @property
     def bare(self) -> str:
@@ -76,7 +94,17 @@ class ParsedQuery:
 
     @property
     def structured(self) -> bool:
-        return self.used_syntax
+        return self.used_syntax or bool(self.hints) or self.unknown_prefix or bool(self.notes)
+
+    def fix_prefixes(self, text: str) -> str | None:
+        """`text` with each mistyped prefix swapped for the one it looks like (skil:python -> skill:python), or
+        None when no prefix was mistyped."""
+        if not self.hints:
+            return None
+        out = text
+        for typed, fixed in self.hints:
+            out = re.sub(rf"(?<!\w){re.escape(typed)}:", f"{fixed}:", out, flags=re.I)
+        return out if out != text else None
 
     def explain(self) -> str:
         """The search as it was read, in plain words: '(python OR go) AND NOT recruiter AND title: engineer'.
@@ -85,6 +113,11 @@ class ParsedQuery:
             return ""
 
         def show(i: Item) -> str:
+            if i.near:
+                ops = [show(o) for o in i.near]
+                if len(ops) == 2:
+                    return f"{ops[0]} within {i.dist} words of {ops[1]}"
+                return f"{', '.join(ops[:-1])} and {ops[-1]} all within {i.dist} words of each other"
             return f'"{i.text}"' if i.phrase else (i.raw or i.text)
 
         label = {"skill": "skill", "title": "title", "company": "company", "location": "location",
@@ -127,6 +160,20 @@ def parse_query(text: str | None) -> ParsedQuery:
                 i = m.end()
                 continue
             fld, i = FIELD_ALIASES[m.group(1).lower()], m.end()
+        elif m and len(m.group(1)) >= 3 and s[m.end():m.end() + 2] != "//":
+            typed, fixed = m.group(1), nearest_prefix(m.group(1))
+            empty = m.end() >= n or s[m.end()].isspace()
+            if fixed:  # skil:python: the mistyped prefix is left off and the value is searched as plain words
+                pq.hints.append((typed, fixed))
+                pq.notes.append(f"{typed}: isn't a search prefix, so it was left off and the rest searched as plain "
+                                f"words. The closest prefix is {fixed}:.")
+                i = m.end()
+                if empty:
+                    continue
+            elif not empty:  # foo:bar reads as the two plain words foo and bar
+                pq.unknown_prefix = True
+                pq.notes.append(f"{typed}: isn't a search prefix, so it was read as plain words. The prefixes are "
+                                "title, company, location, skill, tag and source.")
         if i < n and s[i] == '"':
             j = s.find('"', i + 1)
             if j == -1:  # unbalanced: the quote is dropped and the rest reads as plain words
@@ -149,12 +196,18 @@ def parse_query(text: str | None) -> ParsedQuery:
             toks.append(("op", raw, False, None))
             pq.used_syntax = pq.used_syntax or raw != "AND"
             continue
+        if fld is None and not neg and _NEAR_TOKEN.fullmatch(raw):
+            dist = int(raw[5:]) if "/" in raw else NEAR_DEFAULT
+            toks.append(("near", max(1, min(dist, NEAR_MAX)), False, None))
+            continue
         toks.append(("word", raw, neg, fld))
+
+    toks = _join_near(toks, pq)
 
     # A lowercase "or" between two words is an OR too ("python or go").
     for k, (kind, value, neg, fld) in enumerate(toks):
         if (kind == "word" and value == "or" and not neg and fld is None and 0 < k < len(toks) - 1
-                and toks[k - 1][0] in ("word", "phrase") and toks[k + 1][0] in ("word", "phrase")
+                and toks[k - 1][0] in ("word", "phrase", "nearset") and toks[k + 1][0] in ("word", "phrase", "nearset")
                 and not toks[k + 1][2]):
             toks[k] = ("op", "OR", False, None)
             pq.used_syntax = True
@@ -170,11 +223,20 @@ def parse_query(text: str | None) -> ParsedQuery:
             continue
         neg = neg or pending_not
         pending_not = False
-        item = Item.of(value, phrase=(kind == "phrase"))
+        if kind == "nearset":
+            ops = [Item.of(v, phrase=(k == "phrase")) for k, v in value[0]]
+            ops = [o for o in ops if o]
+            if len(ops) < 2:  # nothing left to be near: whatever is left reads as an ordinary word
+                item = ops[0] if ops else None
+            else:
+                item = Item(" ".join(o.text for o in ops), False, " ".join(o.raw for o in ops), False,
+                            near=tuple(ops), dist=value[1])
+        else:
+            item = Item.of(value, phrase=(kind == "phrase"))
         if item is None:
             continue
         # A prefix value keeps its punctuation: skill:c++, skill:node.js, source:ci/cd.
-        text = " ".join((value or "").lower().split()).rstrip(",;")
+        text = " ".join((value if isinstance(value, str) else "").lower().split()).rstrip(",;")
         if neg:  # a minus or NOT leaves people out; an OR before it means nothing
             if fld:
                 pq.not_fields.setdefault(fld, []).append(text)
@@ -197,7 +259,7 @@ def parse_query(text: str | None) -> ParsedQuery:
                     pq.fields[fld] = [text]  # the last one given wins
             last, pending_or = fld, False
             continue
-        if pending_or and last:  # skill:python OR go: the word joins that prefix
+        if pending_or and last and not item.near:  # skill:python OR go: the word joins that prefix
             pq.fields[last].append(text)
             pq.skill_any = pq.skill_any or last == "skill"
         elif pending_or and pq.groups:
@@ -208,6 +270,64 @@ def parse_query(text: str | None) -> ParsedQuery:
             last = None
         pending_or = False
     return pq
+
+
+def _join_near(toks: list, pq: ParsedQuery) -> list:
+    """Fold `a NEAR b` (and chains) into one ("nearset", (operands, distance)) token. A NEAR without a plain word
+    or phrase on each side is left out, with a note."""
+    out: list = []
+    k = 0
+    while k < len(toks):
+        kind, value, neg, fld = toks[k]
+        if kind != "near":
+            out.append(toks[k])
+            k += 1
+            continue
+        left = out[-1] if out else None
+        right = toks[k + 1] if k + 1 < len(toks) else None
+        ok = (left and left[0] in ("word", "phrase", "nearset") and not left[2] and left[3] is None
+              and right and right[0] in ("word", "phrase") and not right[2] and right[3] is None)
+        if not ok:
+            pq.notes.append("NEAR needs a word or a quoted phrase on each side (python NEAR django), so it was left out.")
+            k += 1
+            continue
+        if left[0] == "nearset":
+            ops, dist = left[1]
+            out[-1] = ("nearset", ([*ops, (right[0], right[1])], max(dist, value)), False, None)
+        else:
+            out[-1] = ("nearset", ([(left[0], left[1]), (right[0], right[1])], value), False, None)
+        pq.used_syntax = True
+        k += 2
+    return out
+
+
+def _osa(a: str, b: str) -> int:
+    """Edit distance where swapping two neighbouring letters counts as one change (compnay -> company)."""
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def nearest_prefix(word: str) -> str | None:
+    """The known prefix a mistyped one looks like (skil -> skill, tittle -> title, locaton -> location), or None.
+    One slip for short words, two for longer ones."""
+    w = (word or "").lower()
+    if len(w) < 3 or w in FIELD_ALIASES:
+        return None
+    cap = 1 if len(w) <= 5 else 2
+    best: tuple[int, str] | None = None
+    for known in FIELD_ALIASES:
+        d = _osa(w, known)
+        if d <= cap and (best is None or d < best[0]):
+            best = (d, known)
+    return best[1] if best else None
 
 
 def rewrite_suggestion(original: str, bare: str, suggestion: str) -> str:

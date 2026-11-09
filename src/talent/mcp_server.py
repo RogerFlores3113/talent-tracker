@@ -815,10 +815,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         lowercase "or" between two words) is either; -recruiter or NOT manager leaves out people who have that
         exact word; title:, company:, location:, skill: (or tag:) and source: narrow to one field, like
         title:engineer (punctuation stays: skill:c++, skill:node.js); skill:python OR go means either skill;
+        python NEAR django finds the two words within 5 words of each other, python NEAR/3 django within 3 (1 to 50;
+        words or quoted phrases; only a capital NEAR or near/N counts, a plain "near" is an ordinary word);
+        a mistyped prefix like skil:python is left off, searched as plain words, and answered with "Did you mean
+        skill:python?" (also in the structured "suggestion" and "notes");
         -title:manager or NOT source:referral leaves out people whose own field has it. source: also matches a
         word of the Found via label (source:sample finds "Sample data"). A phrase or OR searches profile text only.
         Fewer than 3 people with every word: the closest matches (some of the words) follow, marked as such.
-        A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?".
+        A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?" (in a
+        search with OR, quotes or NEAR it is only ever a "Did you mean", never applied for you).
         Leave query empty to list the most recently updated candidates.
         location / title / company narrow by part of those fields (shorthand works, case doesn't matter);
         tag narrows to one skill tag; source to one exact "Found via" value (like Referral). Words in Found via
@@ -920,11 +925,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                      "No saved candidates match. Try fewer or different words, or no filters."]
         if res.suggestion and not res.corrected:
             lines.append(f"Did you mean {res.suggestion}?")
+        lines.extend(f"Note: {n}" for n in res.notes)
         if heading:
             lines.insert(0, heading)
         return _result("\n".join(lines), {
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
-            "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q,
+            "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
             **({"no_one_named": q} if nobody else {}),
             "app_url": app_url(app_path or "/?q=" + quote(res.suggestion if res.corrected else q))})
 
