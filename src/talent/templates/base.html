@@ -10,7 +10,7 @@
 </head>
 {% set path = request.url.path %}
 <body class="{% block bodyclass %}{% endblock %}">
-  <a class="skip-link" href="#main">Skip to main content</a>
+  {% block skiplinks %}<a class="skip-link" href="#main">Skip to main content</a>{% endblock %}
   <header class="top">
     <a class="brand" href="/">Talent Search</a>
     <nav aria-label="Main">

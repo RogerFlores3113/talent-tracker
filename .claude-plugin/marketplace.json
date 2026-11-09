@@ -3,6 +3,9 @@
   "owner": {
     "name": "Talent Search"
   },
+  "metadata": {
+    "description": "Skills that teach your AI app to use Talent Search, a private recruiting desk that runs on your own computer."
+  },
   "plugins": [
     {
       "name": "talent-search",

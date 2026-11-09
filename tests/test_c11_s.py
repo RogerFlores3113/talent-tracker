@@ -131,7 +131,7 @@ def test_routes(store, home, tmp_path, monkeypatch):
     page = c.get("/connect").text
     assert "Install skills" in page and "Get the Claude plugin" in page and "Not found on this computer" in page
     assert "Install anyway" in page and "Older way: upload skills one at a time" in page
-    assert "claude plugin marketplace add RogerFlores3113/talent-tracker" in page
+    assert "/plugin marketplace add RogerFlores3113/talent-tracker" in page and "/plugin install talent-search@talent-tracker" in page
     assert "talent-search@talent-tracker" in page and "Customize" in page
     r = c.get("/connect/skills.plugin")
     assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))

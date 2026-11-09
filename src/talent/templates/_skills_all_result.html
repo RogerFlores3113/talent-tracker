@@ -28,3 +28,4 @@
   <p><strong>Done. Start a new chat in your AI app (or restart Claude Code) so it picks up the skills.</strong></p>
   <details class="fine"><summary>Files written</summary><ul class="plain code-list">{% for f in result['written'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul></details>
 {% endif %}
+{% if action in ('install', 'remove') %}{% set oob = true %}{% include "_skills_found.html" %}{% endif %}

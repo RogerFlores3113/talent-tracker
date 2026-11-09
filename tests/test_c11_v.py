@@ -66,7 +66,9 @@ def test_resources_ask_for_a_border(store):
         assert (r.meta or {}).get("ui", {}).get("prefersBorder") is True, r.uri
 
 
-def test_candidate_cards_is_app_only_and_lean(store):
+def test_candidate_cards_is_app_only_and_lean(store, monkeypatch):
+    from talent import mcp_server
+    monkeypatch.setattr(mcp_server, "_client_apps", lambda mcp: True)  # cycle 11 X: hidden from clients without Apps
     server = build_server(store)
     job = store.add_job("Staff Backend", "Acme")
     a = store.add_candidate(name="Ana Ruiz", email="ana@x.com", current_title="Engineer", current_company="Stripe",

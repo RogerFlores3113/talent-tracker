@@ -521,6 +521,12 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
                 elif busy:
                     row["warnings"].append(f"{top} is booked then ({busy['cname']}, {busy['what']}), so {who} would run it."
                                            + (" Also free: " + ", ".join(others) + "." if others else ""))
+                elif not _in_their_hours(interviews.interviewer_zone({}, top, book), s, e, person_hours(hours_book, top),
+                                         INTERVIEWER_DEFAULT_HOURS):
+                    mine = person_hours(hours_book, top) or INTERVIEWER_DEFAULT_HOURS
+                    row["warnings"].append(f"{top} is outside their working hours then ({mine[0]}:00 to {mine[1]}:00), "
+                                           f"so {who} would run it."
+                                           + (" Also free: " + ", ".join(others) + "." if others else ""))
             n = cal.count(who, day) + 1
             if n > MAX_PER_DAY:
                 row["warnings"].append(f"{who} would have {n} sessions on {actions.day_text(day)}, which is a heavy day.")

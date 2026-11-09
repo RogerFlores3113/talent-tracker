@@ -13,6 +13,7 @@
 //   data-check-all            on a checkbox: tick or untick every person (name candidate_ids) in its form
 //   data-check-name="pair"    on a data-check-all box: tick the boxes with that name instead (they may sit outside the
 //                             form element and point at it with the form attribute)
+//   (Candidates table)        Shift-click a second row box to tick or untick every row between the two
 //   data-print                on a button: open the browser's print dialog (print or save as PDF)
 //   data-busy="message"       on a form: once sent, show the message in its [data-busy-note] and send it only once
 //                             (a submit button's own data-busy wins when that button sent it)
@@ -109,6 +110,21 @@
     const name = all.dataset.checkName || "candidate_ids";
     Array.from(all.form.elements).filter(b => b.name === name && b.type === "checkbox")
       .forEach(b => { b.checked = all.checked; });
+  });
+
+  // Candidates table: click one row's box, then Shift-click another to tick (or untick) everyone between them.
+  let lastPick = null;
+  document.addEventListener("click", e => {
+    const box = e.target.closest && e.target.closest("input[type=checkbox][name='candidate_ids']");
+    if (!box) return;
+    if (e.shiftKey && lastPick && lastPick !== box && document.contains(lastPick)) {
+      const boxes = Array.from(document.querySelectorAll("input[type=checkbox][name='candidate_ids']"));
+      const a = boxes.indexOf(lastPick), b = boxes.indexOf(box);
+      if (a >= 0 && b >= 0) {
+        boxes.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(x => { x.checked = box.checked; });
+      }
+    }
+    lastPick = box;
   });
 
   // The time zone banner: suggest the zone this browser is in, so saving it is one click.
@@ -350,7 +366,13 @@
     if (document.getElementById("tour-data") || document.querySelector("[autofocus]")) return;
     const a = document.activeElement;
     if (a && a !== document.body && a.id !== "main") return;
-    const t = document.querySelector("[data-focus-here]") || document.querySelector("main > .flash, main > p.error[role=alert]");
+    let ended = false;  // the tour was just ended: keyboard and screen reader start at the page's heading
+    try { ended = window.sessionStorage.getItem("ts-tour-ended") === "1"; window.sessionStorage.removeItem("ts-tour-ended"); } catch (e) { /* no storage: skip */ }
+    if (ended) {
+      const h = document.querySelector("main h1") || document.querySelector("h1");
+      if (h) { h.setAttribute("tabindex", "-1"); try { h.focus({preventScroll: true}); } catch (e) { h.focus(); } return; }
+    }
+    const t = document.querySelector("[data-focus-here]") || document.querySelector("main > .flash:not(.tz-banner), main > p.error[role=alert]");  // never the time zone box
     if (!t) return;
     if (!t.hasAttribute("tabindex")) t.setAttribute("tabindex", "-1");
     try { t.focus({preventScroll: !!window.location.hash}); } catch (e) { t.focus(); }
@@ -495,6 +517,10 @@
     document.body.appendChild(root);
 
     function postForm(action, fields) {  // a real form post: the server redirects to the page to show next
+      if (action === "/tour/skip" || action === "/tour/finish") {  // ending: nothing stays dimmed, and the next page starts at its heading
+        try { window.sessionStorage.setItem("ts-tour-ended", "1"); } catch (e) { /* no storage: skip */ }
+        clearInert(); root.remove();
+      }
       const f = el("form"); f.method = "post"; f.action = action; f.hidden = true;
       Object.keys(fields || {}).forEach(k => { const i = el("input"); i.type = "hidden"; i.name = k; i.value = fields[k]; f.appendChild(i); });
       document.body.appendChild(f); f.submit();
@@ -515,7 +541,8 @@
         else render();
       });
     }
-    function skip() { confirming = true; render(); }  // ending is asked about first, by button or by Esc
+    function skip() { postForm("/tour/skip", {}); }  // "Skip tour" ends it in one click
+    function askToEnd() { confirming = true; render(); }  // Esc asks first, so a stray key doesn't end it
     // The finish step and the "End the tour?" question offer to delete the demo people the recruiter worked with and
     // the saved searches they made during the demo. What they tick is posted with Finish or Skip.
     function addPicks() {
@@ -661,11 +688,23 @@
       place();
     }
 
+    // The tour never sits over a box the person is typing in: while focus is in a field of the page, the tour
+    // steps aside (hidden, page usable); it comes back when focus leaves, and nothing typed is touched.
+    let paused = false;
+    const isField = n => !!(n && n.matches && !root.contains(n)
+      && n.matches("input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=hidden]), textarea, select, [contenteditable=true]"));
+    function pause() { if (paused) return; paused = true; root.hidden = true; clearInert(); }
+    function resume() {
+      if (!paused || isField(document.activeElement)) return;
+      paused = false; root.hidden = false; render();
+    }
+    document.addEventListener("focusin", e => { if (isField(e.target)) pause(); });
+    document.addEventListener("focusout", () => { if (paused) window.setTimeout(resume, 0); });
     document.addEventListener("keydown", e => {
-      if (!document.body.contains(root)) return;
+      if (!document.body.contains(root) || paused) return;
       // Esc on a menu closes the menu (a native dropdown may be open), not the tour.
       if (e.key === "Escape" && e.target && e.target.tagName === "SELECT") return;
-      if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }  // Esc asks first
+      if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else askToEnd(); return; }  // Esc asks first
       if (e.key !== "Tab") return;
       // Keep Tab inside the tour: its own buttons, then the lit-up area (so a Connect button can be reached by keyboard).
       const list = focusables(pop).concat(target ? focusables(target) : [], reach && reach !== target && !(target && target.contains(reach)) ? focusables(reach).concat(reach.matches("button, a[href]") ? [reach] : []) : []);
@@ -679,7 +718,7 @@
     const main = document.querySelector("main");
     if (main && window.MutationObserver) new MutationObserver(replace).observe(main, {childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "open"]});
     if (window.ResizeObserver) new ResizeObserver(replace).observe(document.body);
-    render();
+    if (isField(document.activeElement)) pause(); else render();  // never start over a box that has focus
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startTour);
   else startTour();

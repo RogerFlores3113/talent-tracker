@@ -90,7 +90,7 @@ def test_hints_reach_the_read_back_line(store, client):
 def test_zero_results_page_has_did_you_mean_and_a_way_to_widen(store, client):
     store.add_candidate(name="Pia", tags=["Python"])
     page = client.get("/candidates", params={"q": "skill:pyhton"}).text
-    row = re.search(r'<td colspan="10" class="none">(.*?)</td>', page, re.S).group(1)
+    row = re.search(r'<td colspan="12" class="none">(.*?)</td>', page, re.S).group(1)
     assert "No candidates match that" in row and "Did you mean" in row and "skill:Python" in html.unescape(row)
     assert "To widen it" in row
     today = client.get("/", params={"q": "skill:zebra crossing"}).text

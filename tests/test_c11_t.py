@@ -70,7 +70,7 @@ def test_backend_engineer_boston_ranks_boston_first_and_says_what_it_understood(
     res = store.search_candidates("backend engineer Boston")
     names = [h.candidate["name"] for h in res.hits]
     assert names[0] == "Ben Boston"  # both parts
-    assert names.index("Sara Soft") < names.index("Aus Tin")  # in Boston with part of the role beats role elsewhere
+    assert names.index("Aus Tin") < names.index("Sara Soft")  # the whole role elsewhere beats part of it in Boston (c11 X)
     assert res.exact_total == 1 and res.total >= 4
     assert res.understood == "Looking for backend engineer in Boston, MA"
     reasons = {h.candidate["name"]: h.reason for h in res.hits}
@@ -85,7 +85,8 @@ def test_no_exact_in_the_place_still_ranks_the_place_first(store):
     res = store.search_candidates("backend developer Boston")
     assert res.exact_total == 0
     names = [h.candidate["name"] for h in res.hits]
-    assert names.index("Dev Ops") < names.index("Aus Tin") or "Dev Ops" not in names[:2] or True
+    assert "Dev Ops" not in names  # only the place matches: counted as part of it, not listed as close (c11 X)
+    assert res.partial_total >= 1
     assert all(h.closest for h in res.hits)
     assert res.understood.endswith("in Boston, MA")
 
@@ -100,7 +101,7 @@ def test_mcp_reply_says_what_it_understood(store):
     _people(store)
     srv = build_server(store)
     out = text(call(srv, "search_candidates", query="backend engineer Boston"))
-    assert "Looking for backend engineer in Boston, MA: 1 exact, " in out
+    assert "Looking for backend engineer in Boston, MA: 1 matches the role and the place" in out
     assert data(call(srv, "search_candidates", query="backend engineer Boston"))["understood"].startswith("Looking for")
 
 

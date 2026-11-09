@@ -4,19 +4,22 @@
       <td class="pickcell"><input type="checkbox" form="bulk-form" name="candidate_ids" value="{{ c.id }}"{% if ticked and c.id in ticked %} checked{% endif %} aria-label="Tick {{ c.name }}{% if c.current_company %}, {{ c.current_company }}{% elif c.email %}, {{ c.email }}{% endif %}"></td>
       <td class="colorcell">{{ color_bubble(c) }}</td>
       <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a>{% if new_after is not none and c.id > new_after %} <span class="badge new">New</span>{% endif %}</td>
-      <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td><td>{{ c.location or '' }}</td>
+      <td>{{ c.current_title or '' }}</td><td>{{ c.current_company or '' }}</td>
+      <td>{% if c.main_job_id %}<a href="/jobs/{{ c.main_job_id }}">{{ c.main_job }}</a>{% if c.more_jobs %} <span class="fine">+{{ c.more_jobs }} more</span>{% endif %}{% endif %}</td>
+      <td>{{ c.main_stage or '' }}</td>
+      <td>{{ c.location or '' }}</td>
       <td class="nowrap">{{ c.last_contacted_at | date if c.last_contacted_at else '' }}</td>
       <td class="nowrap">{{ c.updated_at | date }}</td>
       <td class="nowrap">{{ c.created_at | date }}</td>
       <td>{{ chips(c.tags[:4]) }}</td>
     </tr>
 {% else %}
-    {% if page_no == 1 %}<tr><td colspan="10" class="none">No candidates{{ ' match that' if q or keep }}.
+    {% if page_no == 1 %}<tr><td colspan="12" class="none">No candidates{{ ' match that' if q or keep }}.
       {% if suggestion and not corrected %}Did you mean <a href="/candidates?{{ dict(keep, q=suggestion) | urlencode }}">{{ suggestion }}</a>?{% endif %}
       {% if q or keep %}<span class="fine">{% if keep %}To widen it, take off a filter chip above{% if q %}, or use fewer words{% endif %}.{% else %}To widen it, use fewer words, or put OR between them (python OR go).{% endif %}</span>{% endif %}
     </td></tr>{% endif %}
 {% endfor %}
 {% if page_no < pages %}
     {% set next_q = dict(keep, q=q, sort=sort, dir=dir, page_no=page_no + 1, qsort=qsort, qdir=qdir) %}
-    <tr class="more"><td colspan="10"><a class="btn" href="/candidates?{{ next_q | urlencode }}" hx-get="/candidates?{{ dict(next_q, more=1) | urlencode }}" hx-target="closest tr" hx-swap="outerHTML">Show more</a> <span class="fine">Showing {{ shown }} of {{ total }}</span></td></tr>
+    <tr class="more"><td colspan="12"><a class="btn" href="/candidates?{{ next_q | urlencode }}" hx-get="/candidates?{{ dict(next_q, more=1) | urlencode }}" hx-target="closest tr" hx-swap="outerHTML">Show more</a> <span class="fine">Showing {{ shown }} of {{ total }}</span></td></tr>
 {% endif %}

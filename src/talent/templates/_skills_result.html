@@ -48,3 +48,4 @@
   <p class="ok" role="status" tabindex="-1" autofocus>Removed {{ result['removed']|length }} skill folders from {{ app }}.</p>
   {% for k in result['kept'] %}<p class="flash warn">Kept <code>{{ k }}</code> because it holds files that are yours (edited by you, or added by you). It is your own folder now.</p>{% endfor %}
 {% endif %}
+{% if action in ('install', 'remove') %}{% set oob = true %}{% include "_skills_found.html" %}{% endif %}

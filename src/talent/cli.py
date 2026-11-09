@@ -265,6 +265,9 @@ def _install_skills(args: argparse.Namespace) -> None:
               "Use --claude-code or --codex to install anyway, or --plugin to get the file for the Claude app.")
         return
     plans = []
+    no_one_to_ask = bool(targets) and not args.yes and not sys.stdin.isatty()
+    if no_one_to_ask:  # an agent or a script has no one to ask: say first that nothing happened
+        print("Nothing installed yet. Run again with --yes to install.")
     for target in targets:
         plan = skills.plan_install(target)
         plans.append(plan)
@@ -280,8 +283,8 @@ def _install_skills(args: argparse.Namespace) -> None:
             print(f"  left alone {sk['path']}: {sk['reason']}")
     if targets and not args.yes:
         # An agent or a script has no one to ask, so it has to say yes on purpose with --yes.
-        if not sys.stdin.isatty():
-            sys.exit("Nothing installed. Run again with --yes to install these, or from a terminal to be asked.")
+        if no_one_to_ask:
+            sys.exit(1)
         if input("Install these? Type yes to go ahead: ").strip().lower() not in ("y", "yes"):
             sys.exit("Nothing installed.")
     for target, plan in zip(targets, plans):
