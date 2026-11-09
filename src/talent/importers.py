@@ -14,19 +14,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .paths import backups_dir
-from .store import (CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
+from .store import (clean_color, CANDIDATE_FIELDS, CHANGE_SOURCES, FIELD_LABELS, MERGE_OVERWRITES, DuplicateValue,
                     IdentityConflict, Store, normalize_linkedin, now_iso, parse_when, same_person_name,
                     split_tags, stage_outcome, to_dt)
 
 EXPORT_FIELDS = (
     "name", "email", "phone", "linkedin_url", "website", "current_title", "current_company", "location",
-    "tags", "about", "source", "last_contacted_at", "created_at", "updated_at",
+    "tags", "about", "source", "last_contacted_at", "created_at", "updated_at", "color",
 )
 EXPORT_HEADERS = {
     "name": "Name", "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn", "website": "Website",
     "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills",
     "about": "About", "source": "Source", "last_contacted_at": "Last contacted", "created_at": "Added",
-    "updated_at": "Last updated", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
+    "updated_at": "Last updated", "color": "Color", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
 }
 EXPORT_NOTES_KEPT = 20      # newest notes per person in the export's Notes column
 EXPORT_NOTES_CHARS = 5000   # and at most this much text
@@ -51,6 +51,8 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 "how found", "found through", "lead source")),
     ("last_contacted_at", ("last contacted", "last contact", "contacted", "last spoke", "last spoken",
                            "last touch", "last reached out")),
+    # A colour tag (red, orange, yellow, green, blue, purple). "Flag" only when it is the whole header.
+    ("color", ("color", "colour", "flag", "color tag", "colour tag")),
     # Pipeline columns: which job a row is for, at which client, and where they are in it.
     ("job_title", ("requisition", "req", "job req", "opening", "job opening", "position applied", "applied for",
                    "role", "job")),
@@ -67,7 +69,7 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Who owns the person in the ATS: kept as a tag ("Recruiter: Marcus"), so it can be searched.
     ("tag_column", ("recruiter", "recruiter name", "assigned recruiter")),
 )
-_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column"}
+_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
 _PIPELINE_ONLY_HINTS = {"role", "job"}
 _MULTI_TARGETS = {"location", "note", "tag_column"}  # several columns may feed these
@@ -96,7 +98,7 @@ TARGET_LABELS = {
     "tags": "Skills", "source": "Source", "last_contacted_at": "Last contacted",
     "job_title": "Job they're up for", "job_company": "Client (the job's company)", "stage": "Stage in that job",
     "jobs": "Jobs, as exported", "tag_column": "A tag, as Column: value (like Owner: Marcus)",
-    "created_at": "Date added", "stage_changed_at": "Date they reached that stage",
+    "color": "Color tag", "created_at": "Date added", "stage_changed_at": "Date they reached that stage",
 }
 BACKUPS_KEPT = 10
 
@@ -317,6 +319,14 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 data["tags"] = split_tags((data.get("tags") or []) + split_tags(v))  # , ; | (never / as in ci/cd)
             elif target == "tag_column":
                 data["tags"] = split_tags((data.get("tags") or []) + [f"{col_name}: {v}"])
+            elif target == "color":  # red, orange, yellow, green, blue, purple; anything else is skipped with a note
+                try:
+                    shade = clean_color(v)
+                except ValueError:
+                    warnings.append(f"left {col_name} blank, {v[:30]!r} isn't one of red, orange, yellow, green, blue, purple")
+                    continue
+                if shade:
+                    data["color"] = shade
             elif target in ("created_at", "stage_changed_at"):
                 when = _date_cell(v, col_name, warnings)
                 if when:

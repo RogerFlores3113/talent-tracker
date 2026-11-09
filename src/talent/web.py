@@ -41,6 +41,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     split_tags, to_dt)
 from .store import as_local, parse_when
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
+from .store import COLORS, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -72,7 +73,28 @@ CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
 # "Undo all AI changes from the last ...": hours back.
 UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"}
 CHANGES_SHOWN = 300
+# The colour bubble's words: one letter in the bubble too, so colour is never the only clue.
+COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue": "B", "purple": "P"}
+# Rainbow order as SQL: red first, then orange... purple, then people with no colour.
+COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
+                  + f" ELSE {len(COLORS)} END")
+COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
+
+
+def color_info(color: str | None) -> dict[str, Any]:
+    """What a colour bubble says and does: its name, letter, the colours a click and a right-click go to, and
+    the label for screen readers ("Color: red. Click for orange")."""
+    color = color if color in COLORS else None
+    nxt, prev = next_color(color, 1), next_color(color, -1)
+    name = color or "none"
+    go = f"Click for {nxt}" if nxt else "Click to clear it"
+    return {"color": color or "", "name": name, "letter": COLOR_LETTERS.get(color or "", ""),
+            "next": nxt or "none", "prev": prev or "none", "aria": f"Color: {name}. {go}",
+            "title": f"Color: {name}. {go}. Right-click or Shift-click goes back."}
+
+
 TABLE_SORTS = {
+    "color": COLOR_RANK_SQL,
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
     "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at",
@@ -315,6 +337,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["local"] = _local
     env.filters["day"] = actions.day_text  # a date, Windows-safe
     env.globals["IV_TIME"] = IV_TIME
+    env.globals["color_info"] = color_info
+    env.globals["COLORS"] = COLORS
     env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
     env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.globals["user_zone"] = lambda: reports.user_zone(store)
@@ -502,37 +526,62 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ------------------------------------------------------------ table
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
-              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0, job: str = "",
-              client: str = "", stage: str = "", pipe: str = "", days: str = ""):
+              sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
+              color_pick: str = "", cf: str = ""):
         per = 100
+        # The chips above the table are submit buttons: pressing the colour already chosen clears it.
+        color = (color_pick if color_pick != color else "") if color_pick else color
+        color = color.strip().lower()
+        color = color if color in (*COLORS, "none") else ""
+        colored_first = cf == "1"
+        if sort not in TABLE_SORTS:
+            sort = "color"
+        dir = dir if dir in ("asc", "desc") else ("asc" if sort == "color" else "desc")
         job_id = int(job) if job.strip().isdigit() else None
         pipe = pipe if pipe in opsreview.PIPES else ""
         day_n = int(days) if days.strip().isdigit() else None
         member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n)
         page_no = max(1, page_no)
-        sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
+        sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
         if q.strip():
-            result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                   limit=per, offset=(page_no - 1) * per, **member)
-            rows, total = [h.candidate for h in result.hits], result.total
+            member["color"] = color or None
+            if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
+                                                            if h.candidate.get("color") in COLORS else len(COLORS)))
+                start = (page_no - 1) * per
+                rows = [h.candidate for h in ranked[start:start + per]]
+            else:
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=per, offset=(page_no - 1) * per, **member)
+                rows = [h.candidate for h in result.hits]
+            total = result.total
             suggestion = result.suggestion
         else:
             conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
-                                                       source=source or None, **member)
+                                                       source=source or None, color=color or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
+            if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
+                order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
+            else:
+                order = f"{sql_sort} {direction}, c.id DESC"
             rows = [store._hydrate(r) for r in store._rows(
-                f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
+                f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
         keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
-                                      client=client, stage=stage, pipe=pipe,
+                                      client=client, stage=stage, pipe=pipe, color=color,
+                                      cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n).items() if v != ""}
         ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
-                   suggestion=suggestion, corrected=bool(suggestion and result.corrected))
+                   suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
+                   colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
@@ -600,6 +649,23 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "candidate_form.html", c={"id": candidate_id, **data},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
         return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/color")
+    async def set_candidate_color(request: Request, candidate_id: int):
+        """The colour bubble: save one colour (or none) at once. A fetch from the page gets JSON back so the bubble
+        updates in place; a plain form post (no script) goes back to the page it came from."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        wants_json = "application/json" in request.headers.get("accept", "")
+        try:
+            saved = store.set_color(candidate_id, clean_color(str(form.get("color", ""))))
+        except ValueError as exc:
+            if wants_json:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return back(request, default=f"/candidates/{candidate_id}", error=str(exc))
+        if wants_json:
+            return JSONResponse({"id": candidate_id, **color_info(saved.get("color")), "counts": store.color_counts()})
+        return back(request, default=f"/candidates/{candidate_id}")
 
     @app.post("/candidates/{candidate_id}/delete")
     def delete_candidate_form(candidate_id: int):

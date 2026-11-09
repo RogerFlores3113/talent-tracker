@@ -140,7 +140,28 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "tags",
     "source",
     "last_contacted_at",
+    "color",
 )
+# The colour bubbles on the Candidates table, in rainbow order (the order they cycle and sort in).
+COLORS: tuple[str, ...] = ("red", "orange", "yellow", "green", "blue", "purple")
+
+
+def clean_color(value: Any) -> str | None:
+    """A colour as stored: one of COLORS or None (blank or "none" clears it). Anything else is refused."""
+    v = " ".join(str(value or "").split()).lower()
+    if v in COLORS:
+        return v
+    if v in ("none", "no color", "no colour", "clear", ""):
+        return None
+    raise ValueError(f"{str(value)[:30]!r} isn't a colour. Use one of: {', '.join(COLORS)} (or none to clear it).")
+
+
+def next_color(color: str | None, step: int = 1) -> str | None:
+    """The colour after this one when clicking the bubble (step 1) or before it (step -1): none, red, orange,
+    yellow, green, blue, purple, then back to none."""
+    ring = (None, *COLORS)
+    return ring[(ring.index(color) + step) % len(ring)] if color in ring else None
+
 
 _FTS_COLS = "name, current_title, current_company, location, about, tags, history_text"
 
@@ -629,6 +650,12 @@ _MIGRATIONS: tuple[Any, ...] = (
         last_seen  TEXT NOT NULL,
         trust      TEXT NOT NULL DEFAULT 'trusted' CHECK (trust IN ('read_only', 'suggest', 'trusted'))
     );
+    """,
+    # v8b: a colour tag on each person (red, orange, yellow, green, blue or purple), for the bubble on the
+    # Candidates table. NULL means no colour.
+    """
+    ALTER TABLE candidates ADD COLUMN color TEXT
+        CHECK (color IS NULL OR color IN ('red', 'orange', 'yellow', 'green', 'blue', 'purple'));
     """,
 )
 # Kinds of AI action and how each is listed on Changes.
@@ -1978,6 +2005,8 @@ class Store:
             out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
+        if "color" in out:
+            out["color"] = clean_color(out["color"])
         for k, v in out.items():
             limit = FIELD_LIMITS.get(k)
             if limit and isinstance(v, str) and len(v) > limit:
@@ -2228,6 +2257,24 @@ class Store:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
         return self._update(candidate_id, fields, work_history, by=by, via=via)
+
+    def set_color(self, candidate_id: int, color: str | None) -> dict[str, Any]:
+        """The recruiter's quick colour tag from the bubble on the Candidates table. It saves at once and changes
+        nothing else: no timeline entry and no new "updated" date, so triaging a list doesn't reorder it by
+        date. (The AI app's colour changes go through update_candidate, which logs them so Undo works.)"""
+        want = clean_color(color)
+        self.get_candidate(candidate_id)
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE candidates SET color = ? WHERE id = ?", (want, candidate_id))
+        return self.get_candidate(candidate_id)
+
+    def color_counts(self) -> dict[str, int]:
+        """How many people have each colour ("none" counts the untagged), for the chips above the table."""
+        out = {c: 0 for c in COLORS}
+        out["none"] = 0
+        for r in self._rows("SELECT color, count(*) AS n FROM candidates GROUP BY color"):
+            out[r["color"] or "none"] = r["n"]
+        return out
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
                 *, by: str, merge: bool = False, derived: tuple[str, ...] = (),
@@ -3084,7 +3131,7 @@ class Store:
                         fields[k] = ov
                 elif ov and not kv:
                     fields[k] = ov
-                elif k != "name" and ov and kv and str(ov).strip() != str(kv).strip():
+                elif k not in ("name", "color") and ov and kv and str(ov).strip() != str(kv).strip():
                     dropped[k] = ov
             mine = self.work_history(keep_id)
             seen = {((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) for e in mine}
@@ -3424,7 +3471,7 @@ class Store:
     def candidate_filters(self, *, location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, job_id: int | None = None,
                           client: str | None = None, stage: str | None = None, pipe: str | None = None,
-                          days: int | None = None) -> tuple[list[str], list[Any], dict]:
+                          days: int | None = None, color: str | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
         bay area, swe) and ignore case and accents; tag and source ignore case."""
         where: list[str] = []
@@ -3445,6 +3492,12 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        if color and color.strip():  # one of the six colours, or "none" for people with no colour
+            want = clean_color(color)
+            where.append("c.color = ?" if want else "c.color IS NULL")
+            if want:
+                params.append(want)
+            filters["color"] = want or "none"
         from .opsreview import PIPES, pipe_sql
         pipe = pipe if pipe in PIPES else None  # a column of the Ops review: in process, stuck, offers out...
         if job_id or (client and client.strip()) or (stage and stage.strip()) or pipe:
@@ -3515,6 +3568,7 @@ class Store:
         stage: str | None = None,
         pipe: str | None = None,
         days: int | None = None,
+        color: str | None = None,
     ) -> SearchResult:
         """Ranked search, best matches first; empty query lists most recent.
 
@@ -3523,7 +3577,8 @@ class Store:
         matches with some of the words. A word nobody has gets a spelling fix from the saved words.
         """
         where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source,
-                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days,
+                                                         color=color)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
@@ -3552,7 +3607,8 @@ class Store:
                         fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                     res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
                                                  limit=limit, offset=offset, fix_typos=False,
-                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days,
+                                                 color=color)
                     res.suggestion = fixed
                     return res
             if fixes:
@@ -3561,13 +3617,13 @@ class Store:
                     fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
                 res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
                                              limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, color=color)
                 if res.exact_total:
                     res.query, res.suggestion, res.corrected = query, fixed, True
                     return res
                 res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
                                              limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, color=color)
                 res.suggestion = fixed
                 return res
 

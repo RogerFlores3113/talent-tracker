@@ -19,6 +19,10 @@
 //   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
+//   data-color-bubble         on a colour bubble button (data-cid, data-color, data-next, data-prev): a click saves the
+//                             next colour at once and updates the bubble in place; Right-click or Shift-click goes to
+//                             the colour before. Without script the bubble's own form posts and the page reloads.
+//   data-color-count="red"    on a number in the colour chips: refreshed after a bubble changes
 //   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
@@ -163,7 +167,7 @@
 
   document.addEventListener("change", e => {
     const el = e.target;
-    if (el.matches && el.matches("select[data-autosubmit]") && el.form) el.form.submit();
+    if (el.matches && el.matches("select[data-autosubmit], input[type=checkbox][data-autosubmit]") && el.form) el.form.submit();
     // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
     if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
       const shared = document.getElementById("tbl-move");
@@ -224,5 +228,50 @@
     if (!cid || !board || !window.htmx) return;
     htmx.ajax("POST", board.dataset.moveUrl, {target: "#pipeline", swap: "innerHTML",
       values: {candidate_id: cid, stage: col.dataset.stage, view: "board"}});
+  });
+
+  // Colour bubbles on the Candidates table and a person's page.
+  let colorLive = null;
+  function announceColor(text) {
+    if (!colorLive) {
+      colorLive = document.createElement("div");
+      colorLive.className = "sr-only"; colorLive.setAttribute("role", "status");
+      document.body.appendChild(colorLive);
+    }
+    colorLive.textContent = text;
+  }
+  function setBubble(btn, d) {
+    btn.dataset.color = d.color; btn.dataset.next = d.next; btn.dataset.prev = d.prev;
+    btn.setAttribute("aria-label", d.aria); btn.title = d.title;
+    const letter = btn.querySelector("span"); if (letter) letter.textContent = d.letter;
+    const hidden = btn.form && btn.form.elements.color; if (hidden) hidden.value = d.next;
+    document.querySelectorAll("[data-color-count]").forEach(n => {
+      if (d.counts && d.counts[n.dataset.colorCount] !== undefined) n.textContent = d.counts[n.dataset.colorCount];
+    });
+  }
+  function pickColor(btn, back) {
+    if (btn.dataset.busy) return;
+    btn.dataset.busy = "1";
+    fetch("/candidates/" + encodeURIComponent(btn.dataset.cid) + "/color", {
+      method: "POST", credentials: "same-origin",
+      headers: {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+      body: new URLSearchParams({color: back ? btn.dataset.prev : btn.dataset.next}).toString(),
+    }).then(r => r.json().then(d => ({ok: r.ok, d})))
+      .then(({ok, d}) => {
+        if (!ok) { announceColor(d.error || "Couldn't save that color."); return; }
+        setBubble(btn, d); announceColor("Color: " + d.name);
+      })
+      .catch(() => { announceColor("Couldn't save that color."); })
+      .finally(() => { delete btn.dataset.busy; });
+  }
+  document.addEventListener("click", e => {
+    const btn = e.target.closest && e.target.closest("button[data-color-bubble]");
+    if (!btn || !window.fetch) return;  // no fetch: the form posts and the page reloads
+    e.preventDefault(); pickColor(btn, e.shiftKey);
+  });
+  document.addEventListener("contextmenu", e => {
+    const btn = e.target.closest && e.target.closest("button[data-color-bubble]");
+    if (!btn || !window.fetch) return;
+    e.preventDefault(); pickColor(btn, true);
   });
 })();

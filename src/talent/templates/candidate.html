@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, chips, sub %}
+{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
@@ -16,7 +16,7 @@
 <article class="profile">
   <div class="head">
     <div>
-      <h1>{{ c.name }}</h1>
+      <div class="namerow">{{ color_bubble(c, True) }}<h1>{{ c.name }}</h1></div>
       <p class="sub">{{ sub(c) }}</p>
       {{ chips(c.tags) }}
     </div>
