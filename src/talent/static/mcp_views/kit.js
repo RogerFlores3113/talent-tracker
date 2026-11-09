@@ -11,6 +11,7 @@
      callTool(name, args) -> Promise of the tool result (tools/call; only when HOST.serverTools)
      openLink(url, label)     open a link in the person's browser; if the chat app refuses, shows the URL with a Copy button
      askClaude(text, btn)     sends a message as the person (ui/message); hides btn and says so if the host refuses
+     askOrLink(text, ctl, statusNode, url, label)  askClaude for a change (move, advance, mark done); on refusal hides ctl and offers the app page
      tellClaude(obj, text)    tells the model something without a message (ui/update-model-context)
      canFullscreen() / setMode("fullscreen"|"inline") / fullscreenButton()
      announce(text)           polite live-region announcement; setStatus(node, text) for a local status line
@@ -19,6 +20,7 @@
      personCard(c, opts)      one person's summary card (article); opts: {headingLevel, saved, onAsk, extra}
      peopleTable(rows, st, h) real sortable table with selection; see people.js for the state it expects
      linksRow(c)              Open profile, LinkedIn, Website and every saved link, each named by host and person
+     role(title, company)     "Title at Company", or whichever one there is
      jobLink(job, who)        a job (and stage) as a link to its pipeline page in the app
      avatar(c, small)         initials in a ring coloured by the colour tag
      dateEl(iso) / rel(iso)   relative date with the exact date in the title; day(iso), when(iso) for plain text
@@ -100,6 +102,12 @@ function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const 
 function askClaude(text,btn){return req("ui/message",{role:"user",content:{type:"text",text}}).then(r=>{
  if(r&&r.isError){if(btn)btn.hidden=true;announce("Your chat app wouldn't send that message. You can type it in the chat yourself.");return false}
  announce("Sent to Claude.");return true})}
+/* askOrLink: askClaude for a button or select that would change something. Says what happened in the status node;
+   if the chat app refuses, the control is hidden and an "Open ... in Talent Search" button takes its place. */
+function askOrLink(text,ctl,status,url,label){return askClaude(text,ctl).then(ok=>{
+ if(!status)return ok;
+ if(ok){status.textContent="Asked Claude. It will do this in the chat, and you can undo it in Talent Search.";return true}
+ status.replaceChildren("Your chat app wouldn't send that. ",url?el("button",{class:"link",type:"button",onclick:()=>openLink(url,label||"Talent Search")},label?"Open "+label+" in Talent Search":"Open it in Talent Search"):"Type it in the chat yourself.");return false})}
 function tellClaude(obj,text){if(FAILED.tell)return Promise.resolve(false);
  return req("ui/update-model-context",{content:[{type:"text",text}],structuredContent:obj}).then(r=>{if(r&&r.isError){FAILED.tell=1;return false}return true})}
 function callTool(name,args){return req("tools/call",{name,arguments:args||{}})}
@@ -128,7 +136,8 @@ function initials(n){const p=String(n||"?").trim().split(/\s+/).filter(Boolean);
 function colorCls(c){return COLORS.includes(c)?" c-"+c:""}
 function avatar(c,small){return el("span",{class:"avatar"+(small?" sm":"")+colorCls(c&&c.color),"aria-hidden":"true"},initials(c&&c.name))}
 function firstName(n){return String(n||"").trim().split(/\s+/)[0]||"them"}
-function roleLine(c){return[c.current_title,c.current_company&&("at "+c.current_company)].filter(Boolean).join(" ")}
+function role(t,c){return t&&c?t+" at "+c:(t||c||"")}
+function roleLine(c){return role(c.current_title,c.current_company)}
 function jobLink(j,who){const text=j.job||j.job_title||"a job";
  const url=j.app_url||(j.origin&&j.job_id?j.origin+"/jobs/"+j.job_id:null);
  return url?linkBtn(url,text,"Open the "+text+" pipeline"+(who?" ("+who+" is in it)":"")):el("span",{},text)}
@@ -221,7 +230,7 @@ function openCard(cls,url,...kids){const m=/\/candidates\/(\d+)/.exec(String(url
  return e}
 
 /* ---- refresh and results */
-const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view"];
+const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists"];
 function canRefresh(){return canCall()&&TOOL&&ARGS&&READ_TOOLS.includes(TOOL)}
 function refresh(btn){if(btn)btn.disabled=true;announce("Refreshing.");
  callTool(TOOL,ARGS).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}showResult(d,r._meta)})}
@@ -252,7 +261,9 @@ req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-searc
 /* ---- people table: peopleTable(rows, st, h)
    rows: lean people (id, name, current_title, current_company, location, jobs[], match, last_contacted_at, created_at, updated_at, color, email, app_url)
    st:   {sel:Set of ids, sort:null|key, dir:"asc"|"desc", filter:""}, kept by the caller so it survives a redraw
-   h:    {onOpen(person), onSel(), origin, more:{label,onClick}|null, total:Number}
+   h:    {onOpen(person), onSel(), origin, more:{label,onClick}|null, total:Number,
+          matchLabel:"Fit" (rename the Match column), hide:["added","updated","color",...] (hide columns),
+          prospects:true (rows are Shortlist prospects: no "Open in Talent Search" for ids), bulkExtra(chosen)->[nodes] (more buttons when rows are picked)}
    Returns {node, focusCaption()}. A plain table with a caption, sort buttons inside th, name as th scope=row. */
 function firstJob(p){return(p.jobs||[])[0]||null}
 function plainMatch(p){return String(p.match||p.reason||"").split("**").join("")}
@@ -280,9 +291,10 @@ function sortedRows(rows,st){const idx=new Map(rows.map((p,i)=>[p.id,i]));let ou
    const c=cmpVals(a,b,col.date);return c?c*sign:idx.get(x.id)-idx.get(y.id)})}
  return out}
 function selNames(rows,st){return rows.filter(p=>st.sel.has(p.id))}
-function peopleLabel(ps){return ps.map(p=>p.name+" (id "+p.id+")").join(", ")}
+function peopleLabel(ps,noId){return ps.map(p=>noId?p.name:p.name+" (id "+p.id+")").join(", ")}
 function peopleTable(rows,st,h){
  const wrap=el("div",{});
+ const colLabel=c=>(c.k==="match"&&h.matchLabel)||c.l;
  const status=el("div",{class:"sel",role:"status","aria-live":"polite"});
  const caption=el("caption",{tabindex:"-1"});
  const tbody=el("tbody");
@@ -295,12 +307,12 @@ function peopleTable(rows,st,h){
  const relBtn=el("button",{class:"btn",type:"button",onclick:()=>{st.sort=null;st.dir="asc";fill();heads();announce("Sorted by relevance, the order the search gave.")}},"Relevance");
  const ths=TCOLS.map(c=>{const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
    if(st.sort===c.k)st.dir=st.dir==="asc"?"desc":"asc";else{st.sort=c.k;st.dir="asc"}
-   fill();heads();announce("Sorted by "+c.l+", "+(st.dir==="asc"?"ascending":"descending"))});
-  return{c,b,th:el("th",{scope:"col",class:c.wide?"wide":null},b)}});
+   fill();heads();announce("Sorted by "+colLabel(c)+", "+(st.dir==="asc"?"ascending":"descending"))});
+  return{c,b,th:el("th",{scope:"col",class:"k-"+c.k+(c.wide?" wide":"")},b)}});
  function heads(){for(const{c,b,th}of ths){const on=st.sort===c.k;
    th.setAttribute("aria-sort",on?(st.dir==="asc"?"ascending":"descending"):"none");
-   b.replaceChildren(c.l,el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
-   b.setAttribute("aria-label","Sort by "+c.l+(on?", sorted "+(st.dir==="asc"?"ascending":"descending"):""))}
+   b.replaceChildren(colLabel(c),el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
+   b.setAttribute("aria-label","Sort by "+colLabel(c)+(on?", sorted "+(st.dir==="asc"?"ascending":"descending"):""))}
   relBtn.setAttribute("aria-pressed",st.sort?"false":"true")}
  function selUI(){const n=st.sel.size;status.textContent=n?n+" selected":"";
   const inShown=shown.filter(p=>st.sel.has(p.id)).length;
@@ -311,12 +323,13 @@ function peopleTable(rows,st,h){
   if(n){const emails=chosen.filter(p=>p.email).map(p=>p.email);
    bulk.append(
     el("button",{class:"btn",type:"button",onclick:()=>{askRow.hidden=false;askIn.focus()}},"Ask Claude about these "+n),
-    el("button",{class:"btn",type:"button",onclick:()=>openLink((h.origin||"")+"/candidates?ids="+chosen.map(p=>p.id).join(","),"the Candidates page")},"Open "+n+" in Talent Search"),
-    el("button",{class:"btn",type:"button",onclick:()=>{const t=emails.join(", ");copyText(t).then(ok=>{stat2.textContent=ok?"Copied "+emails.length+" email"+(emails.length===1?"":"s")+(emails.length<n?" ("+(n-emails.length)+" had none saved).":"."):"Couldn't copy. "+(t?"Select them here: "+t:"None of them has an email saved.");announce(stat2.textContent)})}},"Copy "+emails.length+" email"+(emails.length===1?"":"s")))}
+    h.prospects?null:el("button",{class:"btn",type:"button",onclick:()=>openLink((h.origin||"")+"/candidates?ids="+chosen.map(p=>p.id).join(","),"the Candidates page")},"Open "+n+" in Talent Search"),
+    el("button",{class:"btn",type:"button",onclick:()=>{const t=emails.join(", ");copyText(t).then(ok=>{stat2.textContent=ok?"Copied "+emails.length+" email"+(emails.length===1?"":"s")+(emails.length<n?" ("+(n-emails.length)+" had none saved).":"."):"Couldn't copy. "+(t?"Select them here: "+t:"None of them has an email saved.");announce(stat2.textContent)})}},"Copy "+emails.length+" email"+(emails.length===1?"":"s")),
+    ...(h.bulkExtra?h.bulkExtra(chosen):[]))}
   else askRow.hidden=true}
  const askIn=el("input",{class:"field",type:"text","aria-label":"What should Claude do with them?",placeholder:"What should Claude do with them?",maxlength:"500"});
  const sendAsk=()=>{const t=askIn.value.trim();if(!t){askIn.focus();return}const chosen=selNames(rows,st);
-  askClaude("For these "+chosen.length+" candidates: "+peopleLabel(chosen)+": "+t,sendBtn).then(ok=>{if(ok){askIn.value="";askRow.hidden=true;stat2.textContent="Sent to Claude."}})};
+  askClaude("For these "+chosen.length+" candidates: "+peopleLabel(chosen,h.prospects)+": "+t,sendBtn).then(ok=>{if(ok){askIn.value="";askRow.hidden=true;stat2.textContent="Sent to Claude."}})};
  const sendBtn=el("button",{class:"btn primary",type:"button",onclick:sendAsk},"Send to Claude");
  askIn.addEventListener("keydown",e=>{if(e.key==="Enter")sendAsk();if(e.key==="Escape"){e.stopPropagation();askRow.hidden=true}});
  askRow.append(askIn,sendBtn,el("button",{class:"btn",type:"button",onclick:()=>{askRow.hidden=true}},"Cancel"));
@@ -330,22 +343,22 @@ function peopleTable(rows,st,h){
     last=i;selUI();if(h.onSel)h.onSel()});
    const open=el("button",{class:"link",type:"button","aria-label":"Show card for "+p.name,onclick:()=>h.onOpen(p)},p.name);
    const j=firstJob(p);
-   const td=(label,...kids)=>el("td",{"data-label":label},...kids);
-   const wd=(label,...kids)=>el("td",{class:"wide","data-label":label},...kids);
-   const txt=(label,v)=>{const t=el("td",{"data-label":v?label:null,title:v||null},v||"");return t};
-   const mt=el("td",{class:"match","data-label":plainMatch(p)?"Match":null,title:plainMatch(p)||null},p.match?marked(p.match):(p.reason||""));
-   tbody.append(el("tr",{},el("td",{class:"pickcell"},pick),el("th",{scope:"row"},open),
-    txt("Title",p.current_title),txt("Company",p.current_company),txt("Location",p.location),
-    el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:j&&(j.state==="lost"||j.state==="hired")?"out":null},j?stageText(j):""),
-    mt,td(p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),wd(p.created_at?"Added":null,dateEl(p.created_at)),wd(p.updated_at?"Updated":null,dateEl(p.updated_at)),
-    el("td",{class:"wide","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
+   const td=(k,label,...kids)=>el("td",{class:"k-"+k+(["added","updated","color"].includes(k)?" wide":""),"data-label":label},...kids);
+   const txt=(k,label,v)=>el("td",{class:"k-"+k,"data-label":v?label:null,title:v||null},v||"");
+   const mt=el("td",{class:"match k-match","data-label":plainMatch(p)?(h.matchLabel||"Match"):null,title:plainMatch(p)||null},el("div",{class:"clamp"},p.match?marked(p.match):(p.reason||"")));
+   tbody.append(el("tr",{},el("td",{class:"pickcell"},pick),el("th",{scope:"row",class:"k-name"},open),
+    txt("title","Title",p.current_title),txt("company","Company",p.current_company),txt("location","Location",p.location),
+    el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:"k-stage"+(j&&(j.state==="lost"||j.state==="hired")?" out":"")},j?stageText(j):""),
+    mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),
+    el("td",{class:"wide k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
   if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"11"},"Nobody matches that filter.")));
   selUI()}
  filter.addEventListener("input",()=>{st.filter=filter.value;fill()});
  allBox.addEventListener("click",()=>{for(const p of shown)setSel(p,allBox.checked);selUI();if(h.onSel)h.onSel()});
  const none=el("button",{class:"btn",type:"button",onclick:()=>{for(const p of shown)st.sel.delete(p.id);selUI();if(h.onSel)h.onSel()}},"Select none");
  const all=el("button",{class:"btn",type:"button",onclick:()=>{for(const p of shown)st.sel.add(p.id);selUI();if(h.onSel)h.onSel()}},"Select all shown");
- const table=el("table",{class:"ptable"},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
+ const hidden=[...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"])];  // no Color column when nobody has one
+ const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")+hidden.map(k=>" hide-"+k).join("")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
  const tools=el("div",{class:"tbar"},filter,relBtn,all,none,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
  wrap.append(tools,bulk,askRow,stat2,el("div",{class:"tablewrap"},table));
  heads();fill();

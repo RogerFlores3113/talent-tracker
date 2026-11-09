@@ -31,6 +31,8 @@ URIS = {
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
 ALIASES = {"candidate": "people", "results": "people"}
+# Views that draw the people table (or one like it) also load people.css.
+WITH_TABLE = ("people", "decide", "shortlist")
 # The host draws a border around the view (it sits inside the chat like a card).
 RESOURCE_META = {"ui": {"prefersBorder": True}}
 _DIR = Path(__file__).parent / "static" / "mcp_views"
@@ -44,7 +46,7 @@ def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
-    css = _read("kit.css") + ("\n" + _read("people.css") if name == "people" else "")
+    css = _read("kit.css") + ("\n" + _read("people.css") if name in WITH_TABLE else "")
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     return (

@@ -2616,12 +2616,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         nums = actions.job_numbers(store, job_id)
         left_out = actions.omitted_stages(store, job_id, omit_stages)
         shown = actions.status_numbers(store, job_id, omit_stages)
-        stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [
-            _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "current_title": a["current_title"],
-                   "current_company": a["current_company"], "since": a["stage_changed_at"],
-                   "days_in_stage": _days_since(a["stage_changed_at"]), "next_interview": next_iv.get(a["candidate_id"]),
-                   "app_url": app_url(f"/candidates/{a['candidate_id']}")})
-            for a in s["candidates"]]} for s in store.pipeline_by_stage(job_id)]
+        by_stage = store.pipeline_by_stage(job_id)
+        sig = decide.signals(store, job_id, [a["candidate_id"] for s in by_stage if s["outcome"] == "open"
+                                             for a in s["candidates"]])
+
+        def card(a: dict[str, Any]) -> dict[str, Any]:  # what a board card shows: stage time, verdicts, feedback owed
+            g = sig.get(a["candidate_id"]) or {}
+            return _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"],
+                          "current_title": a["current_title"], "current_company": a["current_company"],
+                          "since": a["stage_changed_at"], "days_in_stage": _days_since(a["stage_changed_at"]),
+                          "next_interview": next_iv.get(a["candidate_id"]), "verdicts": g.get("tally"),
+                          "sessions_done": g.get("done"), "feedback_owed": len(g["owed"]) if g.get("owed") else None,
+                          "owed_by": g.get("owed", [])[:3], "app_url": app_url(f"/candidates/{a['candidate_id']}")})
+        stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [card(a) for a in s["candidates"]]}
+                  for s in by_stage]
         text = actions.job_status_text(store, job_id, omit_stages=omit_stages)
         total = sum(len(s["candidates"]) for s in stages)
         hidden = actions.hidden_note(store, job_id, omit_stages)
@@ -2630,6 +2638,18 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if total:  # the note, and who was left out (for the recruiter only), sit apart from the paste text
             content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}." if hidden else "")
                                        + (f"\n{booked['text']}" if booked else "")))
+        seen = []  # verdicts and feedback owed, which the board cards show: for the recruiter, never pasted
+        for st in stages:
+            for c in st["candidates"]:
+                bits = [x for x in (c.get("verdicts"), "feedback still owed by " + ", ".join(c["owed_by"])
+                                    + (f" and {c['feedback_owed'] - len(c['owed_by'])} more"
+                                       if c.get("owed_by") and c["feedback_owed"] > len(c["owed_by"]) else "")
+                                    if c.get("feedback_owed") else None) if x]
+                if bits:
+                    seen.append(f"{c['name']} ({'; '.join(bits)})")
+        if seen:
+            content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} interview feedback so far: "
+                                       + "; ".join(seen) + "."))
         offer_lines = offers.recruiter_lines(store, job_id)  # status words only, never pasted
         if offer_lines:
             content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} offers: " + "; ".join(offer_lines) + "."))
@@ -3168,10 +3188,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if d.get("conflict") or d.get("needs_confirmation"):
                 groups["needs_answer"].append(_slim({
                     "name": person.name, "reason": d.get("warning"), "existing": d.get("existing"),
-                    "possible_duplicates": d.get("possible_duplicates")}))
+                    "possible_duplicates": (d.get("possible_duplicates") or [])[:25],
+                    "more_duplicates": max(0, len(d.get("possible_duplicates") or []) - 25) or None}))
                 continue
             kept = [*kept_saved, *(k for k in d.get("kept") or [] if k not in kept_saved)]
             row = _slim({"id": d["id"], "name": d["name"], "saved_status": d.get("saved_status"),
+                         "current_title": d.get("current_title"), "current_company": d.get("current_company"),
+                         "location": d.get("location"), "linkedin_url": d.get("linkedin_url"),
+                         "links": (d.get("links") or [])[:6], "no_contact": not (d.get("email") or d.get("linkedin_url")) or None,
                          "held": (d.get("identity_kept") or []) + (d.get("budget_kept") or []), "kept": kept,
                          "ignored_fields": d.get("ignored_fields"), "notes": notes,
                          "app_url": app_url(f"/candidates/{d['id']}")})
@@ -3209,6 +3233,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.append(f"{label}:")
             for r in groups[key]:
                 line = f"- {quoted(r['name'])}" + (f" (id {r['id']})" if r.get("id") else "")
+                role = " at ".join(x for x in (r.get("current_title"), r.get("current_company")) if x)
+                if role or r.get("location"):
+                    line += ", " + ", ".join(x for x in (role, r.get("location")) if x)
+                if r.get("no_contact"):
+                    line += ". No email or LinkedIn saved, so there is no way to reach them yet"
                 if r.get("saved_status") and key == "updated":
                     line += f": {r['saved_status']}"
                 if r.get("reason"):
@@ -3224,6 +3253,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 if r.get("pipeline_error"):
                     line += f". Not added to the job: {r['pipeline_error'].rstrip('.')}"
                 lines.append(line + ".")
+                for m in r.get("possible_duplicates") or []:  # who they might be, so the answer can name them
+                    lines.append(f"  - Could be {_line(m)}")
+                if r.get("more_duplicates"):
+                    lines.append(f"  - and {r['more_duplicates']} more saved under this name")
+                if r.get("existing"):
+                    lines.append(f"  - Matches {_line(r['existing'])}")
         kids = [r["id"] for r in store._rows("SELECT id FROM ai_actions WHERE id > ? AND kind IN"
                                              " ('candidate', 'profile', 'pipeline_add') ORDER BY id", (mark,))]
         batch_id = None
@@ -3738,8 +3773,27 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         res = actions.action_items(store)
         keys = ("key", "kind", "title", "detail", "when", "candidate_id", "job_id", "suggestion_id", "interview_id",
                 "interview_ids", "interviewer", "stage", "next_stage", "due_on", "due_text", "overdue")
-        items = [_slim({k: i.get(k) for k in keys}) for i in res["items"]]
-        later = [_slim({k: i.get(k) for k in keys}) for i in res["next_week"]]
+        names: dict[tuple[str, int], str | None] = {}
+
+        def known(kind: str, i: int | None) -> str | None:  # who and which job a row is about, for the view's buttons
+            if i is None:
+                return None
+            if (kind, i) not in names:
+                try:
+                    if kind == "c":
+                        names[(kind, i)] = store.get_candidate(i)["name"]
+                    else:
+                        j = store.get_job(i)
+                        names[(kind, i)] = actions.job_label(j["title"], j.get("company"))
+                except (KeyError, LookupError, ValueError, NotFound):
+                    names[(kind, i)] = None
+            return names[(kind, i)]
+
+        def lean(i: dict[str, Any]) -> dict[str, Any]:
+            return _slim({**{k: i.get(k) for k in keys}, "name": known("c", i.get("candidate_id")),
+                          "job": known("j", i.get("job_id"))})
+        items = [lean(i) for i in res["items"]]
+        later = [lean(i) for i in res["next_week"]]
 
         def row(i: dict[str, Any]) -> str:
             return (f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")

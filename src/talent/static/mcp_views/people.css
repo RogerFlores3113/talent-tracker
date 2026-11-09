@@ -27,9 +27,39 @@ table.ptable .out{color:var(--muted);text-decoration:line-through;text-decoratio
  table.ptable td,table.ptable th[scope=row]{border:0;height:auto;padding:1px 0}
  table.ptable td[data-label]::before{content:attr(data-label) ": ";color:var(--muted)}
  table.ptable td.pickcell{order:-1}
+ table.ptable caption{display:block;white-space:normal}
  table.ptable tr{display:flex;flex-direction:column}
  table.ptable td.pickcell{order:-2}table.ptable th[scope=row]{order:-1}
 }
 @media (forced-colors:active){.btn,.chip,.avatar{border:1px solid ButtonText}.btn.primary{background:Highlight;color:HighlightText}mark{background:Highlight;color:HighlightText}}
 html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
 @media (max-width:560px){html table.ptable .wide{display:block!important}}
+
+/* People table: columns size to what they hold and text wraps, so nothing is clipped or scrolls sideways
+   (full screen adds Added, Updated and Color; inline keeps the compact set; below 560px it stacks) */
+@media (min-width:561px){
+ table.ptable{width:100%}
+ table.ptable th,table.ptable td{max-width:none;height:auto;padding:5px 4px;white-space:normal;overflow:visible;text-overflow:clip;vertical-align:top}
+ table.ptable td.k-stage{max-width:clamp(6rem,16vw,18rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ table.ptable td.k-color,table.ptable th.pickcell,table.ptable td.pickcell{white-space:nowrap}
+ table.ptable thead th{white-space:normal;vertical-align:bottom}
+ table.ptable th button.sort{text-align:left;white-space:normal}
+ table.ptable td.k-match{min-width:7rem}
+ table.ptable td.k-match .clamp{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+ html[data-mode=fullscreen] table.ptable td.k-match .clamp{-webkit-line-clamp:3;line-clamp:3}
+ table.ptable th.k-name{min-width:clamp(4rem,9vw,8rem)}
+ /* the Shortlist table drops Location inline; full screen shows it */
+ html:not([data-mode=fullscreen]) table.ptable.prospects .k-location{display:none}
+}
+table.ptable.hide-title .k-title,table.ptable.hide-company .k-company,table.ptable.hide-location .k-location,table.ptable.hide-stage .k-stage,table.ptable.hide-contacted .k-contacted,table.ptable.hide-added .k-added,table.ptable.hide-updated .k-updated,table.ptable.hide-color .k-color,table.ptable.hide-match .k-match{display:none!important}
+
+/* finalists table */
+table.ftable th,table.ftable td{max-width:none;white-space:normal;height:auto;padding:6px;vertical-align:top;overflow:visible;text-overflow:clip}
+table.ftable td.k-acts{min-width:11rem}
+table.ftable tr.qrow td{background:var(--chip);border-bottom:1px solid var(--line)}
+table.ftable tr.qrow:hover{background:none}
+.quotes{padding:2px 0}.quotes .iv{margin:6px 0}
+.quotes q{quotes:"\201C" "\201D"}
+ul.fb{margin:2px 0 0 12px}ul.fb li{margin:2px 0}
+@media (max-width:560px){table.ftable td.k-acts{min-width:0}}
+table.ptable th[scope=row] button.link{text-align:left}

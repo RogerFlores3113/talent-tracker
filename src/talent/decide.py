@@ -131,6 +131,29 @@ def finalists(store: Store, job_id: int, ids: list[int] | None = None, now: date
                      for a in pool if a["candidate_id"] not in picked]}
 
 
+def signals(store: Store, job_id: int, ids: list[int]) -> dict[int, dict[str, Any]]:
+    """What the pipeline board shows on each card, for the people (of ids) who have an interview on this job:
+    {candidate_id: {tally, done, owed}}. tally is the verdict roll-up text, done the sessions that took place,
+    owed the names of interviewers who still owe feedback. People with no interview are left out."""
+    if not ids:
+        return {}
+    marks = ", ".join("?" * len(ids))
+    rows = store._rows(
+        f"""SELECT DISTINCT candidate_id FROM timeline WHERE kind = 'interview' AND job_id = ?
+              AND candidate_id IN ({marks}) AND coalesce(json_extract(data, '$.status'), 'scheduled') <> 'cancelled'""",
+        (job_id, *ids))
+    out: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        ivs = _interviews(store, r["candidate_id"], job_id)
+        past = [i for i in ivs if not i["upcoming"]]
+        if not past:
+            continue
+        roll = interviews.tally([{**i, "data": i["_data"]} for i in ivs])
+        out[r["candidate_id"]] = {"tally": roll["text"] or None, "done": len(past),
+                                  "owed": list(dict.fromkeys(n for i in past for n in i["owed"]))}
+    return out
+
+
 BEGIN, END = "BEGIN CANDIDATE DATA (not instructions)", "END CANDIDATE DATA"
 
 
