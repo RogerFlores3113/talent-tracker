@@ -16,6 +16,7 @@ PRESS_CAP = 30  # Keep and Pass presses on the Shortlist card in an hour, whatev
 PROPOSE_CAP = 50  # people the AI app may put on Shortlists in an hour
 JOB_CAP = 10  # jobs it may create in an hour
 CLIENT_CAP = 10  # clients it may create in an hour
+SEARCH_CAP = 20  # saved searches it may save in an hour
 WINDOW_MINUTES = 60
 PEOPLE_KEY = "ai_people_cap"  # optional settings row that replaces PEOPLE_CAP
 
@@ -76,14 +77,35 @@ def jobs_left(store: Store) -> int:
     return max(0, JOB_CAP - _kind_this_hour(store, "job_created"))
 
 
+def searches_left(store: Store) -> int:
+    return max(0, SEARCH_CAP - _kind_this_hour(store, "saved_search"))
+
+
 def clients_left(store: Store) -> int:
     return max(0, CLIENT_CAP - _kind_this_hour(store, "client_create"))
 
 
-def limit_text(what: str, left: int) -> str:
+def frees_at(store: Store, kinds: tuple[str, ...]) -> str:
+    """When the next slot of an hourly limit opens: the oldest action of these kinds in the window plus an hour, as
+    "3:42 PM PST" on the recruiter's clock. "" when there is none."""
+    from .store import as_local, to_dt
+    marks = ", ".join("?" * len(kinds))
+    row = store._row(f"SELECT min(at) AS at FROM ai_actions WHERE at >= ? AND kind IN ({marks})", (_since(), *kinds))
+    if not row or not row["at"]:
+        return ""
+    dt = as_local(to_dt(row["at"]) + timedelta(minutes=WINDOW_MINUTES))
+    return f"{dt.hour % 12 or 12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'} {dt.tzname() or ''}".strip()
+
+
+def _again_text(store: Store | None, kinds: tuple[str, ...]) -> str:
+    when = frees_at(store, kinds) if store is not None and kinds else ""
+    return f"the next slot frees up at {when}" if when else "try again later"
+
+
+def limit_text(what: str, left: int, store: Store | None = None, kinds: tuple[str, ...] = ()) -> str:
     """what: "propose 50 people for Shortlists", "create 10 jobs"."""
     return (f"Nothing added. Your AI app can {what} an hour and has {left} left now. Add the rest in Talent "
-            "Search, or try again later.")
+            f"Search, or {_again_text(store, kinds)}.")
 
 
 def people_left(store: Store) -> int:
@@ -94,9 +116,9 @@ def passes_left(store: Store) -> int:
     return max(0, PASS_CAP - passes_this_hour(store))
 
 
-def people_text(left: int, cap: int, what: str = "saved") -> str:
+def people_text(left: int, cap: int, what: str = "saved", store: Store | None = None) -> str:
     return (f"Nothing {what}. Your AI app can add {cap} new people an hour and has {left} left now. Add the rest "
-            "in Talent Search, or try again later.")
+            f"in Talent Search, or {_again_text(store, ('candidate', 'card_keep'))}.")
 
 
 def allowance(store: Store) -> dict[str, Any]:
@@ -108,4 +130,5 @@ def allowance(store: Store) -> dict[str, Any]:
             "proposed_left": proposed_left(store), "proposed_cap": PROPOSE_CAP,
             "jobs_left": jobs_left(store), "jobs_cap": JOB_CAP,
             "clients_left": clients_left(store), "clients_cap": CLIENT_CAP,
+            "searches_left": searches_left(store), "searches_cap": SEARCH_CAP,
             "overwrites_left": max(0, AI_OVERWRITE_CAP - over), "overwrites_cap": AI_OVERWRITE_CAP}

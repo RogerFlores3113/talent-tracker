@@ -259,18 +259,31 @@ def _install_skills(args: argparse.Namespace) -> None:
     from . import skills
 
     targets = _skill_targets(args, default_all=not args.zip)
+    plans = []
     for target in targets:
         plan = skills.plan_install(target)
-        print(f"{plan['label']}: will add {len(plan['items'])} skills to {plan['base']}")
+        plans.append(plan)
+        counts = {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
+        print(f"{plan['label']}: {len(plan['items'])} skills in {plan['base']} "
+              f"({counts['new']} new files, {counts['updated']} updated, {counts['unchanged']} unchanged, "
+              f"{len(plan['edited'])} edited by you and kept)")
         for f in plan["files"]:
-            print(f"  add {f}")
+            print(f"  {plan['labels'].get(f, 'new')} {f}")
         for f in plan["edited"]:
             print(f"  edited by you, kept: {f}")
         for sk in plan["skipped"]:
             print(f"  left alone {sk['path']}: {sk['reason']}")
-    for target in targets:
+    if targets and not args.yes:
+        # An agent or a script has no one to ask, so it has to say yes on purpose with --yes.
+        if not sys.stdin.isatty():
+            sys.exit("Nothing installed. Run again with --yes to install these, or from a terminal to be asked.")
+        if input("Install these? Type yes to go ahead: ").strip().lower() not in ("y", "yes"):
+            sys.exit("Nothing installed.")
+    for target, plan in zip(targets, plans):
         res = skills.install(target)
-        print(f"{res['label']}: added {len(res['items'])} skills ({res['base']})")
+        counts = {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
+        print(f"{res['label']}: {len(res['items'])} skills ({res['base']}): {counts['new']} files added, "
+              f"{counts['updated']} updated, {counts['unchanged']} unchanged, {len(plan['edited'])} kept because you edited them")
     if args.zip:
         print(f"Wrote {skills.write_zip(Path(args.zip))}. In Claude Desktop: Customize > Skills, add each zip inside.")
 
@@ -327,6 +340,7 @@ def main(argv: list[str] | None = None) -> None:
     inst = sub.add_parser("install-skills", help="add the Talent Search skills to Claude Code and Codex (or write a zip)")
     inst.add_argument("--claude-code", action="store_true", help="install into ~/.claude/skills")
     inst.add_argument("--codex", action="store_true", help="install into ~/.agents/skills")
+    inst.add_argument("--yes", action="store_true", help="don't ask first (needed when no one can be asked)")
     inst.add_argument("--zip", metavar="PATH", help="write a zip to upload in Claude Desktop (Customize > Skills)")
     rem = sub.add_parser("remove-skills", help="remove the Talent Search skills this app installed (only those)")
     rem.add_argument("--claude-code", action="store_true", help="only from ~/.claude/skills")

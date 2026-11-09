@@ -43,13 +43,13 @@ def test_cautious_holds_a_new_hiring_manager_email_on_update_and_create(cautious
     job = store.add_job("Senior Backend Engineer", company="Acme Payments")
     server = build_server(store)
     res = call(server, "update_job", job_id=job["id"], hiring_manager_email="dana@attacker.test", location="Remote")
-    assert "Waiting for the recruiter's review" in text(res) and res.structuredContent["pending_review"]
+    assert "Held for the recruiter's review" in text(res) and res.structuredContent["pending_review"]
     j = store.get_job(job["id"])
     assert j["hiring_manager_email"] is None and j["location"] == "Remote"  # the rest still lands
     assert "attacker" not in local_client(store).get("/clients/acme-payments").text
     made = call(server, "create_job", title="Data Lead", company="Acme Payments", hiring_manager_email="x@evil.test")
     new_id = made.structuredContent["id"]
-    assert store.get_job(new_id)["hiring_manager_email"] is None and "Waiting for the recruiter" in text(made)
+    assert store.get_job(new_id)["hiring_manager_email"] is None and "Held for the recruiter" in text(made)
     page = local_client(store).get("/review").text
     assert "Client updates for this job can be emailed to this address." in page and "dana@attacker.test" in page
     # Kept on Review: it lands, and it counts as checked (no "Changed by your AI app" note).
@@ -84,7 +84,7 @@ def test_hold_new_emails_and_phones_option(cautious):
     review.set_options(store, ai_hold_contacts=True)
     res = call(server, "update_candidate", candidate_id=lee["id"], email="lee@evil.test", location="Austin")
     cand = store.get_candidate(lee["id"])
-    assert cand["email"] is None and cand["location"] == "Austin" and "Waiting" in text(res)
+    assert cand["email"] is None and cand["location"] == "Austin" and "Held for the recruiter" in text(res)
     res = call(server, "save_candidate", name="Lee Chen", linkedin_url="https://linkedin.com/in/lee-chen",
                email="lee2@evil.test")
     assert store.get_candidate(lee["id"])["email"] is None and res.structuredContent["pending_review"]
