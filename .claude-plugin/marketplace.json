@@ -1,0 +1,13 @@
+{
+  "name": "talent-tracker",
+  "owner": {
+    "name": "Talent Search"
+  },
+  "plugins": [
+    {
+      "name": "talent-search",
+      "source": "./",
+      "description": "Skills that teach your AI app to use Talent Search well: sourcing, triage, interviews, outreach, pipeline reviews, feedback and decisions."
+    }
+  ]
+}

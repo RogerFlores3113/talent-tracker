@@ -246,19 +246,24 @@ def _import_stage_opts(args: argparse.Namespace, prof: dict | None) -> dict[str,
             "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
 
 
-def _skill_targets(args: argparse.Namespace, default_all: bool = True) -> list[str]:
+def _skill_targets(args: argparse.Namespace, default_all: bool = True, detected: bool = False) -> list[str]:
     from . import skills
 
     targets = [t for t, on in (("claude-code", args.claude_code), ("codex", args.codex)) if on]
     if not targets and default_all:
-        targets = list(skills.TARGETS)
+        targets = skills.detected_targets() if detected else list(skills.TARGETS)
     return targets
 
 
 def _install_skills(args: argparse.Namespace) -> None:
     from . import skills
 
-    targets = _skill_targets(args, default_all=not args.zip)
+    plugin = args.plugin if args.plugin is not None else args.zip  # --zip is the old name for --plugin
+    targets = _skill_targets(args, default_all=plugin is None, detected=True)
+    if plugin is None and not targets:
+        print("No Claude Code or Codex found on this computer, so nothing was installed.\n"
+              "Use --claude-code or --codex to install anyway, or --plugin to get the file for the Claude app.")
+        return
     plans = []
     for target in targets:
         plan = skills.plan_install(target)
@@ -284,8 +289,11 @@ def _install_skills(args: argparse.Namespace) -> None:
         counts = {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
         print(f"{res['label']}: {len(res['items'])} skills ({res['base']}): {counts['new']} files added, "
               f"{counts['updated']} updated, {counts['unchanged']} unchanged, {len(plan['edited'])} kept because you edited them")
-    if args.zip:
-        print(f"Wrote {skills.write_zip(Path(args.zip))}. In Claude Desktop: Customize > Skills, add each zip inside.")
+    if targets:
+        print("Start a new chat (or restart Claude Code) so it picks up the skills.")
+    if plugin is not None:
+        path = skills.write_plugin(Path(plugin) if plugin else None)
+        print(f"Wrote {path}. In Claude: Customize > Plugins > Add > Upload plugin, then pick that file.")
 
 
 def _remove_skills(args: argparse.Namespace) -> None:
@@ -337,11 +345,13 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
     sub.add_parser("check-codex", help="check that Codex can start Talent Search")
     sub.add_parser("check-lmstudio", help="check that LM Studio can start Talent Search")
-    inst = sub.add_parser("install-skills", help="add the Talent Search skills to Claude Code and Codex (or write a zip)")
+    inst = sub.add_parser("install-skills", help="add the Talent Search skills to every AI app found here, or write the Claude plugin file")
     inst.add_argument("--claude-code", action="store_true", help="install into ~/.claude/skills")
     inst.add_argument("--codex", action="store_true", help="install into ~/.agents/skills")
     inst.add_argument("--yes", action="store_true", help="don't ask first (needed when no one can be asked)")
-    inst.add_argument("--zip", metavar="PATH", help="write a zip to upload in Claude Desktop (Customize > Skills)")
+    inst.add_argument("--plugin", nargs="?", const="", default=None, metavar="PATH",
+                      help="write talent-search.plugin for the Claude app (default: your Downloads folder)")
+    inst.add_argument("--zip", metavar="PATH", help=argparse.SUPPRESS)  # old name for --plugin
     rem = sub.add_parser("remove-skills", help="remove the Talent Search skills this app installed (only those)")
     rem.add_argument("--claude-code", action="store_true", help="only from ~/.claude/skills")
     rem.add_argument("--codex", action="store_true", help="only from ~/.agents/skills")

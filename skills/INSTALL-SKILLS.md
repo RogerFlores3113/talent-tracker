@@ -1,10 +1,16 @@
-# Install the Talent Search skills (for Claude Code or Codex)
+# Install the Talent Search skills
+
+**Easiest for a person:** open the Connect AI page in Talent Search and press **Install skills**. It adds the skills to Claude Code and Codex if they are on this computer, after showing the files. For the Claude app (desktop or claude.ai), press **Get the Claude plugin**, then in Claude go to Customize > Plugins > Add > Upload plugin and pick `talent-search.plugin`. Plugins added in the Claude app also show up in Claude Code.
+
+**Claude Code plugin route (gets updates):** `claude plugin marketplace add RogerFlores3113/talent-tracker`, then `claude plugin install talent-search@talent-tracker`. In the Claude app: Customize > Plugins > Add marketplace > `RogerFlores3113/talent-tracker`.
+
+**The rest of this file is for an AI coding agent (Claude Code or Codex)** that was asked to copy the skill folders.
 
 You are an AI coding agent (Claude Code or Codex). A person asked you to install the Talent Search skills. Follow these steps exactly. Do not change anything else.
 
 The skills are the folders next to this file named `talent-search-*`, each with a `SKILL.md`. (They are bundled with the Talent Search app. If you were not given this folder's path, the Connect AI page in Talent Search shows it.)
 
-**Easiest way:** if the `talent` command is available, run `talent install-skills --claude-code` (or `--codex`). It lists every file first (new, updated or unchanged), never overwrites a file the person edited, and does the label files for you. Without a terminal to answer a question it refuses to install unless you add `--yes`, and you add `--yes` only after the person said yes. If it is not available, follow the steps below.
+**Easiest way:** if the `talent` command is available, run `talent install-skills` (every app it finds; or `--claude-code` or `--codex`). It lists every file first (new, updated or unchanged), never overwrites a file the person edited, and does the label files for you. Without a terminal to answer a question it refuses to install unless you add `--yes`, and you add `--yes` only after the person said yes. If it is not available, follow the steps below.
 
 ## 0. Can you ask the person?
 
@@ -55,6 +61,6 @@ Read back the destination folders, confirm each `SKILL.md` starts with `---` and
 
 Only after the person confirms the list, delete the files you wrote in `talent-search-*` folders that contain `.installed-by-talent-search`, and only a file whose SHA-256 still matches the recorded one. Keep any file the person changed or added, and say which. Leave every other folder alone. (`talent remove-skills` does this and asks first.) A skill the person edited stays, but it loses its `.installed-by-talent-search` label, so it is the person's own from then on and a later install leaves it alone.
 
-## Claude Desktop
+## Claude app (desktop or claude.ai)
 
-Claude Desktop does not read a skills folder. The person can download a zip from the Connect AI page in Talent Search (all skills in one zip, or one zip per skill), or run `talent install-skills --zip skills.zip`, and add each small zip under Customize > Skills.
+There is no skills folder to copy into. The person presses **Get the Claude plugin** on the Connect AI page (or you run `talent install-skills --plugin`, which saves `talent-search.plugin` in their Downloads folder), then in Claude opens Customize > Plugins > Add > Upload plugin and picks that file. The older way, one zip per skill under Customize > Skills, is still on the Connect AI page.

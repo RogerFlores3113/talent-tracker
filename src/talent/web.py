@@ -1746,11 +1746,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return None
         try:
             if not tour.state(store)["active"]:
+                if request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
+                    return None  # never over the install buttons on their own
                 if request.query_params.get("tour") in tour.MODES:
                     tour.start(store, request.query_params["tour"])
                 elif tour.should_autostart(store):
                     tour.start(store, tour.FULL)
-            return tour.payload(store)
+            payload = tour.payload(store)
+            if payload and request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
+                if payload["steps"][payload["step"]].get("path") != "/connect":
+                    return None  # a tour running elsewhere doesn't cover the install buttons
+            return payload
         except Exception:  # the tour must never break a page
             log.exception("tour state could not be read")
             return None
@@ -1799,9 +1805,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error=str(exc))
         if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
             return RedirectResponse("/?" + urlencode({"notice": removal_notice(removed, "the demo data")}), status_code=303)
-        if mode == tour.SHORT:
-            return back(request)
-        return RedirectResponse("/", status_code=303)
+        return back(request)  # stay on the page the tour was ended from
 
     @app.post("/tour/skip")
     async def tour_skip(request: Request):
@@ -3531,6 +3535,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             skill_names=skills.skill_names(),
             desktop_steps=skills.DESKTOP_STEPS[0],
             skills_source=str(skills.source_dir()),
+            detected=skills.detected_targets(),
+            skill_plan_missing=[{"target": t, "label": skills.TARGET_LABELS[t]} for t in skills.TARGETS
+                                if not skills.detect(t)],
+            plugin_file=skills.PLUGIN_FILE,
+            plugin_saved=(skills.downloads_dir() / skills.PLUGIN_FILE).is_file(),
+            skill_info=skills.skill_info(),
+            plugin_steps=skills.PLUGIN_STEPS,
+            plugin_commands=skills.CLAUDE_CODE_PLUGIN_COMMANDS,
+            marketplace_repo=skills.REPO,
+            can_open_claude=skills.claude_app_command() is not None,
             skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
                         for n in skills.skill_names()],
         )
@@ -3548,6 +3562,49 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
         return Response(skills.build_zip(), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
+
+    @app.get("/connect/skills.plugin")
+    def skills_plugin():
+        """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
+        return Response(skills.build_plugin(), media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
+
+    @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
+    def skills_plugin_save(request: Request):
+        """Write talent-search.plugin to Downloads and show it in the file manager (best effort)."""
+        try:
+            path = skills.write_plugin()
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_plugin_result.html", error=integrations.friendly_error(exc))
+        shown = skills.reveal(path)
+        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown, steps=skills.PLUGIN_STEPS,
+                    can_open_claude=skills.claude_app_command() is not None, plugin_file=skills.PLUGIN_FILE)
+
+    @app.post("/connect/skills/claude-app/open", response_class=HTMLResponse)
+    def skills_open_claude(request: Request):
+        """Start the Claude desktop app (best effort)."""
+        ok = skills.open_claude_app()
+        return HTMLResponse('<span class="fine" role="status">' + (
+            "Opening Claude..." if ok else "Couldn't open Claude. Open it yourself.") + "</span>")
+
+    @app.post("/connect/skills/all/{action}", response_class=HTMLResponse)
+    async def connect_skills_all(request: Request, action: str):
+        """One preview and one confirm for every AI app found on this computer (or the ones named in 'targets')."""
+        if action not in ("preview-install", "install"):
+            raise HTTPException(404)
+        form = await request.form()
+        named = [t for t in str(form.get("targets") or "").split(",") if t in skills.TARGETS]
+        try:
+            if action == "preview-install":
+                result = skills.plan_all(named or None)
+            else:
+                result = skills.install_all(named or skills.detected_targets())
+        except Exception as exc:
+            integrations.log_failure(exc)
+            return page(request, "_skills_all_result.html", action="error", error=integrations.friendly_error(exc))
+        return page(request, "_skills_all_result.html", action=action, result=result,
+                    labels=skills.TARGET_LABELS, targets_csv=",".join(result["targets"]))
 
     @app.post("/connect/skills/{target}/{action}", response_class=HTMLResponse)
     def connect_skills(request: Request, target: str, action: str):

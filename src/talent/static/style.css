@@ -645,3 +645,9 @@ td.pickcell, th.pickcell { width: 1%; text-align: center; }
   .cal-chip.clash { border-width: 3px; }
   .stage-form.unsent select[data-stage-pick], #tbl-move.unsent { border-style: dashed; }
 }
+
+/* Connect page: long commands wrap, and the three app cards stack on mid-size screens. */
+.connect-grid pre.code, #claude-code-panel pre.code { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+@media (max-width: 1300px) { .connect-three { grid-template-columns: 1fr; } }
+.btn.link { background: none; border: none; padding: 0; min-height: 0; text-decoration: underline; color: var(--accent, inherit); font: inherit; cursor: pointer; }
+.btn.link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

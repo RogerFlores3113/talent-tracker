@@ -16,7 +16,9 @@
   <p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>
   {% endfor %}
   {% if result['items'] %}
+  <div role="group" aria-label="Add skills to {{ result['base'] }}">
   <button class="btn primary" autofocus aria-describedby="skills-{{ target }}-sum" hx-post="/connect/skills/{{ target }}/install" hx-target="#skills-{{ target }}-result">Add these files</button>
+  </div>
   {% else %}<p tabindex="-1" autofocus>Nothing to add for {{ app }}.</p>
   {% endif %}
 {% elif action == 'install' %}
@@ -25,7 +27,7 @@
   <p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>
   {% endfor %}
   {% if result['edited'] %}<p class="flash warn">Edited by you, kept as they are: {% for f in result['edited'] %}<code>{{ f }}</code>{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
-  <p class="fine">Start a new {{ app }} session to pick them up.</p>
+  <p><strong>Start a new chat in {{ app }} (or restart it) so it picks up the skills.</strong></p>
   <details class="fine"><summary>Files written</summary><ul class="plain code-list">{% for f in result['written'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul></details>
 {% elif action == 'preview-remove' %}
   {% if result['folders'] or result['left'] %}
