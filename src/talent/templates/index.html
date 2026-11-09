@@ -24,6 +24,18 @@
       <input type="text" name="tag" value="{{ tag }}" placeholder="Has skill (exact)" aria-label="Skill filter">
     </div>
   </details>
+  <details class="search-tips">
+    <summary>Search tips</summary>
+    <ul class="tips">
+      <li><code>react python</code> finds people who have both words (this is the default).</li>
+      <li><code>"machine learning"</code> in quotes finds those words together.</li>
+      <li><code>python OR go</code> finds people with either word. Write OR in capitals.</li>
+      <li><code>-recruiter</code> or <code>NOT manager</code> leaves out people who have that word.</li>
+      <li><code>title:engineer</code>, <code>company:acme</code>, <code>location:sf</code>, <code>skill:python</code> and <code>source:referral</code> narrow to one field.</li>
+      <li>Example: <code>title:engineer "machine learning" python OR go -recruiter</code>. Brackets are ignored.</li>
+    </ul>
+    <p class="fine">More filters (skills, remote, years of experience, last contacted) are on the <a href="/candidates">Candidates</a> page, where you can also save a search.</p>
+  </details>
 </form>
 {% endif %}
 <section id="results" aria-live="polite">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>

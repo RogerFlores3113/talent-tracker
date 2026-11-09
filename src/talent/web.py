@@ -33,6 +33,7 @@ from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import chase, desk, opsreview
+from . import searchquery
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -508,7 +509,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"today": actions.action_items(store), "jobs": store.list_jobs("open"),
+        return {"saved_searches": store.list_saved_searches(counts=True, limit=6),
+                "today": actions.action_items(store), "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
@@ -528,7 +530,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
               client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
-              color_pick: str = "", cf: str = ""):
+              color_pick: str = "", cf: str = "",
+              title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
+              exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
+              added_days: str = "", has_email: str = "", has_linkedin: str = ""):
         per = 100
         # The chips above the table are submit buttons: pressing the colour already chosen clears it.
         color = (color_pick if color_pick != color else "") if color_pick else color
@@ -541,7 +546,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         job_id = int(job) if job.strip().isdigit() else None
         pipe = pipe if pipe in opsreview.PIPES else ""
         day_n = int(days) if days.strip().isdigit() else None
-        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n)
+        # The "More filters" (searchquery.py): cleaned once, used for the search and kept in every link.
+        more_params = searchquery.clean_params(dict(
+            title=title, company=company, skills=skills, skill_mode=skill_mode, remote=remote, exp_min=exp_min,
+            exp_max=exp_max, contacted=contacted, contacted_days=contacted_days, added_days=added_days,
+            has_email=has_email, has_linkedin=has_linkedin))
+        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n,
+                      **searchquery.search_kwargs(more_params))
         page_no = max(1, page_no)
         sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
@@ -576,9 +587,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
-                                      days="" if not pipe or day_n is None else day_n).items() if v != ""}
+                                      days="" if not pipe or day_n is None else day_n,
+                                      **more_params).items() if v != ""}
         ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
-                   job=job_id or "", client=client, stage=stage, keep=keep,
+                   job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
+                   more_open=any(k in more_params for k in searchquery.MORE_KEYS),
+                   active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
+                   saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
+                   min_years_note="exp_min" in more_params,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
                    colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
@@ -586,6 +602,88 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
                     **store.membership_choices(job_id))
+
+    def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
+                     more: dict[str, str]) -> list[dict[str, str]]:
+        """One chip per filter that is on, each linking to the same table with just that filter off."""
+        names = {"tag": "Skill", "location": "Location", "source": "Found via", "client": "Client", "stage": "Stage",
+                 "title": "Title", "company": "Company"}
+        out: list[dict[str, str]] = []
+
+        def chip(label: str, *drop: str) -> None:
+            rest = {k: v for k, v in keep.items() if k not in drop}
+            if "q" not in drop and q:
+                rest["q"] = q
+            rest.update(sort=sort, dir=dir)
+            out.append({"label": label, "href": "/candidates?" + urlencode(rest)})
+
+        for k, label in names.items():
+            if keep.get(k):
+                chip(f"{label}: {keep[k]}", k)
+        if job_id is not None:
+            chip("In one job", "job", "stage")
+        if "skills" in more:
+            chip(("All of: " if more.get("skill_mode") == "all" else "Any of: ") + more["skills"], "skills", "skill_mode")
+        if "remote" in more:
+            chip("Remote", "remote")
+        if "exp_min" in more or "exp_max" in more:
+            lo, hi = more.get("exp_min"), more.get("exp_max")
+            chip(f"{lo} to {hi} years" if lo and hi else f"{lo}+ years" if lo else f"Up to {hi} years", "exp_min", "exp_max")
+        c = more.get("contacted")
+        if c:
+            n = more.get("contacted_days", "")
+            chip("Never contacted" if c == "never" else f"Last contacted over {n} days ago" if c == "older"
+                 else f"Contacted in the last {n} days", "contacted", "contacted_days")
+        if "added_days" in more:
+            chip(f"Added in the last {more['added_days']} days", "added_days")
+        if "has_email" in more:
+            chip("Has email", "has_email")
+        if "has_linkedin" in more:
+            chip("Has LinkedIn", "has_linkedin")
+        return out
+
+    # ------------------------------------------------------ saved searches
+    @app.post("/saved-searches")
+    async def saved_search_create(request: Request):
+        form = await request.form()
+        params = searchquery.clean_params({k: str(v) for k, v in form.items()})
+        try:
+            row = store.save_search(str(form.get("search_name") or ""), params, by="app")
+        except ValueError as exc:
+            return back(request, "/candidates", error=str(exc))
+        return RedirectResponse("/candidates?" + urlencode([*params.items(), ("notice", f"Saved search “{row['name']}”.")]),
+                                status_code=303)
+
+    @app.get("/saved-searches/{search_id}")
+    def saved_search_open(search_id: int):
+        """Open a saved search: the Candidates table with its words and filters, and note that it was looked at
+        (so "new" counts only people added after now)."""
+        try:
+            row = store.get_saved_search(search_id)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        store.mark_search_viewed(search_id)
+        return RedirectResponse("/candidates?" + urlencode(row["params"]), status_code=303)
+
+    @app.post("/saved-searches/{search_id}/rename")
+    async def saved_search_rename(request: Request, search_id: int):
+        form = await request.form()
+        try:
+            row = store.rename_saved_search(search_id, str(form.get("search_name") or ""))
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        except ValueError as exc:
+            return back(request, "/candidates", error=str(exc))
+        return back(request, "/candidates", notice=f"Renamed to “{row['name']}”.")
+
+    @app.post("/saved-searches/{search_id}/delete")
+    def saved_search_delete(request: Request, search_id: int):
+        """The recruiter's own action: the AI has no tool that deletes a saved search."""
+        try:
+            row = store.delete_saved_search(search_id)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)

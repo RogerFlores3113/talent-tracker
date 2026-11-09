@@ -39,6 +39,11 @@
   {{ start_options(False) }}
 </section>
 {% endif %}
+{% if saved_searches %}<section class="saved-today" aria-label="Saved searches">
+  <span class="fine">Saved searches:</span>
+  {% for sv in saved_searches %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}">{{ sv.name }} <span class="fine">{{ sv.count }}</span>{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}
+  <a class="fine" href="/candidates">All</a>
+</section>{% endif %}
 <div class="overview">
   <section class="today">
     <div class="sec-head">

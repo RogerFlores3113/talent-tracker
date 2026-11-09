@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .searchquery import parse_query
 from .store import HL_END, HL_START, SearchHit, SearchResult, Store
 
 log = logging.getLogger(__name__)
@@ -233,7 +234,12 @@ class SearchService:
         return "typesense" if self.index is not None and time.monotonic() >= self._down_until else "built-in"
 
     def search(self, query: str = "", **kw: Any) -> SearchResult:
-        if any(kw.get(k) for k in ("tag", "source", "job_id", "client", "stage", "pipe", "color")):  # these filters live in SQLite
+        # These filters live in SQLite, and so does the query language (quotes, OR, minus or NOT, title: and the
+        # other prefixes): Typesense is not asked for any of them, the built-in search answers.
+        if (any(kw.get(k) for k in ("tag", "source", "job_id", "client", "stage", "pipe", "color", "company", "skills",
+                                    "remote", "exp_min", "exp_max", "contacted", "added_days", "added_since",
+                                    "has_email", "has_linkedin"))
+                or parse_query(query).structured):
             return self.store.search_candidates(query, **kw)
         kw.pop("tag", None)
         kw.pop("source", None)
