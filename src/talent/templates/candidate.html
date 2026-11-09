@@ -94,6 +94,7 @@
       {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% set ivnote = interview_note(ivd) %}{% if ivnote %}<div class="fine">How it went: {{ ivnote }}</div>{% endif %}
       {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}: {{ f.text }}</div>{% endfor %}
+      {% if t.kind == 'interview' and t.status != 'cancelled' %}<div class="fine"><a class="link small" href="/candidates/{{ c.id }}/interviews/{{ t.id }}.ics" download title="Downloads a calendar file you can open in your own calendar app.">Add to calendar</a></div>{% endif %}
       {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">

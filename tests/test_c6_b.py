@@ -96,7 +96,7 @@ def test_interviews_page_shows_no_job_with_a_pick_link(store):
     _hfl, _acme, lena = _two_clients(store)
     wed = interviews.week_start() + timedelta(days=2)  # a weekday in the week the page shows, any day it runs
     iv = store.log(lena, "interview", "Client interview", at=f"{wed}T10:00")
-    page = local_client(store).get("/interviews").text
+    page = local_client(store).get("/interviews?view=week").text
     assert "No job" in page and f"/interviews/{iv['id']}/job" in page
 
 

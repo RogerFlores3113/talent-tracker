@@ -2099,13 +2099,42 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                 status_code=303)
 
     @app.get("/interviews", response_class=HTMLResponse)
-    def interviews_page(request: Request, week: str = ""):
-        """The week: every session booked across all jobs, grouped into loops, with clashes and what's owed flagged."""
+    def interviews_page(request: Request, week: str = "", view: str = "", month: str = ""):
+        """The month calendar (the default), or with ?view=week or ?week=<day> the week: every session booked
+        across all jobs, grouped into loops, with clashes and what's owed flagged."""
+        calendar_prompt = recipes.log_calendar_interviews()
+        if week or view == "week":
+            try:
+                day = interviews.week_day(week)
+            except ValueError:
+                day = None
+            return page(request, "interviews.html", w=interviews.week(store, day), calendar_prompt=calendar_prompt)
         try:
-            day = interviews.week_day(week)
+            first = interviews.month_first(month)
         except ValueError:
-            day = None
-        return page(request, "interviews.html", w=interviews.week(store, day))
+            first = interviews.month_first("")
+        return page(request, "interviews_month.html", m=interviews.month(store, first), calendar_prompt=calendar_prompt)
+
+    @app.get("/interviews.ics")
+    def interviews_ics(month: str = ""):
+        """The month's interviews (or every upcoming one) as a calendar file for the recruiter's own calendar app."""
+        try:
+            first = interviews.month_first(month) if month.strip() else None
+        except ValueError:
+            raise HTTPException(400, "month is like 2026-11.")
+        name = f"interviews-{first.strftime('%Y-%m')}.ics" if first else "interviews-upcoming.ics"
+        return Response(interviews.ics_for_month(store, first), media_type="text/calendar; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/candidates/{candidate_id}/interviews/{entry_id:int}.ics")
+    def interview_ics(candidate_id: int, entry_id: int):
+        """One interview as a calendar file (Add to calendar on the profile)."""
+        try:
+            body = interviews.ics_for_interview(store, candidate_id, entry_id)
+        except LookupError:
+            raise HTTPException(404, "Interview not found")
+        return Response(body, media_type="text/calendar; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="interview-{entry_id}.ics"'})
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/session")
     async def add_session_form(request: Request, candidate_id: int, entry_id: int):
