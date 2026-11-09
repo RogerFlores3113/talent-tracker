@@ -6,6 +6,13 @@
 </div>
 {%- endmacro %}
 
+{#- The colour bubble: a real button that cycles none, red, orange, yellow, green, blue, purple. With script it saves
+    in place (data-color-bubble in app.js); without, the form posts and comes back to the page. -#}
+{% macro color_bubble(c, big=False) -%}
+{% set i = color_info(c.color) %}
+<form class="cbub-form" method="post" action="/candidates/{{ c.id }}/color"><input type="hidden" name="color" value="{{ i.next }}"><button type="submit" class="cbub{{ ' big' if big }}" data-color-bubble data-cid="{{ c.id }}" data-color="{{ i.color }}" data-next="{{ i.next }}" data-prev="{{ i.prev }}" aria-label="{{ i.aria }}" title="{{ i.title }}"><span aria-hidden="true">{{ i.letter }}</span></button></form>
+{%- endmacro %}
+
 {% macro chips(tags, link=True) -%}
 {% if tags %}<span class="chips">{% for t in tags %}{% if link %}<a class="chip" href="/candidates?tag={{ t | urlencode }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
 {%- endmacro %}

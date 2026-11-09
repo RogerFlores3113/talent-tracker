@@ -37,7 +37,7 @@ from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
 from .mcp_views import MIME, URIS, tool_meta, view_html
 from .paths import app_url
-from .store import (AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
+from .store import (clean_color, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
                     to_dt)
@@ -66,6 +66,7 @@ except what you read.
   is the recruiter's to change in the app, so don't rename a stage to a name that counts differently. Once you have
   cleared or replaced several saved values on one person in an hour, more changes to that person wait for the
   recruiter.
+- The recruiter's colored bubbles on the Candidates table are theirs: use set_candidate_color only when asked.
 - The recruiter sees what you write under Changes in the app and can undo it there: people you add, profile
   edits, pipeline adds and stage moves, jobs you create or edit, stage edits, to-dos you add or complete,
   interviews you cancel or move, outcomes you record, and interview feedback you save. Notes, calls, emails,
@@ -650,7 +651,7 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
     the note, the candidate's own lines sit inside a fresh marker (fenced), and the recruiter's words come after."""
     out = [_line(c)]
     for k, label in (("email", "Email"), ("phone", "Phone"), ("linkedin_url", "LinkedIn"), ("website", "Website"),
-                     ("source", "Source"), ("last_contacted_at", "Last contacted"), ("updated_at", "Last updated")):
+                     ("source", "Source"), ("color", "Color tag"), ("last_contacted_at", "Last contacted"), ("updated_at", "Last updated")):
         if c.get(k):
             out.append(f"{label}: {_local(c[k]) if k.endswith('_at') else c[k]}")
     if c.get("tags"):
@@ -732,7 +733,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def search_candidates(query: str = "", location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, limit: int = 10,
                           job_id: int | None = None, client: str | None = None,
-                          stage: str | None = None) -> CallToolResult:
+                          stage: str | None = None, color: str | None = None) -> CallToolResult:
         """Search saved candidates by any words: skills, past or current companies, titles, names, places,
         the jobs they're in (title or company, like "Acme Fintech") and their timeline notes and interviews.
 
@@ -749,12 +750,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         is in and their stage there, so "already in my pipeline?" takes one call.
         job_id, client and stage narrow to people in that job, on that client's jobs, or in that stage name
         (they all have to hold in the same pipeline, so job_id 4 with stage "Onsite" is who is in Onsite on job 4).
+        color narrows to people with that color tag (red, orange, yellow, green, blue or purple; none for untagged).
         With no query this lists them, most recently updated first.
         """
         q = (query or "").strip()
         is_id, _ = store.lookup_exact(q)
         limit = max(1, min(limit, 50))
         member = {"job_id": job_id, "client": client, "stage": stage}
+        if color and color.strip():
+            member["color"] = clean_color(color) or "none"
         if stage and stage.strip() and job_id:
             store.resolve_stage(job_id, stage)  # a stage the job doesn't have gets the plain error
         elif job_id:
@@ -765,7 +769,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
                                                  "tags", "email", "linkedin_url", "source", "last_contacted_at",
-                                                 "updated_at")}
+                                                 "updated_at", "color")}
             c["jobs"] = [_slim({"job_id": p["job_id"], "job": _job_name({"title": p["job_title"],
                                                                          "company": p.get("job_company")}),
                                 "stage": p["stage"]}) for p in store.candidate_pipelines(c["id"])]
@@ -1129,6 +1133,48 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if lead:
             store.log(candidate_id, "note", _lead_note(lead, lead_url), source="AI app")
             out["note"] = _lead_ask(lead)
+        return _said(sentence, out)
+
+    @mcp.tool(annotations=EDIT)
+    def set_candidate_color(candidate_id: int, color: str) -> CallToolResult:
+        """Set the color tag on one candidate: red, orange, yellow, green, blue or purple, or none to clear it.
+
+        The recruiter uses these colored bubbles on the Candidates table to sort and filter people, so only change one
+        when the recruiter asks you to (for example "mark the strong ones green"). The colors have no fixed meaning;
+        ask what each one means to them if it matters. Replacing or clearing a color someone already has follows the
+        same rules as update_candidate (it can wait for the recruiter's review in Cautious mode). Every change is
+        recorded with the old value, and the recruiter can undo it in the app.
+        """
+        want = clean_color(color)
+        current = store.get_candidate(candidate_id)
+        data: dict[str, Any] = {"color": want}
+        who = f"{quoted(current['name'])} (id {candidate_id})"
+        clearing = want is None and current.get("color") is not None
+        if clearing and not store.ai_clears_left(1):
+            raise ValueError(f"No change made. Your AI app has already cleared {AI_CLEAR_CAP} saved values this hour, "
+                             "across everyone. Ask the recruiter to clear more in the app, or try again later.")
+        over = store.ai_overwrites(candidate_id, data)
+        waiting = None
+        if over and review.cautious(store):  # replacing a saved color waits for review; a first color applies
+            waiting = review.queue_profile(store, candidate_id, data, None, over, session)
+            over = []
+        if not waiting and not store.ai_edit_budget_left(candidate_id, over):
+            raise ValueError("No change made. " + _budget_text(current["name"]))
+        if over and not store.ai_overwrites_left(len(over)):
+            raise ValueError(_cap_text())
+        out: dict[str, Any] = {}
+        if waiting:
+            sentence = f"Nothing changed on {who} yet. " + _wait_text(waiting)
+            out.update(_slim(current))
+            out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
+        else:
+            cand = store.update_candidate(candidate_id, by="ai", color=want)
+            changed = cand.pop("_changed", [])
+            sentence = (f"Set the color of {who} to {want}." if changed and want else
+                        f"Cleared the color of {who}." if changed else
+                        f"Nothing to change on {who}; the color was already {want or 'none'}.")
+            out.update({**_slim(cand), "changed": changed})
+        out["color"] = out.get("color") or "none"
         return _said(sentence, out)
 
     @mcp.tool(annotations=WRITE)
@@ -3305,6 +3351,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 ARG_ALIASES = {
     "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
                        "summary": "about", "linkedin": "linkedin_url"},
+    "set_candidate_color": {"colour": "color", "flag": "color", "id": "candidate_id"},
     "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
                          "summary": "about", "linkedin": "linkedin_url"},
     "record_offer": {"base_salary": "salary", "base": "salary", "compensation": "salary", "comp": "salary",
@@ -3421,6 +3468,8 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
             store.get_job(args["job_id"])
         if isinstance(args.get("candidate_id"), int):
             store.get_candidate(args["candidate_id"])
+        if name == "set_candidate_color":
+            clean_color(args.get("color"))  # a color that isn't one of the six is refused now, not held
         if name == "set_followup_sequence":
             outreach.clean_start(args.get("enroll_from", "today"))
             outreach.clean_steps(args.get("steps"))  # names wrong keys and too few steps

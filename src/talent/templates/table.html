@@ -7,7 +7,7 @@
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
   <div class="actions-inline"><a class="btn" href="/export.csv">Export CSV</a> <a class="btn primary" href="/candidates/new">Add</a></div>
 </div>
-<form class="tablebar" method="get" action="/candidates">
+<form class="tablebar" id="tablebar-form" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search" aria-label="Search candidates">
   <select name="tag" aria-label="Filter by skill" data-autosubmit>
     <option value="">Any skill</option>
@@ -30,17 +30,25 @@
     <option value="">Any stage</option>
     {% for st in stage_choices %}<option value="{{ st }}" {{ 'selected' if st | lower == stage | lower }}>{{ st }}</option>{% endfor %}
   </select>{% endif %}
-  <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">
+  <input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}"><input type="hidden" name="color" value="{{ color }}">
+  {% if q %}<label class="checkline"><input type="checkbox" name="cf" value="1" {{ 'checked' if colored_first }} data-autosubmit> Colored first</label>{% endif %}
   <button class="btn" type="submit">Go</button>
   {% if q or keep %}<a href="/candidates" class="small">Clear</a>{% endif %}
 </form>
 {% if pipe_label %}<p class="fine">Showing people in {{ 'this job' if job else 'open jobs' }}: <strong>{{ pipe_label }}</strong>. <a href="/clients/review">Back to the Ops review</a></p>{% endif %}
 {% if suggestion and corrected %}<p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ suggestion }}</strong>.</p>
 {% elif suggestion %}<p class="suggest">Did you mean <a href="/candidates?{{ dict(keep, q=suggestion) | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
-{% if q %}<p class="fine">Sorted by best match.</p>{% endif %}
+<div class="colorbar" role="group" aria-label="Color tags">
+  <span class="fine">Color:</span>
+  {% for name in COLORS %}{% set n = color_counts[name] %}<button type="submit" form="tablebar-form" name="color_pick" value="{{ name }}" class="cchip{{ ' on' if color == name }}" aria-pressed="{{ 'true' if color == name else 'false' }}" title="{{ 'Show everyone' if color == name else 'Show only ' ~ name }}"><span class="cbub small" data-color="{{ name }}" aria-hidden="true">{{ name[0] | upper }}</span> {{ name | capitalize }} <span class="n" data-color-count="{{ name }}">{{ n }}</span></button>{% endfor %}
+  <button type="submit" form="tablebar-form" name="color_pick" value="none" class="cchip{{ ' on' if color == 'none' }}" aria-pressed="{{ 'true' if color == 'none' else 'false' }}" title="{{ 'Show everyone' if color == 'none' else 'Show only people with no color' }}"><span class="cbub small" data-color="" aria-hidden="true"></span> None <span class="n" data-color-count="none">{{ color_counts['none'] }}</span></button>
+  {% if color %}<a href="/candidates?{{ dict(keep, color='') | urlencode }}" class="small">Show all colors</a>{% endif %}
+</div>
+<p class="fine">{% if q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Tick Colored first to group by color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Color to group by color again.{% endif %}</p>
 <div class="table-wrap">
 <table class="dense">
   <thead><tr>
+    <th class="colorcell">{% if q %}Color{% else %}<a href="/candidates?{{ dict(keep, sort='color', dir='desc' if sort == 'color' and dir == 'asc' else 'asc') | urlencode }}">Color{% if sort == 'color' %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
     {% for key, label in [('name','Name'),('title','Title'),('company','Company'),('location','Location'),('contacted','Last contacted'),('updated','Updated')] %}
     <th>{% if q %}{{ label }}{% else %}<a href="/candidates?{{ dict(keep, sort=key, dir= 'asc' if sort == key and dir == 'desc' else ('desc' if sort == key else ('desc' if key in ('contacted','updated') else 'asc'))) | urlencode }}">{{ label }}{% if sort == key %} {{ '▲' if dir == 'asc' else '▼' }}{% endif %}</a>{% endif %}</th>
     {% endfor %}

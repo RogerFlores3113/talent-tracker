@@ -135,6 +135,7 @@ clearing a field with an empty string) and move stages, never delete.
 | `get_candidate(id)` | full record, work history, jobs, timeline; in-chat card |
 | `save_candidate(name, ..., work_history?)` | add or merge by email/LinkedIn; warns on same-name matches |
 | `update_candidate(id, ...)` | edit fields; empty string clears |
+| `set_candidate_color(id, color)` | red, orange, yellow, green, blue, purple or none: the colored bubble on the Candidates table (guarded like update_candidate, Undo works) |
 | `log_activity(candidate_id, kind, summary, when?, job_id?)` | timeline entry; how Gmail/Calendar data arrives via the AI app's own connectors |
 | `create_job`, `update_job`, `list_jobs`, `edit_job_stages` | jobs with custom stages |
 | `add_to_pipeline`, `move_stage`, `job_pipeline` | per-job pipeline; in-chat board |
