@@ -21,6 +21,7 @@
   {% if exact_count %}<a class="btn" href="/candidates/duplicates/merge-exact">Merge all exact email or LinkedIn matches ({{ exact_count }})</a>{% endif %}
   <form method="post" action="/candidates/duplicates/dismiss-many" id="bulk-dismiss" class="inline">
     <label class="check"><input type="checkbox" data-check-all data-check-name="pair" aria-label="Tick every pair shown"> <span class="fine">Tick every pair shown</span></label>
+    <button class="btn primary" type="submit" formaction="/candidates/duplicates/merge-review">Merge ticked pairs</button>
     <button class="btn" type="submit">Not the same person, for the ticked pairs</button>
   </form>
 </div>

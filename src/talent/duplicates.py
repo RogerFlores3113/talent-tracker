@@ -223,12 +223,16 @@ def exact_matches(store: Store) -> list[dict[str, Any]]:
     return out
 
 
-def merge_pairs(store: Store, pairs: list[tuple[int, int]]) -> dict[str, Any]:
-    """Merge each (keep, other), the recruiter's choice in the app. A person already folded into another by an
-    earlier pair in the list goes to that person instead. Returns {"merged": n, "skipped": [reasons]}."""
+def merge_pairs(store: Store, pairs: list[tuple]) -> dict[str, Any]:
+    """Merge each (keep, other) or (keep, other, primary_email), the recruiter's choice in the app. A person
+    already folded into another by an earlier pair in the list goes to that person instead. Returns
+    {"merged": n, "skipped": [reasons], "lines": [one plain line per merged pair]}. The caller saves ONE backup
+    for the whole batch first."""
     into: dict[int, int] = {}
-    merged, skipped = 0, []
-    for keep, other in pairs:
+    merged, skipped, lines = 0, [], []
+    for pair in pairs:
+        keep, other = pair[0], pair[1]
+        primary = pair[2] if len(pair) > 2 else None
         while keep in into:
             keep = into[keep]
         while other in into:
@@ -236,13 +240,22 @@ def merge_pairs(store: Store, pairs: list[tuple[int, int]]) -> dict[str, Any]:
         if keep == other:
             continue
         try:
-            store.merge_candidates(keep, other, by="app")
+            names = (store.get_candidate(keep)["name"], store.get_candidate(other)["name"])
+            store.merge_candidates(keep, other, by="app", primary_email=primary)
         except (LookupError, ValueError) as exc:
             skipped.append(f"{keep} and {other}: {exc}")
             continue
         into[other] = keep
         merged += 1
-    return {"merged": merged, "skipped": skipped}
+        lines.append(f"Kept {names[0]} (id {keep}), merged in {names[1]} (id {other}). "
+                     f"Emails now: {', '.join(store.all_emails(keep)) or 'none'}.")
+    return {"merged": merged, "skipped": skipped, "lines": lines}
+
+
+def pair_details(store: Store, keep: int, other: int) -> dict[str, Any]:
+    """Both people of a pair as saved, with every address each has, for the "who is kept" step."""
+    return {"keep": keep, "other": other, "a": store.get_candidate(keep), "b": store.get_candidate(other),
+            "emails": list(dict.fromkeys([*store.all_emails(keep), *store.all_emails(other)]))}
 
 
 def plausible_for(store: Store, c: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

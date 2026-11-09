@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> None:
 
         store = Store(db_path())
         if cmd == "export-csv":
-            Path(args.file).write_text(importers.export_csv(store), encoding="utf-8", newline="")
+            Path(args.file).write_bytes(importers.export_csv_bytes(store))
             print(f"Wrote {store.count_candidates()} candidates to {args.file}.")
         else:
             header, rows = importers.read_csv(importers.decode(Path(args.file).read_bytes()))

@@ -66,6 +66,24 @@
     {% elif replace_stages %}<input type="hidden" name="replace_stages" value="1">{% endif %}
     {% if preview.closed_jobs or reopen_jobs %}<label class="check"><input type="checkbox" name="reopen_jobs" value="1" {{ 'checked' if reopen_jobs }}>
       <span>Open {{ 'this job' if (preview.closed_jobs or preview.reopened) | length == 1 else 'these jobs' }} again and sync {{ 'its' if (preview.closed_jobs or preview.reopened) | length == 1 else 'their' }} rows: {% for c in (preview.closed_jobs or []) %}{{ c.job }}{{ ', ' if not loop.last }}{% endfor %}{{ preview.reopened | join(', ') }}. Left unticked, a job you closed here stays closed and nobody is added or moved on it. Changed it? Check again to see the result.</span></label>{% endif %}
+    {% if email_changes %}<fieldset class="panel" id="email-changes"><legend>{{ email_changes | length }} {{ 'person looks' if email_changes | length == 1 else 'people look' }} like existing people with a new email</legend>
+      <p class="fine">Same name and company, but an email we don't have. Update means the file's email becomes their main one and the old one is kept. Add as new person means a second profile. A match that also shares the job is updated unless you say otherwise. Press Check again after you change a choice.</p>
+      <label>For all of them <select name="email_default" aria-label="What to do for every person with a changed email">
+        <option value="" {{ 'selected' if not email_default }}>Update when the job matches, otherwise add as new</option>
+        <option value="update" {{ 'selected' if email_default == 'update' }}>Update this person (add the new email)</option>
+        <option value="new" {{ 'selected' if email_default == 'new' }}>Add as new person</option></select></label>
+      <div class="table-wrap"><table class="dense">
+        <thead><tr><th>Person</th><th>Old email</th><th>New email</th><th>This one</th></tr></thead>
+        <tbody>{% for c in email_changes[:100] %}
+          <tr><td>{{ c.name }}{% if c.company %} <span class="muted">{{ c.company }}</span>{% endif %}{% if c.strong %} <span class="fine">same job</span>{% endif %}</td>
+            <td class="fine">{{ c.old_email or 'more than one match' }}</td><td class="fine">{{ c.new_email }}</td>
+            <td>{% if c.id %}{% set pick = email_picks.get(c.row, '') %}<select name="emailchg_{{ c.row }}" aria-label="What to do with row {{ c.row }}, {{ c.name }}">
+              <option value="" {{ 'selected' if not pick }}>As chosen above: {{ 'update' if c.action == 'update' else 'add as new person' }}</option>
+              <option value="update" {{ 'selected' if pick == 'update' }}>Update this person (add the new email)</option>
+              <option value="new" {{ 'selected' if pick == 'new' }}>Add as new person</option></select>{% else %}Add as new person{% endif %}</td></tr>{% endfor %}
+        </tbody></table></div>
+      {% if email_changes | length > 100 %}<p class="fine">The first 100 are listed. The choice above covers all {{ email_changes | length }}.</p>{% endif %}
+    </fieldset>{% endif %}
     {% for p in panels %}{{ panel_list(p, 'preview') }}{% endfor %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}

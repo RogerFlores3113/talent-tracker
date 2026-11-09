@@ -747,6 +747,66 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice += f" {len(res['skipped'])} could not be merged and were left alone."
         return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
 
+    def _current_pairs() -> dict[tuple[int, int], dict[str, Any]]:
+        """Every pair the finder shows right now, either way round, so only real pairs can be merged."""
+        out: dict[tuple[int, int], dict[str, Any]] = {}
+        for p in duplicates.find_pairs(store):
+            out[(p["keep"], p["other"])] = p
+            out[(p["other"], p["keep"])] = p
+        return out
+
+    @app.post("/candidates/duplicates/merge-review", response_class=HTMLResponse)
+    async def duplicates_merge_review(request: Request):
+        """App window only. Step one of "Merge ticked pairs": who is kept in each pair, and what happens to the
+        other one. Nothing changes until the recruiter confirms. The AI has no merge tool."""
+        form = await request.form()
+        known = _current_pairs()
+        seen: set[frozenset[int]] = set()
+        rows = []
+        for a, b in _pair_ids(form):
+            if (a, b) not in known or frozenset((a, b)) in seen:
+                continue
+            seen.add(frozenset((a, b)))
+            try:
+                rows.append({**duplicates.pair_details(store, a, b), "reasons": known[(a, b)]["reasons"]})
+            except NotFound:
+                continue
+        if not rows:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        return page(request, "duplicates_review.html", rows=rows[:500], count=len(rows), cut=max(0, len(rows) - 500))
+
+    @app.post("/candidates/duplicates/merge-ticked")
+    async def duplicates_merge_ticked(request: Request):
+        """App window only. Merges the confirmed pairs with ONE backup for the whole batch. Each pair keeps the
+        person chosen (the more complete one unless the recruiter flipped it) and the main email chosen. The AI has
+        no merge tool, and the store refuses a merge from an AI session too."""
+        form = await request.form()
+        known = _current_pairs()
+        chosen: list[tuple] = []
+        for a, b in _pair_ids(form):
+            if (a, b) not in known:
+                continue
+            value = f"{a}-{b}"
+            win = str(form.get(f"keep_{value}") or a)
+            keep, other = (b, a) if win == str(b) else (a, b)
+            primary = str(form.get(f"primary_{value}") or "").strip() or None
+            chosen.append((keep, other, primary))
+        if not chosen:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        try:
+            importers.backup_before_import(store, reason="merge")  # one backup for the whole batch
+        except ValueError as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}),
+                                    status_code=303)
+        res = duplicates.merge_pairs(store, chosen)
+        n = res["merged"]
+        notice = f"Merged {n} pair{'' if n == 1 else 's'}. One backup was saved first for all of them."
+        if res["skipped"]:
+            notice += f" {len(res['skipped'])} could not be merged and were left alone."
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
+
     @app.post("/candidates/duplicates/dismiss-many")
     async def duplicates_dismiss_many(request: Request):
         """App window only: the ticked pairs are different people. They never come back."""
@@ -897,16 +957,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if candidate_id == other_id:
             raise HTTPException(404, "Pick two different people")
         return page(request, "merge.html", keep=store.candidate_detail(candidate_id, timeline_limit=5),
-                    other=store.candidate_detail(other_id, timeline_limit=5))
+                    other=store.candidate_detail(other_id, timeline_limit=5),
+                    emails=list(dict.fromkeys([*store.all_emails(candidate_id), *store.all_emails(other_id)])))
 
     @app.post("/candidates/{candidate_id}/merge/{other_id}")
-    def merge_form(candidate_id: int, other_id: int):
+    async def merge_form(request: Request, candidate_id: int, other_id: int):
         """App window only. The AI has no merge tool: merging deletes the other record."""
         cand_or_404(candidate_id)
         other = cand_or_404(other_id)
+        form = await request.form()
+        primary = str(form.get("primary_email") or "").strip() or None
         try:
             importers.backup_before_import(store, reason="merge")
-            cand = store.merge_candidates(candidate_id, other_id, by="app")
+            cand = store.merge_candidates(candidate_id, other_id, by="app", primary_email=primary)
         except ValueError as exc:
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'flash_error': str(exc)})}",
                                     status_code=303)
@@ -1149,11 +1212,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except OSError:
             pass  # the panels still show their first lines
 
+    def _email_choices(form: Any) -> tuple[str | None, dict[int, str]]:
+        """The changed-email choices from the form: one for all ("update" or "new", else automatic) and one per
+        row (emailchg_<row>), which win over the one for all."""
+        default = str(form.get("email_default") or "")
+        picks = {int(k[9:]): str(v) for k, v in form.items()
+                 if k.startswith("emailchg_") and k[9:].isdigit() and str(v) in ("update", "new")}
+        return (default if default in ("update", "new") else None), picks
+
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
                  add_stages: bool = True, move_stages: bool = True, client: str | None = None,
                  reopen_jobs: bool = False, replace_stages: bool = True,
-                 allow_backward: bool = False) -> HTMLResponse:
+                 allow_backward: bool = False, email_default: str | None = None,
+                 email_choices: dict[int, str] | None = None) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         prof = importers.sync_profile(store, header)
         client = (client or "").strip()[:120]
@@ -1163,7 +1235,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
                                                    move_stages=move_stages, profile={**(prof or {}), "client": client},
                                                    reopen_jobs=reopen_jobs, replace_stages=replace_stages,
-                                                   allow_backward=allow_backward)
+                                                   allow_backward=allow_backward, email_default=email_default,
+                                                   email_choices=email_choices)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -1178,6 +1251,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
                     replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
                     allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
+                    email_default=email_default or "", email_picks=email_choices or {}, email_changes=(preview or {}).get("email_changes") or [],
                     this_tool=importers.detect_export(header),
                     skipped_email=importers.skipped_email_columns(header, mapping))
 
@@ -1204,7 +1278,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
                         client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
                         replace_stages=form.get("replace_stages") == "1",
-                        allow_backward=form.get("allow_backward") == "1")
+                        allow_backward=form.get("allow_backward") == "1",
+                        email_default=_email_choices(form)[0], email_choices=_email_choices(form)[1])
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -1232,7 +1307,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
                                            profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
-                                           replace_stages=replace_stages, allow_backward=allow_backward)
+                                           replace_stages=replace_stages, allow_backward=allow_backward,
+                                           email_default=_email_choices(form)[0],
+                                           email_choices=_email_choices(form)[1])
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
@@ -1335,7 +1412,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/export.csv")
     def export_csv():
         stamp = datetime.now().strftime("%Y-%m-%d")
-        return Response(importers.export_csv(store), media_type="text/csv; charset=utf-8",
+        return Response(importers.export_csv_bytes(store), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="talent-search-{stamp}.csv"'})
 
     @app.get("/backup")

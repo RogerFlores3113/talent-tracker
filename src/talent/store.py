@@ -2235,6 +2235,28 @@ class Store:
             self._dup_count = None
         return added
 
+    def _promote_email(self, candidate_id: int, email: str) -> str | None:
+        """Make one of the person's other addresses their main one; the old main becomes an other. Inside a
+        transaction. Returns the address, or None when it is already the main one or isn't theirs."""
+        row = self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,))
+        old = (row.get("email") or "").lower() if row else ""
+        if not row or email == old or email not in self.other_emails(candidate_id):
+            return None
+        self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = ?", (candidate_id, email))
+        self._conn.execute("UPDATE candidates SET email = ?, updated_at = ? WHERE id = ?",
+                           (email, now_iso(), candidate_id))
+        if old:
+            self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, old))
+        self._dup_count = None
+        return email
+
+    def set_primary_email(self, candidate_id: int, email: str, *, by: str = "app") -> bool:
+        """The recruiter makes one of a person's other addresses their main one. App window only."""
+        refuse_ai("Changing a main email", by)
+        e = (_clean(email) or "").lower()
+        with self._lock, self._conn:
+            return self._promote_email(candidate_id, e) is not None
+
     def remove_other_email(self, candidate_id: int, email: str) -> bool:
         """The recruiter takes one other address off a person (the app window only; the AI never removes)."""
         with self._lock, self._conn:
@@ -3317,7 +3339,8 @@ class Store:
             raise NotFound(f"No candidate with id {candidate_id}")
         self.erase_traces()
 
-    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
+    def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app",
+                         primary_email: str | None = None) -> dict[str, Any]:
         """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
         Refused for by="ai" and inside an AI session.
 
@@ -3326,12 +3349,18 @@ class Store:
         the same job, keep ends up in the further stage. A "change" entry on keep records what came
         from where (it can't be undone with Undo; the backup taken before merging can). The
         returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
+
+        primary_email picks which of their addresses ends up as the main one (the others stay as other emails).
+        It must be one of the two people's own addresses; left out, keep's main email stays.
         """
         refuse_ai("Merging candidates", by)
         if keep_id == other_id:
             raise ValueError("Pick two different people to merge.")
         self.get_candidate(keep_id)
         other = self.get_candidate(other_id)
+        want = (_clean(primary_email) or "").lower() or None
+        if want and want not in {*self.all_emails(keep_id), *self.all_emails(other_id)}:
+            raise ValueError(f"{primary_email} isn't one of their addresses.")
         with self._lock, self._conn:
             krow = self._row("SELECT * FROM candidates WHERE id = ?", (keep_id,))
             orow = self._row("SELECT * FROM candidates WHERE id = ?", (other_id,))
@@ -3388,7 +3417,10 @@ class Store:
                 self._apply(keep_id, fields)
             filled = [k for k in fields if k not in ("tags", "work_history")]
             kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
+            new_main = self._promote_email(keep_id, want) if want else None
             bits = [f"filled {_labels(filled)}"] if filled else []
+            if new_main:
+                bits.append(f"made {new_main} the main email")
             if kept_emails:
                 bits.append(f"kept {len(kept_emails)} more email{'' if len(kept_emails) == 1 else 's'} "
                             f"({', '.join(kept_emails)})")
