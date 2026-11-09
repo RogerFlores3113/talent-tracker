@@ -305,5 +305,5 @@ def test_book_loop_waits_for_review_in_cautious_mode(store, chicago):
     dana = _person(store, jid, "Dana Cho")
     review.set_cautious(store, True)
     res = call(build_server(store), "book_loop", job_id=jid, candidate_id=dana, start=MONDAY)
-    assert "Waiting for the recruiter's review" in text(res)
+    assert "Waiting for your review" in text(res)
     assert not [t for t in store.timeline(dana) if t["kind"] == "interview"]

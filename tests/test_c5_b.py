@@ -59,7 +59,7 @@ def test_today_shows_an_onsite_loop_as_one_card_and_digest_keeps_a_moved_session
     assert items[0]["title"] == "Interview loop with Jordan Lee: 4 sessions"
     assert [s["name"] for s in items[0]["sessions"]] == [f"Onsite: part {n}" for n in range(1, 5)]
     page = local_client(store).get("/").text
-    assert page.count("Interview loop with Jordan Lee") == 1 and "with Ravi" in page
+    assert page.count("Interview loop with Jordan Lee") == 1 + page.count("Snooze Interview loop with Jordan Lee") and "with Ravi" in page
 
     # One session moves to two days later: still part of the loop, in Today and in the status update.
     store.update_interview(ids[3], at=_local(5, 14))

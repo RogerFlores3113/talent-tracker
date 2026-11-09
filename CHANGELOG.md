@@ -102,6 +102,16 @@ All notable changes to Talent Search. Newest first.
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 
+### Text replies, search and import fixes
+- Replies in Codex and Claude Code (which show only text) name each person and job with a link to open them in Talent Search the first time they appear, use short bulleted details instead of raw JSON, and say "you" instead of "the recruiter".
+- Searching a role and a place, like "backend engineer Boston", reads both parts: people who match both come first, then people in Boston with part of the role, then the role elsewhere. Each result says which part matched, and the reply says what it understood ("Looking for backend engineer in Boston, MA: 1 exact, 3 close").
+- Typing a search on the Candidates page keeps best match first, and you can click a column heading to sort the results by it instead.
+- Importing a CSV with a Stage or Status column but no job column keeps it as a tag ("Stage: Offer") instead of dropping it, and columns like Years are kept as notes. The summary says so, and lists each person a row was folded into, with the reason and a link to them.
+- plan_loop says which time zone its times are in (your saved one, else this computer's), and reads a start time with an offset (like 10:00 -08:00) correctly.
+- A plain row in save_candidates no longer shows a false "looks like instructions" caution when the person has namesakes.
+- Today: the time zone banner says which zone this browser is in and offers it in one click, there is a "Skip to today's list" link, and each Snooze and Done button names its item.
+- The view test host (scripts/view_host.py) replaces the old frame each time you press Run.
+
 
 ## [0.1.1] - 2026-11-09
 

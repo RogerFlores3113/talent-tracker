@@ -295,9 +295,10 @@ def test_log_activity_aliases_and_plain_sentences(store):
     assert made.structuredContent["id"]
     call(server, "add_to_pipeline", candidate_id=ana["id"], job_id=job["id"])
     moved = call(server, "move_stage", candidate_id=ana["id"], job_id=job["id"], stage="Screening")
-    assert text(moved) == 'Moved "Ana Ruiz" to Screening on Backend (Ledgerly) (was Sourced).'
+    assert text(moved).split('\nOpen in Talent Search:')[0] == 'Moved "Ana Ruiz" to Screening on Backend (Ledgerly) (was Sourced).'
     assert moved.structuredContent["stage"] == "Screening"
     todo = call(server, "add_suggestion", text="Follow up with Ana", candidate_id=ana["id"], job_id=job["id"])
-    assert text(todo) == ('Added a to-do to the recruiter\'s Today list: "Follow up with Ana", for "Ana Ruiz", on '
-                          'Backend (Ledgerly). Written by your AI app.')
+    assert text(todo).split("\nOpen in Talent Search:")[0] == (
+        'Added a to-do to your Today list: "Follow up with Ana", for "Ana Ruiz", on Backend (Ledgerly). '
+        'Written by your AI app.')
     assert todo.structuredContent["candidate_id"] == ana["id"]

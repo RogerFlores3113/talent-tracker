@@ -4,6 +4,7 @@
 {% block body %}
 {% set qp = request.query_params %}
 {% if qp.get('deleted') %}<p class="flash">Candidate deleted.</p>{% endif %}
+{% if not searching and (total_all or jobs) %}<a class="skip-link" href="#today-list">Skip to today's list</a>{% endif %}
 {% set tz_unset = not user_zone() and computer_on_utc() %}
 {% if not searching and (tz_unset or user_zone()) %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone" data-tz-banner data-tz-saved="{{ user_zone() or '' }}"{{ '' if tz_unset else ' hidden' }}>
   <input type="hidden" name="next" value="/">

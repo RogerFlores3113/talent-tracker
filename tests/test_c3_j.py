@@ -87,7 +87,7 @@ def test_conflict_reply_points_to_the_app_and_renders(store):
     out = call(server, "save_candidate", name="Ana Ruiz", email="ben@x.com")
     data = structured(out)
     assert data["conflict"] and data["existing"]["app_url"].endswith(f"/candidates/{ben['id']}")
-    assert "ask the recruiter to change the name in the app" in data["warning"]
+    assert "ask the user to change the name in the app" in data["warning"]
     assert "update_candidate" not in data["warning"]
     html = view_html("candidate")
     assert "notSaved" in html and "Already saved" in html

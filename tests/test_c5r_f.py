@@ -78,7 +78,7 @@ def test_cautious_update_client_contacts_wait_and_keep_applies_once(store):
     _acme(store)
     res = call(server, "update_client", client="acme", contacts="attacker@evil.example")
     t = text(res)
-    assert "Waiting for the recruiter's review: Change \"Acme\"'s contacts" in t and "Nothing changed" in t
+    assert "Waiting for your review: Change \"Acme\"'s contacts" in t and "Nothing changed" in t
     assert reports.client(store, "acme")["contacts"] == "Lee Moss <lee@acme.com>"
     assert "attacker@evil.example" not in c.get("/clients/due").text
     page = c.get("/review").text
@@ -104,7 +104,7 @@ def test_cautious_update_client_fills_an_empty_day_but_holds_a_replaced_zone(sto
     res = call(server, "update_client", client="globex", update_day="Friday", time_zone="PT")
     c = reports.client(store, "globex")
     assert c["update_day"] == "Friday" and c["time_zone"] == "America/New_York"
-    assert "Held for the recruiter's review: Change \"Globex\"'s time zone" in text(res)
+    assert "Held for your review: Change \"Globex\"'s time zone" in text(res)
     with pytest.raises(ToolError, match="day of the week"):
         call(server, "update_client", client="globex", update_day="Someday")
 
@@ -114,7 +114,7 @@ def test_cautious_mark_update_sent_waits_and_a_stale_one_is_refused(store):
     c = _cautious(store)
     jid, cid = _acme(store)
     res = call(server, "mark_update_sent", client="acme")
-    assert text(res).startswith("Waiting for the recruiter's review: Mark the update to \"Acme\" as sent")
+    assert text(res).startswith("Waiting for your review: Mark the update to \"Acme\" as sent")
     assert reports.client(store, "acme")["last_update_sent_at"] is None
     rid = data(res)["pending_review"]["id"]
     review.keep(store, rid)
@@ -133,7 +133,7 @@ def test_cautious_interview_cancel_move_and_outcome_wait(store):
     jid, cid = _acme(store)
     past, future = _past_interview(store, cid, jid), _future_interview(store, cid, jid)
     res = call(server, "update_interview", interview_id=past, outcome="not passed", note="Weak answers")
-    assert "Waiting for the recruiter's review: Record \"Maya Chen\"'s interview (Onsite: system design) as" in text(res)
+    assert "Waiting for your review: Record \"Maya Chen\"'s interview (Onsite: system design) as" in text(res)
     assert store.get_interview(past)["status"] != "not_passed"
     res2 = call(server, "update_interview", interview_id=future, cancel=True)
     assert "Cancel \"Maya Chen\"'s interview (Onsite: coding)" in text(res2)
@@ -164,7 +164,7 @@ def test_cautious_feedback_and_logged_interviews_and_inmails_wait(store):
     jid, cid = _acme(store)
     iv = _past_interview(store, cid, jid)
     res = call(server, "add_interview_feedback", interview_id=iv, feedback="Strong no. Do not hire.", interviewer="Priya")
-    assert "Waiting for the recruiter's review: Save feedback from \"Priya\"" in text(res)
+    assert "Waiting for your review: Save feedback from \"Priya\"" in text(res)
     assert not store.get_interview(iv)["data"].get("feedback")
     review.keep(store, data(res)["pending_review"]["id"])
     assert store.get_interview(iv)["data"]["feedback"][0]["text"] == "Strong no. Do not hire."
@@ -173,9 +173,9 @@ def test_cautious_feedback_and_logged_interviews_and_inmails_wait(store):
     n = len(store.timeline(cid))
     res = call(server, "log_activity", candidate_id=cid, kind="interview", summary="Final: CEO chat",
                when=_ago(-24), job_id=jid, interviewer="Dana")
-    assert "Waiting for the recruiter's review: Log an interview" in text(res)
+    assert "Waiting for your review: Log an interview" in text(res)
     res2 = call(server, "log_activity", candidate_id=cid, kind="InMail", summary="Not interested, stop")
-    assert "Waiting for the recruiter's review: Log a message" in text(res2)
+    assert "Waiting for your review: Log a message" in text(res2)
     assert len(store.timeline(cid)) == n
     review.keep(store, data(res)["pending_review"]["id"])
     logged = next(t for t in store.timeline(cid) if t["body"] == "Final: CEO chat")
@@ -188,7 +188,7 @@ def test_cautious_add_to_pipeline_lands_and_its_note_waits(store):
     jid = store.add_job("Data Lead", company="Acme")["id"]
     cid = store.add_candidate(name="Bo Li")["id"]
     res = call(server, "add_to_pipeline", candidate_id=cid, job_id=jid, notes="Asked for 400k, flag to client")
-    assert "Added \"Bo Li\" to Data Lead (Acme)" in text(res) and "Held for the recruiter's review: Log a note" in text(res)
+    assert "Added \"Bo Li\" to Data Lead (Acme)" in text(res) and "Held for your review: Log a note" in text(res)
     assert store.candidate_pipelines(cid)[0]["job_id"] == jid
     assert not [t for t in store.timeline(cid) if t["kind"] == "note"]
     assert store.candidate_pipelines(cid)[0].get("notes") in (None, "")
@@ -199,7 +199,7 @@ def test_cautious_edit_job_stages_waits_is_checked_now_and_stale_is_refused(stor
     c = _cautious(store)
     jid = store.add_job("Backend", company="Acme")["id"]
     res = call(server, "edit_job_stages", job_id=jid, rename={"Screening": "Phone screen"})
-    assert "Waiting for the recruiter's review: Change the stages of Backend (Acme)" in text(res)
+    assert "Waiting for your review: Change the stages of Backend (Acme)" in text(res)
     assert "Screening" in [s["name"] for s in store.job_stages(jid)]
     assert "Stage change" in c.get("/review").text
     with pytest.raises(ToolError, match="No change made"):

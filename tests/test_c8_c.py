@@ -539,7 +539,7 @@ def test_a_tainted_session_with_a_suggest_only_app_still_queues_with_the_reason(
     row = trust.touch(store, None)
     trust.set_trust(store, row["id"], "suggest")
     res = call(s, "update_candidate", candidate_id=ids["lee"], about="From a suggest-only app.")
-    assert text(res).startswith("Waiting for the recruiter's review")
+    assert text(res).startswith("Waiting for your review")
     assert review.pending(store)[0]["payload"].get("held_because") == "injection"
 
 

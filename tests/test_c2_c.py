@@ -149,7 +149,7 @@ def test_role_client_status_build_pipelines(store):
 def test_status_without_a_job_is_left_out(store):
     r = _run(store, "Name,Status\nAna,Interviewing\n", ["name", "stage"])
     assert r["warnings"] == ["Row 2: left the client and stage out, there's no job title on this row"]
-    assert importers.guess_mapping(["Name", "Status"]) == ["name", ""]
+    assert importers.guess_mapping(["Name", "Status"]) == ["name", "tag_column"]  # kept as a tag (cycle 11 T)
 
 
 # --------------------------------------------------------- 5. duplicates

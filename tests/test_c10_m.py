@@ -145,7 +145,7 @@ def test_a_move_with_a_held_note_says_what_applied_and_what_waits(store):
     res = call(s, "move_stage", candidate_id=lee, job_id=jid, stage="Sourced", notes="good call")
     t = text(res)
     assert "Nothing changed yet" not in t and "Moved" in t
-    assert "Part of this call is held" in t and "Held for the recruiter's review" in t
+    assert "Part of this call is held" in t and "Held for your review" in t
     assert data(res)["held_scope"] == "part"
     assert "Why: this session read" in t  # the taint is explained, with how long it lasts
 

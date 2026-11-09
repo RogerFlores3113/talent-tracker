@@ -43,13 +43,13 @@ def test_cautious_holds_a_new_hiring_manager_email_on_update_and_create(cautious
     job = store.add_job("Senior Backend Engineer", company="Acme Payments")
     server = build_server(store)
     res = call(server, "update_job", job_id=job["id"], hiring_manager_email="dana@attacker.test", location="Remote")
-    assert "Held for the recruiter's review" in text(res) and res.structuredContent["pending_review"]
+    assert "Held for your review" in text(res) and res.structuredContent["pending_review"]
     j = store.get_job(job["id"])
     assert j["hiring_manager_email"] is None and j["location"] == "Remote"  # the rest still lands
     assert "attacker" not in local_client(store).get("/clients/acme-payments").text
     made = call(server, "create_job", title="Data Lead", company="Acme Payments", hiring_manager_email="x@evil.test")
     new_id = made.structuredContent["id"]
-    assert store.get_job(new_id)["hiring_manager_email"] is None and "Held for the recruiter" in text(made)
+    assert store.get_job(new_id)["hiring_manager_email"] is None and "Held for you" in text(made)
     page = local_client(store).get("/review").text
     assert "Client updates for this job can be emailed to this address." in page and "dana@attacker.test" in page
     # Kept on Review: it lands, and it counts as checked (no "Changed by your AI app" note).
@@ -84,7 +84,7 @@ def test_hold_new_emails_and_phones_option(cautious):
     review.set_options(store, ai_hold_contacts=True)
     res = call(server, "update_candidate", candidate_id=lee["id"], email="lee@evil.test", location="Austin")
     cand = store.get_candidate(lee["id"])
-    assert cand["email"] is None and cand["location"] == "Austin" and "Held for the recruiter" in text(res)
+    assert cand["email"] is None and cand["location"] == "Austin" and "Held for you" in text(res)
     res = call(server, "save_candidate", name="Lee Chen", linkedin_url="https://linkedin.com/in/lee-chen",
                email="lee2@evil.test")
     assert store.get_candidate(lee["id"])["email"] is None and res.structuredContent["pending_review"]
@@ -203,14 +203,14 @@ def test_a_field_only_undo_all_and_a_keep_all_take_a_backup(cautious):
 def test_the_ai_completes_only_its_own_to_dos(store):
     server = build_server(store)
     mine = store.add_suggestion("Follow up with Noah Williams")
-    with pytest.raises(ToolError, match="recruiter's own to-do"):
+    with pytest.raises(ToolError, match="your own to-do"):
         call(server, "complete_suggestion", suggestion_id=mine["id"])
     assert not store._row("SELECT done_at FROM suggestions WHERE id = ?", (mine["id"],))["done_at"]
     its = call(server, "add_suggestion", text="Ping Lee").structuredContent
     assert "Marked the to-do done" in text(call(server, "complete_suggestion", suggestion_id=its["id"]))
     review.set_cautious(store, True)
     res = call(server, "complete_suggestion", suggestion_id=mine["id"])
-    assert "Waiting for the recruiter's review: Mark the to-do \"Follow up with Noah Williams\" done" in text(res)
+    assert "Waiting for your review: Mark the to-do \"Follow up with Noah Williams\" done" in text(res)
     assert "To-do done" in local_client(store).get("/review").text
     review.keep(store, res.structuredContent["pending_review"]["id"])
     assert store._row("SELECT done_at FROM suggestions WHERE id = ?", (mine["id"],))["done_at"]

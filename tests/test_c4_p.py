@@ -34,7 +34,7 @@ def test_ai_may_change_only_a_few_saved_values_per_person_per_hour(store):
     call(server, "update_candidate", candidate_id=maya["id"], current_title="VP Engineering")
     with pytest.raises(Exception, match=re.escape(
             "No change made. Your AI app already changed several of Maya Okafor's details this hour. "
-            "Ask the recruiter to make more changes in the app.")):
+            "Ask the user to make more changes in the app.")):
         call(server, "update_candidate", candidate_id=maya["id"], location="")
     assert store.get_candidate(maya["id"])["location"] == "Austin"
     # Filling an empty field still works, and so does the recruiter in the app.
@@ -212,7 +212,7 @@ def test_ai_cant_rename_a_stage_to_a_name_that_reads_as_another_outcome(store):
     job = store.add_job("Backend", "Acme")
     server = build_server(store)
     with pytest.raises(Exception, match=r"No change made\. Sourced2 reads as in play, but Hired counts as a hire\. "
-                                        r"Ask the recruiter to rename Hired in the app"):
+                                        r"Ask the user to rename Hired in the app"):
         call(server, "edit_job_stages", job_id=job["id"], rename={"Hired": "Sourced2"})
     assert "Hired" in [s["name"] for s in store.job_stages(job["id"])]
     call(server, "edit_job_stages", job_id=job["id"], rename={"Hired": "Placed", "Screening": "Phone screen"})

@@ -83,6 +83,17 @@ COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue":
 # Rainbow order as SQL: red first, then orange... purple, then people with no colour.
 COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
                   + f" ELSE {len(COLORS)} END")
+# Sorting a search by a column (qsort): its key, and whether the first click goes high to low. Without one the
+# search is in best match order.
+QSORTS = {
+    "name": (lambda c: (c.get("name") or "").casefold(), False),
+    "title": (lambda c: (c.get("current_title") or "").casefold(), False),
+    "company": (lambda c: (c.get("current_company") or "").casefold(), False),
+    "location": (lambda c: (c.get("location") or "").casefold(), False),
+    "contacted": (lambda c: c.get("last_contacted_at") or "", True),
+    "updated": (lambda c: c.get("updated_at") or "", True),
+    "added": (lambda c: c.get("id") or 0, True),
+}
 COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
 
 
@@ -518,6 +529,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return ""
         pq = searchquery.parse_query(q)
         notes = list(getattr(result, "notes", None) or pq.notes)
+        said = getattr(result, "understood", None)
+        if said:  # "Looking for backend engineer in Boston, MA: 0 exact, 3 close"
+            return f"{said}: {result.exact_total} exact, {result.total - result.exact_total} close."
         if not (pq.structured or pq.operator_mode or notes):
             return ""
         return " ".join([pq.explain(), *notes]).strip()
@@ -583,7 +597,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = ""):
+              ids: str = "", qsort: str = "", qdir: str = ""):
         per = 100
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
@@ -626,6 +640,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                             if h.candidate.get("color") in COLORS else len(COLORS)))
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
+            elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                key, desc_first = QSORTS[qsort]
+                reverse = (qdir != "asc") if desc_first else (qdir == "desc")
+                ranked = sorted(result.hits, key=lambda h: key(h.candidate), reverse=reverse)
+                start = (page_no - 1) * per
+                rows = [h.candidate for h in ranked[start:start + per]]
             else:
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
                                        limit=per, offset=(page_no - 1) * per, **member)
@@ -666,6 +688,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    new_after=new_after_id, closest=bool(q.strip() and result.closest),
                    saved_notes=list(result.notes) if q.strip() else [],
                    colored_first=colored_first and bool(q.strip()),
+                   qsort=qsort if q.strip() and qsort in QSORTS and not colored_first else "",
+                   qdir=qdir if qdir in ("asc", "desc") else "",
                    color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)

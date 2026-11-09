@@ -129,7 +129,7 @@ def test_cap_applies_only_to_ai_saves_from_listed_sites_when_on(store):
         call(server, "save_candidate", **li(n))
     with pytest.raises(Exception) as err:
         call(server, "save_candidate", **li(120))
-    assert "The recruiter turned on Stricter site guards" in str(err.value) and "10" in str(err.value)
+    assert "You turned on Stricter site guards" in str(err.value) and "10" in str(err.value)
     # a person from another source still saves, and so does an update to someone already saved
     assert data(call(server, "save_candidate", name="Gus Plain", email="gus@example.com", source="Referral"))["created"]
     assert data(call(server, "save_candidate", **{**li(100), "location": "Austin"}))["created"] is False

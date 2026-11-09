@@ -73,7 +73,7 @@ def test_mcp_save_candidate_returns_a_conflict(store):
     out = data(call(server, "save_candidate", name="Ana Ruiz", email="ben@ex.com", current_title="Intern"))
     assert out["conflict"] is True and out["created"] is False and out["changed"] == []
     assert out["existing"]["id"] == ben["id"] and out["existing"]["name"] == "Ben Cole"
-    assert f"id {ben['id']}" in out["warning"] and "Ask the recruiter" in out["warning"]
+    assert f"id {ben['id']}" in out["warning"] and "Ask the user" in out["warning"]
     assert store.get_candidate(ben["id"])["current_title"] is None and store.count_candidates() == 1
 
 

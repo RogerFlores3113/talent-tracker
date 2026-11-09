@@ -58,7 +58,8 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tags", ("skills", "tags", "keywords", "tech", "stack", "tech stack", "labels", "skill set", "top skills")),
     ("note", ("notes", "note", "comments", "comment", "salary", "salary expectation", "notice", "notice period",
               "feedback", "connected on", "date connected", "years of experience", "years experience",
-              "experience years", "total experience", "yoe")),
+              "experience years", "total experience", "yoe", "years", "yrs", "years exp", "yrs exp",
+              "years of exp", "experience")),
     ("about", ("about", "summary", "bio", "description", "profile summary")),
     ("source", ("source", "found via", "referral", "channel", "where we met", "met at", "how we met", "met via",
                 "how found", "found through", "lead source", "sources", "candidate source")),
@@ -319,8 +320,8 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
         if not out[col] and header[col].strip() and (_EXTRA_CONTACT.match(low) or low == "headline"
                                                       or _looks_email_header(low)):
             out[col] = "note"
-    if "job_title" not in used:  # a client or status means nothing without the job itself
-        out = ["" if f in ("job_company", "stage") else f for f in out]
+    if "job_title" not in used:  # a client means nothing without the job; a Stage or Status is kept as a tag
+        out = ["tag_column" if f == "stage" else "" if f == "job_company" else f for f in out]
     return out
 
 
@@ -680,6 +681,9 @@ def _collapse(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out.append(rec)
             hit = rec
         else:
+            kind = next(k[0] for k in keys if owner.get(k) is hit)
+            hit.setdefault("merge_why", []).append("the same email address" if kind == "email"
+                                                   else "the same LinkedIn profile")
             _merge_records(hit, rec)
         for k in keys:
             owner.setdefault(k, hit)
@@ -719,11 +723,16 @@ def _fold_keyless(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             owner[k] = rec
             out.append(rec)
         elif hit["rows"][0] < rec["rows"][0]:
+            hit.setdefault("merge_why", []).append(
+                "the same name and phone number" if k[0] == "ph" else "the same name and company, with no email or LinkedIn")
             _merge_records(hit, rec)
         else:  # this row comes first in the file, so the later row's values still win
             first = {**rec, "rows": list(rec["rows"]), "data": dict(rec["data"]), "differs": dict(rec["differs"]),
                      "notes": list(rec["notes"]), "jobs": list(rec["jobs"]), "warnings": list(rec["warnings"]),
                      "job_at": dict(rec.get("job_at", {})), "other_emails": list(rec.get("other_emails", []))}
+            first["merge_why"] = [*rec.get("merge_why", []), *hit.get("merge_why", []),
+                                  "the same name and phone number" if k[0] == "ph"
+                                  else "the same name and company, with no email or LinkedIn"]
             _merge_records(first, hit)
             hit.clear()
             hit.update(first)
@@ -1233,6 +1242,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
     held: list[str] = []
     backward: list[str] = []
     merged_rows: list[str] = []
+    merges: list[dict[str, Any]] = []  # people a row was folded into, with the evidence
     missing: dict[tuple[int, str], dict[str, str]] = {}
     stages_made: list[str] = []
     field_counts: Counter[str] = Counter()
@@ -1268,6 +1278,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                                                             for row, fields in sorted(by_row.items()))
             merged_rows.append(line)
         more = rec.get("other_emails", [])
+        merge_why = ""
         by_email = store.find_duplicate(email=data.get("email")) if data.get("email") else None
         by_other = [h for h in (store.find_duplicate(email=e) for e in more) if h]  # every address counts
         owners = {h["id"]: h for h in by_other}
@@ -1317,10 +1328,16 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             match = None
             if change and change["action"] == "update":
                 match = people.by_id_entry(change["id"])
+                merge_why = (f"same {change['why']}, but a new email ({change['new_email']}); "
+                             f"the old one ({change['old_email'] or 'another'}) is kept")
             elif not (data.get("email") or data.get("linkedin_url")):
                 people = people or _People(store)
                 people.fresh = made_ids
                 match, others = people.match(data)
+                if match:
+                    same_phone = bool(_digits(data.get("phone")) and _digits(data.get("phone")) == _digits(match.get("phone")))
+                    merge_why = ("same name and phone number" if same_phone else
+                                 "same name and company, and neither has an email or LinkedIn")
             if not match and not by_email and not by_li:
                 data.setdefault("source", source)  # only new people get the sheet as where they came from
             if change and change["action"] == "update":
@@ -1350,6 +1367,13 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             skipped_rows += len(rec["rows"])
             conflicts += _is_conflict(exc)
             continue
+        if merge_why and not created:
+            merges.append({"row": rec["rows"][0], "name": cand["name"], "id": cand["id"], "why": merge_why})
+        if len(rec["rows"]) > 1:
+            merges.append({"row": rec["rows"][0], "name": cand["name"], "id": cand["id"],
+                           "why": f"rows {', '.join(map(str, rec['rows']))} are one person in this file: "
+                                  f"{' and '.join(dict.fromkeys(rec.get('merge_why') or ['the same details']))}. "
+                                  "Saved as one"})
         if created:
             made_ids.add(cand["id"])
             if change and change["action"] == "new":
@@ -1416,8 +1440,10 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                     + ("updated, the new email is now their main one" if c["action"] == "update"
                        else "added as a new person")
                     + (", and the job matches" if c.get("same_job") else "") for c in email_changes]
+    merge_lines = [f"Row {m['row']}: {m['name']} (id {m['id']}): {m['why']}" for m in merges]
     return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
-            "email_change_lines": change_lines,
+            "email_change_lines": change_lines, "merges": merges, "merge_lines": merge_lines,
+            "column_lines": column_lines(header, mapping, rows),
             "skipped_rows": skipped_rows, "conflicts": conflicts, "warnings": warned, "notes": notes,
             "email_changes": email_changes, "changes": changes, "changed_fields": dict(field_counts.most_common()),
             "possible_duplicates": possible, "pipelines_added": pipelines, "stage_fallbacks": fallbacks,
@@ -1433,6 +1459,29 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             "_changed": bool(added or updated or notes or pipelines or dated or jobs_created or stages_made
                              or moved or (jobs and jobs.reopened)),
             "dry_run": False}
+
+
+_STAGE_WORDS = {_norm_header(w) for f, ws in _HEADER_HINTS if f == "stage" for w in ws}
+
+
+def column_lines(header: list[str], mapping: list[str], rows: list[list[str]] | None = None) -> list[str]:
+    """What happened to columns that have no field of their own: a Stage or Status with no job column (kept as a
+    tag, with its most common values), and other columns kept as notes ("Years: 8"). Plain lines for the summary."""
+    out: list[str] = []
+    stage_cols = [i for i, m in enumerate(mapping) if m == "tag_column" and i < len(header)
+                  and _norm_header(header[i]) in _STAGE_WORDS]
+    for i in stage_cols:
+        counts: Counter[str] = Counter(r[i].strip() for r in rows or [] if i < len(r) and r[i].strip())
+        top = ", ".join(f"{v} ({n:,})" for v, n in counts.most_common(8))
+        out.append(f"{header[i].strip()} was kept as a tag on each person (\"{header[i].strip()}: value\"), not as a "
+                   "pipeline stage, because this file has no job column and Talent Search keeps stages per job. "
+                   "No stages were made and nobody was put in a pipeline."
+                   + (f" Values: {top}." if top else ""))
+    notes = [header[i].strip() for i, m in enumerate(mapping) if m == "note" and i < len(header)
+             and _norm_header(header[i]) not in _PLAIN_NOTE_HEADERS and header[i].strip()]
+    if notes:
+        out.append(f"Kept as a note on each person (with the column name in front): {', '.join(notes[:8])}.")
+    return out
 
 
 def _date_note(stage_dated: int, placed: int, created: int) -> str:
@@ -2031,6 +2080,7 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
         lines.append("Also: " + "; ".join(extra) + ".")
     if result.get("email_columns_skipped"):
         lines.append(email_skip_line(result["email_columns_skipped"]))
+    lines += result.get("column_lines") or []
     lines += closed_job_lines(result)
     return lines
 
@@ -2073,6 +2123,7 @@ PANEL_LINES = 20  # lines a result panel shows before "and N more"
 PANELS = (("skipped", "Skipped rows"), ("moved", "Stage moves from the file"), ("already_in", "Already in that job"),
           ("warnings", "Imported, with a cell left blank"), ("stage_fallbacks", "Put in a different stage"),
           ("merged_rows", "Rows saved as one person"), ("changes", "What changed on updated people"),
+          ("merge_lines", "Folded into people already here"),
           ("email_change_lines", "People whose email changed"),
           ("possible_duplicates", "Possible duplicates to check"),
           ("missing_from_file", "Here but not in the file"))
@@ -2102,7 +2153,8 @@ def result_panels(result: dict[str, Any]) -> list[dict[str, Any]]:
                 groups = [f"{k}: {n:,}" for k, n in list(result["stage_moves"].items())[:PANEL_LINES]]
             else:
                 groups = group_lines(lines)
-        out.append({"key": key, "title": title, "count": len(lines), "groups": groups,
+        rows = (result.get("merges") or [])[:PANEL_LINES] if key == "merge_lines" else []
+        out.append({"key": key, "title": title, "count": len(lines), "groups": groups, "rows": rows,
                     "lines": lines[:PANEL_LINES], "more": max(0, len(lines) - PANEL_LINES),
                     "open": key == "possible_duplicates"})
     return out
