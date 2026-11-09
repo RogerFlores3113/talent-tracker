@@ -93,6 +93,12 @@ All notable changes to Talent Search. Newest first.
 - Feedback owed in chat: who owes feedback, grouped by interviewer, with days overdue, a Copy nudge button that copies a short reminder in your voice, and Log feedback or Mark chased requests.
 - Duplicates in chat: each possible pair as two side-by-side cards with the matching email, LinkedIn, name or company marked. Merging and "not the same person" still happen in Talent Search, never from the view.
 - add_interview_feedback with a wrong interview id now says to use list_interviews to find the right one, and takes lean yes and lean no (also written lean_yes, lean_no).
+- The people table in full screen shows every column (Match, Last contacted, Added, Updated and Color when anyone has one) instead of cutting them off, and inline it wraps instead of scrolling sideways. A long Stage is shortened with the full text on hover.
+- Pipeline board: each card shows the stage with days in it, how the interviews went (for example "Strong yes 1, Mixed 1"), a "Feedback owed" flag and the next interview. A "Move to..." menu asks Claude to move the person, and the header says how many are in each stage and matches the text reply.
+- Finalists: a sortable comparison table (verdicts, sessions done and left, feedback owed, last interview, stage). Open a row to read each interviewer's own words. Advance and Reject ask Claude, and Reject asks you to confirm first.
+- Today groups its list under headings with counts. Every person, job and interview is a real button, and Done, Snooze and the next step ask Claude.
+- Shortlist: when someone matches a person you already saved, the card shows who they are, where they work, their jobs and stages, and opens their card. "Show as a table" lets you tick several people and keep or pass them. Every LinkedIn button names the person.
+- Saved batch: each person shows their title, company, links and a "No contact info" badge, and when a name needs your answer the view and the text list the actual people it could be, with "Same person" and "Someone new" buttons that ask Claude.
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 

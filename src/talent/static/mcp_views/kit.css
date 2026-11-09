@@ -103,3 +103,17 @@ input.reason,input.field{font:inherit;font-size:.8125rem;border:1px solid var(--
 .forme{border:1px dashed var(--line);border-radius:10px;padding:10px 14px;color:var(--muted);font-size:.8125rem;margin-top:10px}
 .forme h2{margin-top:0}
 .recipient{font-size:.75rem;color:#5c5c57;margin:0 0 4px}
+
+/* chips that carry a state (pipeline, finalists, today) and selects */
+.chip.owed{background:transparent;border:1px solid var(--danger);color:var(--danger)}
+.chip.verdict{border:1px solid var(--line)}
+.chip.next{background:transparent;border:1px solid var(--accent);color:var(--accent)}
+select.field{font:inherit;font-size:.8125rem;border:1px solid var(--line);border-radius:7px;padding:3px 8px;background:var(--surface);color:var(--text);min-height:28px;max-width:100%}
+.pc .pname{font-weight:600}
+.pc ul.chips{margin-top:4px}
+ul.stagecounts{margin:2px 0 6px}
+.savedbox{border-left:3px solid var(--accent);padding:4px 8px;margin-top:6px;background:var(--chip);border-radius:4px}
+.status:empty{margin:0;min-height:0}
+table.ftable th[scope=row] .small{font-weight:400}
+ul.matches>li{border-top:1px solid var(--line);padding:8px 0}
+ul.matches>li:first-child{border-top:0}

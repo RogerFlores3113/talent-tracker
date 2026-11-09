@@ -38,6 +38,8 @@ URIS = {
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
 ALIASES = {"candidate": "people", "results": "people"}
+# Views that draw the people table (or one like it) also load people.css.
+WITH_TABLE = ("people", "decide", "shortlist")
 # The host draws a border around the view (it sits inside the chat like a card).
 RESOURCE_META = {"ui": {"prefersBorder": True}}
 _DIR = Path(__file__).parent / "static" / "mcp_views"
@@ -51,9 +53,10 @@ def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
-    own = _DIR / (name + ".css")  # a view may bring its own styles (people.css, interviews.css ...)
-    css = (_read("kit.css") + ("\n" + _read("people.css") if name == "searches" else "")  # searches shows the People view
-           + ("\n" + own.read_text(encoding="utf-8") if own.exists() else ""))
+    own = _DIR / (name + ".css")  # a view may bring its own styles (interviews.css ...)
+    table = name in WITH_TABLE or name == "searches"  # these show the People card or table, so they need people.css
+    css = (_read("kit.css") + ("\n" + _read("people.css") if table else "")
+           + ("\n" + own.read_text(encoding="utf-8") if own.exists() and own.name != "people.css" else ""))
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     # Saved searches shows the People view inside itself: people.js loads first, its two entry points are kept,
