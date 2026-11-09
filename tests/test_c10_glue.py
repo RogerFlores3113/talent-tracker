@@ -70,3 +70,19 @@ def test_connect_page_shows_the_claude_code_command(store):
     html = local_client(store).get("/connect").text
     assert 'id="claude-code-cmd"' in html and "claude mcp add --transport stdio --scope user" in html
     assert 'data-copy-from="claude-code-cmd"' in html
+
+
+def test_an_earlier_all_day_interview_is_named_as_all_day_in_the_warning(tmp_path):
+    from talent.store import Store
+    from talent.mcp_server import build_server
+    from test_c10_w1 import call, text, _world
+    st = Store(tmp_path / "t.db")
+    try:
+        cid, jid = _world(st)
+        s = build_server(st)
+        call(s, "log_activity", candidate_id=cid, kind="interview", summary="Onsite", when="2026-12-03", job_id=jid)
+        out = text(call(s, "log_activity", candidate_id=cid, kind="interview", summary="Final",
+                        when="2026-12-09T15:00:00+00:00", job_id=jid))
+        assert "Thu Dec 3, all day" in out and "Dec 3, 12:00" not in out
+    finally:
+        st.close()

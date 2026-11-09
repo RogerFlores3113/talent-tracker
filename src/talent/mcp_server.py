@@ -1586,7 +1586,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             out["note"] = (f"{cand['name']} now has {n} interviews on {_local(entry['at']).rsplit(',', 1)[0]} for "
                            "this job, so they show as one loop.")
         if others:
-            listed = ", ".join(f"id {t['id']} on {_local(t['at'])}" for t in others)
+            listed = ", ".join(f"id {t['id']} on " + (interviews.when_for(t['at'], all_day=True) if _is_all_day(t)
+                                                        else _local(t['at'])) for t in others)
             out["warning"] = (f"Logged. This candidate already has an interview scheduled ({listed}). If this one "
                               "replaces it, call update_interview on the old one with cancel=true, or move the old "
                               "one with update_interview instead of logging a new one.")
