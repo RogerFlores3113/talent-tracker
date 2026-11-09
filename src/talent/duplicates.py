@@ -137,6 +137,8 @@ def find_pairs(store: Store, limit: int | None = None) -> list[dict[str, Any]]:
                     found[(a, b)].add(reason)
 
     emails: dict[str, list[int]] = defaultdict(list)
+    extra = store.other_emails_by_id()
+    every: dict[int, set[str]] = {}  # every address a person has, cleaned
     links: dict[str, list[int]] = defaultdict(list)
     name_phone: dict[tuple[str, str], list[int]] = defaultdict(list)
     name_co: dict[tuple[str, str], list[int]] = defaultdict(list)
@@ -144,7 +146,9 @@ def find_pairs(store: Store, limit: int | None = None) -> list[dict[str, Any]]:
     names: dict[int, list[str]] = {}
     for r in rows:
         i = r["id"]
-        if k := email_key(r["email"]):
+        mine = {k for k in (email_key(e) for e in [r["email"], *extra.get(i, [])]) if k}
+        every[i] = mine
+        for k in mine:
             emails[k].append(i)
         if r["linkedin_url"] or r["linkedin_key"]:
             if k := (r["linkedin_key"] or normalize_linkedin(r["linkedin_url"])):
@@ -196,8 +200,8 @@ def find_pairs(store: Store, limit: int | None = None) -> list[dict[str, Any]]:
             lb = rb["linkedin_key"] or normalize_linkedin(rb["linkedin_url"])
             if la and lb and la != lb:
                 continue
-            ea, eb = email_key(ra["email"]), email_key(rb["email"])
-            if ea and eb and ea != eb:
+            ea, eb = every.get(a, set()), every.get(b, set())
+            if ea and eb and not ea & eb:
                 reasons = {REASONS[5] if REASONS[3] in reasons else REASONS[6]}
         keep, other = ((a, b) if (_complete(ra), -a) >= (_complete(rb), -b) else (b, a))
         pairs.append({"keep": keep, "other": other, "reasons": sorted(reasons, key=_RANK.__getitem__)})
@@ -246,12 +250,14 @@ def plausible_for(store: Store, c: dict[str, Any], rows: list[dict[str, Any]]) -
     with a different name unless it shares an email or LinkedIn (a shared phone alone says nothing)."""
     skip = dismissed(store)
     li = normalize_linkedin(c.get("linkedin_url"))
-    ek = email_key(c.get("email"))
+    mine = {k for k in (email_key(e) for e in [c.get("email"), *store.other_emails(c["id"])]) if k}
+    extra = store.other_emails_by_id() if mine and rows else {}
     out = []
     for d in rows:
         if pair_key(c["id"], d["id"]) in skip:
             continue
-        strong = bool((ek and ek == email_key(d.get("email")))
+        theirs = {k for k in (email_key(e) for e in [d.get("email"), *extra.get(d["id"], [])]) if k}
+        strong = bool((mine & theirs)
                       or (li and li == normalize_linkedin(d.get("linkedin_url"))))
         if same_person_name(c["name"], d["name"]) or strong:
             out.append(d)

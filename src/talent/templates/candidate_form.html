@@ -46,6 +46,7 @@
   {% set v = c[f] or '' %}
   <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ v[:10] if kind == 'date' else v }}" {{ 'required autofocus' if f == 'name' and not c.id }}></label>
   {% endfor %}
+  <label class="wide">Other emails (one per line; delete a line to remove it)<textarea name="other_emails" rows="2" placeholder="a personal or older address">{{ c.other_emails | join('\n') if c.other_emails is iterable and c.other_emails is not string else (c.other_emails or '') }}</textarea></label>
   <label class="wide">Skills (comma separated)<input type="text" name="tags" value="{{ c.tags | join(', ') if c.tags is not string else c.tags }}" placeholder="python, sql, leadership"></label>
   <label class="wide">About (search looks here first)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
   <label class="wide">Work history, one role per line: Title | Company | Start | End

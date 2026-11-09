@@ -288,6 +288,7 @@ class PersonIn(BaseModel):
     tags: list[str] | None = Field(None, validation_alias=AliasChoices("tags", "skills"))
     work_history: list[WorkEntry] | None = None
     source: str | None = None
+    other_emails: list[str] | None = Field(None, description="More email addresses for them; added, never removed")
     create_anyway: bool = False
 
 
@@ -660,6 +661,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
                      ("source", "Source"), ("color", "Color tag"), ("last_contacted_at", "Last contacted"), ("updated_at", "Last updated")):
         if c.get(k):
             out.append(f"{label}: {_local(c[k]) if k.endswith('_at') else c[k]}")
+        if k == "email" and c.get("other_emails"):
+            out.append("Other emails: " + ", ".join(c["other_emails"]))
     if c.get("tags"):
         out.append("Skills: " + ", ".join(c["tags"]))
     if c.get("about"):
@@ -1066,9 +1069,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         tags: list[str] | None = None,
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
+        other_emails: list[str] | None = None,
         create_anyway: bool = False,
     ) -> CallToolResult:
         """Add a candidate, or update the existing one if the email or LinkedIn URL already exists.
+
+        other_emails: more addresses for the same person (a personal one next to the work one). They are added to
+        the person and count when matching, so a saved person is found by any of their addresses. You can add
+        addresses here but never remove one: the recruiter does that in the app.
 
         On a match, blanks never erase what's saved: title, company and location take your new values, empty
         fields are filled, and the saved name, source and about are kept (the result lists what changed and what
@@ -1110,8 +1118,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source)
+        more = [e.strip().lower() for e in (other_emails or []) if isinstance(e, str) and _EMAIL_RE.match(e.strip())]
         someone_else: list[dict[str, Any]] = []
-        if not create_anyway and store.find_duplicate(email, linkedin_url) is None:
+        if (not create_anyway and store.find_duplicate(email, linkedin_url) is None
+                and not any(store.find_duplicate(e) for e in more)):
             same_name, someone_else = store.split_same_name(name, email, linkedin_url)
             if same_name:
                 n = len(same_name)
@@ -1137,6 +1147,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         over_held: list[str] = []
         over_why, waiting = "", None
         match = store.find_duplicate(data.get("email"), data.get("linkedin_url"))
+        if match is None:
+            match = next((h for h in (store.find_duplicate(e) for e in more) if h), None)
         if match is None and ai_caps.people_left(store) < 1:  # a new person, past the hourly limit on new people
             raise ValueError(ai_caps.people_text(0, ai_caps.people_cap(store)))
         if match is not None:  # a merge may replace the title, company, location and work history it has
@@ -1158,7 +1170,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 if "work_history" in over:
                     history = None
         try:
-            cand, created = store.upsert_candidate(work_history=history, by="ai", **data)
+            cand, created = store.upsert_candidate(work_history=history, by="ai", other_emails=more, **data)
         except IdentityConflict as exc:
             what = "email" if exc.field == "email" else "LinkedIn URL"
             other = exc.existing
@@ -1184,7 +1196,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes.append(f"Not saved, because save_candidate has no field for them: {', '.join(ignored)}. Put "
                          "skills in tags and anything else worth keeping in about or notes. It takes: name, email, phone, "
                          "linkedin_url, website, current_title (or title, headline), current_company (or company), "
-                         "location, about (or notes), tags (or skills), work_history, source.")
+                         "location, about (or notes), tags (or skills), work_history, source, other_emails.")
         if headline_unused and (headline_unused.casefold() != (current_title or "").strip().casefold()):
             notes.append(f"Did not use the headline {headline_unused[:80]!r}, as you also sent a current_title. "
                          "Put it in notes or about if you want it kept.")

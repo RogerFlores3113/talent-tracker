@@ -27,6 +27,7 @@ EXPORT_HEADERS = {
     "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills",
     "about": "About", "source": "Source", "last_contacted_at": "Last contacted", "created_at": "Added",
     "updated_at": "Last updated", "color": "Color", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
+    "other_emails": "Other emails",
 }
 EXPORT_NOTES_KEPT = 20      # newest notes per person in the export's Notes column
 EXPORT_NOTES_CHARS = 5000   # and at most this much text
@@ -36,6 +37,8 @@ EXPORT_NOTES_CHARS = 5000   # and at most this much text
 _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("email", ("email", "e-mail", "mail", "email address", "e-mail address", "work email", "personal email",
                "emails", "primary email", "email addresses")),
+    ("other_emails", ("other emails", "other email", "additional emails", "additional email", "secondary email",
+                      "secondary emails", "alternate email", "alternate emails", "alt email", "other email addresses")),
     ("linkedin_url", ("linkedin", "profile url", "li url", "linkedin url", "linkedin profile",
                       "public profile url", "linkedin profile url", "linkedin link", "profile link")),
     ("phone", ("phone", "mobile", "cell", "tel", "telephone", "phone number", "cellphone", "phones",
@@ -78,7 +81,7 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tag_column", ("recruiter", "recruiter name", "assigned recruiter", "sourced by", "sourcer", "coordinator",
                     "origin")),
 )
-_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color"}
+_EXACT_ONLY = {"created_at", "stage_changed_at", "tag_column", "color", "other_emails"}
 # "Role" or "Job" means the job they're up for only on a sheet that also tracks a client or a status.
 _PIPELINE_ONLY_HINTS = {"role", "job", "project"}
 _MULTI_TARGETS = {"location", "note", "tag_column"}  # several columns may feed these
@@ -99,7 +102,7 @@ FULL_NAME = ("name", "full name", "candidate", "candidate name", "contact", "con
 # created_at and stage_changed_at date the person and their place in the job.
 IMPORT_TARGETS = (("", "name", "first_name", "last_name") + tuple(f for f in CANDIDATE_FIELDS if f != "name")
                   + ("tag_column", "created_at", "note", "notes", "job_title", "job_company", "stage",
-                     "stage_changed_at", "jobs"))
+                     "stage_changed_at", "jobs", "other_emails"))
 TARGET_LABELS = {
     "": "Skip this column", "name": "Full name", "first_name": "First name", "last_name": "Last name",
     "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn URL", "website": "Website",
@@ -108,6 +111,7 @@ TARGET_LABELS = {
     "tags": "Skills", "source": "Source", "last_contacted_at": "Last contacted",
     "job_title": "Job they're up for", "job_company": "Client (the job's company)", "stage": "Stage in that job",
     "jobs": "Jobs, as exported", "tag_column": "A tag, as Column: value (like Owner: Marcus)",
+    "other_emails": "Other emails (kept as more addresses for them)",
     "color": "Color tag", "created_at": "Date added", "stage_changed_at": "Date they reached that stage",
 }
 BACKUPS_KEPT = 10
@@ -285,7 +289,7 @@ def guess_mapping(header: list[str], rows: list[list[str]] | None = None) -> lis
                     continue
                 if f == "current_title" and w in _PIPELINE_ONLY_HINTS and pipeline_sheet and low == w:
                     continue  # on a pipeline sheet a bare "Role" is the job they're up for
-                if f != "email" and _looks_email_header(low):
+                if f not in ("email", "other_emails") and _looks_email_header(low):
                     continue  # "Personal Email Address" is an email, never a location because it says "address"
                 s = _hint_score(low, w)
                 if f in _EXACT_ONLY and s < 1000:
@@ -378,6 +382,7 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
         loc_parts: list[tuple[int, str]] = []
         extra_emails: list[str] = []  # addresses beyond the first in a cell or a second Email column
         email_cols: list[tuple[str, str]] = []  # "Work Email", "a@work.com": from a column kept as a note
+        more_emails: list[str] = []  # an "Other emails" column, and the addresses of the note lines below
         site = ""
         for col, target in enumerate(mapping):
             if not target or col >= len(r):
@@ -431,6 +436,8 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                         note_at[text] = parse_when(v, default_now=False)
                     except ValueError:
                         pass
+            elif target == "other_emails":
+                more_emails.extend(e.lower() for e in _EMAIL.findall(v))
             elif target == "notes":
                 notes.extend(reversed(_split_notes_cell(v)))  # oldest first, so the newest ends up on top
             elif target in job:
@@ -468,12 +475,14 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 extra_emails.extend(found)
             elif found and found != [(data.get("email") or "").lower()]:
                 notes.append(f"{col_name}: {v}")
+                more_emails.extend(found)
         if extra_emails:
             extra_emails = [e for e in dict.fromkeys(extra_emails) if e != (data.get("email") or "").lower()]
             if extra_emails and not data.get("email"):
                 data["email"] = extra_emails.pop(0)
             if extra_emails:
                 notes.append("Other emails: " + ", ".join(extra_emails))
+                more_emails.extend(extra_emails)
         if loc_parts:
             data["location"] = ", ".join(dict.fromkeys(v for _, v in sorted(loc_parts, key=lambda x: x[0])))
         if site and "website" not in data:
@@ -488,7 +497,11 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             jobs.append((job["job_title"], job["job_company"], job["stage"], False, n))
         elif job["job_company"] or job["stage"]:
             warnings.append("left the client and stage out, there's no job title on this row")
-        yield {"rows": [n], "data": data, "notes": notes, "note_at": note_at, "jobs": jobs, "warnings": warnings,
+        if more_emails and not data.get("email"):
+            data["email"] = more_emails.pop(0)  # only "Other emails" given: the first is their main address
+        main = (data.get("email") or "").lower()
+        yield {"rows": [n], "data": data, "other_emails": [e for e in dict.fromkeys(more_emails) if e != main],
+               "notes": notes, "note_at": note_at, "jobs": jobs, "warnings": warnings,
                "differs": {}, "created_at": dates.get("created_at"),
                "stage_at": {n: dates["stage_changed_at"]} if "stage_changed_at" in dates else {}}
 
@@ -552,6 +565,9 @@ def _merge_records(a: dict[str, Any], b: dict[str, Any]) -> None:
     a["differs"] remembers which fields the rows disagreed on, and the row whose value was kept."""
     for k, v in b["data"].items():
         cur = a["data"].get(k)
+        if k == "email" and cur and cur.lower() != v.lower():
+            a["other_emails"] = list(dict.fromkeys([*a.get("other_emails", []), v.lower()]))
+            continue  # matched by another address: both stay, the first row's is the main one
         if k == "tags":
             a["data"][k] = split_tags((cur or []) + v)
         elif k == "last_contacted_at":
@@ -560,6 +576,8 @@ def _merge_records(a: dict[str, Any], b: dict[str, Any]) -> None:
             if cur not in (None, "") and _fold(str(cur)) != _fold(str(v)):
                 a["differs"][k] = b["rows"][0]
             a["data"][k] = v
+    a["other_emails"] = [e for e in dict.fromkeys([*a.get("other_emails", []), *b.get("other_emails", [])])
+                         if e != (a["data"].get("email") or "").lower()]
     a["rows"] += b["rows"]
     a["notes"] += [x for x in b["notes"] if x not in a["notes"]]
     a["note_at"] = {**b["note_at"], **a["note_at"]}
@@ -577,7 +595,8 @@ def _collapse(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for rec in records:
         d = rec["data"]
         keys = [k for k in (("email", (d.get("email") or "").strip().lower()),
-                            ("li", normalize_linkedin(d.get("linkedin_url")) or "")) if k[1]]
+                            ("li", normalize_linkedin(d.get("linkedin_url")) or ""),
+                            *(("email", e) for e in rec.get("other_emails", []))) if k[1]]
         hit = next((owner[k] for k in keys if k in owner), None)
         if hit is not None and d.get("name") and hit["data"].get("name") \
                 and not same_person_name(hit["data"]["name"], d["name"]):
@@ -628,7 +647,8 @@ def _fold_keyless(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _merge_records(hit, rec)
         else:  # this row comes first in the file, so the later row's values still win
             first = {**rec, "rows": list(rec["rows"]), "data": dict(rec["data"]), "differs": dict(rec["differs"]),
-                     "notes": list(rec["notes"]), "jobs": list(rec["jobs"]), "warnings": list(rec["warnings"])}
+                     "notes": list(rec["notes"]), "jobs": list(rec["jobs"]), "warnings": list(rec["warnings"]),
+                     "other_emails": list(rec.get("other_emails", []))}
             _merge_records(first, hit)
             hit.clear()
             hit.update(first)
@@ -1095,8 +1115,20 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                 line += ". Where they differ, " + ", ".join(f"row {row} won ({_labels(fields)})"
                                                             for row, fields in sorted(by_row.items()))
             merged_rows.append(line)
+        more = rec.get("other_emails", [])
         by_email = store.find_duplicate(email=data.get("email")) if data.get("email") else None
+        by_other = [h for h in (store.find_duplicate(email=e) for e in more) if h]  # every address counts
+        owners = {h["id"]: h for h in by_other}
+        if by_email:
+            owners[by_email["id"]] = by_email
+        by_email = by_email or (by_other[0] if by_other else None)
         by_li = store.find_duplicate(linkedin_url=data.get("linkedin_url")) if data.get("linkedin_url") else None
+        if len(owners) > 1:
+            who = ", ".join(f"{h['name']} (id {h['id']})" for h in owners.values())
+            skipped.append(f"{label}: its email addresses match different people already here ({who}), so it was left alone")
+            skipped_rows += len(rec["rows"])
+            conflicts += 1
+            continue
         if by_email and by_li and by_email["id"] != by_li["id"]:
             skipped.append(f"{label}: its email and LinkedIn match two different people here (the email is "
                            f"{by_email['name']}'s, id {by_email['id']}, and the LinkedIn is {by_li['name']}'s, id "
@@ -1109,16 +1141,18 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             if not (data.get("email") or data.get("linkedin_url")):
                 people = people or _People(store)
                 match, others = people.match(data)
-            if not match and not store.find_duplicate(data.get("email"), data.get("linkedin_url")):
+            if not match and not by_email and not by_li:
                 data.setdefault("source", source)  # only new people get the sheet as where they came from
             if match and not (match["email"] or match["linkedin_url"]):
                 cand = store.update_candidate(match["id"], by="import", **_merge_fields(store, match["id"], data))
                 created = False
+                if more:
+                    store.add_other_emails(match["id"], more, strict=False)
             else:
                 if match:  # same name and company or phone: save into them through their email or LinkedIn
                     data = {**data, "email": match["email"], "linkedin_url": match["linkedin_url"]}
                     data = {k: v for k, v in data.items() if v not in (None, "")}
-                res = store.upsert_candidate(by="import", **data)
+                res = store.upsert_candidate(by="import", other_emails=more, **data)
                 cand, created = res[0], bool(res[1])
         except Exception as exc:  # one bad row must never stop the rest
             skipped.append(f"{label}: {_row_error(exc)}")
@@ -1881,7 +1915,9 @@ def export_csv(store: Store) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([EXPORT_HEADERS[f] for f in EXPORT_FIELDS]
-               + [EXPORT_HEADERS["jobs"], EXPORT_HEADERS["notes"], EXPORT_HEADERS["work_history"]])
+               + [EXPORT_HEADERS["other_emails"], EXPORT_HEADERS["jobs"], EXPORT_HEADERS["notes"],
+                  EXPORT_HEADERS["work_history"]])
+    others = store.other_emails_by_id()
     for c in store.all_candidates():
         history = "; ".join(
             " at ".join(x for x in (h["title"], h["company"]) if x)
@@ -1889,7 +1925,7 @@ def export_csv(store: Store) -> str:
             for h in store.work_history(c["id"])
         )
         row = [", ".join(c[f]) if f == "tags" else (c.get(f) or "") for f in EXPORT_FIELDS]
-        row += [_jobs_text(store, c["id"]), _notes_text(store, c["id"]), history]
+        row += [", ".join(others.get(c["id"], [])), _jobs_text(store, c["id"]), _notes_text(store, c["id"]), history]
         w.writerow([_safe_cell(v) for v in row])
     return buf.getvalue()
 
@@ -2104,9 +2140,16 @@ def _experience_section(lines: list[str]) -> list[dict[str, str]]:
                 continue  # one bare phrase and a date: not clear enough
         else:
             prev = [l for l in body[max(used + 1, i - 2):i] if not _RANGE.search(l)]
-            if len(prev) < 2:
+            one = _title_company(prev[-1]) if prev else None
+            two = _company_above_title(prev[-2], prev[-1]) if len(prev) >= 2 else None
+            if one:  # "Senior Software Engineer, Datadog - Remote", then the dates on their own line
+                title, company = one
+            elif two:  # the company line above the title line
+                title, company = two
+            elif len(prev) < 2:
                 continue
-            title, company = prev[-2], re.split(r"\s+·\s+", prev[-1])[0]
+            else:
+                title, company = prev[-2], re.split(r"\s+·\s+", prev[-1])[0]
         title, company = title.strip(), company.strip()
         if (len(title) > 80 or len(company) > 80 or not title
                 or any(re.match(r"^[-*•–]", x) for x in (title, company))
@@ -2286,6 +2329,61 @@ def _company_line(line: str) -> bool:
             and not re.search(r"[.!?]$", first) and len(first.split()) <= 6 and not _BARE.search(low)
             and not any(ch.isdigit() for ch in first[:1]))
 
+_TITLE_WORDS = re.compile(
+    r"(?i)\b(?:engineer|engineering|manager|director|recruiter|designer|lead|developer|analyst|scientist|architect|"
+    r"consultant|specialist|officer|president|vp|head|founder|co-?founder|cto|ceo|coo|cfo|intern|associate|"
+    r"coordinator|administrator|strategist|writer|accountant|representative|executive|partner|principal|staff|"
+    r"senior|junior|sr|jr|owner|advisor|researcher|programmer|technician|supervisor|producer|editor|sourcer|"
+    r"generalist|sdr|bdr)\b")
+# After a title and a comma, these name a team or a specialty, not an employer ("Software Engineer, Backend").
+_TEAM_WORDS = {"backend", "frontend", "front end", "back end", "full stack", "fullstack", "platform", "infrastructure",
+               "data", "ml", "ai", "security", "growth", "mobile", "web", "devops", "sre", "payments", "search",
+               "core", "product", "design", "sales", "marketing", "operations", "ops", "finance", "hr", "people",
+               "talent", "technical", "engineering", "remote", "hybrid"}
+
+
+def _has_title_word(text: str) -> bool:
+    return bool(_TITLE_WORDS.search(text))
+
+
+def _title_company(line: str) -> tuple[str, str] | None:
+    """'Senior Engineer, Stripe' or 'Staff Designer at Figma' (with or without a '- Remote' tail) as (title,
+    company). The title side must read like a job title and the company side must not, so a sentence with a
+    comma, a team ('Software Engineer, Backend') or a place is left alone."""
+    base = _strip_place(line.strip())
+    if not base or len(base) > 110 or _EMAIL.search(base) or "http" in base or any(ch in base for ch in "|·"):
+        return None
+    for sep in (" at ", " @ "):
+        if sep in base:
+            t, _, c = base.partition(sep)
+            t, c = t.strip(" ,-"), c.strip(" ,-")
+            if t and c and _has_title_word(t) and len(c.split()) <= 5 and not _has_title_word(c):
+                return t, c
+            return None
+    if "," in base:
+        t, _, c = base.rpartition(",")
+        t, c = t.strip(), c.strip()
+        if (t and c and _has_title_word(t) and not _has_title_word(c) and len(c.split()) <= 5
+                and len(c) <= 50 and not any(ch.isdigit() for ch in c) and not _strict_place(c)
+                and not _STATE.match(c) and not re.fullmatch(r"[A-Z]{2}", c) and c.lower() not in _TEAM_WORDS and not re.search(r"[.!?]$", c)
+                and not _LOC_SUFFIX.match(c)):
+            return t, c
+    return None
+
+
+def _company_above_title(first: str, second: str) -> tuple[str, str] | None:
+    """A resume header with the company on the line above the title: 'Datadog - Remote' then 'Senior Software
+    Engineer'. The company line has no title words (or ends in a dash and a place) and the title line has some.
+    Returns (title, company), or None when it is the usual order."""
+    if (len(first) > 70 or len(second) > 80 or not _has_title_word(second) or _has_title_word(_strip_place(first))
+            or _title_company(first) or _title_company(second) or not _company_line(_strip_place(first))
+            or any(ch.isdigit() for ch in second) or _RANGE.search(second)):
+        return None
+    if _has_title_word(first) and _strip_place(first) == first.strip():
+        return None
+    return second.strip(), _strip_place(first)
+
+
 
 def _signature_lines(text: str) -> list[str] | None:
     """The lines of an email signature (the last paragraph with a way to reach someone in it), starting at the
@@ -2352,6 +2450,7 @@ def quick_parse(text: str) -> dict[str, Any]:
             raw = sig
     if head and head[0] != _clean_name(head[0]) and _is_name(_clean_name(head[0])):
         head = [_clean_name(head[0])] + head[1:]
+    role_line = False  # the current role came from one "Title, Company" line or a company line above the title
     if head and _is_name(head[0]):
         name = head[0]
         out["name"] = name.title() if name.isupper() else name
@@ -2361,7 +2460,17 @@ def quick_parse(text: str) -> dict[str, Any]:
             headline = rest[0]
             sep = " at " if " at " in headline else " @ " if " @ " in headline else None
             contact = bool(_PHONE.search(headline)) or _strict_place(headline.split(" | ")[0])
-            if contact:
+            above = _company_above_title(headline, rest[1]) if plain and len(rest) > 1 and not contact else None
+            tc = _title_company(headline) if plain and not contact and not above else None
+            if above:  # "Datadog - Remote" over "Senior Software Engineer"
+                role_line = True
+                out["current_title"], out["current_company"] = above
+                rest = [rest[1], *rest[2:]] if len(rest) > 2 else rest  # what follows the title line
+                headline = rest[0]
+            elif tc:  # "Senior Engineer, Stripe" (or "... at Stripe", with or without "- Remote")
+                out["current_title"], out["current_company"] = tc
+                role_line = True
+            elif contact:
                 pass  # "Portland, OR | 555 0100": contact details, not a headline
             elif sep:
                 t, _, c = headline.partition(sep)
@@ -2376,6 +2485,8 @@ def quick_parse(text: str) -> dict[str, Any]:
                         and not _EMAIL.search(parts[1]) and "http" not in parts[1]):
                     out["current_company"] = parts[1]
             if contact:
+                pass
+            elif above:
                 pass
             elif len(rest) > 1 and _LOCATION.match(rest[1].split(" · ")[0]) and not plain:
                 out["location"] = rest[1].split(" · ")[0]
@@ -2418,6 +2529,10 @@ def quick_parse(text: str) -> dict[str, Any]:
             out["current_title"] = now["title"]
             if now.get("company"):
                 out["current_company"] = now["company"]
+    if (role_line and head is lines and not out.get("work_history") and out.get("current_title")
+            and out.get("current_company")):  # a resume's header role is their current job
+        out["work_history"] = [{"title": out["current_title"], "company": _strip_place(out["current_company"]),
+                                "start": None, "end": "now"}]
     if out.get("location"):
         out["location"] = _no_zip(out["location"]) or out["location"]
     if out.get("current_company"):
