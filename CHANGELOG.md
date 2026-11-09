@@ -4,6 +4,9 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Candidates
+- Click a skill chip to highlight it in a rainbow color (red, orange, yellow, green, blue, purple, in the order you click) and move people who have it to the top. Nobody is hidden any more. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search
