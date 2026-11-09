@@ -600,6 +600,18 @@ def _identity_hold(store: Store, data: dict[str, Any]) -> tuple[list[str], str]:
     return touch, why
 
 
+def _stage_rank(store: Store, job_id: int, stage: str, cache: dict[int, list[dict[str, Any]]]) -> int:
+    """Where a stage sits in its job's pipeline, as a number to sort by: the stage's place in the job's stages,
+    with stages that are exits (rejected, withdrawn...) after every other stage."""
+    if job_id not in cache:
+        cache[job_id] = store.job_stages(job_id)
+    stages = cache[job_id]
+    for i, st in enumerate(stages):
+        if st["name"] == stage:
+            return (1000 if st.get("outcome") == "lost" else 0) + i
+    return 1000 if stage_outcome(stage) == "lost" else len(stages)
+
+
 def _result(text: str, data: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=data)
 
@@ -1062,6 +1074,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         res = (store.search_candidates(q, limit=limit) if is_id
                else search.search(q, limit=limit, offset=offset, **kw))
         results = []
+        ranks: dict[int, list[dict[str, Any]]] = {}
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
                                                  "tags", "email", "linkedin_url", "website", "source",
@@ -1070,8 +1083,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             c["jobs"] = [_slim({"job_id": p["job_id"], "job": _job_name({"title": p["job_title"],
                                                                          "company": p.get("job_company")}),
                                 "stage": p["stage"], "since": p.get("stage_changed_at"),
+                                "stage_rank": _stage_rank(store, p["job_id"], p["stage"], ranks),
                                 "state": stage_outcome(p["stage"]) if stage_outcome(p["stage"]) != "open" else None})
                         for p in store.candidate_pipelines(c["id"])]
+            if c["jobs"]:  # the stage shown first, as a number, so a table sorts in pipeline order
+                c["stage_rank"] = c["jobs"][0]["stage_rank"]
             c["has_email"] = bool(c.get("email"))
             if h.snippet:
                 c["match"] = snippet_text(h.snippet)
@@ -1289,6 +1305,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             for k in ("keep", "other"):
                 c = store.get_candidate(p[k])
                 people.append({**brief(c), **_slim({"source": c.get("source"), "created_at": c.get("created_at"),
+                                                    "phone": c.get("phone"),
                                                     "app_url": app_url(f"/candidates/{c['id']}")})})
             out.append({"reasons": p["reasons"], "people": people,
                         "compare_and_merge_url": app_url(f"/candidates/{p['keep']}/merge/{p['other']}")})
@@ -1353,7 +1370,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        "what this person is called, then save them with that name.")
             return _result(f"{warning}\n{DATA_NOTE}\n- Name sent: {' '.join(name.split())[:200]}",
                            {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
-                            "incoming_name": name, "warning": warning, "data_note": DATA_NOTE})
+                            "incoming_name": name, "warning": warning, "data_note": DATA_NOTE,
+                            "recruiter_note": "Nothing was saved. That name reads like a sentence, not a person's name."})
         notes_text, headline_unused = (notes or "").strip(), ""
         if headline and headline.strip():  # a LinkedIn headline is the current title, and "X at Y" the company too
             head_title, head_company = split_headline(headline)
@@ -1398,7 +1416,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 return _result(f"{warning}\n{DATA_NOTE}\n{lines}",
                                {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
                                 "incoming_name": name, "possible_duplicates": dupes,
-                                "warning": warning, "data_note": DATA_NOTE})
+                                "warning": warning, "data_note": DATA_NOTE,
+                                "recruiter_note": (f"Nothing was saved yet. {name} is already saved"
+                                                   if n == 1 else f"Nothing was saved yet. {n} people named {name} are already saved")
+                                + ". Is this one of them, or someone new?"})
         held, held_why = _identity_hold(store, data)
         history = _history(work_history)
         over_held: list[str] = []
@@ -1444,7 +1465,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return _result(f"{warning}\n{DATA_NOTE}\n- {_line(other)}",
                            {"created": False, "conflict": True, "changed": [], "saved_status": "Not saved",
                             "data_note": DATA_NOTE, "existing": {**brief(other), "app_url": page},
-                            "incoming_name": exc.incoming_name, "warning": warning, "app_url": page})
+                            "incoming_name": exc.incoming_name, "warning": warning, "app_url": page,
+                            "recruiter_note": (f"Nothing was saved. That {what} already belongs to {other['name']}, "
+                                               f"but it came with the name {exc.incoming_name}. Are they the same person?")})
         if created and guarded:
             site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
@@ -2291,8 +2314,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """
         d = decide.finalists(store, job_id, candidate_ids or None)
         job = d["job"]
+        stage_list = store.job_stages(job_id)
+
+        def next_stage(stage: str) -> str | None:  # the next stage in the job's pipeline that is still in play
+            names = [x["name"] for x in stage_list]
+            if stage not in names:
+                return None
+            for x in stage_list[names.index(stage) + 1:]:
+                if x.get("outcome") != "lost":
+                    return x["name"]
+            return None
+
         data = {"job": _job_out(_slim(job)), "data_note": DATA_NOTE, "people": [_slim({
-            **p, "app_url": app_url(f"/candidates/{p['candidate_id']}"),
+            **p, "next_stage": next_stage(p.get("stage") or ""), "app_url": app_url(f"/candidates/{p['candidate_id']}"),
             "interviews": [_slim({**i, "feedback": i["feedback"] or None}) for i in p["interviews"]],
             "todos": p["todos"] or None}) for p in d["people"]],
             "more": d["more"], "offer_stage": d["offer_stage"], "out_stage": d["out_stage"],
@@ -3285,7 +3319,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 _IGNORED.reset(token)
             if d.get("conflict") or d.get("needs_confirmation"):
                 groups["needs_answer"].append(_slim({
-                    "name": person.name, "reason": d.get("warning"), "existing": d.get("existing"),
+                    "name": person.name, "reason": d.get("warning"), "recruiter_note": d.get("recruiter_note"),
+                    "existing": d.get("existing"),
                     "possible_duplicates": (d.get("possible_duplicates") or [])[:25],
                     "more_duplicates": max(0, len(d.get("possible_duplicates") or []) - 25) or None}))
                 continue
@@ -3293,6 +3328,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             row = _slim({"id": d["id"], "name": d["name"], "saved_status": d.get("saved_status"),
                          "current_title": d.get("current_title"), "current_company": d.get("current_company"),
                          "location": d.get("location"), "linkedin_url": d.get("linkedin_url"),
+                         "email": d.get("email"), "phone": d.get("phone"), "website": d.get("website"),
                          "links": (d.get("links") or [])[:6], "no_contact": not (d.get("email") or d.get("linkedin_url")) or None,
                          "held": (d.get("identity_kept") or []) + (d.get("budget_kept") or []), "kept": kept,
                          "ignored_fields": d.get("ignored_fields"), "notes": notes,
@@ -4042,6 +4078,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return recipes.refresh_stale(guard=site_guard.enabled(store))
 
     _check_arguments(mcp)
+    _add_time_zone(mcp)
     _track_session(mcp, store, session, started)
     wording.install(mcp, store)  # own-company mode: "you" for "the recruiter" in what the tools say
     return mcp
@@ -4106,6 +4143,25 @@ def _check_ids(tool: Any, name: str, args: dict[str, Any]) -> None:
         read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
         raise ToolError(("" if read_only else "No change made. ") + f"{key} is a number, not {value!r}"
                         + (f"; {where} shows them." if where else "."))
+
+
+def _add_time_zone(mcp: FastMCP) -> None:
+    """Every tool with an in-chat view says which time zone the recruiter's Settings use ("time_zone", an IANA
+    name), so the view shows times in it and not in the browser's zone. Left out when no zone is saved."""
+    manager = mcp._tool_manager
+    inner = manager.call_tool
+
+    async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
+        result = await inner(name, arguments, context=context, convert_result=convert_result)
+        tool = manager.get_tool(name)
+        meta = (getattr(tool, "meta", None) or {}).get("ui") or {}
+        zone = getattr(shown_zone(), "key", None)
+        data = getattr(result, "structuredContent", None)
+        if zone and meta.get("resourceUri") and isinstance(data, dict) and "time_zone" not in data:
+            result.structuredContent = {**data, "time_zone": zone}
+        return result
+
+    manager.call_tool = call_tool  # type: ignore[method-assign]
 
 
 def _check_arguments(mcp: FastMCP) -> None:

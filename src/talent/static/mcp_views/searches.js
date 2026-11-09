@@ -35,7 +35,7 @@ draw=function(focus){drawPeople(focus);addBack()};
 function listView(d){
  const items=d.saved_searches||[];const wrap=el("div",{});
  const news=items.reduce((a,s)=>a+(s.new_since_opened||0),0);
- wrap.append(header({title:"Saved searches",count:items.length?items.length+(items.length===1?" search":" searches")+(news?", "+news+" new people":""):null,appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:false,refresh:false}));
+ wrap.append(header({title:"Saved searches",count:items.length?items.length+(items.length===1?" search":" searches")+(news?", "+news+" new people":""):null,appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:false}));
  if(!items.length){wrap.append(emptyState("No saved searches yet. Ask Claude to save one, and it will show up here."));return wrap}
  wrap.append(el("ul",{class:"plain","aria-label":"Saved searches"},items.map(ssCard)));return wrap}
 render=function(d){

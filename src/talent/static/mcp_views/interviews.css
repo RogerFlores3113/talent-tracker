@@ -28,3 +28,4 @@ li.session.clash{border-color:var(--danger)}
 .fbform textarea{min-height:64px;resize:vertical}
 .sure{margin-top:8px;font-size:.8125rem;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 @media (max-width:420px){.session .toprow{display:block}.session .time{display:block}.acts .btn{flex:1 1 auto;justify-content:center}}
+.clashlist{margin:4px 0;padding-left:18px}

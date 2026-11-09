@@ -40,8 +40,10 @@ function item(i,origin){
  if(i.detail)li.append(el("div",{class:"small muted"},i.detail));
  const acts=el("div",{class:"acts"});
  if(i.job&&jUrl&&i.candidate_id)acts.append(jobLink({job:i.job,job_id:i.job_id,origin},i.name));
- for(const[label,text]of actionsFor(i)){const b=el("button",{class:"btn",type:"button","aria-label":label+": "+(i.name?i.name+", ":"")+(i.title||LABEL[i.kind])},label);
-  b.addEventListener("click",()=>askOrLink(text,b,status,cUrl||jUrl||(origin?origin+"/":null),i.name||null));acts.append(b)}
+ for(const[label,text]of actionsFor(i)){const b=el("button",{class:"btn",type:"button",needs:"message","aria-label":label+": "+(i.name?i.name+", ":"")+(i.title||LABEL[i.kind])},label);
+  const url=cUrl||jUrl||(origin?origin+"/":null);
+  if(/^(Move to |Cancel it)/.test(label))b.addEventListener("click",()=>confirmSend(acts,(/^Move/.test(label)?label.replace(/^Move to /,"Move "+(i.name?firstName(i.name):"them")+" to ")+"?":"Cancel "+(i.name?firstName(i.name)+"'s":"this")+" interview?")+" Claude does it when you send this.",text,status,url,i.name||null,()=>b.focus(),null,b));
+  else b.addEventListener("click",()=>askOrLink(text,b,status,url,i.name||null));acts.append(b)}
  if(acts.childNodes.length)li.append(acts);
  li.append(status);return li}
 function section(label,items,origin,level){

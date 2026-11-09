@@ -111,6 +111,11 @@ All notable changes to Talent Search. Newest first.
 - A plain row in save_candidates no longer shows a false "looks like instructions" caution when the person has namesakes.
 - Today: the time zone banner says which zone this browser is in and offers it in one click, there is a "Skip to today's list" link, and each Snooze and Done button names its item.
 - The view test host (scripts/view_host.py) replaces the old frame each time you press Run.
+- In-chat People table: Select none clears everyone (the counter says how many are hidden by the filter), new Job and Email columns, a "Has an email" toggle, Stage sorts in pipeline order, the table scrolls sideways with an edge shadow and a fixed Name column, and "Back to table" keeps your sort, filter, selection and place.
+- In-chat views: when the chat app blocks copying, the view says so and shows the text selected in a box; Ask Claude with an empty box asks you to type first; picking a stage or pressing Advance asks "Move X to Y?" with Send and Cancel before anything is sent; rows say "Sent to Claude" after a button sends a message.
+- In-chat views: a stopped request keeps what you were looking at, times show in your Settings time zone ("Times in PST"), Refresh on every list view, the card carousel can be focused with a hint for the arrow keys, flipping cards tells Claude who you are looking at, and controls the chat app can't support are hidden.
+- In-chat Interviews shows one clash line per interviewer with the load strip on top, Finalists has Days in process and "Advance to Offer", saved people and the Shortlist show email, phone and website, the "needs your answer" card uses plain words, and Duplicates sides are labelled by person and email.
+- In-chat views: screen reader and keyboard fixes (names on repeated buttons, headings read the person's name, one Tab stop in the avatar strip, focus after sending).
 
 
 ## [0.1.1] - 2026-11-09

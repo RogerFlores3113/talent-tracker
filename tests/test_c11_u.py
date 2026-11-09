@@ -84,7 +84,7 @@ def test_views_never_write_directly():
     for name in ("pipeline", "decide", "today", "saved"):
         js = (_DIR / f"{name}.js").read_text()
         assert "callTool(" not in js and "tools/call" not in js and "req(" not in js, name
-        assert "askOrLink(" in js, name
+        assert "askOrLink(" in js or "confirmSend(" in js, name  # c11 W: a pick or move asks first, then sends
     # the Shortlist keeps its existing keyed tools and adds no new ones
     js = (_DIR / "shortlist.js").read_text()
     assert "keep_prospects" in js and "pass_prospects" in js and "shortlist_card_key" in js

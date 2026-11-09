@@ -16,9 +16,12 @@ function pcard(c,s,d,stages){
  if(s.outcome==="open"||s.outcome==="lost"){
   const opts=stages.filter(x=>x.name!==s.name);
   const sel=el("select",{class:"field moveto","aria-label":"Move "+nm+" to another stage"},el("option",{value:""},"Move to..."),opts.map(x=>el("option",{value:x.name},x.name)));
-  sel.addEventListener("change",()=>{const to=sel.value;if(!to)return;sel.value="";
-   askOrLink("Move "+nm+" to "+to+" for "+jobName(job)+" (candidate id "+c.candidate_id+", job id "+job.id+").",sel,status,c.app_url,nm)});
-  card.append(el("div",{class:"acts"},sel))}
+  const acts=el("div",{class:"acts"});
+  const go=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Move "+nm,disabled:true},"Move");
+  sel.addEventListener("change",()=>{go.disabled=!sel.value});  // picking only sets the value; Move asks first
+  go.addEventListener("click",()=>{const to=sel.value;if(!to)return;
+   confirmSend(acts,"Move "+firstName(nm)+" to "+to+"? Claude makes the move when you send this.","Move "+nm+" to "+to+" for "+jobName(job)+" (candidate id "+c.candidate_id+", job id "+job.id+").",status,c.app_url,nm,()=>sel.focus())});
+  acts.append(sel,go);card.append(acts)}
  card.append(status);
  return card}
 function render(d){
@@ -26,13 +29,13 @@ function render(d){
  const n=d.counts||{active:d.stages.filter(s=>s.outcome==="open").reduce((a,s)=>a+s.candidates.length,0)};
  const sum=[n.active+" in the running"];if(n.hired!=null)sum.push(d.openings>1?n.hired+" of "+d.openings+" hired":n.hired+" hired");if(n.out)sum.push(n.out+" out");
  const line=d.headline||(sum.join(" · "));
- wrap.append(header({title:job.title+(job.company?" · "+job.company:""),count:line+(job.status&&job.status!=="open"?" · "+job.status.replace("_"," "):""),appUrl:d.app_url}));
+ wrap.append(header({title:job.title+(job.company?" · "+job.company:""),count:line+(job.status&&job.status!=="open"?" · "+job.status.replace("_"," "):""),appUrl:d.app_url,fullscreen:d.stages.some(s=>(s.total!=null?s.total:s.candidates.length)>0)}));
  const fs=wrap.querySelector("button[data-fs]");if(fs)fs.classList.add("primary");
  const per=d.stages.filter(s=>(s.total!=null?s.total:s.candidates.length)>0);
  const left=new Set(d.left_out||[]);
  if(per.length){
   wrap.append(el("ul",{class:"chips stagecounts","aria-label":"People in each stage"},per.map(s=>{const t=s.total!=null?s.total:s.candidates.length;
-   return el("li",{class:"chip",title:left.has(s.name)?"Not in the status update":null},s.name+" "+t+(left.has(s.name)?" *":""))})));
+   return el("li",{class:"chip",title:left.has(s.name)?"Not in the status update":null},s.name,el("span",{class:"sr"},","),"\u00a0"+t+(left.has(s.name)?" *":""))})));
   if(per.some(s=>left.has(s.name)))wrap.append(el("p",{class:"small muted",style:"margin:2px 0 6px"},"* Not in the status update text: "+per.filter(s=>left.has(s.name)).map(s=>s.name).join(", ")+"."))}
  else wrap.append(emptyState("Nobody is in this job's pipeline yet."));
  const board=el("div",{class:"board wrap"});

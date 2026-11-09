@@ -25,14 +25,14 @@ function oneUpdate(u,jobs,idx,n){
  if(u.for)sec.append(el("p",{class:"small muted",style:"margin:10px 0 2px"},"For "+u.for+" (this line is not part of the update)"));
  const pv=previewOf(u.text,jobs);
  const st=el("span",{class:"small muted",role:"status"});
- const btn=el("button",{class:"btn primary",type:"button","aria-label":u.for?"Copy the update for "+u.for:"Copy update",onclick:()=>copyText(u.text,pv).then(ok=>{st.textContent=ok?"Copied. Paste it where you send updates.":"Your chat app wouldn't copy it, so the update is selected. Press Ctrl+C or Cmd+C.";announce(st.textContent)})},u.for?"Copy this update":"Copy update");
+ const btn=el("button",{class:"btn primary",type:"button","aria-label":u.for?"Copy the update for "+u.for:"Copy update",onclick:()=>copyText(u.text,sec.querySelector(".acts"),st,"Copied. Paste it where you send updates.")},u.for?"Copy this update":"Copy update");
  sec.append(el("div",{class:"acts",style:"margin:0 0 8px"},btn,st),pv);return sec}
 function render(d){
  const wrap=el("div",{});
  const jobs=d.job_links||[];
  const ups=d.update_text?[{for:null,text:d.update_text}]:(d.updates||[]).filter(u=>u&&u.text);
  const isClient=TOOL==="client_report"||(!d.update_text&&d.client);
- wrap.append(header({title:isClient?"Client update"+(d.client?": "+d.client:""):"Status update",count:d.since&&isClient?"Since "+day(d.since):null,appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:false,refresh:false}));
+ wrap.append(header({title:isClient?"Client update"+(d.client?": "+d.client:""):"Status update",count:d.since&&isClient?"Since "+day(d.since):null,appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:false}));
  if(!ups.length){wrap.append(emptyState("There is no update to show right now."));
   if(d.last_sent_copy)wrap.append(oneUpdate({for:null,text:d.last_sent_copy},jobs));return wrap}
  wrap.append(el("p",{class:"small muted",style:"margin:0 0 6px"},"This is what the client sees. Only this part is copied."));
