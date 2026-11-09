@@ -1,7 +1,7 @@
 # Talent Search
 
 A candidate database for recruiters that lives on your own computer. Search it
-instantly from a simple app window, track each job's pipeline, and let Claude
+instantly in your web browser, track each job's pipeline, and let Claude
 Desktop, Codex or a local model in LM Studio find, save and update candidates
 for you in plain English.
 
@@ -18,6 +18,9 @@ for you in plain English.
 
 See [CHANGELOG.md](CHANGELOG.md) for everything in each version.
 
+**Requirements:** macOS on Apple Silicon (M1 or later) for now, Windows 10 or 11 (64-bit),
+or Linux x86_64.
+
 ## Download
 
 Get the file for your computer from the
@@ -28,6 +31,8 @@ Get the file for your computer from the
 | Mac | `TalentSearch-mac.dmg` (or `TalentSearch-mac.zip`) |
 | Windows | `TalentSearch-windows.zip` |
 | Linux | `TalentSearch-linux.tar.gz` |
+
+Each release also lists `SHA256SUMS.txt` so you can check your download.
 
 ## Install
 
@@ -43,6 +48,8 @@ such as Claude Desktop can't find it later.
 4. The first time, it says it can't be checked for malware because it isn't notarized
    yet. Right-click the app, choose **Open**, then **Open** again. On newer macOS,
    go to **System Settings > Privacy & Security** and press **Open Anyway**.
+5. Open Talent Search once this way **before** you connect Claude Desktop, so macOS
+   trusts it and Claude can start it.
 
 ### Windows
 
@@ -75,18 +82,21 @@ Your data is one file, `talent.db`, in `~/Library/Application Support/Talent Sea
 
 ## Connect Claude Desktop
 
-1. Install [Claude Desktop](https://claude.ai/download) and open it once.
+1. Install [Claude Desktop](https://claude.ai/download) and open it once. (On a Mac,
+   also open Talent Search once with right-click > **Open**, as in Install above.)
 2. In Talent Search, open **Connect AI** and press **Connect Claude Desktop**.
    The page shows the settings file it wrote and checks that Talent Search starts.
 3. **Quit Claude Desktop completely.** Closing the window is not enough.
    - Mac: choose **Claude > Quit Claude** in the menu bar, or press Cmd+Q.
    - Windows: right-click the Claude icon by the clock and choose **Quit**.
 4. Open Claude Desktop again.
-5. Check **Settings > Developer**. **talent-search** should be listed as running.
+5. Check **Settings > Developer** in Claude Desktop. **talent-search** should be listed there
+   as running.
 6. In a chat, Talent Search's tools are under the **+** menu. Try:
    *"What should I do today in Talent Search?"*
 
-If something looks off, press **Test connection** on the Connect AI page.
+If something looks off, press **Test connection** on the Connect AI page. **Show full
+report** copies a report you can paste into a bug report.
 
 **Codex and LM Studio:** press **Connect Codex** or **Connect LM Studio** on the same
 page, then quit and reopen that app.
@@ -97,19 +107,36 @@ page, then quit and reopen that app.
 Fully quit Claude Desktop (see step 3 above) and open it again. Then press **Test
 connection** on the Connect AI page. If the entry disappeared, Claude was probably open
 while you connected and wrote over the file: quit Claude, press **Connect Claude
-Desktop** again, then reopen Claude. For a full report, run this in Terminal:
+Desktop** again, then reopen Claude. For a full report, run this.
+
+Mac (in Terminal):
 
 ```bash
 "/Applications/Talent Search.app/Contents/MacOS/Talent Search" check-claude
 ```
 
+Windows (in PowerShell, using the folder you extracted; the windowed `Talent Search.exe`
+prints nothing, so use the other one):
+
+```powershell
+"<folder>\Talent Search\talent-search-mcp.exe" check-claude
+```
+
 It exits cleanly when everything is healthy and says what to fix when it isn't.
 
 **Claude says Talent Search failed to start.**
-Look at the log: `~/Library/Logs/Claude/mcp-server-talent-search.log` (Mac) or
-`%APPDATA%\Claude\logs` (Windows). If you moved the app, press **Connect Claude
-Desktop** again so it points at the new place. On a Mac, also open the app once with
-right-click > **Open** so macOS trusts it.
+Look at Claude's log for it:
+
+- Mac: `~/Library/Logs/Claude/mcp-server-talent-search.log`
+- Windows: `%APPDATA%\Claude\logs\mcp-server-talent-search.log`
+- Windows, Claude from the Microsoft Store: `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\logs`
+
+If you moved the app, press **Connect Claude Desktop** again so it points at the new
+place. On a Mac, also open the app once with right-click > **Open** so macOS trusts it.
+
+**I installed Claude Desktop from the Microsoft Store.**
+Talent Search finds that settings file by itself. The Connect page shows which file it
+used.
 
 **Mac says "Talent Search can't be opened."**
 Right-click the app and choose **Open**, then **Open** again, or use **Open Anyway** in
@@ -120,11 +147,11 @@ Choose **More info**, then **Run anyway**.
 
 **The page says "locked".**
 The window is locked by a key so other websites can't read your data. Open Talent
-Search from its icon (or run `talent open`) and it unlocks in your browser.
+Search again from Applications (Mac) or from the Start menu or its folder (Windows),
+and it unlocks in your browser.
 
 **The port is already in use.**
-Talent Search picks the next free port by itself. Use whatever address it opens, or
-run `talent serve --port 8800` to choose one.
+Talent Search picks a free port by itself. Use whatever address it opens in your browser.
 
 **Where is my data, and how do I back it up?**
 See First run for the folder. **Settings > Download a backup** saves a complete copy

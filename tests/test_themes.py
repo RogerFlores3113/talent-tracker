@@ -66,8 +66,13 @@ def test_theme_contrast(name):
         ("warn on surface", t["--warn"], t["--surface"], 4.5), ("ok on ok-bg", t["--ok"], t["--ok-bg"], 4.5),
         ("bad on bad-bg", t["--bad"], t["--bad-bg"], 4.5), ("warn on warn-bg", t["--warn"], t["--warn-bg"], 4.5),
     ]
-    for key in ("--head-from", "--head-mid", "--head-to", "--head-end"):
+    # The brand is large bold text (>= 3:1) on the brightest start; nav text sits from the 22% stop on (>= 4.5:1).
+    checks.append(("brand on head-from", t["--header-text"], t["--head-from"], 3))
+    for key in ("--head-mid", "--head-to", "--head-end"):
         checks.append((f"header text on {key}", t["--header-text"], t[key], 4.5))
+    # Narrow screens start the header at the 22% stop color, so small text stays >= 4.5:1.
+    checks.append(("header text on narrow start", t["--header-text"], t["--head-mid"], 4.5))
+    checks.append(("line vs bg is visible but soft", t["--line"], t["--bg"], 1.0))
     bad = [(label, round(ratio(fg, bg), 2), need) for label, fg, bg, need in checks if ratio(fg, bg) < need]
     assert not bad, f"{name}: {bad}"
 
@@ -118,3 +123,30 @@ def test_locked_page_uses_the_default_look(store):
     c = local_client(store, unlocked=False)
     r = c.get("/")
     assert "/static/style.css" in r.text and "data-theme" not in r.text
+
+
+def test_header_gradient_rules_in_css():
+    assert "var(--head-from) 0%, var(--head-mid) 22%" in CSS
+    assert "--head-grad-narrow: linear-gradient(100deg, var(--head-mid) 0%" in CSS
+    narrow = CSS.split("@media (max-width: 640px) {")[1].split("\n}\n")[0]
+    assert "background: var(--head-grad-narrow)" in narrow
+    brand = re.search(r"\.brand \{[^}]*\}", CSS).group(0)
+    assert "font-weight: 700" in brand and int(re.search(r"font-size: (\d+)px", brand).group(1)) >= 19
+
+
+@pytest.mark.parametrize("name", ["sunset", "ocean", "classic"])
+def test_light_theme_borders_do_not_vanish(name):
+    t = BLOCKS[name]
+    assert ratio(t["--line"], t["--bg"]) >= 1.5
+
+
+def test_theme_reaches_below_the_header():
+    for name, t in BLOCKS.items():
+        assert {"--rule-from", "--rule-to", "--tint"} <= set(t), name
+    assert "h1::after" in CSS and ".panel:focus-within::before" in CSS
+
+
+def test_settings_look_panel_explains_dark_mode_and_splits_the_default_swatch(store):
+    page = local_client(store).get("/settings").text
+    assert "Sunset to forest and Classic go dark when your computer is in dark mode." in page
+    assert page.count('class="chip-bar split"') == 2
