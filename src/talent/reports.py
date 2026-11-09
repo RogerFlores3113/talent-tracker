@@ -182,7 +182,9 @@ def user_zone(store: Store) -> str | None:
 
 def computer_on_utc() -> bool:
     """This computer's clock says UTC: a server or a fresh virtual machine, rarely where a recruiter sits."""
-    return (datetime.now().astimezone().tzname() or "").upper() in ("UTC", "Z")
+    now = datetime.now().astimezone()
+    # Windows names it "Coordinated Universal Time"; Mac and Linux say "UTC".
+    return now.utcoffset() == timedelta(0) and (now.tzname() or "").upper() in ("UTC", "Z", "COORDINATED UNIVERSAL TIME")
 
 
 def fallback_zone(store: Store) -> str | None:

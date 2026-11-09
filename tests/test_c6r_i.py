@@ -82,7 +82,8 @@ def test_web_import_without_a_preview_still_offers_to_keep_stages(store, monkeyp
 
 
 # ------------------------------------------------------------- 2. time zone banner
-def test_today_shows_the_time_zone_banner_until_a_zone_is_saved(store):
+def test_today_shows_the_time_zone_banner_until_a_zone_is_saved(store, monkeypatch):
+    monkeypatch.setattr(reports, "computer_on_utc", lambda: True)  # the bar only shows on a computer set to UTC
     c = local_client(store)
     home = c.get("/").text
     assert "Welcome to Talent Search" in home and "Set your time zone" in home  # the welcome page has it too
