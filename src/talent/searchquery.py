@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 # field prefix -> the filter it sets
 FIELD_ALIASES = {"title": "title", "company": "company", "location": "location", "skill": "skill", "skills": "skill",
@@ -116,6 +116,78 @@ class Item:
 
 
 @dataclass
+class Advice:
+    """One thing that looks like a slip, in plain words. `fix` turns the typed text into what was probably meant.
+    always=False: only worth saying when the search found nobody (skill:python django is often meant as a skill
+    and a word, and "lives near boston" is just English)."""
+    note: str
+    fix: Callable[[str], str] | None = None
+    always: bool = True
+
+
+_PREFIXES = "|".join(sorted(FIELD_ALIASES, key=len, reverse=True))
+_MULTI_VALUE = re.compile(rf'(?<![\w:])(-?)({_PREFIXES}):([^\s"():]+)\s+([^\s"():-][^\s"():]*)(?=[\s"()]|$)', re.I)
+_PROXIMITY = re.compile(r'"([^"]+)"\s*~\s*(\d{1,3})(?!\d)')
+_LONE_DASH = re.compile(r'(?:(?<=\s)|^)-(?=\s|$)')
+_QUOTED = re.compile(r'"[^"]*"')
+_OPWORDS = {"or", "and", "not", "near"}
+
+
+def query_advice(text: str | None) -> list[Advice]:
+    """Notes for mistakes people bring from other search boxes: several words after a prefix without quotes, the
+    "a b"~3 proximity form, a lowercase not or near, and a minus with nothing after it. Never raises."""
+    s = (text or "")[:2000]
+    bare = _QUOTED.sub('""', s)  # what is inside quotes was typed on purpose
+    out: list[Advice] = []
+    # skill:machine learning  ->  skill:"machine learning"
+    for m in _MULTI_VALUE.finditer(bare):
+        neg, pre, first, second = m.groups()
+        if first.lower() in _OPWORDS or second.lower() in _OPWORDS:
+            continue
+        pat = re.compile(rf'(?<![\w:])({re.escape(neg + pre)}:){re.escape(first)}\s+{re.escape(second)}(?!\w)', re.I)
+        out.append(Advice(
+            f'{pre}:{first} only takes the one word after the colon, so {second} was searched as a separate word. '
+            f'For a value of several words, use quotes: {pre}:"{first} {second}".',
+            lambda t, pat=pat, v=f"{first} {second}": pat.sub(lambda mm: f'{mm.group(1)}"{v}"', t), always=False))
+    # "python django"~3  ->  python NEAR/3 django
+    for m in _PROXIMITY.finditer(s):
+        words = m.group(1).split()
+        if len(words) < 2:
+            continue
+        n = max(1, min(int(m.group(2)), NEAR_MAX))
+        fixed = f" NEAR/{n} ".join(words)
+        out.append(Advice(
+            f'"{m.group(1)}"~{m.group(2)} is how other tools write proximity. Here, write {fixed}: the words must be '
+            f'at most {n} words apart.', lambda t, old=m.group(0), new=fixed: t.replace(old, new)))
+    toks = bare.split()
+    # python not manager
+    for k, t in enumerate(toks):
+        nxt = toks[k + 1] if k + 1 < len(toks) else ""
+        if t == "not" and nxt and nxt.lower() not in _OPWORDS and not nxt.startswith("-") and len(toks) > 1:
+            out.append(Advice(
+                'A lowercase not is searched as a plain word. To leave people out, write NOT in capitals '
+                f'(NOT {nxt}) or put a minus in front (-{nxt}).',
+                lambda t: re.sub(r'(?<![\w-])not(?=\s+[^\s-])', 'NOT', t)))
+            break
+    # python near django
+    for k, t in enumerate(toks):
+        if t == "near" and 0 < k < len(toks) - 1:
+            out.append(Advice(
+                'A lowercase near is searched as a plain word. For two words close together, write NEAR in capitals '
+                f'({toks[k - 1]} NEAR {toks[k + 1]}), or NEAR/3 for at most 3 words apart.',
+                lambda t: re.sub(r'(?<=\s)near(?=\s)', 'NEAR', t), always=False))
+            break
+    # a minus with nothing after it
+    if _LONE_DASH.search(bare):
+        out.append(Advice(
+            'A minus on its own was ignored. To leave people out, put it right before the word (-manager), or write '
+            'NOT manager.',
+            lambda t: re.sub(r'(?:(?<=\s)|^)-\s+(?=[^\s-])', '-', t) if re.search(r'(?:(?<=\s)|^)-\s+[^\s-]', t)
+            else re.sub(r'(?:(?<=\s)|^)-(?=\s|$)', '', t).strip()))
+    return out
+
+
+@dataclass
 class ParsedQuery:
     groups: list[list[Item]] = field(default_factory=list)  # AND of OR-groups
     exclude: list[Item] = field(default_factory=list)
@@ -126,6 +198,7 @@ class ParsedQuery:
     used_syntax: bool = False  # quotes, OR, NOT, a minus or a field prefix was understood
     hints: list[tuple[str, str]] = field(default_factory=list)  # (typed prefix, the prefix it looks like): skil -> skill
     unknown_prefix: bool = False  # something like foo:bar, which is read as plain words
+    advice: list[Advice] = field(default_factory=list)  # common slips: a note each, and the fix to offer
 
     @property
     def operator_mode(self) -> bool:
@@ -143,6 +216,16 @@ class ParsedQuery:
     @property
     def structured(self) -> bool:
         return self.used_syntax or bool(self.hints) or self.unknown_prefix or bool(self.notes)
+
+    def apply_advice(self, text: str, *, only_always: bool = False) -> str | None:
+        """`text` with the fix of each piece of advice applied (skill:machine learning -> skill:"machine learning",
+        "a b"~3 -> a NEAR/3 b), or None when nothing changed. only_always leaves out the advice that is only
+        spoken when nothing was found."""
+        out = text
+        for a in self.advice:
+            if a.fix and (a.always or not only_always):
+                out = a.fix(out)
+        return out if out != text else None
 
     def fix_prefixes(self, text: str) -> str | None:
         """`text` with each mistyped prefix swapped for the one it looks like (skil:python -> skill:python), or
@@ -251,6 +334,8 @@ def parse_query(text: str | None) -> ParsedQuery:
         toks.append(("word", raw, neg, fld))
 
     toks = _join_near(toks, pq)
+    pq.advice = query_advice(s)
+    pq.notes += [a.note for a in pq.advice if a.always]
 
     # A lowercase "or" between two words is an OR too ("python or go").
     for k, (kind, value, neg, fld) in enumerate(toks):

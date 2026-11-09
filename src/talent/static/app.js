@@ -33,7 +33,7 @@
 //   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover.
 //                             While it shows, the page behind it is inert (except the lit part); a step may also light
 //                             a second element ("reach") so the recruiter can click it, and the finish step offers
-//                             check boxes (delete_people, delete_searches) that are posted with Finish or Skip.
+//                             check boxes (delete_people) that are posted with Finish or Skip.
 (function () {
   "use strict";
 
@@ -341,12 +341,17 @@
     colorLive.textContent = text;
   }
   function setBubble(btn, d) {
+    const was = btn.dataset.color || "none", now = d.color || "none";
     btn.dataset.color = d.color; btn.dataset.next = d.next; btn.dataset.prev = d.prev;
     btn.setAttribute("aria-label", d.aria); btn.title = d.title;
     const letter = btn.querySelector("span"); if (letter) letter.textContent = d.letter;
     const hidden = btn.form && btn.form.elements.color; if (hidden) hidden.value = d.next;
-    document.querySelectorAll("[data-color-count]").forEach(n => {
-      if (d.counts && d.counts[n.dataset.colorCount] !== undefined) n.textContent = d.counts[n.dataset.colorCount];
+    // The numbers follow the search and filters on the page, so move one person from the old colour to the new
+    // one here instead of swapping in whole-database totals.
+    if (was !== now) document.querySelectorAll("[data-color-count]").forEach(n => {
+      const k = n.dataset.colorCount, v = parseInt(n.textContent, 10);
+      if (!isNaN(v) && k === was) n.textContent = Math.max(0, v - 1);
+      else if (!isNaN(v) && k === now) n.textContent = v + 1;
     });
   }
   function pickColor(btn, back) {
@@ -444,7 +449,9 @@
         lab.append(inp, el("span", "", text)); extras.appendChild(lab); picks.push({input: inp, field, id});
       };
       (ex.people || []).forEach(p => add("Also delete " + p.name + " (you worked with them)", "delete_people", p.id));
-      (ex.searches || []).forEach(x => add("Also remove my saved search " + x.name, "delete_searches", x.id));
+      // Saved searches made on the demo people go with them on their own: one short line, not a box for each.
+      if ((ex.searches || []).length) extras.appendChild(el("p", "fine",
+        "Saved searches you made that only find demo people are removed with them."));
     }
     function chosen() {
       const out = {};

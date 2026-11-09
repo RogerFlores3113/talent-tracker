@@ -2736,11 +2736,17 @@ class Store:
             self._conn.execute("UPDATE candidates SET color = ? WHERE id = ?", (want, candidate_id))
         return self.get_candidate(candidate_id)
 
-    def color_counts(self) -> dict[str, int]:
-        """How many people have each colour ("none" counts the untagged), for the chips above the table."""
+    def color_counts(self, **filters: Any) -> dict[str, int]:
+        """How many people have each colour ("none" counts the untagged), for the chips above the table. With
+        filters (the same ones as candidate_filters: tag, location, job_id, skills...) only the people those let
+        through are counted, so the numbers follow what the table shows. A colour filter is never applied here."""
         out = {c: 0 for c in COLORS}
         out["none"] = 0
-        for r in self._rows("SELECT color, count(*) AS n FROM candidates GROUP BY color"):
+        filters.pop("color", None)
+        conds, params, _ = self.candidate_filters(**filters) if filters else ([], [], {})
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        for r in self._rows(f"SELECT c.color AS color, count(*) AS n FROM candidates c {where} GROUP BY c.color",
+                            params):
             out[r["color"] or "none"] = r["n"]
         return out
 
@@ -4286,8 +4292,9 @@ class Store:
             params = json.loads(r["params"])
         except (TypeError, ValueError):
             params = {}
-        from .searchquery import clean_params
-        return {**r, "params": clean_params(params if isinstance(params, dict) else {})}
+        from .searchquery import clean_params, describe
+        params = clean_params(params if isinstance(params, dict) else {})
+        return {**r, "params": params, "summary": describe(params)}  # summary: what it runs, for a chip's tooltip
 
     def save_search_problem(self, name: str, *, by: str = "app") -> str | None:
         """Why a saved search under this name would be refused (name already used, too many), or None. The words
@@ -4393,7 +4400,10 @@ class Store:
         res = self.search_candidates(q, limit=1, **kw)
         total = res.exact_total if res.exact_total is not None else res.total
         new = 0
-        if total:
+        newest = (self._row("SELECT coalesce(max(id), 0) AS n FROM candidates") or {}).get("n") or 0
+        if total and row.get("seen_max_id") is not None and newest <= row["seen_max_id"]:
+            pass  # nobody was saved since the last look: no second search needed
+        elif total:
             if row.get("seen_max_id") is not None:  # people saved after the last look, by id (the same second counts)
                 res = self.search_candidates(q, limit=1, after_id=row["seen_max_id"], **kw)
             else:  # saved before ids were tracked: by time
@@ -4493,7 +4503,11 @@ class Store:
         is_id, _ = self.lookup_exact(query)
         pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
         if not pq.structured and not pq.operator_mode:
-            return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+            res = self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+            if pq.advice and not res.corrected and not (res.total and not res.closest):  # "python near django"
+                res.suggestion = pq.apply_advice(res.suggestion or query) or res.suggestion
+                res.notes = [*res.notes, *(a.note for a in pq.advice)]
+            return res
         # Field prefixes add to the form's own filters. A Title, Company, Location or Found via typed both ways
         # counts as either one (OR), and the read-back says so; nothing typed is dropped.
         notes: list[str] = []
@@ -4547,7 +4561,12 @@ class Store:
             fixed = pq.fix_prefixes(res.suggestion or query)
             if fixed:
                 res.suggestion = fixed
-        res.notes = [*pq.notes, *notes]
+        found = bool(res.total) and not res.closest
+        if pq.advice and not res.corrected:  # skill:machine learning, "a b"~3, lowercase not: offer what was meant
+            fixed = pq.apply_advice(res.suggestion or query, only_always=found)
+            if fixed:
+                res.suggestion = fixed
+        res.notes = [*pq.notes, *notes, *(a.note for a in pq.advice if not a.always and not found)]
         res.query = query
         return res
 

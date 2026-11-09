@@ -507,9 +507,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not (q or "").strip() or store.lookup_exact(q)[0]:
             return ""
         pq = searchquery.parse_query(q)
-        if not (pq.structured or pq.operator_mode):
-            return ""
         notes = list(getattr(result, "notes", None) or pq.notes)
+        if not (pq.structured or pq.operator_mode or notes):
+            return ""
         return " ".join([pq.explain(), *notes]).strip()
 
     @app.get("/", response_class=HTMLResponse)
@@ -526,7 +526,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"saved_searches": store.list_saved_searches(counts=True, count_first=6),
+        return {"saved_searches": store.list_saved_searches(counts=True),
                 "today": actions.action_items(store), "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
@@ -543,6 +543,28 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "_result_cards.html" if offset else "_results.html", **ctx)
 
     # ------------------------------------------------------------ table
+    def color_counts_here(q: str, tag: str, location: str, source: str, member: dict[str, Any], total: int,
+                          color: str) -> dict[str, int]:
+        """The numbers on the color chips: how many people of each color the current search and filters find (the
+        chosen color itself is left out, so the chips still show what the other colors would give). One grouped
+        query without a search; with one, a count per color, and the last color from the total."""
+        base = {k: v for k, v in member.items() if k != "color"}
+        if not q.strip():
+            return store.color_counts(tag=tag or None, location=location or None, source=source or None, **base)
+        out = {c: 0 for c in COLORS}
+        out["none"] = 0
+        all_total = total if not color else search.search(
+            q, tag=tag or None, location=location or None, source=source or None, limit=1, **base, color=None).total
+        if not all_total:
+            return out
+        names = [*COLORS, "none"]
+        for name in names if color else COLORS:
+            out[name] = search.search(q, tag=tag or None, location=location or None, source=source or None, limit=1,
+                                      **base, color=name).total
+        if not color:  # nobody is counted twice, so the untagged are what is left
+            out["none"] = max(0, all_total - sum(out[c] for c in COLORS))
+        return out
+
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
@@ -616,13 +638,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
-                   saved=store.list_saved_searches(counts=True, count_first=6), save_params=searchquery.clean_params({**keep, "q": q}),
+                   saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
                    min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
                    new_after=new_after_id, closest=bool(q.strip() and result.closest),
                    saved_notes=list(result.notes) if q.strip() else [],
-                   colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
+                   colored_first=colored_first and bool(q.strip()),
+                   color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
@@ -1498,7 +1521,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if dp:
             msg += f" Also deleted {', '.join(dp)}."
         if ds:
-            msg += f" Also removed the saved search{'' if len(ds) == 1 else 'es'} {', '.join(ds)}."
+            msg += (f" Also removed the saved search {ds[0]}, which only matched sample people." if len(ds) == 1 else
+                    f" Also removed {len(ds)} saved searches that only matched sample people.")
         empty = [x["name"] for x in store.list_saved_searches(counts=True) if x["count"] == 0]
         if empty:
             msg += (f" {len(empty)} saved search{'' if len(empty) == 1 else 'es'} now match nobody ({', '.join(empty[:3])}"

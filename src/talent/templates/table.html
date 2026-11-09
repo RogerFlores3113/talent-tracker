@@ -67,7 +67,7 @@
 {% if active_chips %}<p class="filter-chips" role="group" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 <div class="savedbar" id="saved-searches">
   {% if saved %}<span class="fine">Saved searches:</span>
-  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" aria-label="{{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% endif %}{% if sv.new %}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }}{% if sv.count is not none %} <span class="fine">{{ sv.count }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
+  {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" title="{{ sv.summary }}" aria-label="{{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% endif %}{% if sv.new %}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }}{% if sv.count is not none %} <span class="fine">{{ sv.count }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
   {% if save_params %}<details class="save-search">
     <summary>Save this search</summary>
     <form method="post" action="/saved-searches" class="inline-form">
@@ -84,7 +84,7 @@
         <input type="text" name="search_name" value="{{ sv.name }}" maxlength="60" aria-label="New name for saved search {{ sv.name }}">
         <button class="btn small" type="submit" aria-label="Rename saved search {{ sv.name }}">Rename</button>
       </form>
-      <span class="fine">{% if sv.count is not none %}{{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% endif %}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
+      <span class="fine">{{ sv.summary }}{% if sv.count is not none %} · {{ sv.count }} match{{ '' if sv.count == 1 else 'es' }}{% endif %}{% if sv.created_by == 'ai' %} · saved by your AI app{% endif %}</span>
       <form method="post" action="/saved-searches/{{ sv.id }}/{{ 'unpin' if sv.pinned else 'pin' }}"><button class="btn small" type="submit" aria-label="{{ 'Unpin' if sv.pinned else 'Pin' }} saved search {{ sv.name }}">{{ 'Unpin' if sv.pinned else 'Pin to top' }}</button></form>
       <form method="post" action="/saved-searches/{{ sv.id }}/delete" data-confirm="Delete the saved search {{ sv.name }}? The people stay."><button class="btn small" type="submit" aria-label="Delete saved search {{ sv.name }}">Delete</button></form>
     </li>{% endfor %}
@@ -93,7 +93,7 @@
 </div>
 {% if pipe_label %}<p class="fine">Showing people in {{ 'this job' if job else 'open jobs' }}: <strong>{{ pipe_label }}</strong>. <a href="/clients/review">Back to the Ops review</a></p>{% endif %}
 {% if suggestion and corrected %}<p class="suggest">Nothing matched “{{ q }}”. Showing results for <strong>{{ suggestion }}</strong>.</p>
-{% elif suggestion %}<p class="suggest">Did you mean <a href="/candidates?{{ dict(keep, q=suggestion) | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
+{% elif suggestion and total %}<p class="suggest">Did you mean <a href="/candidates?{{ dict(keep, q=suggestion) | urlencode }}">{{ suggestion }}</a>?</p>{% endif %}
 <div class="colorbar" role="group" aria-label="Color tags">
   <span class="fine">Color:</span>
   {% for name in COLORS %}{% set n = color_counts[name] %}<button type="submit" form="tablebar-form" name="color_pick" value="{{ name }}" class="cchip{{ ' on' if color == name }}" aria-pressed="{{ 'true' if color == name else 'false' }}" title="{{ 'Show everyone' if color == name else 'Show only ' ~ name }}"><span class="cbub small" data-color="{{ name }}" aria-hidden="true">{{ name[0] | upper }}</span> {{ name | capitalize }} <span class="n" data-color-count="{{ name }}">{{ n }}</span></button>{% endfor %}

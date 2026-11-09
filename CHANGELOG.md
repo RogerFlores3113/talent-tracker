@@ -9,6 +9,11 @@ All notable changes to Talent Search. Newest first.
 - "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
 - Phrase, OR and NEAR searches look in notes too, so a wider search never finds fewer people.
 - `c#`, `c++`, `f#` and `.net` are words of their own, so `c#` no longer finds C++ people.
+- Every saved search shows its count and "+N new" (not just the first six), and hovering a chip shows what it searches for.
+- Hints for common slips: `skill:machine learning` (use quotes), `"a b"~3` (use NEAR/3), lowercase `not` and `near`, and a lone `-`.
+- The zero-results page offers "Did you mean" and a way to widen the search.
+- The color counters follow your search and filters.
+- Clearing sample data or finishing the tour removes the saved searches you made on the sample people, so no empty chips are left.
 - A prefix typed twice means either (`company:google company:meta`), and a filter plus a typed prefix both count. The read-back line says so.
 - A match count, search tips on Candidates, and a type-ahead skill filter with every skill.
 

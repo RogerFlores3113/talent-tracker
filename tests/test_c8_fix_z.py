@@ -310,7 +310,7 @@ def test_saved_searches_made_during_the_demo_are_offered_and_removed(store):
     extras = tour_data(c.get("/"))["extras"]
     assert extras["searches"] == [{"id": demo["id"], "name": "Rust folks"}]
     msg = flash_of(c.post("/tour/finish", data={"delete_searches": str(demo["id"])}, follow_redirects=False))
-    assert "Also removed the saved search Rust folks" in msg
+    assert "Also removed the saved search Rust folks" in msg  # (c10 w2: it now goes even without the tick)
     names = [x["name"] for x in store.list_saved_searches()]
     assert "Rust folks" not in names and "From my AI" in names
 
@@ -320,7 +320,7 @@ def test_a_search_left_behind_that_now_matches_nobody_is_mentioned(store):
     start_and_load(c)
     store.save_search("Rust folks", {"q": "rust"}, by="app")
     msg = flash_of(c.post("/tour/finish", follow_redirects=False))
-    assert "now match nobody (Rust folks)" in msg
+    assert "Rust folks" not in [x["name"] for x in store.list_saved_searches()]  # it only found demo people: removed (c10 w2)
     load_sample_data(store)
     store.save_search("Go folks", {"q": "golang"}, by="app")
     msg = flash_of(c.post("/sample-data/remove", follow_redirects=False))

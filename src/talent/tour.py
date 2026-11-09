@@ -278,13 +278,14 @@ def end(store: Store, delete_people: set[int] | None = None,
         offered_people = {w["id"]: w["name"] for w in worked_with(store)}
         offered_searches = {x["id"]: x["name"] for x in demo_searches(store)}
         removed = remove_sample_data(store)
-        removed["deleted_people"], removed["deleted_searches"] = [], []
+        removed["deleted_people"] = []
         for cid in sorted((delete_people or set()) & set(offered_people)):
             try:
                 store.delete_candidate(cid)
                 removed["deleted_people"].append(offered_people[cid])
             except NotFound:
                 pass
+        removed["deleted_searches"] = list(removed.get("deleted_searches") or [])  # made on the demo people
         for sid in sorted((delete_searches or set()) & set(offered_searches)):
             try:
                 store.delete_saved_search(sid)
