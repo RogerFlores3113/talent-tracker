@@ -32,7 +32,7 @@ from . import ai_caps, trust
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, desk, opsreview
+from . import chase, desk, duplicates, opsreview
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -536,7 +536,40 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+                    dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    # ------------------------------------------------------- duplicates
+    @app.get("/candidates/duplicates", response_class=HTMLResponse)
+    def duplicates_page(request: Request, shown: int = 50):
+        shown = max(50, min(shown, 2000))
+        pairs = duplicates.find_pairs(store)
+        total = len(pairs)
+        rows = []
+        for p in pairs[:shown]:
+            rows.append({**p, "a": store.get_candidate(p["keep"]), "b": store.get_candidate(p["other"])})
+        return page(request, "duplicates.html", rows=rows, total=total, shown=shown,
+                    dismissed=len(duplicates.dismissed(store)))
+
+    @app.post("/candidates/duplicates/dismiss")
+    async def duplicates_dismiss(request: Request):
+        """App window only: these two are different people. The pair never comes back."""
+        form = await request.form()
+        a, b = str(form.get("a") or ""), str(form.get("b") or "")
+        if not (a.isdigit() and b.isdigit()):
+            raise HTTPException(400, "Pick two people")
+        try:
+            duplicates.dismiss(store, int(a), int(b))
+        except (NotFound, ValueError):
+            raise HTTPException(404, "Candidate not found")
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": "Got it. That pair won't show up again."}),
+                                status_code=303)
+
+    @app.post("/candidates/duplicates/reset")
+    def duplicates_reset():
+        n = duplicates.forget_dismissed(store)
+        return RedirectResponse("/candidates/duplicates?" + urlencode(
+            {"notice": f"{n} pair{'' if n == 1 else 's'} can show up again."}), status_code=303)
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
@@ -817,13 +850,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
+        found, missing = duplicates.found_fields(guess)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
-        dupe = store.find_duplicate(guess.get("email"), guess.get("linkedin_url"))
+        dupe = duplicates.already_here(store, guess)
         if dupe and len(text.split()) == 1 and guess.get("linkedin_url"):  # just their link: open who has it
             return RedirectResponse(f"/candidates/{dupe['id']}?{urlencode({'notice': f'Already saved: {dupe['name']}.'})}",
                                     status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
-                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text))
+                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing,
+                    dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None)
 
     # ----------------------------------------------------------- csv
     @app.get("/import", response_class=HTMLResponse)
@@ -890,6 +925,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
+                    export_phrase=importers.export_phrase(importers.detect_export(header)),
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,

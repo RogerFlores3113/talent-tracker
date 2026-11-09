@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema
 
 from . import __version__, actions, recipes, review, shortlist, reports
-from . import chase, desk, opsreview
+from . import chase, desk, duplicates, opsreview
 from . import ai_caps, decide, interviews, loops, offers, sessions, trust
 from . import outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
@@ -49,6 +49,8 @@ except what you read.
 - Before adding someone, search by name or email to avoid duplicates. save_candidate also merges automatically
   when the email or LinkedIn URL matches (it fills empty fields and never changes the saved name, source or
   about). If it returns possible_duplicates, show them to the recruiter and ask whether it's the same person.
+  find_duplicates lists people who may be saved twice across the whole database; tell the recruiter, who
+  merges them in the app (you can't merge or delete).
 - Put a 2 to 4 sentence summary of the person in `about`; search ranks on it. Fill current_title,
   current_company, location, skills as `tags`, and `work_history` when you know them.
 - Log calls, emails, messages, meetings and interviews with log_activity (use the real date/time, with time zone
@@ -859,6 +861,33 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def brief(c: dict[str, Any]) -> dict[str, Any]:
         return _slim({k: c.get(k) for k in (
             "id", "name", "current_title", "current_company", "location", "email", "linkedin_url")})
+
+    @mcp.tool(annotations=READ)
+    def find_duplicates(limit: int = 20) -> CallToolResult:
+        """People who may be saved twice, across the whole database: the same email, LinkedIn, name and phone,
+        name and company, or a similar name at the same company. Strongest matches first, each with the reason and
+        a link to the page where the recruiter compares and merges them. Pairs the recruiter already said are
+        different people are left out. Tell the recruiter what you found; there is no tool to merge or delete:
+        only the recruiter merges, in the app window."""
+        limit = max(1, min(int(limit), 50))
+        pairs = duplicates.find_pairs(store)
+        out = []
+        for p in pairs[:limit]:
+            people = [brief(store.get_candidate(p[k])) for k in ("keep", "other")]
+            out.append({"reasons": p["reasons"], "people": people,
+                        "compare_and_merge_url": app_url(f"/candidates/{p['keep']}/merge/{p['other']}")})
+        data = {"data_note": DATA_NOTE, "total": len(pairs), "shown": len(out), "pairs": untag(out),
+                "app_url": app_url("/candidates/duplicates")}
+        if not pairs:
+            return _plain("No likely duplicates right now.", data)
+        head = (f"{len(pairs)} possible duplicate pair{'' if len(pairs) == 1 else 's'}"
+                + (f", showing the first {len(out)}" if len(out) < len(pairs) else "")
+                + ". Only the recruiter can merge them, in the app window.")
+        rows = []
+        for o in out:
+            who = " and ".join(f"{x.get('name')} (id {x['id']})" for x in o["people"])
+            rows.append(f"- {who}: {', '.join(o['reasons'])}. Compare: {o['compare_and_merge_url']}")
+        return _result("\n".join([head, *fenced(rows)]), data)
 
     @mcp.tool(annotations=WRITE, meta=tool_meta("candidate"))
     def save_candidate(

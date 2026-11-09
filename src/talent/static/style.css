@@ -474,3 +474,7 @@ section.welcome.panel { margin-bottom: var(--space-5); }
 #claude-panel details { margin-top: var(--space-3); }
 #claude-panel pre.code { max-height: 220px; overflow: auto; }
 .claude-open { border-left: 3px solid var(--line); padding-left: var(--space-3); }
+
+/* Possible duplicates page */
+.dup-person { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; overflow-wrap: anywhere; }
+.dup-pair .actions-inline { margin-top: 0.6rem; }
