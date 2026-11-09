@@ -323,7 +323,7 @@ def _slim(c: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in c.items() if v not in (None, "", [])}
 
 
-CARD_CAP = 20
+CARDS_PER_CALL = 20
 _PAGE_KEYS = ("location", "title", "tag", "source", "client", "stage", "color", "company", "skill_mode", "exp_min",
               "exp_max", "contacted", "contacted_days", "added_days")
 
@@ -1198,7 +1198,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def candidate_cards(candidate_ids: list[int]) -> CallToolResult:
         """For the in-chat People view only (hidden from the model): the summary card of up to 20 saved people,
         for the card, the carousel and the table. Read-only. Use get_candidate to read someone yourself."""
-        ids = list(dict.fromkeys(int(i) for i in candidate_ids))[:CARD_CAP]
+        ids = list(dict.fromkeys(int(i) for i in candidate_ids))[:CARDS_PER_CALL]
         cards, missing = [], []
         for i in ids:
             try:
