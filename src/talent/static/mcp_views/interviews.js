@@ -18,7 +18,7 @@ function sessionWords(s,tz){return "interview id "+s.interview_id+" ("+sessionNa
 
 function feedbackForm(s,tz,btn,box){
  let verdict=null;const names=s.interviewers||[];
- const form=el("form",{class:"fbform","aria-label":"Record feedback on "+s.cand+"'s "+sessionName(s)});
+ const form=el("form",{novalidate:"true",class:"fbform","aria-label":"Record feedback on "+s.cand+"'s "+sessionName(s)});
  const vbox=el("div",{class:"opts",role:"group","aria-label":"Verdict, optional"});
  const vbtns=VERDICTS.map(([v,l])=>{const b=el("button",{class:"btn",type:"button","aria-pressed":"false"},l);
   b.addEventListener("click",()=>{verdict=verdict===v?null:v;vbtns.forEach((x,i)=>x.setAttribute("aria-pressed",VERDICTS[i][0]===verdict?"true":"false"))});return b});
@@ -28,7 +28,7 @@ function feedbackForm(s,tz,btn,box){
  if(names.length>1){const sel=el("select",{id:id+"w"},names.map(n=>el("option",{value:n},n)));whoNode=el("div",{},el("label",{for:id+"w"},"Who is this feedback from?"),sel);whoVal=()=>sel.value}
  else if(names.length===1){whoNode=el("div",{class:"small muted"},"From "+names[0]);whoVal=()=>names[0]}
  else{const inp=el("input",{type:"text",id:id+"w",maxlength:"200"});whoNode=el("div",{},el("label",{for:id+"w"},"Who is this feedback from? (optional)"),inp);whoVal=()=>inp.value.trim()}
- const note=el("textarea",{id:id+"n",maxlength:"4000",required:"true"});
+ const note=el("textarea",{id:id+"n",maxlength:"4000","aria-required":"true"});
  const st=el("div",{class:"status small",role:"status"});
  const send=el("button",{class:"btn primary",type:"submit"},"Send to Claude");
  const cancel=el("button",{class:"btn",type:"button",onclick:()=>{form.remove();btn.setAttribute("aria-expanded","false");btn.focus()}},"Cancel");
@@ -37,7 +37,7 @@ function feedbackForm(s,tz,btn,box){
   if(!text){setStatus(st,"Write what they said first.");note.focus();return}
   const w=whoVal();
   const msg="Please save this interview feedback: "+sessionWords(s,tz)+". Interviewer: "+(w||"not named")+". Verdict: "+(verdict||"none given")+". What they said: \""+text.replace(/"/g,"'")+"\". Use add_interview_feedback with that interviewer, verdict and text.";
-  askClaude(msg,send).then(ok=>{if(ok){setStatus(st,"Sent to Claude. It will save the feedback and tell you.");send.disabled=true}else setStatus(st,"Your chat app wouldn't send that. You can type it in the chat, or open the interview in Talent Search.")})});
+  askClaude(msg,send).then(ok=>{if(ok){setStatus(st,"Sent to Claude. It will save the feedback and tell you.");send.disabled=true;st.tabIndex=-1;st.focus()}else setStatus(st,"Your chat app wouldn't send that. You can type it in the chat, or open the interview in Talent Search.")})});
  form.addEventListener("keydown",e=>{if(e.key==="Escape"){e.stopPropagation();cancel.click()}});
  return form}
 
@@ -56,14 +56,14 @@ function sessionItem(s,tz,clashes){
  const acts=el("div",{class:"acts"});
  const started=parseD(s.at)&&parseD(s.at)<=new Date();
  const box=el("div",{});
- if(s.status!=="cancelled"&&started&&!s.all_day){const fb=el("button",{class:"btn primary",type:"button","aria-expanded":"false","aria-label":"Record feedback on "+nm+"'s "+sessionName(s)},"Record feedback");
+ if(s.status!=="cancelled"&&started&&!s.all_day){const fb=el("button",{class:"btn primary",type:"button",needs:"message","aria-expanded":"false","aria-label":"Record feedback on "+nm+"'s "+sessionName(s)},"Record feedback");
   fb.addEventListener("click",()=>{if(box.firstChild){box.replaceChildren();fb.setAttribute("aria-expanded","false");return}
    const f=feedbackForm(s,tz,fb,box);box.append(f);fb.setAttribute("aria-expanded","true");f.querySelector("button").focus()});
   acts.append(fb)}
  if(s.status!=="cancelled"){
-  const rs=el("button",{class:"btn",type:"button","aria-label":"Reschedule "+nm+"'s "+sessionName(s)},"Reschedule");
+  const rs=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Reschedule "+nm+"'s "+sessionName(s)},"Reschedule");
   rs.addEventListener("click",()=>askClaude("Please reschedule "+sessionWords(s,tz)+". Ask me what new time I want, then use update_interview.",rs));
-  const cn=el("button",{class:"btn",type:"button","aria-label":"Cancel "+nm+"'s "+sessionName(s)},"Cancel");
+  const cn=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Cancel "+nm+"'s "+sessionName(s)},"Cancel");
   cn.addEventListener("click",()=>{if(box.querySelector(".sure"))return;
    const yes=el("button",{class:"btn primary",type:"button"},"Yes, cancel it");const no=el("button",{class:"btn",type:"button"},"Keep it");
    const row=el("div",{class:"sure",role:"group","aria-label":"Confirm cancelling"},"Cancel this interview? It stays on the timeline and can be put back.",yes,no);
@@ -78,14 +78,28 @@ function zoneNote(s,tz){if(!s.candidate_tz||s.all_day)return null;const z=goodTz
  const mine=clock(s.at,tz,true),theirs=clock(s.at,z,true);if(mine===theirs)return null;
  return el("span",{class:"zone"},theirs+" for "+firstName(s.cand)+" ("+s.candidate_tz.replace(/_/g," ")+")")}
 
+/* one line per interviewer ("Lee Chen is booked 3 times at once: A, B, C"), not one per pair of sessions */
+function clashGroups(d,ss){const byId=new Map(ss.map(s=>[s.interview_id,s]));const out=[];const people=new Map();
+ for(const c of d.clashes||[]){
+  const m=c.kind==="interviewer"?/^(.+?) is booked twice around (.+?): /.exec(c.text||""):null;
+  if(!m){out.push({text:c.text,ids:new Set(c.interview_ids||[])});continue}
+  const list=people.get(m[1])||[];people.set(m[1],list);
+  const mine=list.filter(g=>(c.interview_ids||[]).some(i=>g.ids.has(i)));
+  let g=mine[0];if(!g){g={who:m[1],when:m[2],ids:new Set()};list.push(g);out.push(g)}
+  for(const o of mine.slice(1)){o.ids.forEach(i=>g.ids.add(i));list.splice(list.indexOf(o),1);out.splice(out.indexOf(o),1)}
+  (c.interview_ids||[]).forEach(i=>g.ids.add(i))}
+ for(const g of out)if(g.who){const names=[...g.ids].map(i=>byId.get(i)).filter(Boolean).map(s=>s.cand);
+  g.text=g.who+" is booked "+g.ids.size+" times at once around "+g.when+": "+names.join(", ")}
+ return out}
 function render(d){
- const wrap=el("div",{});const tz=goodTz(d.tz);
+ const wrap=el("div",{});const tz=goodTz(d.tz||d.time_zone);ABS_USED=true;
  const ss=flat(d);
  const start=d.start?new Date(d.start+"T12:00:00"):null;
- wrap.append(header({title:"Interviews"+(start?", week of "+start.toLocaleDateString(undefined,{month:"short",day:"numeric"}):""),count:(d.total||ss.length)+((d.total||ss.length)===1?" session":" sessions"),appUrl:d.app_url,appLabel:"Open in Talent Search"}));
+ wrap.append(header({title:"Interviews"+(start?", week of "+start.toLocaleDateString(undefined,{month:"short",day:"numeric"}):""),count:(d.total||ss.length)+((d.total||ss.length)===1?" session":" sessions"),appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:ss.length>0}));
  if(!ss.length){wrap.append(emptyState("No interviews booked this week."));return wrap}
- const clashBy={};for(const c of d.clashes||[])for(const id of c.interview_ids||[])(clashBy[id]=clashBy[id]||[]).push(c.text);
- if((d.clashes||[]).length)wrap.append(el("div",{class:"card",role:"note"},el("b",{},(d.clashes.length)+(d.clashes.length===1?" clash":" clashes")+" this week. "),"Sessions with a clash are marked below."));
+ const groups0=clashGroups(d,ss);const clashBy={};for(const g of groups0)for(const id of g.ids)(clashBy[id]=clashBy[id]||[]).push(g.text);
+ if(groups0.length)wrap.append(el("div",{class:"card",role:"note"},el("b",{},groups0.length+(groups0.length===1?" clash":" clashes")+" this week."),el("ul",{class:"clashlist"},groups0.map(g=>el("li",{},g.text)))," Sessions with a clash are marked below."));
+ if((d.load||[]).length)wrap.append(el("h2",{},"Interviewer load this week"),el("ul",{class:"load"},d.load.map(l=>el("li",{},l.interviewer+": "+l.sessions+(l.sessions===1?" session":" sessions")))));
  const nowIso=new Date().toISOString();const today=dayKey(nowIso,tz),tomorrow=dayKey(new Date(Date.now()+864e5).toISOString(),tz);
  const groups=[];for(const s of ss){const k=dayKey(s.at,tz);let g=groups[groups.length-1];if(!g||g.k!==k){g={k,at:s.at,items:[]};groups.push(g)}g.items.push(s)}
  for(const g of groups){const label=g.k===today?"Today":g.k===tomorrow?"Tomorrow":dayName(g.at,tz);
@@ -93,5 +107,4 @@ function render(d){
   sec.append(el("h2",{class:"dayh",id:"d"+g.k},label,(g.k===today||g.k===tomorrow)?el("span",{class:"when"},dayName(g.at,tz)):null));
   sec.append(el("ul",{class:"sessions","aria-label":label+", "+g.items.length+(g.items.length===1?" session":" sessions")},g.items.map(s=>sessionItem(s,tz,clashBy[s.interview_id]||[]))));
   wrap.append(sec)}
- if((d.load||[]).length){wrap.append(el("h2",{},"Interviewer load this week"),el("ul",{class:"load"},d.load.map(l=>el("li",{},l.interviewer+": "+l.sessions+(l.sessions===1?" session":" sessions")))))}
  return wrap}

@@ -66,7 +66,7 @@ def view_html(name: str) -> str:
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Talent Search</title>"
-        f"<style>{css}</style></head><body><main id='main'><p class='empty'>Loading...</p></main>"
+        f"<style>{css}</style></head><body><div id='notice' role='status'></div><main id='main'><p class='empty'>Loading...</p></main>"
         "<div id='drawer' hidden></div><div id='linknote'></div>"
         "<div id='live' class='sr' role='status' aria-live='polite'></div>"
         f"<script>{kit}\n{scripts}</script></body></html>"

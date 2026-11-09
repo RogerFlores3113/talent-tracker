@@ -12,7 +12,8 @@ const COLS=[
  {k:"sessions",l:"Sessions",v:p=>sessions(p).done},
  {k:"owed",l:"Feedback owed",v:p=>owedNames(p).length},
  {k:"last",l:"Last interview",v:p=>lastDone(p),date:1},
- {k:"stage",l:"Stage",v:p=>p.stage}];
+ {k:"stage",l:"Stage",v:p=>p.stage},
+ {k:"days",l:"Days in process",v:p=>p.days_in_process}];
 function sortRows(rows,st){const idx=new Map(rows.map((p,i)=>[p.candidate_id,i]));const col=COLS.find(c=>c.k===st.sort);if(!col)return rows.slice();
  const sign=st.dir==="desc"?-1:1;
  return rows.slice().sort((x,y)=>{let a=col.v(x),b=col.v(y);const ea=a==null||a==="",eb=b==null||b==="";
@@ -35,7 +36,7 @@ function quotes(p,d){
 function render(d){
  const wrap=el("div",{});const j=d.job||{};
  const ps=d.people||[];
- wrap.append(header({title:"Finalists: "+j.title+(j.company?" · "+j.company:""),count:ps.length?plural(ps.length,"finalist")+(d.more&&d.more.length?" · "+d.more.length+" more in late stages":""):null,appUrl:d.app_url,appLabel:"Decide in Talent Search"}));
+ wrap.append(header({title:"Finalists: "+j.title+(j.company?" · "+j.company:""),count:ps.length?plural(ps.length,"finalist")+(d.more&&d.more.length?" · "+d.more.length+" more in late stages":""):null,appUrl:d.app_url,appLabel:"Decide in Talent Search",fullscreen:ps.length>0}));
  if(!ps.length){wrap.append(el("p",{class:"empty"},"Nobody has interviewed or reached a late stage yet."));return wrap}
  const jobName=(j.title||"the job")+(j.company?" ("+j.company+")":"");
  const st={sort:null,dir:"asc"};const open=new Set();
@@ -52,9 +53,10 @@ function render(d){
   const status=el("div",{class:"status small muted",role:"status"});
   const more=el("button",{class:"btn",type:"button","aria-expanded":open.has(p.candidate_id)?"true":"false","aria-controls":"fb-"+p.candidate_id,"aria-label":(open.has(p.candidate_id)?"Hide":"Show")+" feedback from "+nm},open.has(p.candidate_id)?"Hide feedback":"Feedback");
   more.addEventListener("click",()=>{if(open.has(p.candidate_id))open.delete(p.candidate_id);else open.add(p.candidate_id);fill();const b=tbody.querySelector('button[aria-controls="fb-'+p.candidate_id+'"]');if(b)b.focus()});
-  const adv=el("button",{class:"btn",type:"button","aria-label":"Advance "+nm},"Advance");
-  adv.addEventListener("click",()=>askOrLink("Advance "+nm+" to the next stage for "+jobName+" (candidate id "+p.candidate_id+", job id "+j.id+"). They are in "+p.stage+" now.",adv,status,url,nm));
-  const rej=el("button",{class:"btn",type:"button","aria-label":"Reject "+nm},"Reject");
+  const nx=p.next_stage;
+  const adv=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Advance "+nm+(nx?" to "+nx:"")},nx?"Advance to "+nx:"Advance");
+  adv.addEventListener("click",()=>confirmSend(acts,"Advance "+firstName(nm)+(nx?" to "+nx:" to the next stage")+"? Claude makes the move when you send this.","Advance "+nm+" to "+(nx?nx:"the next stage")+" for "+jobName+" (candidate id "+p.candidate_id+", job id "+j.id+"). They are in "+p.stage+" now.",status,url,nm,()=>adv.focus(),"Yes, advance",adv));
+  const rej=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Reject "+nm},"Reject");
   const acts=el("div",{class:"acts",style:"margin:0"},more,adv,rej);
   rej.addEventListener("click",()=>{
    const yes=el("button",{class:"btn primary",type:"button"},"Yes, reject "+nm),no=el("button",{class:"btn",type:"button"},"Keep them in");
@@ -62,7 +64,7 @@ function render(d){
    acts.hidden=true;acts.after(ask);yes.focus();
    no.addEventListener("click",()=>{ask.remove();acts.hidden=false;rej.focus()});
    ask.addEventListener("keydown",e=>{if(e.key==="Escape")no.click()});
-   yes.addEventListener("click",()=>{ask.remove();acts.hidden=false;askOrLink("Reject "+nm+" for "+jobName+" (candidate id "+p.candidate_id+", job id "+j.id+"): move them to "+(d.out_stage||"the out stage")+".",rej,status,url,nm)})});
+   yes.addEventListener("click",()=>{ask.remove();acts.hidden=false;askOrLink("Reject "+nm+" for "+jobName+" (candidate id "+p.candidate_id+", job id "+j.id+"): move them to "+(d.out_stage||"the out stage")+".",rej,status,url,nm).then(ok=>{if(ok){acts.querySelectorAll("button").forEach(b=>b.disabled=true);status.tabIndex=-1;status.focus()}else rej.focus()})})});
   const td=(k,label,...kids)=>el("td",{class:"k-"+k,"data-label":label},...kids);
   const main=el("tr",{class:open.has(p.candidate_id)?"sel":null},
    el("th",{scope:"row",class:"k-name"},personLink(nm,url,p.candidate_id),p.current_title?el("div",{class:"small muted"},role(p.current_title,p.current_company)):null),
@@ -71,9 +73,10 @@ function render(d){
    td("owed","Feedback owed",owed.length?el("span",{class:"chip owed",title:owed.join(", ")},owed.length+" ("+owed.join(", ")+")"):"None"),
    td("last","Last interview",ld?dateEl(ld):el("span",{class:"muted"},"None yet")),
    td("stage","Stage",p.stage),
+   td("days","Days in process",p.days_in_process!=null?String(p.days_in_process):el("span",{class:"muted"},"Not known")),
    td("acts",null,acts,status));
   const rows=[main];
-  if(open.has(p.candidate_id))rows.push(el("tr",{class:"qrow",id:"fb-"+p.candidate_id},el("td",{colspan:"7"},quotes(p,d))));
+  if(open.has(p.candidate_id))rows.push(el("tr",{class:"qrow",id:"fb-"+p.candidate_id},el("td",{colspan:"8"},quotes(p,d))));
   return rows}
  function fill(){tbody.replaceChildren(...sortRows(ps,st).flatMap(row))}
  const all=el("button",{class:"btn",type:"button"},"Show all feedback");

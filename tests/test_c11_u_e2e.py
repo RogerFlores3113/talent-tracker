@@ -105,7 +105,10 @@ def test_people_table_full_screen_shows_every_column_unclipped(host, browser):
     ok = fr.locator("body").evaluate("""() => {const w=document.querySelector('.tablewrap');const t=document.querySelector('table.ptable');
       const ths=[...t.querySelectorAll('thead th')].filter(x=>x.offsetParent);const r=w.getBoundingClientRect();
       return {w:[w.clientWidth,w.scrollWidth],ths:ths.map(x=>x.className+':'+Math.round(x.getBoundingClientRect().width)),scroll:w.scrollWidth<=w.clientWidth+1, inside:ths.every(x=>x.getBoundingClientRect().right<=r.right+1&&x.getBoundingClientRect().width>0)}}""")
-    assert ok["scroll"] and ok["inside"], ok
+    # c11 W: the table scrolls sideways inside its box when it must; the right edge shadow says so, and Name stays put
+    edge = fr.locator(".tablebox .edge.r.on").count()
+    assert (ok["scroll"] and ok["inside"]) or (not ok["scroll"] and edge == 1), (ok, edge)
+    assert fr.locator("th.k-name").first.evaluate("e => getComputedStyle(e).position") == "sticky"
     page.close()
 
 
@@ -127,6 +130,10 @@ def test_pipeline_card_has_chips_and_move_to_asks_claude(host, browser):
     assert fr.get_by_role("button", name="Full screen").get_attribute("class").find("primary") >= 0
     fr.get_by_label("Move Maya Example to another stage").select_option("Offer")
     page.wait_for_timeout(300)
+    assert not _sent(page)  # c11 W: picking a stage sends nothing; Move asks, Send sends
+    fr.get_by_role("button", name="Move Maya Example").click()
+    fr.get_by_role("button", name="Send").click()
+    page.wait_for_timeout(300)
     msg = _sent(page)[-1]
     assert msg.startswith("Move Maya Example to Offer for Senior Backend Engineer (Acme Payments)")
     page.close()
@@ -140,8 +147,9 @@ def test_finalists_table_sorts_expands_and_asks_claude(host, browser):
     rows = fr.locator("tbody tr:not(.qrow) th").all_inner_texts()
     assert rows[0].startswith("Maya") or rows[0].startswith("Kenji")
     fr.get_by_role("button", name="Advance Maya Example").click()
+    fr.get_by_role("button", name="Yes, advance").click()
     page.wait_for_timeout(300)
-    assert _sent(page)[-1].startswith("Advance Maya Example to the next stage for Senior Backend Engineer (Acme Payments)")
+    assert _sent(page)[-1].startswith("Advance Maya Example to ") and "for Senior Backend Engineer (Acme Payments)" in _sent(page)[-1]
     fr.get_by_role("button", name="Reject Maya Example").click()
     fr.get_by_role("button", name="Yes, reject Maya Example").click()
     page.wait_for_timeout(300)

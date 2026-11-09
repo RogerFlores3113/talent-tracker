@@ -117,3 +117,19 @@ ul.stagecounts{margin:2px 0 6px}
 table.ftable th[scope=row] .small{font-weight:400}
 ul.matches>li{border-top:1px solid var(--line);padding:8px 0}
 ul.matches>li:first-child{border-top:0}
+
+/* cycle 11 W */
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+input::placeholder{color:var(--muted);opacity:1}
+.sentnote{margin-left:4px}
+.sure{margin-top:6px;font-size:.8125rem}
+.copynote textarea.copyarea,.copynote input{width:100%;font:inherit;font-size:.8125rem;border:1px solid var(--line);border-radius:7px;padding:4px 8px;background:var(--surface);color:var(--text);margin:4px 0}
+.copynote textarea.copyarea{font-family:ui-monospace,Menlo,monospace;resize:vertical}
+.pcard .stagechip{border:0;font:inherit;font-size:.8125rem;text-decoration:underline;text-underline-offset:2px;cursor:pointer;color:var(--accent)}
+.pcard .stagechip.out{color:var(--muted)}
+#notice:not(:empty){font-size:.75rem;color:var(--muted);border-left:3px solid var(--line);padding:2px 8px;margin:0 0 8px}
+.hint.keys,p.keyhint{font-size:.75rem;color:var(--muted);margin:0 0 6px}
+.carousel[tabindex]:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.preview h2 button.link,.preview p button.link,.preview li button.link{display:inline;text-align:left;white-space:normal}
+.preview h2{overflow-wrap:anywhere}

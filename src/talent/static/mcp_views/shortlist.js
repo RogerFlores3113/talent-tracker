@@ -20,7 +20,7 @@ function act(card,p,tool,args){
   if(d.counts&&countsLine)countsLine.textContent=countText(d.counts);
   swap(Object.assign({},d.prospect,d.candidate_url?{candidate_url:d.candidate_url}:{}),d.needs_choice?{choices:d.matches||[]}:{},d.message||said(r));refreshBulk()});
 }
-function waitingIds(only){return Object.values(CARDS).filter(c=>c.dataset.waiting==="1"&&(!only||(c.querySelector("input.pick")||{}).checked)).map(c=>+c.dataset.id)}
+function waitingIds(only){return ROWS.filter(p=>(p.status||"proposed")==="proposed"&&(!only||((CARDS[p.id]&&CARDS[p.id].querySelector("input.pick"))||{}).checked)).map(p=>p.id)}
 let BUSY=false;
 function bulk(tool,ids,args,status,box){
  box=box||bulkBox;
@@ -55,10 +55,10 @@ function sameLabel(m){return"Same as "+m.name+(m.current_company?", "+m.current_
 function buttons(card,p){
  const box=el("div",{class:"acts"});
  const same=(p.choices&&p.choices.length?p.choices:(p.checks&&p.checks.same_name)||[]);
- const keep=(label,args,primary)=>el("button",{class:"btn"+(primary?" primary":""),onclick:()=>act(card,p,"keep_prospect",args)},label);
- if(same.length){for(const m of same)box.append(keep(sameLabel(m),{candidate_id:m.id},false));box.append(keep("Someone new",{as_new:true},false))}
+ const keep=(label,args,primary,aria)=>el("button",{class:"btn"+(primary?" primary":""),"aria-label":aria||(label==="Keep"?"Keep "+p.name:label+" (keep "+p.name+")"),onclick:()=>act(card,p,"keep_prospect",args)},label);
+ if(same.length){for(const m of same)box.append(keep(sameLabel(m),{candidate_id:m.id},false));box.append(keep("Someone new",{as_new:true},false,"Keep "+p.name+" as someone new"))}
  else box.append(keep("Keep",{},true));
- const pass=el("button",{class:"btn",onclick:()=>{
+ const pass=el("button",{class:"btn","aria-label":"Pass on "+p.name,onclick:()=>{
   const why=el("input",{class:"reason",type:"text",maxlength:"300",placeholder:"Reason (optional)","aria-label":"Why you're passing"});
   const go=el("button",{class:"btn",onclick:()=>act(card,p,"pass_prospect",{reason:why.value})},"Pass");
   const back=el("button",{class:"btn",onclick:()=>box.replaceWith(buttons(card,p))},"Cancel");
@@ -89,6 +89,7 @@ function prospect(p){const sub=role(p.title,p.company)+(p.location?" · "+p.loca
   top.length?el("div",{class:"small"},el("b",{},top.join(". "))):null,
   el("div",{class:"row"},el("b",{},pick,pick?" ":null,p.name,badge?el("span",{class:"badge"},badge):null)),
   sub?el("div",{class:"muted small"},sub):null,p.fit?el("div",{class:"small"},p.fit):null,
+  contactRow({name:p.name,email:p.email}),
   links.childNodes.length?links:null,
   ...savedBlocks(p),
   (p.tags&&p.tags.length)?el("div",{class:"chips"},p.tags.slice(0,8).map(t=>el("span",{class:"chip"},t))):null,
@@ -106,7 +107,7 @@ function prospect(p){const sub=role(p.title,p.company)+(p.location?" · "+p.loca
 function statusWord(p){const s=p.status||"proposed";const c=p.checks||{};
  if(s==="kept")return"Kept"+(p.stage?", in "+p.stage:"");if(s==="passed")return"Passed";
  return"Waiting"+((c.saved||(c.same_name||[]).length)?" (saved)":"")}
-function toRow(p){return{id:p.id,name:p.name,current_title:p.title,current_company:p.company,location:p.location,match:p.fit,tags:p.tags,email:p.email,
+function toRow(p){return{id:p.id,name:p.name,current_title:p.title,current_company:p.company,location:p.location,match:p.fit,tags:p.tags,email:p.email,linkedin_url:p.linkedin_url,
  jobs:[{stage:statusWord(p),state:p.status==="passed"?"lost":null}],_p:p}}
 function openProspect(row,returnTo){
  const main=document.getElementById("main"),drawer=document.getElementById("drawer");const p=row._p;
@@ -134,8 +135,9 @@ function drawList(){
  if(modeBtn){modeBtn.textContent=MODE==="table"?"Show as cards":"Show as a table";modeBtn.setAttribute("aria-pressed",MODE==="table"?"true":"false")}
  if(tableBox)tableBox.hidden=MODE!=="table";
  if(MODE==="table"&&ROWS.length){
-  const rows=ROWS.map(toRow);tableApi=peopleTable(rows,TST,{onOpen:r=>openProspect(r,null),onSel:()=>{},origin:ORIGIN,prospects:true,matchLabel:"Fit",hide:["contacted","added","updated","color"],bulkExtra:tableExtra,total:rows.length});
-  listHost.replaceChildren(tableApi.node)}
+  const rows=ROWS.map(toRow);tableApi=peopleTable(rows,TST,{onOpen:r=>openProspect(r,null),onSel:()=>{},origin:ORIGIN,prospects:true,linkedin:true,matchLabel:"Fit",hide:["contacted","added","updated","color","job"],bulkExtra:tableExtra,total:rows.length});
+  listHost.replaceChildren(tableApi.node);
+  tableApi.node.addEventListener("keydown",e=>{if(e.key==="Escape"&&!(e.target&&e.target.tagName==="INPUT"&&e.target.type==="search"&&e.target.value)&&!e.defaultPrevented){MODE="cards";drawList();if(modeBtn)modeBtn.focus();announce("Showing cards.")}})}
  else{listHost.replaceChildren(...ROWS.map(prospect))}
  refreshBulk()}
 function render(d){
@@ -145,7 +147,7 @@ function render(d){
  const waiting=ROWS.some(p=>(p.status||"proposed")==="proposed");
  const ks=d.keep_stages||[];
  if(ROWS.length>1){modeBtn=el("button",{class:"btn",type:"button","aria-pressed":"false"},"Show as a table");
-  modeBtn.addEventListener("click",()=>{MODE=MODE==="table"?"cards":"table";drawList();announce(MODE==="table"?"Showing a table. Pick people, then keep or pass them.":"Showing cards.")});
+  modeBtn.addEventListener("click",()=>{MODE=MODE==="table"?"cards":"table";drawList();if(MODE==="table"&&tableApi)tableApi.focusCaption();announce(MODE==="table"?"Showing a table. Pick people, then keep or pass them.":"Showing cards.")});
   wrap.append(el("div",{class:"tbar"},modeBtn))}
  if(waiting&&canAct()&&ks.length>1){stageSel=el("select",{"aria-label":"Keep into",class:"field"},ks.map(s=>el("option",{value:s},s)));
   wrap.append(el("div",{class:"small acts"},el("span",{},"Keep into"),stageSel,el("span",{class:"muted"},"(pick "+ks[1]+" if you already messaged them)")))}

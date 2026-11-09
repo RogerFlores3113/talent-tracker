@@ -11,13 +11,14 @@ function row(r){const bits=[];
  if(r.kept&&r.kept.length)bits.push("kept the saved "+fields(r.kept));
  if(r.held&&r.held.length)bits.push("held for you: "+fields(r.held));
  const facts=[roleOf(r),r.location].filter(Boolean).join(" · ");
- const links=linksRow({name:r.name,app_url:r.app_url,linkedin_url:r.linkedin_url,links:r.links});
+ const links=linksRow({name:r.name,app_url:r.app_url,linkedin_url:r.linkedin_url,website:r.website,links:r.links});
  return el("li",{class:"card"},
   el("div",{class:"row"},el("b",{},nameEl(r)),el("span",{},
    r.saved_status&&r.saved_status!=="Saved"?el("span",{class:"badge"},r.saved_status):null,
    r.no_contact?el("span",{class:"badge",title:"No email and no LinkedIn link are saved, so there is no way to reach them yet."},"No contact info"):null)),
   facts?el("div",{class:"small"},facts):null,
   bits.length?el("div",{class:"small muted"},bits.join(" · ")):null,
+  contactRow(r),
   (r.notes||[]).map(x=>el("div",{class:"small"},x)),
   r.pipeline_error?el("div",{class:"small"},"Not added to the job: "+r.pipeline_error):null,
   links.childNodes.length?links:null)}
@@ -37,7 +38,7 @@ function answerRow(r){
  const status=el("div",{class:"status small muted",role:"status"});
  const people=(r.possible_duplicates&&r.possible_duplicates.length)?r.possible_duplicates:(r.existing?[r.existing]:[]);
  const li=el("li",{class:"card"},el("div",{class:"row"},el("b",{},r.name),el("span",{class:"badge"},"Nothing saved yet")),
-  r.reason?el("div",{class:"small"},r.reason):null);
+  el("div",{class:"small"},r.recruiter_note||"Nothing was saved yet. Is this one of the people already saved, or someone new?"));
  if(people.length){
   li.append(el("h3",{class:"muted small",style:"margin:8px 0 2px"},people.length===1?"The saved person it could be":"The "+people.length+(r.more_duplicates?"+":"")+" saved people it could be"));
   const mk=m=>match(m,r.name,status);
@@ -51,7 +52,9 @@ function answerRow(r){
 function plainRow(r){return el("li",{class:"card"},el("b",{},r.name),r.reason?el("div",{class:"small"},r.reason):null)}
 function render(d){
  const wrap=el("div",{});ORIGIN=appOrigin(d.app_url);JOB=d.job?d.job.title+(d.job.company?" ("+d.job.company+")":""):null;
- wrap.append(header({title:d.job?"Saved for "+d.job.title+(d.job.company?" · "+d.job.company:""):"Saved people",count:d.summary||null,appUrl:d.app_url,fullscreen:false,refresh:false}));
+ const got=["saved","updated","unchanged"].reduce((a,k)=>a+(d[k]||[]).length,0);
+ const title=got?(d.job?"Saved for "+d.job.title+(d.job.company?" · "+d.job.company:""):"Saved people"):((d.needs_answer||[]).length?"Nobody saved yet: waiting for your answer":"Nobody was saved");
+ wrap.append(header({title,count:d.summary||null,appUrl:d.app_url,fullscreen:false,refresh:false}));
  if(d.warning)wrap.append(el("div",{class:"card small"},d.warning));
  for(const[k,label]of GROUPS){const rs=d[k]||[];if(!rs.length)continue;
   wrap.append(el("h2",{},label+" ("+rs.length+")"),el("ul",{class:"plain"},rs.map(k==="needs_answer"?answerRow:k==="not_saved"?plainRow:row)))}

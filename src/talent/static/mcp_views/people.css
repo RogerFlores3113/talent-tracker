@@ -48,8 +48,6 @@ html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
  table.ptable td.k-match .clamp{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
  html[data-mode=fullscreen] table.ptable td.k-match .clamp{-webkit-line-clamp:3;line-clamp:3}
  table.ptable th.k-name{min-width:clamp(4rem,9vw,8rem)}
- /* the Shortlist table drops Location inline; full screen shows it */
- html:not([data-mode=fullscreen]) table.ptable.prospects .k-location{display:none}
 }
 table.ptable.hide-title .k-title,table.ptable.hide-company .k-company,table.ptable.hide-location .k-location,table.ptable.hide-stage .k-stage,table.ptable.hide-contacted .k-contacted,table.ptable.hide-added .k-added,table.ptable.hide-updated .k-updated,table.ptable.hide-color .k-color,table.ptable.hide-match .k-match{display:none!important}
 
@@ -63,3 +61,26 @@ table.ftable tr.qrow:hover{background:none}
 ul.fb{margin:2px 0 0 12px}ul.fb li{margin:2px 0}
 @media (max-width:560px){table.ftable td.k-acts{min-width:0}}
 table.ptable th[scope=row] button.link{text-align:left}
+
+/* cycle 11 W: a scroll box with edge shadows, a sticky Name column, Job and Email columns */
+.tablebox{position:relative}
+.tablebox .tablewrap{overflow-x:auto}
+.tablebox .edge{position:absolute;top:0;bottom:0;width:18px;pointer-events:none;opacity:0;transition:opacity .15s}
+.tablebox .edge.l{left:0;background:linear-gradient(to right,rgba(0,0,0,.28),transparent)}
+.tablebox .edge.r{right:0;background:linear-gradient(to left,rgba(0,0,0,.28),transparent)}
+:root[data-theme=dark] .tablebox .edge.l{background:linear-gradient(to right,rgba(0,0,0,.7),transparent)}
+:root[data-theme=dark] .tablebox .edge.r{background:linear-gradient(to left,rgba(0,0,0,.7),transparent)}
+.tablebox .edge.on{opacity:1}
+table.ptable td.k-email .chk{color:var(--ok);font-weight:700}
+html[data-mode=fullscreen] table.ptable td.k-email .chk{display:none}
+html:not([data-mode=fullscreen]) table.ptable td.k-email .addr{display:none}
+table.ptable.hide-job .k-job,table.ptable.hide-email .k-email,table.ptable.hide-linkedin .k-linkedin{display:none!important}
+@media (min-width:561px){
+ table.ptable th.pickcell,table.ptable td.pickcell{position:sticky;left:0;z-index:2;background:var(--surface);min-width:28px}
+ table.ptable th.k-name,table.ptable th[scope=row].k-name{position:sticky;left:28px;z-index:2;background:var(--surface);min-width:7rem;box-shadow:1px 0 0 var(--line)}
+ table.ptable thead th{z-index:3}
+ table.ptable td.k-job{min-width:8rem}
+ table.ptable td.k-title,table.ptable td.k-company{min-width:6rem}
+ table.ptable td.k-email .addr{white-space:nowrap}
+}
+@media (max-width:560px){.tablebox .edge{display:none}.scrollhint{display:none}}

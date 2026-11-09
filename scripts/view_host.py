@@ -87,6 +87,7 @@ textarea{height:160px}button{margin-top:6px}.bubble{background:#fff;border-radiu
 <label><input type="checkbox" id="dark" style="width:auto"> Dark theme</label>
 <label><input type="checkbox" id="nofull" style="width:auto"> Host has no fullscreen</label>
 <label><input type="checkbox" id="nolinks" style="width:auto"> Host refuses links</label>
+<label><input type="checkbox" id="nomsg" style="width:auto"> Host can't send messages or model context</label>
 <button id="run">Run</button><p id="err" style="color:#b00"></p></aside>
 <main><div id="chat"><div class="fullbar"><b id="fulltitle">Fullscreen</b><button id="close" aria-label="Close fullscreen">Close</button></div><div id="frames"></div></div></main>
 <aside id="log"></aside>
@@ -118,7 +119,7 @@ function mount(html,args,result,toolName){
   window.HOSTLOG.push(m);if(m.method!=="ui/notifications/size-changed")log("view →",m);
   const ok=r=>send({jsonrpc:"2.0",id:m.id,result:r}),bad=(msg)=>send({jsonrpc:"2.0",id:m.id,error:{code:-32000,message:msg}});
   switch(m.method){
-   case"ui/initialize":ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:{openLinks:{},serverTools:{},serverResources:{},logging:{}},
+   case"ui/initialize":ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
      hostContext:{theme:$("dark").checked?"dark":"light",displayMode:"inline",availableDisplayModes:modes(),platform:"desktop",locale:"en-US",timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,
      containerDimensions:{maxHeight:6000,width:$("chat").clientWidth},toolInfo:{tool:TOOLS[toolName]}}});break;
    case"ui/notifications/initialized":send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
