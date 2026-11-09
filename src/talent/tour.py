@@ -62,14 +62,15 @@ STEPS: list[dict[str, Any]] = [
      "modes": (FULL, SHORT),
      "body": "Run a search or pick filters, then press Save this search and give it a name. It stays here, showing "
              "how many people match and how many are new since you last looked."},
-    {"id": "person", "title": "A candidate's page", "path": "person", "target": ["main h1"], "modes": (FULL, SHORT),
-     "body": "Everything about one person: details, work history, the jobs they are in, and a timeline of calls and "
+    {"id": "person", "title": "A candidate's page", "path": "person", "target": ["main .profile-summary", "main h1"], "modes": (FULL, SHORT),
+     "body": "The top of a person's page is their summary: who they are, their skills, how to reach them and when "
+             "you last talked. Below it are their work history, the jobs they are in, and a timeline of calls and "
              "notes. Your AI app can add to the timeline too."},
     {"id": "pipeline", "title": "A job's pipeline", "path": "job", "target": ["#pipeline"], "modes": (FULL, SHORT),
      "body": "A job holds a pipeline of candidates in stages you can rename. To move a person along, use the menu "
              "on their card. You can also drag a card to another column. Jobs are listed under the Jobs tab."},
     {"id": "interviews", "title": "Interviews", "path": "/interviews",
-     "target": ["#interviews-view", "main section.panel", "main h1"], "modes": (FULL, SHORT),
+     "target": ["main .sec-head", "#interviews-view", "main section.panel", "main h1"], "reach": "#interviews-view", "modes": (FULL, SHORT),
      "body": "Your month of interviews across every job, like a calendar. Switch to Week for loops, clashes and who owes feedback. Download a calendar file to add them to your own calendar."},
     {"id": "today-actions", "title": "Back to Today", "path": "/", "target": ["section.today", "main h1"],
      "modes": (FULL,),

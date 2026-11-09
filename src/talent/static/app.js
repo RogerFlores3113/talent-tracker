@@ -651,7 +651,16 @@
       target = here(s) ? findTarget(s) : null;
       reach = target ? findReach(s) : null;
       if (target && target.tagName === "DETAILS") target.open = true;
-      if (target && shown !== idx) target.scrollIntoView({block: "center", behavior: calm() ? "auto" : "smooth"});
+      if (target && shown !== idx) {
+        // A target taller than the window is shown from its top (its heading and first button), not from its middle.
+        const tb = target.getBoundingClientRect(), rb = reach ? reach.getBoundingClientRect() : tb;
+        const top = Math.min(tb.top, rb.top), tall = Math.max(tb.bottom, rb.bottom) - top;
+        if (tall > window.innerHeight * 0.7) {
+          const bar = document.querySelector("body > header, header.top, .topbar");
+          const sticky = bar && getComputedStyle(bar).position === "sticky" ? bar.offsetHeight : 0;
+          window.scrollTo({top: Math.max(0, top + window.scrollY - sticky - 16), behavior: calm() ? "auto" : "smooth"});
+        } else window.scrollTo({top: Math.max(0, top + window.scrollY - (window.innerHeight - tall) / 2), behavior: calm() ? "auto" : "smooth"});
+      }
       if (target && s.pulse) {
         try { pulsed = document.querySelector(s.pulse); } catch (e) { pulsed = null; }
         if (pulsed && pulsed.disabled) pulsed = null;  // a button that can't be pressed: the lit-up panel is the cue

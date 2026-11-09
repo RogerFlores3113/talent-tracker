@@ -67,6 +67,7 @@
 {% if range_note %}<p class="suggest">{{ range_note }}</p>{% endif %}
 {% if active_chips %}<p class="filter-chips" role="group" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 <div class="savedbar" id="saved-searches">
+  {% if not saved %}<span class="fine">Saved searches: none yet.{% if not save_params %} Run a search or pick a filter, then you can save it here.{% endif %}</span>{% endif %}
   {% if saved %}<span class="fine">Saved searches:</span>
   {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" title="{{ sv.summary }}" aria-label="{{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% endif %}{% if sv.new %}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }}{% if sv.count is not none %} <span class="fine">{{ sv.count }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
   {% if save_params %}<details class="save-search">

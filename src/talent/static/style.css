@@ -399,6 +399,7 @@ table.dense { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
 .timeline li.struck > div:not(.fine) { text-decoration: line-through; color: var(--muted); }
 .iv-edit { margin-top: var(--space-1); } .iv-edit form { margin: var(--space-1) var(--space-2) var(--space-1) 0; }
 .today .later { margin-top: var(--space-4); } .add-todo input[type=text] { min-width: 16em; }
+.add-todo { display: flex; flex-wrap: wrap; margin-top: var(--space-3); } .add-todo input[type=text] { flex: 1 1 16em; } .add-todo select { max-width: 22em; min-width: 0; } .add-todo .btn { white-space: nowrap; }
 .job-facts { margin: 2px 0 0; } .omit-stages { flex-wrap: wrap; gap: var(--space-1) var(--space-3); margin-bottom: var(--space-2); }
 .row1 .co { font-weight: 400; color: var(--muted); }
 .next-iv { font-size: var(--fs-xs); color: var(--accent); margin-top: 2px; }
