@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-09
+
 ### Search
 - NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
 - "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
