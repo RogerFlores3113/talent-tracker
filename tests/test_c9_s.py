@@ -180,8 +180,15 @@ def test_matching_sites_and_names():
 
 
 def test_no_dashes_in_new_copy_and_no_network(store, monkeypatch):
-    def refuse(*a, **k):
-        raise AssertionError("network call")
+    real_connect = socket.socket.connect
+
+    def refuse(self, address, *a, **k):
+        # Windows' asyncio builds its self-pipe from a loopback socket pair; only
+        # an address off this machine counts as a network call.
+        host = address[0] if isinstance(address, tuple) else address
+        if host in ("127.0.0.1", "::1", "localhost"):
+            return real_connect(self, address, *a, **k)
+        raise AssertionError(f"network call to {address!r}")
     monkeypatch.setattr(socket.socket, "connect", refuse)
     on(store)
     server = build_server(store)
