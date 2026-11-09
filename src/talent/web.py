@@ -3294,6 +3294,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             lmstudio_installed=integrations.lmstudio_config_path().parent.is_dir(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
+            claude_code_command=integrations.claude_code_command(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),
             desktop_steps=skills.DESKTOP_STEPS[0],

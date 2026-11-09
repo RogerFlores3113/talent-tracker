@@ -13,6 +13,7 @@ import os
 import re
 import queue
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -348,6 +349,21 @@ def connect_lmstudio(path: Path | None = None, spec: LaunchSpec | None = None) -
 def lmstudio_connected(path: Path | None = None) -> bool:
     entry = _json_entry(path or lmstudio_config_path())
     return entry is not None and not check_entry(entry)
+
+
+# ------------------------------------------------------------------ Claude Code
+def claude_code_command(spec: LaunchSpec | None = None, windows: bool | None = None) -> str:
+    """The one terminal command that adds our MCP server to Claude Code for every project (user scope).
+
+    Claude Code keeps its own MCP list and reads no file we could safely write, so the person runs this once."""
+    spec = spec or mcp_launch_spec()
+    parts = ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user"]
+    for k, v in spec.env.items():
+        parts += ["--env", f"{k}={v}"]
+    parts += [SERVER_KEY, "--", spec.command, *spec.args]
+    if sys.platform == "win32" if windows is None else windows:
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
 
 
 # ------------------------------------------------------------------ Codex

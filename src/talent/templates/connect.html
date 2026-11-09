@@ -44,8 +44,12 @@
 
   <section class="panel" id="claude-code-panel">
     <h2>Claude Code</h2>
-    <p>Claude Code is Claude for a terminal or code editor. It learns Talent Search from skills, which are short written instructions.</p>
-    <p><a class="btn primary" href="#skills-panel">Add skills for Claude Code</a></p>
+    <p>Claude Code is Claude for a terminal or code editor. Two steps: connect it once, then add the skills, which are short written instructions for Talent Search.</p>
+    <p>1. Paste this into a terminal and press Enter. It works in every folder you open Claude Code in.</p>
+    <pre class="code" id="claude-code-cmd">{{ claude_code_command }}</pre>
+    <p><button class="btn" type="button" data-copy-from="claude-code-cmd">Copy</button></p>
+    <p>2. <a class="btn primary" href="#skills-panel">Add skills for Claude Code</a></p>
+    <p class="fine">Then start a new Claude Code session and type <code>/mcp</code> to check that talent-search is listed.</p>
     <p class="fine">Not sure if you have it? If you don't know what Claude Code is, pick Claude Desktop.</p>
   </section>
 
@@ -141,7 +145,7 @@
   </details>
   {% endif %}
   <h3>Connect by hand</h3>
-  <p>For apps that run local MCP servers (Cursor, Windsurf, Jan, Claude Code and others), paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
+  <p>For apps that run local MCP servers (Cursor, Windsurf, Jan and others), paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
   <pre class="code" id="json-snip">{{ json_snippet }}</pre>
   <button class="btn" type="button" data-copy-from="json-snip">Copy</button>
   <p>Codex settings (config.toml):</p>

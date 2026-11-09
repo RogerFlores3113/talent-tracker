@@ -2,6 +2,47 @@
 
 All notable changes to Talent Search. Newest first.
 
+## [Unreleased]
+
+### Search
+- NEAR finds words close together: `python NEAR django` (within 5 words) or `python NEAR/3 django`.
+- "Did you mean" for a mistyped prefix (`skil:`, `tittle:`), a mistyped skill (`skill:pyhton`) and misspelled words in OR and quoted searches.
+- Phrase, OR and NEAR searches look in notes too, so a wider search never finds fewer people.
+- `c#`, `c++`, `f#` and `.net` are words of their own, so `c#` no longer finds C++ people.
+- A prefix typed twice means either (`company:google company:meta`), and a filter plus a typed prefix both count. The read-back line says so.
+- A match count, search tips on Candidates, and a type-ahead skill filter with every skill.
+
+### Saved searches
+- Today lists every saved search, with pinning. Each count says what it counts.
+- Opening a saved search marks the people who are new since you last looked, and the table has an Added column. Someone added in the same second now counts.
+
+### Interviews and time zones
+- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
+- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
+- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
+- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
+
+### Importing and duplicates
+- A re-import that brings someone back with a new email offers to update them instead of adding a copy.
+- Merge many duplicate pairs at once, with one backup, and pick which email stays main.
+- Today and Jobs load fast with thousands of people.
+- CSV exports open correctly in Excel (names like Søren and Łukasz) and keep stage dates on a round trip.
+
+### Paste and connect
+- Pasting a resume reads every role with its dates, and a note reads name, title and company. The check page says what wasn't found.
+- The Connect AI page asks which app you use, says when an app isn't installed, keeps technical details in a fold, and gives Claude Code its one-line connect command.
+
+### Working with AI apps
+- Saved searches made by an AI app are on Changes and can be undone.
+- Interview replies say which time zone was used and name any clash. An interview needs a start time.
+- Held-for-review replies say exactly what went through and what waits.
+- `talent install-skills` asks first (or takes `--yes`), and reinstalls say which files are new, updated or unchanged.
+
+### Keyboard and screen readers
+- A skip link, current-page marks, named calendar days, table captions and sort state.
+- Stage menus on the board wait for Enter, keep focus on the person you moved and announce the move.
+- Better contrast on Rejected and Withdrawn columns.
+
 ## [0.2.0] - 2026-11-09
 
 ### Search
@@ -27,12 +68,6 @@ All notable changes to Talent Search. Newest first.
 ## [0.1.0] - 2026-11-09
 
 The first release. Talent Search is a candidate database that lives on your own computer, that opens in your web browser for you and tools for your AI app.
-
-### Interviews and time zones
-- Interviews can carry the candidate's and each interviewer's time zone. Invites and calendar files show every person their own clock first, with yours in brackets.
-- A time that doesn't exist on a daylight saving day is refused with the nearest real times; a time that happens twice takes the first and says so.
-- A date with no time is an all-day interview, not midnight. The log form needs a time for an interview.
-- Calendar files give each session its own title, and a week can be downloaded. Decide's finalists are people in late stages or with a finished interview. Today merges feedback cards per candidate, interviewer emails are saved, and the loop planner skips US public holidays.
 
 ### Search and candidates
 - Fast search across names, titles, companies, locations and "about" text, with highlights. Shorthand like `sf`, `nyc` and `swe` works.

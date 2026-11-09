@@ -183,7 +183,8 @@ def test_interview_forms_on_a_person_page_name_their_session(store):
     assert 'aria-label="Interviewer, Onsite: system design"' in html
     assert 'aria-label="Feedback on Onsite: system design"' in html
     assert 'aria-label="Next session after Onsite: system design"' in html
-    assert 'aria-label="Interviewer"' not in html and 'aria-label="Session name"' not in html
+    # only the new-entry form's own Interviewer box keeps the short name; every per-session box names its session
+    assert html.count('aria-label="Interviewer"') == 1 and 'aria-label="Session name"' not in html
 
 
 # ---------------------------------------------------------------- app.js and css

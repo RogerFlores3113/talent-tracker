@@ -1556,6 +1556,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             set_note = (f"It was already logged with no job, so its job is now {_job_name(store.get_job(job_id))}. "
                         "The recruiter can undo that on Changes.")
             out["note"] = f"{out['note']} {set_note}" if out.get("note") else set_note
+        when_notes = [n for n in (entry.get("when_notes") or []) if n]  # a time that happens twice, an all-day entry
+        if when_notes:
+            wn = " ".join(when_notes)
+            out["when_notes"] = when_notes
+            out["note"] = f"{out['note']} {wn}" if out.get("note") else wn
         if what_kind == "interview":
             if not _when_has_zone(when):
                 zn = _zone_used_note(when, entry["at"])
@@ -1728,6 +1733,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             done.append(f"Moved {whose} to {_local(iv['at'])} (was {_local(before['at'])})")
             if not _when_has_zone(when):
                 done.append(_zone_used_note(when, iv["at"]).rstrip("."))
+            done.extend(n.rstrip(".") for n in (iv.get("when_notes") or []) if n)
         if outcome is not None:
             done.append(f"Recorded {whose} {_when_words(iv['at'])} as {interview_label(data) or iv['status']}")
         if interviewer is not None:
