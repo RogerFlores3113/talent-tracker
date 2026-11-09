@@ -66,6 +66,28 @@
   </section>
 </div>
 
+<section class="panel" id="skills-panel">
+  <h2>Skills for your AI app</h2>
+  <p>Skills teach your AI app how to work well in Talent Search: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. {{ skill_names|length }} skills. They add nothing that runs; each is a page of written instructions.</p>
+  <div class="connect-grid">
+    {% for s in skill_status %}
+    <div>
+      <h3>{{ s.label }}</h3>
+      <p class="fine">{% if s.count %}{% if s.current %}<span class="ok">Installed ({{ s.count }} skills, version {{ s.versions|join(', ') }}).</span>{% else %}Installed: {{ s.count }} of {{ s.total }} skills{% if s.versions %}, version {{ s.versions|join(', ') }}{% endif %}. Add again to update.{% endif %}{% else %}Not added yet.{% endif %} Folder: <code>{{ s.base }}</code></p>
+      <button class="btn primary" hx-post="/connect/skills/{{ s.target }}/preview-install" hx-target="#skills-{{ s.target }}-result">{{ 'Update' if s.count else 'Add' }} Talent Search skills for {{ s.label }}</button>
+      {% if s.count %}<button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-remove" hx-target="#skills-{{ s.target }}-result">Remove Talent Search skills</button>{% endif %}
+      <div id="skills-{{ s.target }}-result" aria-live="polite"></div>
+    </div>
+    {% endfor %}
+    <div>
+      <h3>Claude Desktop</h3>
+      <p class="fine">{{ desktop_steps }}</p>
+      <a class="btn" href="/connect/skills.zip" download>Download skills as a .zip for Claude Desktop</a>
+    </div>
+  </div>
+  <p class="fine">Prefer to have your AI app do it? Ask Claude Code or Codex: “Install the skills in skills/ by following skills/INSTALL-SKILLS.md”.</p>
+</section>
+
 <section class="panel">
   <h2>Try asking</h2>
   <ul class="plain">

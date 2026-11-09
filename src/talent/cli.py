@@ -246,6 +246,23 @@ def _import_stage_opts(args: argparse.Namespace, prof: dict | None) -> dict[str,
             "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
 
 
+def _install_skills(args: argparse.Namespace) -> None:
+    from . import skills
+
+    targets = [t for t, on in (("claude-code", args.claude_code), ("codex", args.codex)) if on]
+    if not targets and not args.zip:
+        targets = list(skills.TARGETS)
+    for target in targets:
+        res = skills.install(target)
+        print(f"{res['label']}: {len(res['items'])} skills ({res['base']})")
+        for f in res["written"]:
+            print(f"  wrote {f}")
+        for sk in res["skipped"]:
+            print(f"  left alone {sk['path']}: {sk['reason']}")
+    if args.zip:
+        print(f"Wrote {skills.write_zip(Path(args.zip))}. In Claude Desktop: Customize > Skills, add each zip inside.")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="talent", description="Talent Search")
     sub = parser.add_subparsers(dest="cmd")
@@ -263,6 +280,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
     sub.add_parser("check-codex", help="check that Codex can start Talent Search")
     sub.add_parser("check-lmstudio", help="check that LM Studio can start Talent Search")
+    inst = sub.add_parser("install-skills", help="add the Talent Search skills to Claude Code and Codex (or write a zip)")
+    inst.add_argument("--claude-code", action="store_true", help="install into ~/.claude/skills")
+    inst.add_argument("--codex", action="store_true", help="install into ~/.agents/skills")
+    inst.add_argument("--zip", metavar="PATH", help="write a zip to upload in Claude Desktop (Customize > Skills)")
+    sub.add_parser("remove-skills", help="remove the Talent Search skills this app installed (only those)")
     imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
     imp.add_argument("file")
     imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
@@ -325,6 +347,18 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
     elif cmd == "sync":
         _sync(args)
+    elif cmd == "install-skills":
+        _install_skills(args)
+    elif cmd == "remove-skills":
+        from . import skills
+
+        for target in skills.TARGETS:
+            res = skills.remove(target)
+            for f in res["removed"]:
+                print(f"Removed {f}")
+            for f in res["kept"]:
+                print(f"Kept {f} (it holds files that aren't ours)")
+        print("Done. Only folders Talent Search installed were touched.")
     elif cmd in ("import-csv", "export-csv"):
         from pathlib import Path
 
