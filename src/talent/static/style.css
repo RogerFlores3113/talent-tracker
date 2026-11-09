@@ -518,7 +518,7 @@ a.cal-chip:hover { border-color: var(--accent); text-decoration: none; }
 /* ---- connect checks (fixer A) ---- */
 .checking { display: none; color: var(--muted); font-size: 13px; margin-left: var(--space-2); }
 .checking.htmx-request { display: inline; }
-#claude-panel code { word-break: break-all; font-size: 13px; }
+#claude-panel code, #skills-panel code, .code-list code { word-break: break-all; overflow-wrap: anywhere; font-size: 13px; }
 #claude-panel details { margin-top: var(--space-3); }
 #claude-panel pre.code { max-height: 220px; overflow: auto; }
 .claude-open { border-left: 3px solid var(--line); padding-left: var(--space-3); }
@@ -527,7 +527,7 @@ a.cal-chip:hover { border-color: var(--accent); text-decoration: none; }
    text colour so each bubble stands out from any background, and the letter inside never relies on colour alone.
    Letter on fill contrast: white on red, green, blue and purple (4.5:1 or better), near-black on orange and yellow. */
 .cbub { --bub: transparent; --bub-ink: var(--muted); display: inline-flex; align-items: center; justify-content: center;
-        width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px dashed var(--muted); background: var(--bub);
+        width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 2px dashed var(--muted); background: var(--bub);
         color: var(--bub-ink); font: 700 11px/1 system-ui, sans-serif; cursor: pointer; vertical-align: middle; }
 .cbub[data-color]:not([data-color=""]) { border: 2px solid var(--text); }
 .cbub[data-color="red"] { --bub: var(--tag-red); --bub-ink: var(--tag-red-ink); }
@@ -588,7 +588,10 @@ td.colorcell, th.colorcell { width: 1%; white-space: nowrap; text-align: center;
 .tour-count { margin: 0 0 var(--space-1); font-size: var(--fs-xs); color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .tour-title { font-size: var(--fs-lg); margin: 0 0 var(--space-2); }
 .tour-body { margin: 0 0 var(--space-3); }
-.tour-note { margin: 0 0 var(--space-2); color: var(--warn); font-size: var(--fs-sm); }
+.tour-note { margin: 0 0 var(--space-2); color: var(--muted); font-size: var(--fs-sm); }
+.tour-extras { margin: 0 0 var(--space-3); }
+.tour-extras:empty { display: none; }
+.tour-extras .check { margin: 0; padding: var(--space-1) 0; font-size: var(--fs-sm); }
 .tour-note:empty { display: none; }
 .tour-acts { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; justify-content: space-between; }
 .tour-nav { display: flex; flex-wrap: wrap; gap: var(--space-2); }

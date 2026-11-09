@@ -113,7 +113,7 @@ updated or removed. Claude Desktop takes skills as an upload: download the zip f
 same page and add it under Customize > Skills.
 
 From a terminal: `talent install-skills [--claude-code] [--codex] [--zip PATH]` and
-`talent remove-skills`.
+`talent remove-skills [--claude-code] [--codex] [--yes]` (it lists what goes and asks first). A skill file you edit yourself is never overwritten or deleted.
 
 Ask Claude Code or Codex: "install the skills in skills/ by following
 skills/INSTALL-SKILLS.md".

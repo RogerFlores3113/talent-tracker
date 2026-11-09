@@ -1612,6 +1612,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "tour_mode": "full",
     "tour_step": "0",
     "tour_loaded": "0",
+    "tour_loaded_at": "",  # when the tour added the demo people: saved searches made after it are offered for removal
     "tour_seen": "0",
 }
 

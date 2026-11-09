@@ -93,9 +93,16 @@ def test_codex_target_and_status(home):
 
 
 def test_reinstall_updates_ours(home):
+    """An untouched file of an earlier install is replaced by the new one (the marker's fingerprint still matches)."""
+    import hashlib
+    import json
     skills.install("claude-code")
-    f = home / ".claude" / "skills" / "talent-search-triage-candidates" / "SKILL.md"
-    f.write_text("old", encoding="utf-8")
+    d = home / ".claude" / "skills" / "talent-search-triage-candidates"
+    f = d / "SKILL.md"
+    f.write_text("older bundled text", encoding="utf-8")
+    marker = json.loads((d / skills.MARKER).read_text(encoding="utf-8"))
+    marker["files"]["SKILL.md"] = hashlib.sha256(b"older bundled text").hexdigest()
+    (d / skills.MARKER).write_text(json.dumps(marker), encoding="utf-8")
     assert skills.plan_install("claude-code")["items"][0]["action"] == "update"
     skills.install("claude-code")
     assert f.read_text(encoding="utf-8").startswith("---")
@@ -154,7 +161,7 @@ def test_cli_install_and_zip(home, tmp_path, capsys):
     main(["install-skills", "--codex", "--zip", str(tmp_path / "s.zip")])
     assert (home / ".agents" / "skills").is_dir() and not (home / ".claude").exists()
     assert zipfile.is_zipfile(tmp_path / "s.zip")
-    main(["remove-skills"])
+    main(["remove-skills", "--yes"])  # remove-skills asks first; --yes is the yes
     assert not any((home / ".agents" / "skills").iterdir())
 
 
