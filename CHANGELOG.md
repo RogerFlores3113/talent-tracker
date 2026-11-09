@@ -67,6 +67,13 @@ All notable changes to Talent Search. Newest first.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
 
+### Leftovers from cycle 10
+- On search results, the person's name is the link (the whole card still works as a click target), and LinkedIn and Website are their own links.
+- Your AI app can't save an interview note, outcome note or reason longer than 500 characters (the same as the app). It is told the limit and how long its text was.
+- Feedback from someone not listed on an interview is kept and shown as "from someone not on this interview", but their verdict no longer counts toward the session's result.
+- The loop planner keeps to each interviewer's own working hours (9 to 5 on their clock unless you set others in Interview details), and a start like 2026-11-12T13:00 means not before 1 PM that day.
+- On the Candidates table, the bulk bar has Add tag and Move stage (people not in the chosen job are skipped).
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates

@@ -368,8 +368,20 @@ def form_fields(form: Any) -> dict[str, Any]:
         if not raw.isdigit() or not 10 <= int(raw) <= 480:
             raise ValueError("Length is a number of minutes from 10 to 480. Nothing was saved.")
         minutes = int(raw)
+    hours = " ".join(str(form.get("interviewer_hours") or "").split()) or None
+    if hours:
+        from .loops import parse_hours  # here: loops imports this module
+        try:
+            parse_hours(hours)
+        except ValueError:
+            raise ValueError("The interviewer's working hours look like 9-17 (start hour, then end hour, 24-hour "
+                             "clock). Nothing was saved.") from None
+        if not who or len(interviewers(who)) != 1:
+            raise ValueError("Working hours go with one interviewer. Put one name in the interviewer box. "
+                             "Nothing was saved.")
     return {"interviewer": who, "interviewer_email": email, "minutes": minutes,
             "interviewer_tz": _zone_field(form.get("interviewer_tz"), "interviewer's"),
+            "interviewer_hours": hours,
             "candidate_tz": _zone_field(form.get("candidate_tz"), "candidate's")}
 
 
@@ -384,6 +396,9 @@ def save_form_people(store: Store, fields: dict[str, Any]) -> None:
     """Keep the interviewer's email from the log form (their zone is kept when the interview is logged)."""
     if fields.get("interviewer_email") and fields.get("interviewer"):
         store.save_interviewer(display_name(fields["interviewer"]), fields["interviewer_email"])
+    if fields.get("interviewer_hours") and fields.get("interviewer"):
+        from .loops import save_person_hours
+        save_person_hours(store, display_name(fields["interviewer"]), fields["interviewer_hours"])
 
 
 def named(t: dict[str, Any]) -> list[str]:
@@ -438,13 +453,27 @@ def _key_for(by: str, names: list[str]) -> str:
     return (hit or display_name(by)).casefold()
 
 
+def is_unlisted(t: dict[str, Any], by: str | None) -> bool:
+    """Whether `by` is someone other than the interviewers named on this session. A session that names nobody
+    has no one to be "not on" it, and feedback with no name is never unlisted."""
+    names = named(t)
+    who = " ".join((by or "").split())
+    if not names or not who:
+        return False
+    hit, many = resolve_name(who, [display_name(n) for n in names])
+    return hit is None and not many
+
+
+UNLISTED_LABEL = "from someone not on this interview"
+
+
 def verdicts(t: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """{folded name: {by, verdict, at, source}}: each interviewer's latest verdict on this session ('' when
     nobody was named). A first name or short form ('Priya') counts as the named interviewer it fits."""
     names = [display_name(n) for n in named(t)]
     out: dict[str, dict[str, Any]] = {}
     for v in _data(t).get("verdicts") or []:
-        if isinstance(v, dict) and v.get("verdict") in VERDICT_SCORE:
+        if isinstance(v, dict) and v.get("verdict") in VERDICT_SCORE and not is_unlisted(t, v.get("by")):
             out[_key_for(v.get("by") or "", names)] = v
     return out
 
@@ -523,9 +552,12 @@ def give_verdict(store: Store, interview_id: int, verdict: str, interviewer: str
             data["feedback"] = [*notes, {"by": who, "text": body, "at": ts, "source": source}]
     if data.get("verdict") is None and _legacy_verdict(data):
         data["outcome_note"] = interview_note(data)
-    combined = rollup([v["verdict"] for v in verdicts({**iv, "data": data}).values()]) or word
-    data["verdict"], data["outcome"], data["outcome_at"] = combined, \
-        INTERVIEW_VERDICTS[combined.replace("_", " ")], ts
+    if is_unlisted(iv, who):  # kept, shown as from someone not on the interview, but not counted in the result
+        combined = None
+    else:
+        combined = rollup([v["verdict"] for v in verdicts({**iv, "data": data}).values()]) or word
+        data["verdict"], data["outcome"], data["outcome_at"] = combined, \
+            INTERVIEW_VERDICTS[combined.replace("_", " ")], ts
     data["updated_by"] = source
     with store._write():
         store._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), interview_id))

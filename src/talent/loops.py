@@ -38,6 +38,56 @@ def parse_hours(text: str | None) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+PERSON_HOURS_KEY = "interviewer_hours"  # settings row: {folded name: {"name": ..., "hours": [start, end]}}
+INTERVIEWER_DEFAULT_HOURS = (9, 17)  # an interviewer's own working hours, on their clock, until set
+
+
+def person_hours_book(store: Store) -> dict[str, dict[str, Any]]:
+    try:
+        raw = json.loads(store.setting(PERSON_HOURS_KEY) or "{}")
+    except ValueError:
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, dict) and isinstance(v.get("hours"), list)} \
+        if isinstance(raw, dict) else {}
+
+
+def person_hours(book: dict[str, dict[str, Any]], who: str | None) -> tuple[int, int] | None:
+    """The working hours saved for an interviewer ('Dana' finds 'Dana Lee' when only one fits), or None."""
+    if not who:
+        return None
+    from .store import fold_text
+    name = interviews.display_name(who)
+    hit = book.get(fold_text(name))
+    if hit is None:
+        fits = [r for r in book.values() if interviews.name_matches(name, r.get("name") or "")]
+        hit = fits[0] if len(fits) == 1 else None
+    if not hit:
+        return None
+    try:
+        return int(hit["hours"][0]), int(hit["hours"][1])
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def save_person_hours(store: Store, who: str, text: str | None) -> tuple[int, int] | None:
+    """Keep an interviewer's working hours ('8-16'). Empty clears them (back to 9-17). Raises on a bad value."""
+    from .store import fold_text
+    name = interviews.display_name(who or "")
+    if not name:
+        raise ValueError("Give the interviewer's name to save their working hours.")
+    book = person_hours_book(store)
+    key = fold_text(name)
+    if not (text or "").strip():
+        if book.pop(key, None) is None:
+            return None
+        hours = None
+    else:
+        hours = parse_hours(text)
+        book[key] = {"name": name, "hours": list(hours)}
+    actions._put_setting(store, PERSON_HOURS_KEY, json.dumps(book))
+    return hours
+
+
 def parse_template(text: str) -> list[dict[str, Any]]:
     """One session per line: 'System design | 60 | Priya Nair, Sam Okoye' (minutes and the names are optional)."""
     out = []
@@ -296,13 +346,35 @@ def _odd_hours(name: str, zone: str | None, s: datetime, e: datetime) -> str | N
 PERSON_HOURS = (8, 18)  # a person's own working hours (their local clock) when only their zone is known
 
 
-def _in_their_hours(zone: str | None, s: datetime, e: datetime) -> bool:
-    """Whether a session fits inside 8 AM to 6 PM on that person's own clock. True when no zone is known."""
+def _in_their_hours(zone: str | None, s: datetime, e: datetime, hours: tuple[int, int] | None = None,
+                    default: tuple[int, int] = PERSON_HOURS) -> bool:
+    """Whether a session fits inside that person's working hours on their own clock: `hours` when they have
+    their own, else `default` (8 to 6 for the candidate, 9 to 5 for an interviewer). With no zone known and no
+    hours set it is True; hours set with no zone are read on the recruiter's clock."""
     z = zone_named(zone) if zone else None
     if z is None:
-        return True
+        if hours is None:
+            return True
+        z = shown_zone() or datetime.now().astimezone().tzinfo
+    lo, hi = hours or default
     a, b = s.astimezone(z), e.astimezone(z)
-    return a.date() == b.date() and a.hour >= PERSON_HOURS[0] and (b.hour, b.minute) <= (PERSON_HOURS[1], 0)
+    return a.date() == b.date() and a.hour >= lo and (b.hour, b.minute) <= (hi, 0)
+
+
+def _start_time(start: str | None) -> tuple[int, int] | None:
+    """The clock part of a start ('2026-11-12T13:00' or '2026-11-12 1:30 PM') as (hour, minute), else None."""
+    text = (start or "").strip()[10:].strip(" Tt") if start else ""
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?", text.lower())
+    if not m:
+        raise ValueError("start is a day like 2026-11-09, or a day and time like 2026-11-09T13:00 (not before 1 PM).")
+    h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3)
+    if ap:
+        h = h % 12 + (12 if ap == "pm" else 0)
+    if h > 23 or mi > 59:
+        raise ValueError("start has a time that isn't on the clock. Use 24-hour time like 2026-11-09T13:00.")
+    return h, mi
 
 
 # ------------------------------------------------------------ the plan
@@ -318,6 +390,7 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     cand = store.get_candidate(candidate_id)
     cz = _zone_or_error(candidate_tz) or store.candidate_zone(candidate_id)  # the candidate's own clock, if known
     book = store.interviewer_book()
+    hours_book = person_hours_book(store)
     tpl = get_template(store, job_id)
     if not tpl:
         raise ValueError("This job has no loop template yet. Add one on the job's Loop page (one session per line, "
@@ -330,6 +403,9 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     cal = _Cal.load(store, _at(days[0], 0), _at(days[-1] + timedelta(days=1), 0))
     have = [t for t in actions.upcoming_for(store, candidate_id, job_id, now)]
     cursor = _at(days[0], h0 * 60)
+    not_before = _start_time(start)
+    if not_before and days[0] == asked:  # a time with the start day means not before then on that day
+        cursor = max(cursor, _at(days[0], not_before[0] * 60 + not_before[1]))
     if as_local(now).date() == days[0]:
         cursor = max(cursor, now + timedelta(hours=2))
     warnings: list[str] = []
@@ -364,7 +440,8 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
                         found = (s, e, None, [])
                     else:
                         free = [w for w in eligible if not cal.busy_for(w, s, e)
-                                and _in_their_hours(interviews.interviewer_zone({}, w, book), s, e)]
+                                and _in_their_hours(interviews.interviewer_zone({}, w, book), s, e,
+                                                    person_hours(hours_book, w), INTERVIEWER_DEFAULT_HOURS)]
                         if free:
                             free.sort(key=lambda w: (cal.count(w, day), eligible.index(w)))
                             found = (s, e, free[0], free[1:])
@@ -380,8 +457,9 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
             else:
                 who = ", ".join(eligible) or "anyone"
                 row["warnings"].append(f"No time in the next {HORIZON_DAYS} working days when {cand['name']} and {who} "
-                                       "are all free and inside working hours (the recruiter's, and 8 AM to 6 PM "
-                                       "where the candidate and interviewers are, when their zones are known). "
+                                       "are all free and inside working hours (the recruiter's, 8 AM to 6 PM for "
+                                       "the candidate, and each interviewer's own hours, 9 AM to 5 PM unless set, "
+                                       "where they are when their zones are known). "
                                        "Add an interviewer for this session, or start later.")
             sessions.append(row)
             continue

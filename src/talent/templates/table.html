@@ -112,6 +112,9 @@
     <label>Stage <input type="text" name="stage" list="bulk-stages" placeholder="First stage" maxlength="80"></label>
     <datalist id="bulk-stages">{% for st in stage_choices or [] %}<option value="{{ st }}">{% endfor %}</datalist>
     <button class="btn" type="submit" name="action" value="job">Add to job</button>
+    <button class="btn" type="submit" name="action" value="move" data-confirm="Move the ticked people who are in this job to the stage you typed? People not in the job are skipped.">Move stage</button>
+    <label>Tag <input type="text" name="tag" placeholder="e.g. python" maxlength="60" autocomplete="off"></label>
+    <button class="btn" type="submit" name="action" value="tag">Add tag</button>
     <button class="btn" type="submit" name="action" value="export">Export as CSV</button>
   </div>
 </form>{% endif %}

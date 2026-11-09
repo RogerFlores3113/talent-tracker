@@ -365,6 +365,14 @@ def _zone_used_note(when: Any, iso: str) -> str:
             "a zone is read in that zone.")
 
 
+def _check_note_length(text: Any, what: str) -> None:
+    """The web caps an interview note at 500 characters; the AI app gets the same cap, with a plain error."""
+    n = len((text or "").strip()) if isinstance(text, str) else 0
+    if n > interviews.SUMMARY_LIMIT:
+        raise ValueError(f"The {what} can be up to {interviews.SUMMARY_LIMIT} characters, and this one has {n:,}. "
+                         "Nothing was saved. Shorten it and send it again.")
+
+
 def _unlisted_note(iv: dict[str, Any], who: str | None) -> str:
     """'Sam Roe isn't listed as an interviewer on this session.' when feedback names someone who isn't on it."""
     name = (who or "").strip()
@@ -374,7 +382,7 @@ def _unlisted_note(iv: dict[str, Any], who: str | None) -> str:
     if any(interviews.name_matches(name, w) or interviews.name_matches(interviews.display_name(w), name)
            for w in listed):
         return ""
-    return f"{interviews.display_name(name)} isn't listed as an interviewer on this session."
+    return f"{interviews.display_name(name)} isn't listed as an interviewer on this session, so it is kept but not counted in the session's result."
 
 
 def _wait_text(r: dict[str, Any], *, part: bool = False, hired: bool = False) -> str:
@@ -760,14 +768,18 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
 def _interview_bits(t: dict[str, Any]) -> dict[str, Any]:
     """An interview's interviewer, outcome note and feedback, from a timeline row or its slim copy."""
     d = t.get("data") if isinstance(t.get("data"), dict) else {}
-    return {"interviewer": t.get("interviewer") or d.get("interviewer"),
+    who = t.get("interviewer") or d.get("interviewer")
+    feedback = t.get("feedback") or [f for f in d.get("feedback") or [] if isinstance(f, dict)]
+    session = {"data": {"interviewer": who}}
+    return {"interviewer": who,
             "outcome_note": t.get("outcome_note") or interview_note(d),
             "result": t.get("result") or interview_label(d),
-            "feedback": t.get("feedback") or [f for f in d.get("feedback") or [] if isinstance(f, dict)]}
+            "feedback": [{**f, "unlisted": interviews.is_unlisted(session, f.get("by"))} for f in feedback]}
 
 
 def _feedback_text(f: dict[str, Any]) -> str:
-    return f"Feedback from {f.get('by') or 'an interviewer'}: {f.get('text') or ''}"
+    note = f" ({interviews.UNLISTED_LABEL}, not counted in the result)" if f.get("unlisted") else ""
+    return f"Feedback from {f.get('by') or 'an interviewer'}{note}: {f.get('text') or ''}"
 
 
 def _timeline_line(t: dict[str, Any]) -> str:
@@ -1527,6 +1539,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Log one entry for log_activity: (sentence, structured result, the AI actions it made)."""
         if reply and not (summary or "").strip():
             summary = "Replied"
+        if what_kind == "interview":
+            _check_note_length(summary, "interview note")
         if what_kind == "interview" and not (when and str(when).strip()):
             raise ValueError("No change made. An interview needs a start time in `when`, with a time zone "
                              "(2026-11-12T15:00:00-08:00, or 2026-11-12 3:00 PM PT). Ask the recruiter when it is "
@@ -1754,6 +1768,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """
         if reason is None and note is not None and outcome is None and (when or cancel):
             reason, note = note, None  # a note sent with a new time is the reason it moved
+        _check_note_length(note, "interview note")
+        _check_note_length(reason, "reason")
         before = store.get_interview(interview_id)
         moves = bool(when and str(when).strip()) and parse_when(when) != before["at"]
         records = cancel or moves or outcome is not None or note is not None  # what replaces a saved value
@@ -1900,12 +1916,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   unavailable: list[str] | None = None, candidate_tz: str | None = None) -> CallToolResult:
         """Propose an interview loop for a candidate: a slot for each session in the job's loop template (set on the
         job's Loop page in the app), over the next working days, inside the recruiter's working hours, inside
-        8 AM to 6 PM where the candidate and each interviewer are (when their time zones are known), and clear
+        8 AM to 6 PM where the candidate is and inside each interviewer's own working hours where they are (9 AM to
+        5 PM unless the recruiter set others; their time zones count when known), and clear
         of the interviewers' and the candidate's booked sessions. `candidate_tz` is the candidate's own time zone
         (America/Chicago, Asia/Kolkata, or PT, ET); the one saved for them is used when you leave it out. Warns about heavy days and busy interviewers,
         names who else is free to swap in, and returns paste-ready invite text for each interviewer and for the
         candidate (in the structured result: show it to the recruiter). Nothing is booked and no calendar is
-        written. `start` is the first day to try (2026-11-09; default tomorrow). `unavailable` names interviewers
+        written. `start` is the first day to try (2026-11-09; default tomorrow); add a time
+        (2026-11-12T13:00) for not before 1 PM that day, in the recruiter's time zone. `unavailable` names interviewers
         who are out; others are swapped in. After the recruiter agrees, book_loop logs the sessions. A job with no
         template yet needs one first: set_loop_template saves it."""
         job = store.get_job(job_id)

@@ -195,11 +195,11 @@ def test_show_more_on_results_and_table(store):
                             source="LinkedIn" if i % 3 else "Referral")
     client = local_client(store)
     page = client.get("/?q=python").text
-    assert page.count('<a class="card') == 50 and "Show more" in page and "50 of 130" in page
+    assert page.count('<div class="card ') == 50 and "Show more" in page and "50 of 130" in page
     more = client.get("/search?q=python&offset=50").text
-    assert more.count('<a class="card') == 50 and "100 of 130" in more and "<ul" not in more
+    assert more.count('<div class="card ') == 50 and "100 of 130" in more and "<ul" not in more
     last = client.get("/search?q=python&offset=100").text
-    assert last.count('<a class="card') == 30 and "Show more" not in last
+    assert last.count('<div class="card ') == 30 and "Show more" not in last
 
     table = client.get("/candidates").text
     assert table.count("<tr>") == 100 + 1 and "Show more" in table and "Showing 100 of 130" in table

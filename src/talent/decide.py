@@ -60,7 +60,8 @@ def _interviews(store: Store, candidate_id: int, job_id: int) -> list[dict[str, 
                     "interviewer": d.get("interviewer"), "status": status, "upcoming": ahead,
                     "outcome": interview_label(d) or ("Coming up" if ahead else "Not recorded yet"),
                     "note": interview_note(d),
-                    "feedback": [{"by": f.get("by"), "text": f.get("text"), "at": f.get("at"), "source": f.get("source")}
+                    "feedback": [{"by": f.get("by"), "text": f.get("text"), "at": f.get("at"), "source": f.get("source"),
+                                  "unlisted": interviews.is_unlisted(row, f.get("by"))}
                                  for f in d.get("feedback") or [] if isinstance(f, dict) and f.get("text")]})
     return out
 
@@ -188,7 +189,9 @@ def finalists_text(d: dict[str, Any]) -> str:
                 line += ". Each interviewer: " + ", ".join(f"{_fenced(v['name'] or 'unnamed')} {v['label']}"
                                                            for v in given)
             lines.append(line)
-            lines += [f"  Feedback from {_fenced(f['by'] or 'an interviewer')}: {_fenced(f['text'])}"
+            lines += [f"  Feedback from {_fenced(f['by'] or 'an interviewer')}"
+                      + (f" ({interviews.UNLISTED_LABEL}, not counted in the result)" if f.get("unlisted") else "")
+                      + f": {_fenced(f['text'])}"
                       for f in i["feedback"]]
         lines += [f"- To-do: {_fenced(t['text'])}" for t in p["todos"]]
     lines.append(f"{END} [{token}]")

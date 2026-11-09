@@ -40,7 +40,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
-                    split_tags, to_dt)
+                    join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
 from .store import COLORS, clean_color, next_color
@@ -375,6 +375,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["verdict_choices"] = interviews.VERDICT_CHOICES  # one interviewer's own verdict (Decide)
     env.globals["interview_label"] = interview_label  # 'Strong yes', 'Mixed', 'Passed'
     env.globals["interview_note"] = interview_note
+    env.globals["unlisted_label"] = interviews.UNLISTED_LABEL
+    env.globals["feedback_unlisted"] = lambda t, by: interviews.is_unlisted(t, by)
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
@@ -737,7 +739,60 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if already:
                 notice += f" {already} {'was' if already == 1 else 'were'} already in it and stayed where they are."
             return back(request, "/candidates", notice=notice)
-        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add to a job, or export.")
+        if action == "tag":
+            new = split_tags(str(form.get("tag") or ""))
+            if not new:
+                return back(request, "/candidates", error="Type the tag to add first. Nothing was changed.")
+            changed = had = skipped = 0
+            for cid in ids:
+                try:
+                    cur = store.get_candidate(cid)["tags"] or []
+                    have = {t.lower() for t in cur}
+                    if all(t.lower() in have for t in new):
+                        had += 1
+                        continue
+                    store.update_candidate(cid, tags=join_tags(split_tags([*cur, *new])), by="app")
+                    changed += 1
+                except (NotFound, ValueError):
+                    skipped += 1
+            notice = f"Added {', '.join(new)} to {changed} {'person' if changed == 1 else 'people'}."
+            if had:
+                notice += f" {had} already had {'it' if len(new) == 1 else 'them'}."
+            if skipped:
+                notice += f" {skipped} could not take another tag (their skills list is full)."
+            return back(request, "/candidates", notice=notice + " You can undo each under Changes.")
+        if action == "move":
+            raw_job = str(form.get("job_id") or "")
+            if not raw_job.isdigit():
+                return back(request, "/candidates", error="Pick the job whose stage you want to change.")
+            if not str(form.get("stage") or "").strip():
+                return back(request, "/candidates", error="Type the stage to move them to. Nothing was moved.")
+            job = job_or_404(int(raw_job))
+            try:
+                stage = store.resolve_stage(job["id"], str(form.get("stage") or "").strip())
+            except ValueError as exc:
+                return back(request, "/candidates", error=f"{exc} Nobody was moved.")
+            moved = same = 0
+            skipped_names: list[str] = []
+            for cid in ids:
+                row = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, job["id"]))
+                if row is None:
+                    skipped_names.append(str(cid))
+                    continue
+                if row["stage"] == stage["name"]:
+                    same += 1
+                    continue
+                store.move_stage(cid, job["id"], stage["name"], by="app")
+                moved += 1
+            notice = f"Moved {moved} {'person' if moved == 1 else 'people'} to {stage['name']} in {job['title']}."
+            if same:
+                notice += f" {same} {'was' if same == 1 else 'were'} already there."
+            if skipped_names:
+                k = len(skipped_names)
+                notice += (f" Skipped {k} {'person' if k == 1 else 'people'} who {'is' if k == 1 else 'are'} not in "
+                           "this job. Use Add to job for them.")
+            return back(request, "/candidates", notice=notice)
+        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add a tag, add to a job, move a stage, or export.")
 
     def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
                      more: dict[str, str]) -> list[dict[str, str]]:
@@ -2650,27 +2705,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ------------------------------------------------- the loop planner
     def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
-                   cz: str = ""):
+                   cz: str = "", start_time: str = ""):
         job = job_or_404(job_id)
         tpl = loops.get_template(store, job_id)
         people = actions.in_play(store, job_id)
         plan, error = None, ""
         if candidate.isdigit() and tpl:
             try:
-                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out),
+                plan = loops.plan(store, job_id, int(candidate),
+                                  (f"{start}T{start_time}" if start and start_time.strip() else start) or None,
+                                  interviews.interviewers(out),
                                   candidate_tz=cz or None)
             except (ValueError, NotFound) as exc:
                 error = str(exc)
         return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
                     hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
-                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
-                    plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
+                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, start_time=start_time, out=out,
+                    plan=plan, plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
 
     @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
     def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
-                  cz: str = ""):
+                  cz: str = "", start_time: str = ""):
         """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
-        return _loop_page(request, job_id, candidate, start, out, cz)
+        return _loop_page(request, job_id, candidate, start, out, cz, start_time)
 
     @app.post("/jobs/{job_id}/loop/template")
     async def loop_template_form(request: Request, job_id: int):
