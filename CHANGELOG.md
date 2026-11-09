@@ -2,6 +2,28 @@
 
 All notable changes to Talent Search. Newest first.
 
+## [0.2.0] - 2026-11-09
+
+### Search
+- Search shorthand: `skill:`, `title:`, `company:` and other prefixes, `-word` to leave things out, quoted phrases, `OR`, and a line that says how the app read your search.
+- Saved searches, shown on Today and on the Candidates table. Saved searches can include a color tag.
+
+### Candidates
+- Color tag bubbles. Click a bubble to cycle red, orange, yellow, green, blue, purple and off. Tagged people sort to the top.
+- A duplicate finder with bulk actions. Every email a person has now counts for duplicates, imports, merges and search.
+- Pasting a profile or an email signature fills in more fields, including "Title, Company" lines.
+
+### Interviews
+- A month calendar, with the week view kept as an alternate. Download interviews as a calendar (.ics) file for your own calendar app.
+
+### First run
+- A guided tour that can load sample data and clear it again. Skip it at any time, or replay a short version from the footer or Settings.
+
+### Working with AI apps
+- Ready-made skills for Claude Code, Codex and Claude Desktop, installed from the app or by following INSTALL-SKILLS.md.
+- Prompt-injection guards: text that tries to give the AI orders is flagged, held for your review, and shown with a warning. The AI still can never delete anything, and it never adds an email to a person who is already saved.
+- Scraping is no longer ruled out. A "Stricter site guards" switch in Settings (off by default) asks the AI app to stay off sites whose terms forbid scraping and lowers its hourly cap. Some sites' terms forbid scraping, so check before you point an AI app at them.
+
 ## [0.1.0] - 2026-11-09
 
 The first release. Talent Search is a candidate database that lives on your own computer, that opens in your web browser for you and tools for your AI app.
