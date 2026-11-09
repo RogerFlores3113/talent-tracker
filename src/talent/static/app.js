@@ -18,10 +18,16 @@
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
 //   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
 //   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 (function () {
   "use strict";
+
+  document.addEventListener("change", e => {
+    const t = e.target;
+    if (t && t.matches && t.matches("input[data-theme-pick]") && t.checked) document.documentElement.dataset.theme = t.value;
+  });
 
   function fallbackCopy(text) {
     const t = document.createElement("textarea");

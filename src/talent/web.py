@@ -40,7 +40,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
 from .store import as_local, parse_when
-from .store import BATCH_KINDS
+from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -231,6 +231,12 @@ def _history_to_text(entries: list[dict[str, Any]]) -> str:
                      for e in entries)
 
 
+def current_theme(store: Store) -> str:
+    """The saved color theme, or the default when nothing valid is saved."""
+    value = store.setting("theme")
+    return value if value in {t[0] for t in THEMES} else DEFAULT_THEME
+
+
 def key_cookie_name(key: str) -> str:
     """Cookies are shared by every port on 127.0.0.1, so each install's cookie gets its own name."""
     return "talent_key_" + hashlib.sha256(key.encode()).hexdigest()[:10]
@@ -318,6 +324,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
     env.globals["version"] = __version__
+    env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
+    env.globals["themes"] = THEMES
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
@@ -2666,6 +2674,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 errors[key] = "Use a whole number from 1 to 9999."
         if form.get("pipeline_view") in ("board", "table"):
             values["pipeline_view"] = str(form.get("pipeline_view"))
+        if str(form.get("theme") or "") in {t[0] for t in THEMES}:  # anything else is ignored
+            values["theme"] = str(form.get("theme"))
         if errors:
             return render_settings(request, s={**store.settings(), **values}, errors=errors, status_code=400)
         if form.get("hiring_for") in ("own", "clients"):

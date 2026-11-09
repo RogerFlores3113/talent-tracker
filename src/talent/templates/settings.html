@@ -5,6 +5,16 @@
 {% if saved %}<p class="flash">Saved.</p>{% endif %}
 {% if errors %}<p class="flash warn" role="alert">Nothing was saved. Fix the highlighted number{{ 's' if errors | length > 1 }} and save again.</p>{% endif %}
 <form method="post" action="/settings" class="stack">
+  <section class="panel" id="look">
+    <h2>Look</h2>
+    <p class="fine">Pick the colors. The page changes as you choose, and Save keeps it.</p>
+    <div class="theme-grid" role="radiogroup" aria-label="Color theme">
+      {% for value, name, blurb in themes %}
+      <label class="theme-card" data-t="{{ value }}"><input type="radio" name="theme" value="{{ value }}" data-theme-pick {{ 'checked' if theme() == value }}>
+        <span class="sw"><span class="chip-bar"></span><strong>{{ name }}</strong><span class="fine">{{ blurb }}</span></span></label>
+      {% endfor %}
+    </div>
+  </section>
   <section class="panel">
     <h2>What shows on Today</h2>
     <input type="hidden" name="flags_shown" value="1">
