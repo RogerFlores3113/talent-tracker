@@ -1,4 +1,4 @@
-{% from "_macros.html" import recipe_buttons %}<!doctype html>
+{% from "_macros.html" import recipe_buttons, cur %}<!doctype html>
 <html lang="en" data-theme="{{ theme() }}">
 <head>
   <meta charset="utf-8">
@@ -10,22 +10,23 @@
 </head>
 {% set path = request.url.path %}
 <body class="{% block bodyclass %}{% endblock %}">
+  <a class="skip-link" href="#main">Skip to main content</a>
   <header class="top">
     <a class="brand" href="/">Talent Search</a>
     <nav aria-label="Main">
-      <a href="/" class="{{ 'on' if path == '/' }}">Today</a>
-      <a href="/candidates" class="{{ 'on' if path.startswith('/candidates') and path != '/candidates/new' }}">Candidates</a>
-      <a href="/jobs" class="{{ 'on' if path.startswith('/jobs') }}">Jobs</a>
-      <a href="/interviews" class="{{ 'on' if path == '/interviews' }}">Interviews</a>
-      <a href="/clients" class="{{ 'on' if path.startswith('/clients') }}">{{ 'Reports' if inhouse() else 'Clients' }}</a>
-      {% if inhouse() %}<a href="/plan" class="{{ 'on' if path == '/plan' }}">Hiring plan</a>{% endif %}
-      <a href="/candidates/new" class="{{ 'on' if path in ('/candidates/new', '/paste', '/import') }}">Add</a>
-      <a href="/recipes" class="{{ 'on' if path == '/recipes' }}">AI recipes</a>
-      <a href="/connect" class="{{ 'on' if path == '/connect' }}">Connect AI</a>
-      <a href="/settings" class="{{ 'on' if path == '/settings' }}">Settings</a>
+      {% set nav_items = [('/', 'Today', path == '/'),
+        ('/candidates', 'Candidates', path.startswith('/candidates') and path != '/candidates/new'),
+        ('/jobs', 'Jobs', path.startswith('/jobs')),
+        ('/interviews', 'Interviews', path == '/interviews'),
+        ('/clients', 'Reports' if inhouse() else 'Clients', path.startswith('/clients'))] %}
+      {% if inhouse() %}{% set nav_items = nav_items + [('/plan', 'Hiring plan', path == '/plan')] %}{% endif %}
+      {% set nav_items = nav_items + [('/candidates/new', 'Add', path in ('/candidates/new', '/paste', '/import')),
+        ('/recipes', 'AI recipes', path == '/recipes'), ('/connect', 'Connect AI', path == '/connect'), ('/settings', 'Settings', path == '/settings')] %}
+      {% for href, label, on in nav_items %}<a href="{{ href }}" class="{{ 'on' if on }}"{{ cur(on) }}>{{ label }}</a>
+      {% endfor %}
     </nav>
   </header>
-  <main>
+  <main id="main" tabindex="-1">
     {% set fq = request.state.flash or {} %}
     {% if fq.get('flash_error') %}<p class="flash warn" role="alert">{{ fq.get('flash_error') }}</p>{% endif %}
     {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}</p>{% endif %}

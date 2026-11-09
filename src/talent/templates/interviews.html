@@ -27,11 +27,12 @@
 {% endif %}
 
 <section class="panel">
+  <h2 class="sr-only">Days this week</h2>
   {% if not w.total %}<p class="none">Nothing booked this week. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
   <div class="week days-{{ w.days | length }}">
   {% for d in w.days %}
-    <div class="day">
-      <h3 id="day-{{ d.day.isoformat() }}">{{ d.label }}</h3>
+    <div class="day"{% if d.today %} aria-current="date"{% endif %}>
+      <h3 id="day-{{ d.day.isoformat() }}">{{ d.label }}{% if d.today %} <span class="sr-only">(today)</span>{% endif %}</h3>
       {% for lp in d.loops %}
       <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
         <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}

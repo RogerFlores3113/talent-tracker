@@ -13,6 +13,9 @@
 <form class="cbub-form" method="post" action="/candidates/{{ c.id }}/color"><input type="hidden" name="color" value="{{ i.next }}"><button type="submit" class="cbub{{ ' big' if big }}" data-color-bubble data-cid="{{ c.id }}" data-who="{{ c.name }}" data-color="{{ i.color }}" data-next="{{ i.next }}" data-prev="{{ i.prev }}" aria-label="{{ i.aria }}" title="{{ i.title }}"><span aria-hidden="true">{{ i.letter }}</span></button></form>
 {%- endmacro %}
 
+{# aria-current="page" for a link that class="on" marks as the current one. #}
+{% macro cur(on) -%}{% if on %} aria-current="page"{% endif %}{%- endmacro %}
+
 {% macro chips(tags, link=True) -%}
 {% if tags %}<span class="chips">{% for t in tags %}{% if link %}<a class="chip" href="/candidates?tag={{ t | urlencode }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
 {%- endmacro %}

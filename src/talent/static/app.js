@@ -21,7 +21,8 @@
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
 //   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
-//   data-stage-pick           on a stage menu: move at once, or ask for a reason first for an out stage
+//   data-stage-pick           on a stage menu: a mouse pick moves at once (or asks for a reason first for an out stage);
+//                             with the keyboard it waits for Enter or blur. After a move, focus returns to that person.
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
 //   data-color-bubble         on a colour bubble button (data-cid, data-color, data-next, data-prev): a click saves the
 //                             next colour at once and updates the bubble in place; Right-click or Shift-click goes to
@@ -175,51 +176,35 @@
     });
   });
 
-  // Selects with data-autosubmit: a mouse or touch pick submits at once. With the keyboard, arrow keys change the
-  // value one option at a time, so wait for Enter or for the select to lose focus.
-  const isAuto = n => n && n.matches && n.matches("select[data-autosubmit]");
-  document.addEventListener("keydown", e => {
-    const el = e.target;
-    if (!isAuto(el)) return;
-    if (e.key === "Enter") {
-      if (el.dataset.pending && el.form) { delete el.dataset.pending; delete el.dataset.kb; e.preventDefault(); el.form.submit(); }
-    } else if (/^(Arrow|Home$|End$|Page)/.test(e.key) || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
-      el.dataset.kb = "1";
-    }
-  }, true);
-  document.addEventListener("pointerdown", e => { const el = e.target.closest && e.target.closest("select[data-autosubmit]"); if (el) delete el.dataset.kb; }, true);
-  document.addEventListener("focusout", e => {
-    const el = e.target;
-    if (!isAuto(el) || !el.dataset.pending || !el.form) return;
-    const to = e.relatedTarget;
-    delete el.dataset.pending; delete el.dataset.kb;
-    if (to && to.form === el.form && to.type === "submit") return;  // the Go button sends it
-    el.form.submit();
-  });
-  document.addEventListener("change", e => {
-    const el = e.target;
-    if (isAuto(el) && el.form) {
-      if (el.dataset.kb) { el.dataset.pending = "1"; return; }
-      el.form.submit(); return;
-    }
-    if (el.matches && el.matches("input[type=checkbox][data-autosubmit]") && el.form) { el.form.submit(); return; }
-    // Stage menus: an out stage shows the optional reason first; any other pick (or a reason) moves at once.
-    if (el.matches && el.matches("select[data-table-stage]")) {  // job table view: one shared move form
+  // Menus that wait for the keyboard: filters (data-autosubmit) and the stage menus on the board and the job table.
+  // A mouse or touch pick goes at once. With the keyboard, arrow keys change the value one option at a time, so wait
+  // for Enter or for the menu to lose focus.
+  const DEFER = "select[data-autosubmit], select[data-stage-pick], select[data-table-stage], form.stage-form .reason select";
+  const isAuto = n => n && n.matches && n.matches(DEFER);
+  const sendForm = form => { form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true})); };
+  // Make the optional reason box show, and put the keyboard in it.
+  function askReason(reason, o, who, quiet) {
+    // Hide the reason that only repeats the stage ("Withdrew" when moving to Withdrawn).
+    const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
+    reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
+    const w = reason.querySelector(".tbl-who");
+    if (w) w.textContent = "Why " + (who || "this person") + " is going to " + o.textContent + ":";
+    reason.hidden = false;
+    const pick = reason.querySelector("select");
+    if (pick && !quiet) pick.focus();
+  }
+  // A stage menu or reason menu has settled: an out stage shows the optional reason first; any other pick moves.
+  function stageSettled(el, quiet) {
+    if (el.matches("select[data-table-stage]")) {  // job table view: one shared move form
       const shared = document.getElementById("tbl-move");
       if (!shared) return;
       shared.elements.candidate_id.value = el.dataset.cid;
       shared.elements.stage.value = el.value;
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = shared.querySelector(".reason");
-      if (o && o.dataset.out && reason) {
-        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
-        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
-        const who = reason.querySelector(".tbl-who");
-        if (who) who.textContent = "Why " + (el.dataset.who || "this person") + " is going to " + o.textContent + ":";
-        reason.hidden = false; return;
-      }
+      if (o && o.dataset.out && reason) { askReason(reason, o, el.dataset.who, quiet); return; }
       if (reason) reason.hidden = true;
-      shared.requestSubmit ? shared.requestSubmit() : shared.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+      sendForm(shared);
       return;
     }
     const form = el.closest && el.closest("form.stage-form");
@@ -227,15 +212,95 @@
     if (el.matches("select[data-stage-pick]")) {
       const o = el.selectedOptions && el.selectedOptions[0];
       const reason = form.querySelector(".reason");
-      if (o && o.dataset.out && reason) {
-        // Hide the reason that only repeats the stage ("Withdrew" when moving to Withdrawn).
-        const key = (o.textContent || "").toLowerCase().replace(/[\W_]+/g, " ").trim();
-        reason.querySelectorAll("option[data-like]").forEach(r => { r.hidden = r.dataset.like.split("|").includes(key); });
-        reason.hidden = false; return;
-      }
+      if (o && o.dataset.out && reason) { askReason(reason, o, "", quiet); return; }
       if (reason) reason.hidden = true;
     }
-    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {bubbles: true, cancelable: true}));
+    sendForm(form);
+  }
+  function settle(el, quiet) {
+    if (el.matches("select[data-autosubmit]")) { if (el.form) el.form.submit(); return; }
+    stageSettled(el, quiet);
+  }
+  document.addEventListener("keydown", e => {
+    const el = e.target;
+    if (!isAuto(el)) return;
+    if (e.key === "Enter") {
+      if (el.dataset.pending) { delete el.dataset.pending; delete el.dataset.kb; e.preventDefault(); settle(el, false); }
+    } else if (/^(Arrow|Home$|End$|Page)/.test(e.key) || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      el.dataset.kb = "1";
+    }
+  }, true);
+  document.addEventListener("pointerdown", e => { const el = e.target.closest && e.target.closest(DEFER); if (el) delete el.dataset.kb; }, true);
+  document.addEventListener("focusout", e => {
+    const el = e.target;
+    if (!isAuto(el) || !el.dataset.pending) return;
+    const to = e.relatedTarget;
+    delete el.dataset.pending; delete el.dataset.kb;
+    if (to && el.form && to.form === el.form && to.type === "submit") return;  // the Go or Move button sends it
+    settle(el, true);
+  });
+  document.addEventListener("change", e => {
+    const el = e.target;
+    if (isAuto(el)) {
+      if (el.dataset.kb) { el.dataset.pending = "1"; return; }
+      settle(el, false); return;
+    }
+    if (el.matches && el.matches("input[type=checkbox][data-autosubmit]") && el.form) { el.form.submit(); return; }
+  });
+
+  // After a stage move the board or table is drawn again. Say what moved, and put the keyboard back on that
+  // person's stage menu (or leave it where the person tabbed to, when they are already somewhere on the page).
+  let moved = null;
+  const cssId = v => (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v);
+  document.addEventListener("htmx:beforeRequest", e => {
+    const cfg = e.detail && e.detail.requestConfig;
+    if (!cfg || !/\/jobs\/\d+\/move$/.test(cfg.path || "")) return;
+    const p = cfg.parameters || {};
+    const cid = p.candidate_id, stage = p.stage;
+    if (!cid) { moved = null; return; }
+    const at = document.querySelector("#pipeline [data-cid=\"" + cssId(cid) + "\"]");
+    const strong = at && at.querySelector && at.querySelector("strong");
+    moved = {cid, stage, who: (at && at.dataset.who) || (strong && strong.textContent.trim()) || "This person"};
+  });
+  document.addEventListener("htmx:afterSettle", e => {
+    const m = moved;
+    const t = e.detail && e.detail.target;
+    if (!m || !t || t.id !== "pipeline") return;
+    moved = null;
+    const lost = t.querySelector(".error, .ask-cancel");
+    announceColor(lost ? (lost.textContent || "").trim().replace(/\s+/g, " ") : m.who + " moved to " + (m.stage || "the new stage") + ".");
+    if (lost) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && document.body.contains(a)) return;
+    const pick = t.querySelector("[data-cid=\"" + cssId(m.cid) + "\"] select[data-stage-pick]") ||
+      t.querySelector("select[data-table-stage][data-cid=\"" + cssId(m.cid) + "\"]");
+    if (pick) pick.focus();
+  });
+
+  // "Show more" swaps its own row away. Put the keyboard on the first row or card that was added.
+  let more = null;
+  document.addEventListener("htmx:beforeRequest", e => {
+    const elt = e.detail && e.detail.elt;
+    const holder = elt && elt.closest && elt.closest("tr.more, li.more");
+    if (!holder) return;
+    more = {prev: holder.previousElementSibling, parent: holder.parentElement};
+  });
+  document.addEventListener("htmx:afterSettle", () => {
+    if (!more) return;
+    const m = more; more = null;
+    const a = document.activeElement;
+    if (a && a !== document.body && document.body.contains(a)) return;
+    const first = m.prev ? m.prev.nextElementSibling : (m.parent && m.parent.firstElementChild);
+    const target = first && first.querySelector && first.querySelector("a[href], button");
+    if (target) target.focus();
+  });
+  // The Today search: say the match count once, not the whole list of people.
+  document.addEventListener("htmx:afterSettle", e => {
+    const t = e.detail && e.detail.target;
+    const live = document.getElementById("results-status");
+    if (!live || !t || t.id !== "results") return;
+    const meta = t.querySelector(".meta");
+    live.textContent = meta ? meta.textContent.replace(/\s+/g, " ").trim() : "";
   });
 
   // Drag a card to another column to move it. Every card also has a stage menu, so dragging is optional.

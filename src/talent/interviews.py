@@ -99,8 +99,9 @@ def week(store: Store, start: date | None = None) -> dict[str, Any]:
     lo, hi = _midnight(monday), _midnight(monday + timedelta(days=7))
     rows = _session_rows(store, lo, hi)
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    today = as_local(datetime.now(timezone.utc)).date()
     days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
-             "loops": []} for i in range(7)]
+             "today": monday + timedelta(days=i) == today, "loops": []} for i in range(7)]
     loops = []
     chase = _chase_pairs(store, {(t["candidate_id"], t.get("job_id")) for t in rows})
     for g in actions.group_loops(rows):
