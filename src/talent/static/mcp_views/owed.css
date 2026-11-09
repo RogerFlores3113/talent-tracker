@@ -1,0 +1,11 @@
+/* Feedback owed view: grouped by interviewer. */
+section.who{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+section.who h2.wh{font-size:1rem;text-transform:none;letter-spacing:0;color:var(--text);margin:0 0 2px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+section.who h2.wh .n{font-size:.75rem;font-weight:400;color:var(--muted)}
+ul.owes{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}
+ul.owes>li{border-top:1px solid var(--line);padding-top:8px}
+.late{font-weight:700}
+.late.over{color:var(--danger)}
+.nudge{margin:8px 0 0;padding:6px 8px;border-left:3px solid var(--line);background:var(--chip);border-radius:0 6px 6px 0;font-size:.8125rem;white-space:pre-wrap;overflow-wrap:anywhere}
+html[data-mode=fullscreen] .owedwrap{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:10px;align-items:start}
+html[data-mode=fullscreen] section.who{margin-bottom:0}

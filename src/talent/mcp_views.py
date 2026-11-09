@@ -27,6 +27,9 @@ URIS = {
     "shortlist": "ui://talent-search/shortlist.html",
     "saved": "ui://talent-search/batch-save.html",
     "decide": "ui://talent-search/finalists.html",
+    "interviews": "ui://talent-search/interviews.html",
+    "owed": "ui://talent-search/feedback-owed.html",
+    "duplicates": "ui://talent-search/duplicates.html",
 }
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
@@ -44,7 +47,8 @@ def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
-    css = _read("kit.css") + ("\n" + _read("people.css") if name == "people" else "")
+    own = _DIR / (name + ".css")  # a view may bring its own styles (people.css, interviews.css ...)
+    css = _read("kit.css") + ("\n" + own.read_text(encoding="utf-8") if own.exists() else "")
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     return (

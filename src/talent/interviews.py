@@ -183,7 +183,10 @@ def _owing(t: dict[str, Any], now_iso: str, chase: set[tuple[int, Any]] | None =
     past = x["started"] and x["status"] == "scheduled"
     asks = chase is None or (t["candidate_id"], t.get("job_id")) in chase
     owed = owed_by(t) if asks and x["started"] and x["status"] != "cancelled" else []
-    out = {**x, "needs_outcome": past, "owed": owed}
+    mins = session_minutes(t)
+    out = {**x, "needs_outcome": past, "owed": owed, "minutes": mins,
+           "end": (to_dt(t["at"]) + timedelta(minutes=mins)).replace(microsecond=0).isoformat(),
+           "candidate_tz": candidate_zone(t), "interviewers": interviewers(actions.interviewer_of(t))}
     if owed:  # feedback is due a day after the session ends
         due = to_dt(t["at"]) + timedelta(minutes=session_minutes(t) + CHASE_HOURS * 60)
         out["feedback_due"] = due.replace(microsecond=0).isoformat()
@@ -687,11 +690,18 @@ def group_owed(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(out, key=lambda p: (-p["count"], p["name"].casefold()))
 
 
+def _days_overdue(at: str, now: datetime | None = None) -> int:
+    """Whole days past the point feedback was due (a day after the session), never below 0."""
+    now = now or datetime.now(timezone.utc)
+    return max(0, (now - (to_dt(at) + timedelta(hours=CHASE_HOURS))).days)
+
+
 def owed_people(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """feedback_owed's loops, regrouped by the interviewer who owes: 'Priya Shah owes 3: Dana, Omar, Lena'."""
     return group_owed([{"who": o["name"], "email": o.get("email"), "candidate_id": r["candidate_id"], "name": r["name"],
                         "job_id": r["job_id"], "job": r["job"], "interview_id": o["interview_id"],
-                        "session": o["session"], "at": r["at"], "day": r["day"], "chased": o.get("chased", True)}
+                        "session": o["session"], "at": o.get("at") or r["at"], "day": r["day"],
+                        "days_overdue": _days_overdue(o.get("at") or r["at"]), "chased": o.get("chased", True)}
                        for r in rows for o in r["owed"]])
 
 
@@ -730,7 +740,7 @@ def feedback_owed(store: Store, now: datetime | None = None, job_id: int | None 
                 subject, body = request_text(who, first["candidate_name"], session, day)
                 email = email_for(who, book)
                 owed.append({"name": display_name(who), "email": email, "session": session,
-                             "interview_id": t["id"], "subject": subject, "body": body,
+                             "interview_id": t["id"], "at": t["at"], "subject": subject, "body": body,
                              "mailto": mailto(f"{display_name(who)} <{email}>" if email else who, subject, body),
                              "chased": t["at"] <= due})
         if owed:

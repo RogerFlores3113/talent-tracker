@@ -87,6 +87,10 @@ All notable changes to Talent Search. Newest first.
 - "Load next 50" pages through long searches, and "Open in Talent Search" carries the search and filters. The Candidates page also opens a list of exact people with `?ids=1,2,3`, ticked.
 - Clicking a person in the pipeline, finalists and saved views opens their card in place. If your chat app won't open a link, the address is shown with a Copy button.
 - Better keyboard and screen reader support, stronger contrast in dark mode, and a Refresh button on read-only views.
+- Interviews in chat: a week agenda by day (Today, Tomorrow, then each weekday) with times in your time zone (and the candidate's when it differs), interviewers, a status for each session, clash warnings and each interviewer's load. Record feedback with a verdict, reschedule or cancel from the view: it sends your request to the chat, so the usual review rules apply.
+- Feedback owed in chat: who owes feedback, grouped by interviewer, with days overdue, a Copy nudge button that copies a short reminder in your voice, and Log feedback or Mark chased requests.
+- Duplicates in chat: each possible pair as two side-by-side cards with the matching email, LinkedIn, name or company marked. Merging and "not the same person" still happen in Talent Search, never from the view.
+- add_interview_feedback with a wrong interview id now says to use list_interviews to find the right one, and takes lean yes and lean no (also written lean_yes, lean_no).
 ### Other links
 - Other links on a person: a list of GitHub, portfolio, Scholar, X and other web links you can add on the candidate form, see on their page, import and export in CSV (Other links column), and that your AI app can add (never remove) with save_candidate, update_candidate, save_candidates and propose_candidates. Merging two people combines their links.
 
