@@ -107,13 +107,20 @@ page, then quit and reopen that app.
 
 Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline
 reviews, feedback and decisions) that teach your AI app how to use it well. On the
-Connect AI page, press **Add Talent Search skills** for Claude Code or Codex. You see the
-exact files first, and only folders named `talent-search-*` that the app made are ever
-updated or removed. Claude Desktop takes skills as an upload: download the zip from the
-same page and add it under Customize > Skills.
+Connect AI page, press **Install skills**. It adds them to Claude Code and Codex, whichever
+it finds on your computer, and shows you the exact files first. Only folders named
+`talent-search-*` that the app made are ever updated or removed.
 
-From a terminal: `talent install-skills [--claude-code] [--codex] [--zip PATH]` and
-`talent remove-skills [--claude-code] [--codex] [--yes]` (it lists what goes and asks first). A skill file you edit yourself is never overwritten or deleted.
+For the Claude app (desktop or claude.ai), press **Get the Claude plugin**. It saves
+`talent-search.plugin` in your Downloads folder and shows it to you. In Claude, open
+Customize > Plugins > Add > Upload plugin and pick that file. Plugins added in the Claude
+app also show up in Claude Code. Want updates? Add the marketplace
+`RogerFlores3113/talent-tracker` (in Claude Code:
+`claude plugin marketplace add RogerFlores3113/talent-tracker`, then
+`claude plugin install talent-search@talent-tracker`).
+
+From a terminal: `talent install-skills [--claude-code] [--codex] [--plugin [PATH]]` and
+`talent remove-skills [--claude-code] [--codex] [--yes]` (they list what changes and ask first). A skill file you edit yourself is never overwritten or deleted.
 
 Ask Claude Code or Codex: "install the skills in skills/ by following
 skills/INSTALL-SKILLS.md".

@@ -67,6 +67,13 @@ All notable changes to Talent Search. Newest first.
 - The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
 - A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
 
+### Skills
+- One **Install skills** button on the Connect AI page adds the skills to every AI app found on your computer, after one preview of the files. Apps not found say so and offer "Install anyway".
+- **Get the Claude plugin** saves one `talent-search.plugin` file in your Downloads folder and shows it to you; in the Claude app it is one upload under Customize > Plugins > Add > Upload plugin. No more six zips. An Open Claude button starts the app.
+- The repository is also a plugin marketplace: add `RogerFlores3113/talent-tracker` in the Claude app, or run `claude plugin marketplace add RogerFlores3113/talent-tracker` in Claude Code, to get updates.
+- `talent install-skills` with no options installs into every app it finds (after listing the files); `--plugin [PATH]` writes the plugin file, and replaces `--zip`.
+- Connect page: long commands wrap and the three app cards stack on mid-size screens, the first-run tour no longer opens over the install buttons, and each app card lists connect and skills as steps 1 and 2.
+
 ## [0.1.1] - 2026-11-09
 
 ### Search and candidates

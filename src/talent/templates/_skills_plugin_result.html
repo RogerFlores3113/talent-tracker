@@ -1,0 +1,9 @@
+{% if error %}
+<p class="error" role="alert" tabindex="-1" autofocus>That didn't work: {{ error }}</p>
+<p class="fine">Use the download link instead.</p>
+{% else %}
+<p class="ok" role="status" tabindex="-1" autofocus>Saved <code>{{ plugin_file }}</code> in <code>{{ path }}</code>.{% if shown %} It is shown in your file manager.{% endif %}</p>
+<ol>{% for st in steps %}<li>{{ st }}</li>{% endfor %}</ol>
+{% if can_open_claude %}<p><button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result">Open Claude</button> <span id="claude-open-result" aria-live="polite"></span></p>{% endif %}
+<p class="fine">Then start a new chat so Claude picks up the skills.</p>
+{% endif %}
