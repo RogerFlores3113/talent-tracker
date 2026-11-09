@@ -60,7 +60,7 @@
 </form>
 {% include "_search_tips.html" %}
 {% if from_chat %}<p class="panel ids-banner" role="status"><strong>{{ from_chat }} {{ 'person' if from_chat == 1 else 'people' }} from your chat.</strong> <a href="/candidates">Show everyone</a></p>{% endif %}
-{% if q or keep %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
+{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}

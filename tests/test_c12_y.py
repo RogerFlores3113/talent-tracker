@@ -136,3 +136,12 @@ def test_saved_search_keeps_highlight(store):
     c = local_client(store)
     html = c.get("/candidates?hl=python,go").text
     assert 'name="hl" value="python,go"' in html
+
+
+def test_highlight_alone_is_not_called_a_match(store, client):
+    from talent.sample_data import load_sample_data
+    load_sample_data(store)
+    page = client.get("/candidates", params={"hl": "python"}).text
+    assert 'class="match-count"' not in page
+    page = client.get("/candidates", params={"hl": "python", "location": "boston"}).text
+    assert 'class="match-count"' in page
