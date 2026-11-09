@@ -101,8 +101,8 @@
   --lit: color-mix(in oklab, var(--accent) 9%, var(--surface));
   --lit-line: color-mix(in oklab, var(--accent) 60%, var(--line));
   --ease: 140ms ease;
-  --head-grad: linear-gradient(100deg in oklab, var(--head-from) 0%, var(--head-mid) 30%, var(--head-to) 72%, var(--head-end) 100%);
-  --btn-grad: linear-gradient(100deg in oklab, var(--btn-from), var(--btn-to));
+  --head-grad: linear-gradient(100deg, var(--head-from) 0%, var(--head-mid) 30%, var(--head-to) 72%, var(--head-end) 100%);
+  --btn-grad: linear-gradient(100deg, var(--btn-from), var(--btn-to));
 }
 
 /* ==== Base ==== */
@@ -129,7 +129,7 @@ body.wide main { max-width: 1280px; }
        padding: var(--space-3) var(--space-5); background: var(--head-grad); color: var(--header-text);
        border-bottom: 1px solid color-mix(in oklab, var(--header-text) 14%, transparent);
        box-shadow: 0 2px 14px rgba(var(--shadow-rgb), .18); }
-.brand { font-weight: 700; font-size: var(--fs-lg); color: var(--header-text); text-decoration: none; letter-spacing: -.01em;
+.brand { white-space: nowrap; font-weight: 700; font-size: var(--fs-lg); color: var(--header-text); text-decoration: none; letter-spacing: -.01em;
          padding: var(--space-1) var(--space-3); margin-left: calc(var(--space-3) * -1); border-radius: var(--radius-pill); transition: background var(--ease), box-shadow var(--ease); }
 .brand:hover { color: var(--header-text); background: var(--nav-hover); box-shadow: 0 0 0 3px color-mix(in oklab, var(--header-text) 18%, transparent); }
 .top nav { display: flex; gap: var(--space-1); flex-wrap: wrap; }
@@ -432,7 +432,7 @@ section.welcome.panel { margin-bottom: 20px; }
 .theme-card:hover .sw { background: var(--lit); border-color: var(--lit-line); box-shadow: var(--ring); transform: translateY(-1px); }
 .theme-card input:checked + .sw { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .theme-card input:focus-visible + .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
-.theme-card .chip-bar { height: 36px; border-radius: var(--radius-sm); border: 1px solid var(--line); margin-bottom: var(--space-1); background: linear-gradient(100deg in oklab, var(--f), var(--t)); position: relative; }
+.theme-card .chip-bar { height: 36px; border-radius: var(--radius-sm); border: 1px solid var(--line); margin-bottom: var(--space-1); background: linear-gradient(100deg, var(--f), var(--t)); position: relative; }
 .theme-card .chip-bar::after { content: ""; position: absolute; right: 8px; bottom: 6px; width: 28px; height: 10px; border-radius: 6px; background: var(--b); }
 .theme-card .sw strong { font-size: 14px; }
 .theme-card .sw .fine { line-height: 1.35; }
