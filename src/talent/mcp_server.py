@@ -721,6 +721,17 @@ def _timeline_line(t: dict[str, Any]) -> str:
     return f"{_local(t['at'])} {line}"
 
 
+def _save_search_blocker(store: Store, name: Any) -> str | None:
+    """Why save_search would be refused for this name (the name is taken, or your AI app has saved the most it may),
+    worded for the AI, which can't rename or delete a saved search. None when it would go through."""
+    mine = [r for r in store.list_saved_searches() if r["created_by"] == "ai"]
+    if len(mine) >= AI_SAVED_SEARCH_CAP:
+        return (f"No search saved. Your AI app has already saved {AI_SAVED_SEARCH_CAP} searches, which is the most, "
+                "and you can't delete them. Tell the recruiter they can delete ones they no longer use in the app, "
+                "then try again.")
+    return store.save_search_problem(name, by="ai")
+
+
 def _search_filters(*, company: Any, skills: Any, skill_mode: Any, remote: Any, min_years: Any, max_years: Any,
                     contacted: Any, contacted_days: Any, added_days: Any, has_email: Any,
                     has_linkedin: Any) -> dict[str, Any]:
@@ -751,6 +762,8 @@ def _search_filters(*, company: Any, skills: Any, skill_mode: Any, remote: Any, 
                              "contacted_days).")
         if c != "never" and not contacted_days:
             raise ValueError(f"Say how many days with contacted_days (contacted is {c}).")
+        if c != "never" and int(contacted_days) < 0:
+            raise ValueError("Years and days can't be negative.")
         out["contacted"] = c
         if c != "never":
             out["contacted_days"] = int(contacted_days)
@@ -790,9 +803,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         Matches whole words and their forms ("engineers" finds "engineer"), with the last word as a prefix
         ("pyth" finds "Python"). Filler words like "who" or "people" are ignored. Shorthand like sf, nyc, la,
         bay area, ml, js, k8s, golang, postgres or frontend also matches the other spelling.
-        Query syntax: words all have to match; "machine learning" in quotes is a phrase; python OR go (OR in
-        capitals) is either; -recruiter or NOT manager leaves people out; title:, company:, location:, skill: (or
-        tag:) and source: narrow to one field, like title:engineer. A phrase or OR searches profile text only.
+        Query syntax: words all have to match; "machine learning" in quotes is a phrase; python OR go (or a
+        lowercase "or" between two words) is either; -recruiter or NOT manager leaves out people who have that
+        exact word; title:, company:, location:, skill: (or tag:) and source: narrow to one field, like
+        title:engineer (punctuation stays: skill:c++, skill:node.js); skill:python OR go means either skill;
+        -title:manager or NOT source:referral leaves out people whose own field has it. source: also matches a
+        word of the Found via label (source:sample finds "Sample data"). A phrase or OR searches profile text only.
         Fewer than 3 people with every word: the closest matches (some of the words) follow, marked as such.
         A word nobody has is checked for a typo: you get "Showing results for ..." or "Did you mean ...?".
         Leave query empty to list the most recently updated candidates.
@@ -927,7 +943,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches) and show the
         people who match now, like search_candidates. Running it does not mark it as looked at in the app."""
         limit = max(1, min(limit, 50))
-        row = store.get_saved_search(int(name_or_id) if str(name_or_id).strip().isdigit() else str(name_or_id))
+        # text is looked up as a name first (even a number like "2"), then as an id; a JSON number is an id
+        row = store.get_saved_search(name_or_id if isinstance(name_or_id, int) else str(name_or_id))
         q, kw = store._saved_kwargs(row)
         return _search_reply(q, kw, limit, heading=f"Saved search {quoted(row['name'])} "
                              f"({searchquery.describe(row['params'])}):", app_path=f"/saved-searches/{row['id']}")
@@ -955,16 +972,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   "contacted_days": more.get("contacted_days"), "added_days": more.get("added_days"),
                   "has_email": "1" if more.get("has_email") else None,
                   "has_linkedin": "1" if more.get("has_linkedin") else None}
-        mine = [r for r in store.list_saved_searches() if r["created_by"] == "ai"]
-        if len(mine) >= AI_SAVED_SEARCH_CAP:
-            raise ValueError(f"No search saved. Your AI app has already saved {AI_SAVED_SEARCH_CAP} searches. Ask "
-                             "the recruiter which ones to keep, or to delete some in the app.")
+        blocked = _save_search_blocker(store, name)
+        if blocked:
+            raise ValueError(blocked)
         row = store.save_search(name, params, by="ai")
         what = searchquery.describe(row["params"])
+        # A filter that was out of range is not kept: say which, so the AI doesn't report a search it didn't save.
+        labels = {"exp_min": "min_years", "exp_max": "max_years", "contacted_days": "contacted_days",
+                  "added_days": "added_days", "color": "color", "contacted": "contacted"}
+        left_out = [labels.get(k, k) for k, v in params.items()
+                    if v not in (None, "") and k not in row["params"] and not (k == "skill_mode" and v == "any")]
         data = {"id": row["id"], "name": row["name"], "search": what, "note": "Saved by your AI app",
                 "app_url": app_url("/candidates")}
+        extra = ""
+        if left_out:
+            data["left_out"] = left_out
+            extra = (f" Not saved, because the value was out of range or empty: {', '.join(left_out)}. "
+                     "Check the search above before you tell the recruiter what it does.")
         return _said(f"Saved the search {quoted(row['name'])} ({what}) on the recruiter's Candidates page. "
-                     "Saved by your AI app.", data)
+                     f"Saved by your AI app.{extra}", data)
 
     def candidate_view(candidate_id: int) -> dict[str, Any]:
         """One candidate as get_candidate and save_candidate show it (and the in-chat candidate view reads)."""
@@ -3626,6 +3652,10 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
             store.get_job(args["job_id"])
         if isinstance(args.get("candidate_id"), int):
             store.get_candidate(args["candidate_id"])
+        if name == "save_search":
+            bad = _save_search_blocker(store, args.get("name"))  # a taken name or a full list would be refused anyway
+            if bad:
+                return f"No change made: {bad}"
         if name == "set_candidate_color":
             clean_color(args.get("color"))  # a color that isn't one of the six is refused now, not held
         if name == "set_followup_sequence":

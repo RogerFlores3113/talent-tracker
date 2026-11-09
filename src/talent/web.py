@@ -588,6 +588,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        pq = searchquery.parse_query(q) if q.strip() and not store.lookup_exact(q)[0] else None
+        how_read = ""
+        if pq and (pq.structured or pq.operator_mode):  # "How we read your search", built from the parser
+            how_read = " ".join([pq.explain(), *pq.notes]).strip()
+        range_note = ""
+        if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
+            range_note = (f"Years of experience at least {more_params['exp_min']} and at most {more_params['exp_max']} "
+                          "can't both be true, so nobody matches. Swap the two numbers.")
         keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
@@ -598,7 +606,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
                    saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
-                   min_years_note="exp_min" in more_params,
+                   min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
                    colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())

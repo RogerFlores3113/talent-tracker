@@ -1409,6 +1409,9 @@ class _Term:
 def _query_terms(text: str) -> list[_Term]:
     words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
     kept = [w for w in words if w not in STOPWORDS] or words
+    tail = (text or "").split()
+    # Only a plain last word of 3+ letters is a prefix: "c++", "c#" or "go" must not spread to every word that starts so.
+    plain_end = bool(tail) and re.fullmatch(r"\w+", tail[-1], flags=re.UNICODE) is not None
     terms: list[_Term] = []
     i = 0
     while i < len(kept):
@@ -1418,7 +1421,7 @@ def _query_terms(text: str) -> list[_Term]:
         else:
             form, step = kept[i], 1
         last = i + step >= len(kept)
-        terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
+        terms.append(_Term(form, last and step == 1 and plain_end and len(form) >= 3, ALIASES.get(form, ())))
         i += step
     # A nickname as the first of several words is that first name too ("mike okonkwo" finds Michael
     # Okonkwo), but only in the name, and only with the rest of the query matching as well.
@@ -1437,6 +1440,16 @@ def _item_fts(text: str, phrase: bool) -> str:
     if phrase or " " in text:
         return f'"{text}"'
     return _Term(text, False, ALIASES.get(text, ())).fts()
+
+
+def _exact_fts(text: str, phrase: bool) -> str:
+    """One word or phrase to leave out, as FTS5 text for the unstemmed word index: the exact word (and its plain
+    plural and shorthand), so -recruiter does not drop a Recruiting Coordinator."""
+    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    if phrase or " " in text:
+        return f'"{text}"'
+    forms = [text, text + "s", *ALIASES.get(text, ())]
+    return "(" + " OR ".join(f'"{f}"' for f in dict.fromkeys(forms)) + ")"
 
 
 def _query_groups(text: str) -> list[str]:
@@ -3519,7 +3532,9 @@ class Store:
                           contacted: str | None = None, contacted_days: int | None = None,
                           added_days: int | None = None, added_since: str | None = None,
                           has_email: bool = False, has_linkedin: bool = False,
-                          exclude: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[Any], dict]:
+                          exclude: list[tuple[str, bool]] | None = None,
+                          field_any: dict[str, list[str]] | None = None,
+                          field_not: dict[str, list[str]] | None = None) -> tuple[list[str], list[Any], dict]:
         """SQL conditions on `c` for the search filters. Location, title and company take shorthand (sf, nyc,
         la, bay area, swe) and ignore case and accents; tag and source ignore case.
 
@@ -3527,7 +3542,8 @@ class Store:
         remote, or a tag does. exp_min / exp_max: years of work from the work history (people with no dated
         history are left out when exp_min is set). contacted: "never", "older" (last contact more than
         contacted_days ago) or "within". added_days / added_since: when they were saved. exclude: (words, is a
-        phrase) that must not appear anywhere in the profile."""
+        phrase) that must not appear anywhere in the profile, as whole words. field_any / field_not: values typed
+        after a prefix in the search box (title:, company:, location:, source:, skill:), any of them or none of them."""
         where: list[str] = []
         params: list[Any] = []
         filters: dict[str, str] = {}
@@ -3547,6 +3563,7 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        self._prefix_filters(where, params, filters, field_any or {}, field_not or {})
         if color and color.strip():  # one of the six colours, or "none" for people with no colour
             want = clean_color(color)
             where.append("c.color = ?" if want else "c.color IS NULL")
@@ -3588,6 +3605,41 @@ class Store:
                          + " AND ".join(sub) + ")")
             params += sp
         return where, params, filters
+
+    def _prefix_filters(self, where: list[str], params: list[Any], filters: dict[str, str],
+                        any_of: dict[str, list[str]], none_of: dict[str, list[str]]) -> None:
+        """title:, company:, location:, source: and skill: typed in the search box. Several values of one prefix
+        are alternatives; a negated prefix (-title:manager) leaves out people whose own field has the value."""
+        cols = {"title": ("current_title", True), "company": ("current_company", False), "location": ("location", False)}
+        for negate, groups in ((False, any_of), (True, none_of)):
+            for fld, vals in groups.items():
+                vals = [v for v in vals if v and v.strip()]
+                if not vals:
+                    continue
+                if fld == "skill":
+                    if not negate:
+                        continue  # skills that must be there go through the `skills` filter
+                    marks = ", ".join("?" for _ in vals)
+                    where.append(f"c.id NOT IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
+                    params += vals
+                    filters["without_skill"] = ", ".join(vals)
+                    continue
+                conds: list[str] = []
+                for v in vals:
+                    if fld == "source":  # the exact Found via label, or one whole word of it (source:sample finds Sample data)
+                        conds.append("(lower(trim(coalesce(c.source, ''))) = lower(?) OR tt_has(c.source, ?, 1))")
+                        params += [v.strip(), v.strip()]
+                    elif fld in cols:
+                        col, singular = cols[fld]
+                        forms = _filter_forms(v, singular=singular)
+                        conds.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
+                        for f in forms:
+                            params += [f, int(len(f) <= 3)]
+                if not conds:
+                    continue
+                where.append(("NOT " if negate else "") + "(" + " OR ".join(conds) + ")")
+                key = ("without_" if negate else "") + fld
+                filters.setdefault(key, " or ".join(vals))
 
     def _more_filters(self, where: list[str], params: list[Any], filters: dict[str, str], *, skills, skill_mode,
                       remote, exp_min, exp_max, contacted, contacted_days, added_days, added_since, has_email,
@@ -3649,8 +3701,8 @@ class Store:
             where.append("(c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) <> '')")
             filters["has_linkedin"] = "yes"
         if exclude:
-            expr = " OR ".join(_item_fts(text, phrase) for text, phrase in exclude)
-            where.append("c.id NOT IN (SELECT rowid FROM candidates_fts WHERE candidates_fts MATCH ?)")
+            expr = " OR ".join(_exact_fts(text, phrase) for text, phrase in exclude)
+            where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
             params.append(expr)
             filters["without"] = ", ".join(t for t, _ in exclude)
 
@@ -3683,6 +3735,20 @@ class Store:
         from .searchquery import clean_params
         return {**r, "params": clean_params(params if isinstance(params, dict) else {})}
 
+    def save_search_problem(self, name: str, *, by: str = "app") -> str | None:
+        """Why a saved search under this name would be refused (name already used, too many), or None. The words
+        for the AI say what it can do: it can't rename or delete."""
+        n = self._search_name(name)
+        if self._row("SELECT 1 AS x FROM saved_searches WHERE name = ? COLLATE NOCASE", (n,)):
+            return (f"You already have a saved search called {n}. Pick another name." if by == "ai" else
+                    f"You already have a saved search called {n}. Pick another name, or rename that one.")
+        if self._row("SELECT count(*) AS n FROM saved_searches")["n"] >= self.SAVED_SEARCH_LIMIT:
+            return (f"The recruiter already has {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
+                    "Tell them they can delete ones they no longer use in the app." if by == "ai" else
+                    f"You have {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
+                    "Delete one you don't use first.")
+        return None
+
     def save_search(self, name: str, params: dict[str, Any], *, by: str = "app") -> dict[str, Any]:
         """Keep a search (its words and filters) under a name. A name already in use is refused, never replaced."""
         from .searchquery import clean_params
@@ -3691,11 +3757,9 @@ class Store:
         if not p:
             raise ValueError("There is nothing to save yet: type a search or pick a filter first.")
         with self._write():
-            if self._row("SELECT 1 AS x FROM saved_searches WHERE name = ? COLLATE NOCASE", (n,)):
-                raise ValueError(f"You already have a saved search called {n}. Pick another name, or rename that one.")
-            if self._row("SELECT count(*) AS n FROM saved_searches")["n"] >= self.SAVED_SEARCH_LIMIT:
-                raise ValueError(f"You have {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
-                                 "Delete one you don't use first.")
+            problem = self.save_search_problem(n, by=by)
+            if problem:
+                raise ValueError(problem)
             now = now_iso()
             cur = self._conn.execute(
                 "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
@@ -3705,10 +3769,10 @@ class Store:
     def get_saved_search(self, ref: int | str) -> dict[str, Any]:
         """By id, or by name (ignoring case). NotFound when there is none."""
         r = None
-        if isinstance(ref, int) or str(ref).strip().isdigit():
-            r = self._row("SELECT * FROM saved_searches WHERE id = ?", (int(str(ref).strip()),))
-        if r is None and not isinstance(ref, int):
+        if not isinstance(ref, int):  # text: a saved search's name wins, even a number like "2", then its id
             r = self._row("SELECT * FROM saved_searches WHERE name = ? COLLATE NOCASE", (" ".join(str(ref).split()),))
+        if r is None and (isinstance(ref, int) or str(ref).strip().isdigit()):
+            r = self._row("SELECT * FROM saved_searches WHERE id = ?", (int(str(ref).strip()),))
         if r is None:
             raise NotFound("That saved search isn't there any more.")
         return self._saved_row(r)
@@ -3735,10 +3799,15 @@ class Store:
     def saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
         """(people who match now, how many of them were saved after the search was last opened)."""
         q, kw = self._saved_kwargs(row)
-        total = self.search_candidates(q, limit=1, fix_typos=False, **kw).exact_total or 0
+        # the same search as opening it (typo help included), so the count matches what the page then shows
+        res = self.search_candidates(q, limit=1, **kw)
+        total = res.exact_total if res.exact_total is not None else res.total
         since = row.get("last_viewed_at") or row["created_at"]
-        new = self.search_candidates(q, limit=1, fix_typos=False, added_since=since, **kw).exact_total or 0 if total else 0
-        return total, new
+        new = 0
+        if total:
+            res = self.search_candidates(q, limit=1, added_since=since, **kw)
+            new = res.exact_total if res.exact_total is not None else res.total
+        return total or 0, new or 0
 
     def rename_saved_search(self, search_id: int, name: str) -> dict[str, Any]:
         n = self._search_name(name)
@@ -3824,9 +3893,13 @@ class Store:
         if not pq.structured and not pq.operator_mode:
             return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
         # Field prefixes fill the matching filter when the form did not set it; skills add to the skill list.
-        for fld, key in (("title", "title"), ("company", "company"), ("location", "location"), ("source", "source")):
-            if pq.fields.get(fld) and not kw.get(key):
-                kw[key] = pq.fields[fld][-1]
+        # the form's own Title, Company, Location or Found via filter stays; the prefix does not override it
+        field_any = {f: v for f, v in pq.fields.items()
+                     if f in ("title", "company", "location", "source") and v and not kw.get(f)}
+        if field_any:
+            kw["field_any"] = field_any
+        if pq.not_fields:
+            kw["field_not"] = pq.not_fields
         if pq.fields.get("skill"):
             have = list(kw.get("skills") or [])
             kw["skills"] = [*have, *(x for x in pq.fields["skill"] if x.lower() not in {h.lower() for h in have})]
@@ -3853,8 +3926,8 @@ class Store:
         for gi, g in enumerate(pq.groups):
             parts = []
             for ii, item in enumerate(g):
-                last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and not item.phrase
-                if last and " " not in item.text:
+                last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok
+                if last:
                     parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
                 else:
                     parts.append(_item_fts(item.text, item.phrase))
