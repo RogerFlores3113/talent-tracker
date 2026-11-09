@@ -1115,13 +1115,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
         found, missing = duplicates.found_fields(guess)
+        hints = importers.paste_hints(text, guess)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
         dupe = duplicates.already_here(store, guess)
         if dupe and len(text.split()) == 1 and guess.get("linkedin_url"):  # just their link: open who has it
             return RedirectResponse(f"/candidates/{dupe['id']}?{urlencode({'notice': f'Already saved: {dupe['name']}.'})}",
                                     status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
-                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing,
+                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing, hints=hints,
                     dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None,
                     dupe_name_differs=bool(dupe and guess.get("name") and store.find_duplicate(
                         guess.get("email"), guess.get("linkedin_url")) is not None
@@ -3167,6 +3168,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             claude_quit=integrations.quit_instruction(),
             codex_on=integrations.codex_connected(),
             lmstudio_on=integrations.lmstudio_connected(),
+            codex_installed=integrations.codex_config_path().parent.is_dir(),
+            lmstudio_installed=integrations.lmstudio_config_path().parent.is_dir(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
