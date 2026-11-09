@@ -74,7 +74,9 @@ cd "Talent Search"
 Talent Search opens in your web browser at http://127.0.0.1:8765. It only listens on
 your own computer. No candidates yet? Press **Try it with sample data**. Sample people
 and jobs are marked Sample, and **Remove sample data** (on Today and in Settings)
-deletes exactly those.
+deletes exactly those. A first-time tour walks you through connecting your AI app and
+the main pages, using demo people it clears at the end; skip it any time, and replay a
+shorter version from **Settings** (**Take the tour**).
 
 Your data is one file, `talent.db`, in `~/Library/Application Support/Talent Search`
 (Mac), `%LOCALAPPDATA%\Talent Search` (Windows) or `~/.local/share/Talent Search`

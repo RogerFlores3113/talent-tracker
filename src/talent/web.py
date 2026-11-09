@@ -32,7 +32,7 @@ from . import ai_caps, trust
 from . import outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, desk, duplicates, opsreview
+from . import chase, desk, duplicates, opsreview, tour
 from . import searchquery
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -352,6 +352,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
     env.globals["themes"] = THEMES
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["tour_payload"] = lambda request: tour_for_page(request)  # base.html draws the tour from this
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["ai_email_changes"] = lambda job_ids=None: review.email_changes(store, job_ids)  # job emails it set
@@ -1265,22 +1266,96 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         load_sample_data(store)
         return RedirectResponse("/?sample=1", status_code=303)
 
+    def removal_notice(r: dict[str, Any], what: str = "the sample data") -> str:
+        """One line on what removing the sample data did, and what it kept because the recruiter worked with it."""
+        people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
+        msg = (f"Removed {what}: {people} candidate{'' if people == 1 else 's'} and "
+               f"{jobs} job{'' if jobs == 1 else 's'}.")
+        kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
+                if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
+        if kept:
+            msg += " Kept " + " and ".join(kept) + ". They are your own data now."
+        return msg + " A backup was saved first."
+
     @app.post("/sample-data/remove")
     def sample_data_remove(request: Request):
         try:
             r = remove_sample_data(store)
         except ValueError as exc:  # the backup failed, so nothing was removed
             return back(request, error=str(exc))
-        people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
-        if not (people or jobs or kp or kj):
+        if not (r["people"] or r["jobs"] or r["kept_people"] or r["kept_jobs"]):
             return back(request, notice="There was no sample data to remove.")
-        msg = (f"Removed the sample data: {people} candidate{'' if people == 1 else 's'} and "
-               f"{jobs} job{'' if jobs == 1 else 's'}.")
-        kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
-                if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
-        if kept:
-            msg += " Kept " + " and ".join(kept) + ". They are your own data now."
-        return back(request, notice=msg + " A backup was saved first.")
+        return back(request, notice=removal_notice(r))
+
+    # ------------------------------------------------------------ first-run tour
+    def tour_for_page(request: Request) -> dict[str, Any] | None:
+        """The tour to draw on this page, or None. A first run starts it; ?tour=short starts the replay."""
+        if request.method != "GET" or request.url.path.startswith(("/static/", "/api/")):
+            return None
+        try:
+            if not tour.state(store)["active"]:
+                if request.query_params.get("tour") == tour.SHORT:
+                    tour.start(store, tour.SHORT)
+                elif tour.should_autostart(store):
+                    tour.start(store, tour.FULL)
+            return tour.payload(store)
+        except Exception:  # the tour must never break a page
+            log.exception("tour state could not be read")
+            return None
+
+    def tour_start_path() -> str:
+        p = tour.payload(store)
+        return (p["steps"][p["step"]]["path"] if p else None) or "/"
+
+    @app.post("/tour/start")
+    async def tour_start(request: Request):
+        """Start the tour (mode full or short) and go to its first page."""
+        mode = str((await request.form()).get("mode") or tour.SHORT)
+        if mode not in tour.MODES:
+            raise HTTPException(422, "mode must be full or short")
+        tour.start(store, mode)
+        return RedirectResponse(tour_start_path(), status_code=303)
+
+    @app.post("/tour/step")
+    async def tour_step(request: Request):
+        """Remember which step the user is on, so the tour carries across pages."""
+        raw = str((await request.form()).get("step") or "")
+        if not raw.lstrip("-").isdigit():
+            raise HTTPException(422, "step must be a number")
+        n = tour.set_step(store, int(raw))
+        if n is None:
+            return JSONResponse({"ok": False, "detail": "No tour is running."}, status_code=409)
+        return {"ok": True, "step": n}
+
+    @app.post("/tour/load")
+    def tour_load(request: Request):
+        """The tour's own button: add the demo people (full tour only), then show the next step."""
+        added = tour.load_demo(store)
+        if added is None:
+            return back(request, error="The demo people are only added by the full tour.")
+        return RedirectResponse(tour_start_path(), status_code=303)
+
+    def tour_end(request: Request):
+        mode = tour.state(store)["mode"]
+        try:
+            removed = tour.end(store)
+        except ValueError as exc:  # the backup failed, so nothing was removed and the tour stays open
+            return back(request, error=str(exc))
+        if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
+            return RedirectResponse("/?" + urlencode({"notice": removal_notice(removed, "the demo data")}), status_code=303)
+        if mode == tour.SHORT:
+            return back(request)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/tour/skip")
+    def tour_skip(request: Request):
+        """End the tour now. Demo people the tour added are cleared; nothing else is touched."""
+        return tour_end(request)
+
+    @app.post("/tour/finish")
+    def tour_finish(request: Request):
+        """The last step: clear the demo people the tour added and close the tour for good."""
+        return tour_end(request)
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)

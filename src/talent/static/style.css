@@ -574,3 +574,25 @@ td.colorcell, th.colorcell { width: 1%; white-space: nowrap; text-align: center;
 /* Possible duplicates page */
 .dup-person { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; overflow-wrap: anywhere; }
 .dup-pair .actions-inline { margin-top: 0.6rem; }
+/* First-run tour: a dimmed page with the target cut out (four panels around it), and a popover next to it. */
+.tour-dim { position: fixed; z-index: 900; background: rgba(var(--shadow-rgb), .62); }
+.tour-ring { position: fixed; z-index: 901; pointer-events: none; border-radius: var(--radius-sm); outline: 3px solid var(--accent);
+             box-shadow: 0 0 0 6px color-mix(in oklab, var(--accent) 30%, transparent); transition: all var(--ease); }
+.tour-ring[hidden] { display: none; }
+.tour-pop { position: fixed; z-index: 902; background: var(--surface); color: var(--text); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow-up); padding: var(--space-4) var(--space-4) var(--space-3);
+            max-height: calc(100vh - 24px); overflow: auto; }
+.tour-pop:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tour-count { margin: 0 0 var(--space-1); font-size: var(--fs-xs); color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.tour-title { font-size: var(--fs-lg); margin: 0 0 var(--space-2); }
+.tour-body { margin: 0 0 var(--space-3); }
+.tour-note { margin: 0 0 var(--space-2); color: var(--warn); font-size: var(--fs-sm); }
+.tour-note:empty { display: none; }
+.tour-acts { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; justify-content: space-between; }
+.tour-nav { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.tour-pulse { animation: tour-pulse 1.4s ease-in-out infinite; }
+@keyframes tour-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in oklab, var(--accent) 40%, transparent); } }
+@media (prefers-reduced-motion: reduce) {
+  .tour-pulse { outline: 3px solid var(--accent); outline-offset: 2px; }
+}
+@media print { .tour { display: none !important; } }

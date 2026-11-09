@@ -49,7 +49,7 @@
   {% for key, name, on, blurb in [
       ('codex', 'Codex', codex_on, 'Works for the Codex app and the codex command.'),
       ('lmstudio', 'LM Studio', lmstudio_on, 'For local models. Pick one that supports tool use, like Qwen 3 or Llama 3.1.')] %}
-  <section class="panel">
+  <section class="panel" id="{{ key }}-panel">
     <h2>{{ name }}</h2>
     <p>{% if on %}<span class="ok">Added to its settings.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
     <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result" hx-indicator="#{{ key }}-busy">{{ 'Reconnect' if on else 'Connect' }} {{ name }}</button>
@@ -78,7 +78,7 @@
   <p><a href="/recipes">More ready-made requests</a></p>
 </section>
 
-<details class="panel">
+<details class="panel" id="by-hand">
   <summary>By hand</summary>
   <p>Paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
   <pre class="code" id="json-snip">{{ json_snippet }}</pre>

@@ -256,6 +256,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("open", help="open the window of the running app (unlocks it in this browser)")
     sub.add_parser("mcp", help="run the MCP server over stdio (AI apps start this)")
     sub.add_parser("sample-data", help="load made-up candidates to try the app")
+    sub.add_parser("tour-reset", help="forget that the first-run tour ran, so it starts again on an empty database")
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
     sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
@@ -310,6 +311,12 @@ def main(argv: list[str] | None = None) -> None:
         from .store import Store
 
         print(f"Added {load_sample_data(Store(db_path()))} sample candidates.")
+    elif cmd == "tour-reset":
+        from . import tour
+        from .store import Store
+
+        tour.reset(Store(db_path()))
+        print("The first-run tour will start again the next time the app opens with no candidates or jobs.")
     elif cmd == "reindex":
         from .store import Store
         from .typesense_index import TypesenseIndex

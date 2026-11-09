@@ -153,6 +153,12 @@
 </section>
 {% endif %}
 
+<section class="panel" id="tour">
+  <h2>Take the tour</h2>
+  <p>A short walk through the pages, with the buttons to connect your AI app. It only looks: it never adds or removes anything.</p>
+  <form method="post" action="/tour/start"><input type="hidden" name="mode" value="short"><button class="btn" type="submit">Take the tour</button></form>
+</section>
+
 {% if sample_people or sample_jobs %}
 <section class="panel">
   <h2>Sample data</h2>

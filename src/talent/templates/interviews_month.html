@@ -25,7 +25,7 @@
 </section>
 {% endif %}
 
-<section class="panel">
+<section class="panel" id="interviews-view">
   {% if not m.total %}<p class="none">Nothing booked in {{ m.label }}. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
   <div class="cal" role="grid" aria-label="Interviews in {{ m.label }}">
     <div class="cal-head" role="row">{% for n in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] %}<div role="columnheader" class="{{ 'weekend' if loop.index > 5 }}">{{ n }}</div>{% endfor %}</div>

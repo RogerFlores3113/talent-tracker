@@ -1597,6 +1597,12 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "stale_days": "180",
     "pipeline_view": "board",
     "theme": "sunset",
+    # First-run guided tour (see tour.py): where the user is in it, and whether it ever ran.
+    "tour_active": "0",
+    "tour_mode": "full",
+    "tour_step": "0",
+    "tour_loaded": "0",
+    "tour_seen": "0",
 }
 
 # The color themes on the Settings page: (value, name, one-line description). The first is the default.

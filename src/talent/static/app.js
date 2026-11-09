@@ -25,6 +25,7 @@
 //   data-color-count="red"    on a number in the colour chips: refreshed after a bubble changes
 //   data-table-stage          on a stage menu in the job table view: fills the one shared move form (#tbl-move)
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
+//   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover
 (function () {
   "use strict";
 
@@ -274,4 +275,168 @@
     if (!btn || !window.fetch) return;
     e.preventDefault(); pickColor(btn, true);
   });
+  // ---- Guided tour (see tour.py). The server renders the steps as escaped JSON into the data-tour attribute of
+  // <div id="tour-data"> (no inline script, so the CSP is fine) and keeps the step in settings, so a page load
+  // picks up where the last one left off. All text goes in with textContent, never as HTML.
+  function startTour() {
+    const dataEl = document.getElementById("tour-data");
+    if (!dataEl) return;
+    let data;
+    try { data = JSON.parse(dataEl.dataset.tour); } catch (e) { return; }
+    if (!data || !Array.isArray(data.steps) || !data.steps.length) return;
+    // ?tour=short only starts the replay; once it's running, take it off the address so a reload doesn't restart it.
+    try {
+      const u = new URL(window.location.href);
+      if (u.searchParams.has("tour")) { u.searchParams.delete("tour"); window.history.replaceState(null, "", u.pathname + u.search + u.hash); }
+    } catch (e) { /* leave the address alone */ }
+
+    const steps = data.steps;
+    let idx = Math.max(0, Math.min(data.step || 0, steps.length - 1));
+    let target = null, pulsed = null, confirming = false, shown = -1;
+    const calm = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+
+    const root = el("div", "tour");
+    const dims = [0, 1, 2, 3].map(() => el("div", "tour-dim"));
+    const ring = el("div", "tour-ring");
+    const pop = el("div", "tour-pop");
+    pop.setAttribute("role", "dialog"); pop.setAttribute("aria-modal", "true"); pop.tabIndex = -1;
+    const count = el("p", "tour-count"), title = el("h2", "tour-title"), body = el("p", "tour-body"), note = el("p", "tour-note");
+    title.id = "tour-title"; body.id = "tour-body";
+    pop.setAttribute("aria-labelledby", "tour-title"); pop.setAttribute("aria-describedby", "tour-body");
+    const acts = el("div", "tour-acts");
+    pop.append(count, title, body, note, acts);
+    root.append(...dims, ring, pop);
+    document.body.appendChild(root);
+
+    function postForm(action, fields) {  // a real form post: the server redirects to the page to show next
+      const f = el("form"); f.method = "post"; f.action = action; f.hidden = true;
+      Object.keys(fields || {}).forEach(k => { const i = el("input"); i.type = "hidden"; i.name = k; i.value = fields[k]; f.appendChild(i); });
+      document.body.appendChild(f); f.submit();
+    }
+    function btn(label, cls, fn) {
+      const b = el("button", "btn " + (cls || ""), label); b.type = "button"; b.addEventListener("click", fn); return b;
+    }
+    const here = s => !s.path || s.path === window.location.pathname;
+
+    function go(n) {
+      n = Math.max(0, Math.min(n, steps.length - 1));
+      const next = steps[n];
+      const save = window.fetch ? fetch("/tour/step", {method: "POST", credentials: "same-origin",
+        body: new URLSearchParams({step: String(n)})}).catch(() => {}) : Promise.resolve();
+      save.then(() => {
+        idx = n; confirming = false;
+        if (next.path && next.path !== window.location.pathname) window.location.assign(next.path);
+        else render();
+      });
+    }
+    function skip() {
+      if (data.demo) { confirming = true; render(); return; }  // skipping clears demo people the tour added: ask first
+      postForm("/tour/skip");
+    }
+
+    function findTarget(s) {
+      for (const sel of s.target || []) {
+        let n = null;
+        try { n = document.querySelector(sel); } catch (e) { /* a bad selector just misses */ }
+        if (n) { const r = n.getBoundingClientRect(); if (r.width || r.height) return n; }
+      }
+      return null;
+    }
+    function focusables(scope) {
+      return Array.from(scope.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, summary"))
+        .filter(n => n.offsetParent !== null || n === document.activeElement);
+    }
+
+    function place() {
+      const vw = document.documentElement.clientWidth, vh = window.innerHeight, pad = 6, gap = 12;
+      let r = null;
+      if (target) { const b = target.getBoundingClientRect(); r = {l: Math.max(0, b.left - pad), t: Math.max(0, b.top - pad), r: Math.min(vw, b.right + pad), b: Math.min(vh, b.bottom + pad)}; }
+      const box = (n, l, t, w, h) => { n.style.left = l + "px"; n.style.top = t + "px"; n.style.width = Math.max(0, w) + "px"; n.style.height = Math.max(0, h) + "px"; };
+      if (r) {
+        box(dims[0], 0, 0, vw, r.t); box(dims[1], 0, r.b, vw, vh - r.b);
+        box(dims[2], 0, r.t, r.l, r.b - r.t); box(dims[3], r.r, r.t, vw - r.r, r.b - r.t);
+        box(ring, r.l, r.t, r.r - r.l, r.b - r.t); ring.hidden = false;
+      } else {
+        box(dims[0], 0, 0, vw, vh); dims.slice(1).forEach(d => box(d, 0, 0, 0, 0)); ring.hidden = true;
+      }
+      const pw = Math.min(380, vw - 24);
+      pop.style.width = pw + "px";
+      const ph = pop.offsetHeight;
+      let left, top;
+      if (!r) { left = (vw - pw) / 2; top = Math.max(12, (vh - ph) / 2); }
+      else {
+        const cx = Math.min(Math.max(12, (r.l + r.r) / 2 - pw / 2), vw - pw - 12);
+        const tries = [
+          [cx, r.b + gap, r.b + gap + ph <= vh - 8],
+          [cx, r.t - gap - ph, r.t - gap - ph >= 8],
+          [r.r + gap, Math.min(Math.max(8, r.t), vh - ph - 8), r.r + gap + pw <= vw - 8],
+          [r.l - gap - pw, Math.min(Math.max(8, r.t), vh - ph - 8), r.l - gap - pw >= 8]];
+        const ok = tries.find(t => t[2]);
+        if (ok) { left = ok[0]; top = ok[1]; }
+        else { left = (vw - pw) / 2; top = Math.max(8, vh - ph - 16); }  // no room beside it: dock at the bottom
+      }
+      pop.style.left = Math.round(left) + "px"; pop.style.top = Math.round(top) + "px";
+    }
+    let queued = false;
+    function replace() {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(() => { queued = false; target = here(steps[idx]) ? findTarget(steps[idx]) : null; place(); });
+    }
+
+    function render() {
+      const s = steps[idx];
+      if (pulsed) { pulsed.classList.remove("tour-pulse"); pulsed = null; }
+      target = here(s) ? findTarget(s) : null;
+      if (target && target.tagName === "DETAILS") target.open = true;
+      if (target && shown !== idx) target.scrollIntoView({block: "center", behavior: calm() ? "auto" : "smooth"});
+      if (target && s.pulse) { try { pulsed = document.querySelector(s.pulse); } catch (e) { pulsed = null; } if (pulsed) pulsed.classList.add("tour-pulse"); }
+      acts.textContent = ""; note.textContent = "";
+      if (confirming) {
+        count.textContent = "Before you go"; title.textContent = "End the tour?";
+        body.textContent = "The demo people the tour added will be cleared. A backup is saved first, and anyone you worked with is kept as yours.";
+        acts.append(btn("Keep going", "primary", () => { confirming = false; render(); }),
+                    btn("End tour and clear demo data", "", () => postForm("/tour/skip")));
+      } else {
+        count.textContent = (idx + 1) + " of " + steps.length;
+        title.textContent = s.title; body.textContent = s.body;
+        if (!here(s)) {
+          note.textContent = "This step is on another page.";
+          acts.append(btn("Go to this page", "small", () => window.location.assign(s.path)));
+        }
+        const nav = el("div", "tour-nav");
+        if (idx > 0) nav.append(btn("Back", "", () => go(idx - 1)));
+        if (s.action === "load") nav.append(btn("Load the demo people", "primary", () => postForm("/tour/load")), btn("Not now", "", () => go(idx + 1)));
+        else if (s.action === "finish") nav.append(btn(s.cta || "Finish the tour", "primary", () => postForm("/tour/finish")));
+        else nav.append(btn("Next", "primary", () => go(idx + 1)));
+        acts.append(nav);
+        acts.append(btn("Skip tour", "ghost small tour-skip", skip));
+      }
+      shown = idx;
+      place();
+      pop.focus({preventScroll: true});  // Tab then reaches the popover's buttons
+      place();
+    }
+
+    document.addEventListener("keydown", e => {
+      if (!document.body.contains(root)) return;
+      if (e.key === "Escape") { e.preventDefault(); if (confirming) { confirming = false; render(); } else skip(); return; }
+      if (e.key !== "Tab") return;
+      // Keep Tab inside the tour: its own buttons, then the lit-up area (so a Connect button can be reached by keyboard).
+      const list = focusables(pop).concat(target ? focusables(target) : []);
+      if (!list.length) return;
+      const at = list.indexOf(document.activeElement);
+      const next = e.shiftKey ? (at <= 0 ? list[list.length - 1] : list[at - 1]) : (at === -1 || at === list.length - 1 ? list[0] : list[at + 1]);
+      e.preventDefault(); next.focus();
+    }, true);
+    window.addEventListener("resize", replace);
+    window.addEventListener("scroll", replace, true);
+    const main = document.querySelector("main");
+    if (main && window.MutationObserver) new MutationObserver(replace).observe(main, {childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "open"]});
+    if (window.ResizeObserver) new ResizeObserver(replace).observe(document.body);
+    render();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startTour);
+  else startTour();
 })();
