@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions, skills
-from . import ai_caps, trust
+from . import ai_caps, site_guard, trust
 from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
@@ -354,6 +354,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["version"] = __version__
     env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
     env.globals["themes"] = THEMES
+    env.globals["guarded_sites"] = [d for d, _ in site_guard.GUARDED_SITES]  # listed under Stricter site guards
+    env.globals["guard_cap"] = site_guard.CAP
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["tour_payload"] = lambda request: tour_for_page(request)  # base.html draws the tour from this
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
@@ -836,7 +838,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
-                    refresh_prompt=recipes.refresh_candidate(c))
+                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)))
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
@@ -1543,7 +1545,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
                    inject_warnings=injection.job_warnings(job),
-                   q=q, add_results=add_results, prompt=recipes.source_for_job(job),
+                   q=q, add_results=add_results, prompt=recipes.source_for_job(job, guard=site_guard.enabled(store)),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),
                    hidden_note=actions.hidden_note(store, job_id, omit),
@@ -3078,6 +3080,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 errors[key] = "Use a whole number from 1 to 9999."
         if form.get("pipeline_view") in ("board", "table"):
             values["pipeline_view"] = str(form.get("pipeline_view"))
+        if whole or site_guard.SETTING in form:  # the switch: ticked or not on the Settings page
+            values[site_guard.SETTING] = ("1" if str(form.get(site_guard.SETTING) or "") not in ("", "0", "false", "off")
+                                          else "0")
         if str(form.get("theme") or "") in {t[0] for t in THEMES}:  # anything else is ignored
             values["theme"] = str(form.get("theme"))
         if errors:
@@ -3091,9 +3096,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/recipes", response_class=HTMLResponse)
     def recipes_page(request: Request):
-        items = [(r, recipes.render(r.key)) for r in recipes.RECIPES]
+        guard = site_guard.enabled(store)
+        items = [(r, recipes.render(r.key, guard=guard)) for r in recipes.RECIPES]
         return page(request, "recipes.html", items=items, jobs=store.list_jobs("open"),
-                    job_prompts={j["id"]: recipes.source_for_job(j) for j in store.list_jobs("open")})
+                    job_prompts={j["id"]: recipes.source_for_job(j, guard=guard) for j in store.list_jobs("open")})
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy(request: Request):

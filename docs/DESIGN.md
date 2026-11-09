@@ -19,8 +19,8 @@ candidate database and makes it usable from AI apps they already have.
   and say "save this candidate". The app's local MCP server does the writing.
 - **Recruiter workflow (next):** jobs, per-job pipelines with stages, and a
   dashboard of suggested next actions.
-- **Later:** optional scraping helpers, and a hosted mode with sign-in for
-  teams and multi-device.
+- **Later:** a built-in search (with its own site rules), and a hosted mode with
+  sign-in for teams and multi-device.
 
 Design rules:
 1. **Zero setup.** Double-click opens it. No terminal, Docker, Python or
@@ -258,14 +258,21 @@ review matter more than the scan); text the AI reads from other sources (email, 
 - **AI recipes, Connect AI, Settings** (toggles, backup, export), **Privacy**,
   **Report a problem** (prefilled GitHub issue, nothing sent from the app).
 
-## 7. Scraping (optional, later)
+## 7. Web research and scraping
 
-Main path is the recruiter using Claude Desktop (with its own browsing or Claude
-in Chrome) and saving through our MCP tools. For users who want it built in,
-reuse the Search project's approach: `browser-use` driving the user's own Chrome,
-streaming steps to the UI, with results going through `save_candidate`.
-Behind a feature flag and off by default, and it has to respect site terms
-(LinkedIn in particular forbids automated scraping).
+The recruiter's AI app (Claude, Codex, their own browser tools) may search the
+web and collect pages for them, and save what it finds through our MCP tools.
+Talent Search itself still makes no network calls and never fetches a page. A
+future built-in search would carry its own site rules. Some sites' terms forbid
+automated collection (LinkedIn among them), and that choice is the recruiter's.
+
+The app says so plainly (Connect AI page, Settings, Privacy). Settings has a
+**Stricter site guards** switch (`strict_site_guards`, off by default, list in
+`site_guard.py`). When on, the MCP instructions, the source and save recipes and
+the save and propose replies tell the AI app to stay off the listed sites, and
+the AI app may save or propose only 10 new people an hour whose source or link is
+on one. It guides and limits the AI app through this app only. Recruiter
+actions in the app are never limited by it.
 
 ## 8. Distribution
 

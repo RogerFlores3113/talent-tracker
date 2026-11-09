@@ -1657,6 +1657,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "stale_days": "180",
     "pipeline_view": "board",
     "theme": "sunset",
+    "strict_site_guards": "0",  # "1": the AI app is told to stay off sites whose terms forbid scraping (site_guard.py)
     # First-run guided tour (see tour.py): where the user is in it, and whether it ever ran.
     "tour_active": "0",
     "tour_mode": "full",

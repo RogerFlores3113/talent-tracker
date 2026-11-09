@@ -21,6 +21,7 @@
   </ul>
   <p class="fine">No check catches everything. If your AI app does something you didn't ask for, undo it on Changes, and set that app to Suggest only in Settings if you want to approve everything it does.</p>
   <p><strong>Talent Search never talks to Google, LinkedIn or email.</strong> If your AI app has those connected, it reads them itself and only sends Talent Search the short summary it logs.</p>
+  <p><strong>Web research is your AI app's, and Talent Search stays offline.</strong> Your AI app can search the web and collect pages for you, and Talent Search itself never fetches a web page. Some sites, LinkedIn among them, say in their terms that automated collection isn't allowed. The <a href="/settings#site-guards">Stricter site guards</a> switch in Settings (off by default) tells your AI app, through Talent Search, to stay off {{ guarded_sites | join(', ') }}, and limits it to {{ guard_cap }} new people an hour from them. It can't control what your AI app does outside Talent Search, and it never limits what you add yourself.</p>
   <p><strong>Problem reports are opt-in.</strong> “Report a problem” shows you the text first, then opens a pre-filled page on GitHub. Opening it shows GitHub your text. It is posted only when you press Submit on GitHub, and you can edit it first.</p>
   {% if typesense %}{% include "_typesense_note.html" %}{% endif %}
 </section>

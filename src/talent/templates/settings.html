@@ -44,6 +44,14 @@
     <label class="check"><input type="radio" name="pipeline_view" value="{{ v }}" {{ 'checked' if s.pipeline_view == v }}> <span>{{ label }}</span></label>
     {% endfor %}
   </section>
+  <section class="panel" id="site-guards">
+    <h2>Stricter site guards</h2>
+    {% include "_site_note.html" %}
+    <label class="check"><input type="checkbox" name="strict_site_guards" value="1" {{ 'checked' if s.strict_site_guards == '1' }}>
+      <span><strong>Stricter site guards</strong> <span class="fine">Off by default.</span></span></label>
+    <p class="fine">Sites on the list: {{ guarded_sites | join(', ') }}.</p>
+    <p class="fine">When this is on, your AI app is told not to browse, crawl or bulk-collect from those sites, and it can save or propose only {{ guard_cap }} new people an hour whose source or profile link is on one of them. It guides and limits your AI app through Talent Search. It can't control what your AI app does elsewhere. Adding people yourself (paste, CSV import, the form) is never limited.</p>
+  </section>
   <div><button class="btn primary" type="submit">Save settings</button></div>
 </form>
 

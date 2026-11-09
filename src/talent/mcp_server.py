@@ -31,7 +31,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, duplicates, opsreview
-from . import ai_caps, decide, interviews, loops, offers, sessions, trust
+from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, trust
 from . import injection, mcp_guard, outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, as_local
@@ -779,7 +779,10 @@ def _search_filters(*, company: Any, skills: Any, skill_mode: Any, remote: Any, 
 
 def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     search = search or SearchService(store, TypesenseIndex.from_env())
-    mcp = FastMCP("talent-search", instructions=INSTRUCTIONS)
+    # The site-guard line is added only while the switch is on (read when the server starts; save and propose
+    # replies carry it too, so a session that began before the switch learns it).
+    mcp = FastMCP("talent-search", instructions=INSTRUCTIONS + (
+        "- " + site_guard.instruction_line() + "\n" if site_guard.enabled(store) else ""))
     session = review.new_session()  # one AI session: this server's lifetime, for Keep all / Pass all on Review
     started = now_iso()  # and for its ledger and Roll back (sessions.py)
     reports.apply_zone(store)  # times in replies, and times the AI types, are in the recruiter's own zone
@@ -1151,6 +1154,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             match = next((h for h in (store.find_duplicate(e) for e in more) if h), None)
         if match is None and ai_caps.people_left(store) < 1:  # a new person, past the hourly limit on new people
             raise ValueError(ai_caps.people_text(0, ai_caps.people_cap(store)))
+        guarded = (site_guard.listed_site(data.get("linkedin_url"), data.get("website"), source=data.get("source"))
+                   if site_guard.enabled(store) else None)
+        if match is None and guarded and site_guard.left(store) < 1:  # stricter site guards: a lower hourly cap
+            raise ValueError(site_guard.cap_text(0))
         if match is not None:  # a merge may replace the title, company, location and work history it has
             replace = {k: data[k] for k in MERGE_OVERWRITES if not _blank(data.get(k))}
             over = store.ai_overwrites(match["id"], replace, history)
@@ -1184,6 +1191,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            {"created": False, "conflict": True, "changed": [], "saved_status": "Not saved",
                             "data_note": DATA_NOTE, "existing": {**brief(other), "app_url": page},
                             "incoming_name": exc.incoming_name, "warning": warning, "app_url": page})
+        if created and guarded:
+            site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
         status = "Saved" if created else ("Updated: " + _labels(changed) if changed else "Already saved, nothing new")
         view = candidate_view(cand["id"])
@@ -1242,6 +1251,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 out["note"] = (f"Already saved, so these saved values were kept: {_labels(kept)}. "
                                "If the new ones are right, ask the recruiter, then use update_candidate.")
                 notes.append(out["note"])
+        if guarded:  # the switch is on and this person is from a listed site
+            out["site_guard_note"] = site_guard.result_note(guarded)
+            notes.append(out["site_guard_note"])
         body = _candidate_text(view, note=False)
         text = "\n".join([f"{status}. {DATA_NOTE}", body, *notes])
         return _result(text, out)
@@ -2404,6 +2416,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if len(people) > ai_caps.proposed_left(store):
             raise ValueError(ai_caps.limit_text(f"propose {ai_caps.PROPOSE_CAP} people for Shortlists",
                                                 ai_caps.proposed_left(store)))
+        guard_on = site_guard.enabled(store)
+        listed = [site_guard.listed_site(p.linkedin_url, source=p.source) if guard_on else None for p in people]
+        if guard_on and sum(1 for x in listed if x) > site_guard.left(store):  # a lower cap for listed sites
+            raise ValueError(site_guard.cap_text(site_guard.left(store)))
         res = shortlist.propose(store, job_id, [p.model_dump(exclude=set(p.model_extra or {})) for p in people])
         added = [shortlist.row_view(a) for a in res["added"]]
         job, n, k = res["job"], len(added), len(res["skipped"])
@@ -2418,6 +2434,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             sentence += (f" Not saved, as the Shortlist doesn't take {'it' if len(ignored) == 1 else 'them'}: {shown}. "
                          "It takes name, linkedin_url, title (or headline), company, location, email, fit (or reason), "
                          "source, about, tags and work_history.")
+        guard_site = next((x for x in listed if x), None)
+        if guard_site:
+            kept_names = {a.get("name") for a in added}  # the people actually added, not the ones skipped
+            site_guard.record(store, sum(1 for x, p in zip(listed, people) if x and p.name in kept_names))
+            sentence += " " + site_guard.result_note(guard_site)
         lines = [sentence]
         if added:
             lines += [f"Added {DATA_NOTE}", *prospect_lines(added)]
@@ -2901,11 +2922,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                     "stage": stage_name, "saved_names": [r["name"] for r in groups["saved"]][:5],
                     "updated_names": [r["name"] for r in groups["updated"]][:5]})
             lines.append("The recruiter can undo this whole batch in the app, under Changes.")
+        guard_site = (next((g for g in (site_guard.listed_site(x.linkedin_url, source=x.source) for x in people) if g),
+                           None) if site_guard.enabled(store) else None)
+        if guard_site:
+            lines.append(site_guard.result_note(guard_site))
         data = {**groups, "counts": n, "summary": sentence + ".", "data_note": DATA_NOTE, "batch_id": batch_id,
                 **({"job": _slim({k: job.get(k) for k in ("id", "title", "company")}), "job_id": job_id,
                     "stage": stage_name, "added_to_job": added, "app_url": app_url(f"/jobs/{job_id}")}
                    if job is not None else {"app_url": app_url("/changes?who=ai")}),
-                **({"warning": warning} if warning else {})}
+                **({"warning": warning} if warning else {}),
+                **({"site_guard_note": site_guard.result_note(guard_site)} if guard_site else {})}
         return _said("\n".join(lines), data)
 
     @mcp.tool(annotations=READ)
@@ -3517,13 +3543,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         try:
             job = store.get_job(int(ref)) if ref.isdigit() else None
         except NotFound:
-            return recipes.source_for_job(None, missing_job=ref)
-        return recipes.source_for_job(job, missing_job=ref if ref and job is None else None)
+            return recipes.source_for_job(None, missing_job=ref, guard=site_guard.enabled(store))
+        return recipes.source_for_job(job, missing_job=ref if ref and job is None else None,
+                                      guard=site_guard.enabled(store))
 
     @mcp.prompt(title="Save someone from LinkedIn")
     def save_from_linkedin(url: str) -> str:
         """Save a person from a LinkedIn profile link."""
-        return recipes.save_from_linkedin(url)
+        return recipes.save_from_linkedin(url, guard=site_guard.enabled(store))
 
     @mcp.prompt(title="Save from a resume or profile")
     def save_from_text(text: str) -> str:
@@ -3543,7 +3570,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.prompt(title="Refresh stale profiles")
     def refresh_stale_profiles() -> str:
         """Update candidates whose details are months old."""
-        return recipes.refresh_stale()
+        return recipes.refresh_stale(guard=site_guard.enabled(store))
 
     _check_arguments(mcp)
     _track_session(mcp, store, session, started)
