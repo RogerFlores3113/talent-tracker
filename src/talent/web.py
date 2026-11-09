@@ -84,8 +84,8 @@ COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best mat
 
 def color_info(color: str | None, who: str = "") -> dict[str, Any]:
     """What a colour bubble says and does: its name, letter, the colours a click and a right-click go to, and
-    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange.
-    Shift+Enter goes back one color." so a list of bubbles has a different name for each."""
+    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange." so a list of bubbles has a
+    different name for each. The tooltip (title) adds that Shift+Enter goes back one color."""
     color = color if color in COLORS else None
     nxt, prev = next_color(color, 1), next_color(color, -1)
     name = color or "none"
@@ -93,7 +93,7 @@ def color_info(color: str | None, who: str = "") -> dict[str, Any]:
     back = "Shift+Enter, Shift-click or right-click goes back one color."
     lead = f"{who}: color" if who else "Color:"
     return {"color": color or "", "name": name, "letter": COLOR_LETTERS.get(color or "", ""),
-            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}. {back}",
+            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}.",
             "title": f"{lead} {name}. {go}. {back}"}
 
 

@@ -371,7 +371,7 @@ def test_color_bubble_label_starts_with_the_name_and_mentions_shift_enter(store)
     cid = store.add_candidate(name="Ana Ruiz")["id"]
     c = local_client(store)
     page = c.get("/candidates").text
-    assert 'aria-label="Ana Ruiz: color none. Click for red. Shift+Enter' in page and 'data-who="Ana Ruiz"' in page
+    assert 'aria-label="Ana Ruiz: color none. Click for red.' in page and 'data-who="Ana Ruiz"' in page
     body = c.post(f"/candidates/{cid}/color", data={"color": "red"}, headers={"Accept": "application/json"}).json()
     assert body["aria"].startswith("Ana Ruiz: color red.") and "Shift+Enter" in body["title"]
     js = (REPO / "src" / "talent" / "static" / "app.js").read_text(encoding="utf-8")

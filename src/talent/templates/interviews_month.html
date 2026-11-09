@@ -13,7 +13,7 @@
   </nav>
   <nav class="cal-nav" aria-label="Month">
     <a class="btn ghost small" href="/interviews?view=month&amp;month={{ m.prev.strftime('%Y-%m') }}" rel="prev"><span aria-hidden="true">&larr;</span> <span class="cal-vh">Previous month: </span>{{ m.prev_label }}</a>
-    <a class="btn ghost small" href="/interviews?view=month">Today</a>
+    <a class="btn ghost small" href="/interviews?view=month"{% if m.this_month %} aria-current="page"{% endif %}>Today</a>
     <a class="btn ghost small" href="/interviews?view=month&amp;month={{ m.next.strftime('%Y-%m') }}" rel="next"><span class="cal-vh">Next month: </span>{{ m.next_label }} <span aria-hidden="true">&rarr;</span></a>
   </nav>
 </div>
@@ -28,13 +28,14 @@
 
 <section class="panel" id="interviews-view">
   {% if not m.total %}<p class="none">Nothing booked in {{ m.label }}. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
-  <div class="cal" aria-label="Interviews in {{ m.label }}">
+  <div class="cal" role="group" aria-label="Interviews in {{ m.label }}">
     <div class="cal-head" aria-hidden="true">{% for n in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] %}<div class="{{ 'weekend' if loop.index > 5 }}">{{ n }}</div>{% endfor %}</div>
     {% for wk in m.weeks %}
-    <ul class="cal-week">
+    <ul class="cal-week" aria-label="Week of {{ wk[0].week_label }}">
       {% for d in wk %}
       <li class="cal-day{{ ' other' if not d.in_month }}{{ ' today' if d.today }}{{ ' weekend' if d.weekend }}{{ ' empty' if not d.sessions }}"{% if d.today %} aria-current="date"{% endif %}>
-        <a class="cal-num" href="/interviews?view=week&amp;week={{ d.week }}"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}<span class="cal-vh">{{ '' if (d.day.day == 1 or not d.in_month) else ' ' ~ (d.day | day('%B')) }}, week of {{ d.week_label }}</span></a>
+        {% set n_iv = d.sessions | rejectattr('state', 'equalto', 'cancelled') | list | length %}
+        <a class="cal-num" href="/interviews?view=week&amp;week={{ d.week }}"><span aria-hidden="true"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}</span><span class="cal-vh">{{ d.day | day('%A %B %-d') }}{% if d.today %}, today{% endif %}, {{ n_iv }} interview{{ '' if n_iv == 1 else 's' }}{% if d.sessions | length > n_iv %}, {{ d.sessions | length - n_iv }} cancelled{% endif %}, week of {{ d.week_label }}</span></a>
         {% for x in d.shown %}
         <a class="cal-chip st-{{ x.state }}{{ ' clash' if x.clash and x.state != 'cancelled' }}" href="{{ x.href }}" title="{{ x.candidate }}{% if x.job %}, {{ x.job }}{% endif %}: {{ x.name }}{% if x.interviewer %} with {{ x.interviewer }}{% endif %} ({{ {'upcoming': 'upcoming', 'done': x.result or interview_outcomes.get(x.status, 'done'), 'owes': 'still needs an outcome or feedback', 'cancelled': 'cancelled'}[x.state] }}{% if x.clash and x.state != 'cancelled' %}, clash{% endif %})"><span class="cal-vh">{{ {'upcoming': 'Upcoming', 'done': 'Done', 'owes': 'Needs feedback', 'cancelled': 'Cancelled'}[x.state] }}: </span><span class="cal-time">{{ x.at | local('%-I:%M %p') }}</span> <span class="cal-who">{{ x.candidate }}</span>{% if x.tag %} <span class="cal-tag">{{ x.tag }}</span>{% endif %}{% if x.clash and x.state != 'cancelled' %} <span class="cal-vh">Clash</span>{% endif %}</a>
         {% endfor %}
@@ -44,7 +45,7 @@
     </ul>
     {% endfor %}
   </div>
-  <p class="cal-key fine" aria-label="Colour key">
+  <p class="cal-key fine" role="group" aria-label="Colour key">
     <span class="cal-chip st-upcoming">Upcoming</span>
     <span class="cal-chip st-done">Done</span>
     <span class="cal-chip st-owes">Needs outcome or feedback</span>

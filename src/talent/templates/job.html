@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, sample_badge, injection_box %}
+{% from "_macros.html" import recipe_buttons, sample_badge, injection_box, cur %}
 {% block title %}{{ job.title }} · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block body %}
@@ -17,8 +17,8 @@
   <div class="actions-inline">
     {% include "_job_tabs.html" %}
     <nav class="seg" aria-label="View">
-      <a href="/jobs/{{ job.id }}?view=board" class="{{ 'on' if view == 'board' }}">Board</a>
-      <a href="/jobs/{{ job.id }}?view=table" class="{{ 'on' if view == 'table' }}">Table</a>
+      <a href="/jobs/{{ job.id }}?view=board" class="{{ 'on' if view == 'board' }}"{{ cur(view == 'board') }}>Board</a>
+      <a href="/jobs/{{ job.id }}?view=table" class="{{ 'on' if view == 'table' }}"{{ cur(view == 'table') }}>Table</a>
     </nav>
     <span class="copy-status"><button type="button" class="btn" data-copy-text="{{ status_text }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy status update</button><span class="fine" role="status"></span></span>
     <a class="btn" href="/jobs/{{ job.id }}/edit">Edit job and stages</a>
