@@ -145,7 +145,7 @@ def test_a_move_with_a_held_note_says_what_applied_and_what_waits(store):
     res = call(s, "move_stage", candidate_id=lee, job_id=jid, stage="Sourced", notes="good call")
     t = text(res)
     assert "Nothing changed yet" not in t and "Moved" in t
-    assert "Part of this call is held" in t and "Held for the recruiter's review" in t
+    assert "Part of this call is held" in t and "Held for your review" in t
     assert data(res)["held_scope"] == "part"
     assert "Why: this session read" in t  # the taint is explained, with how long it lasts
 
@@ -179,12 +179,13 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_install_without_a_terminal_needs_yes(home, monkeypatch):
+def test_install_without_a_terminal_needs_yes(home, monkeypatch, capsys):
     from talent.cli import main
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     with pytest.raises(SystemExit) as e:
         main(["install-skills", "--claude-code"])
-    assert "--yes" in str(e.value)
+    assert e.value.code == 1  # cycle 11 X: the first printed line says nothing was installed
+    assert capsys.readouterr().out.splitlines()[0] == "Nothing installed yet. Run again with --yes to install."
     assert not (home / ".claude" / "skills").exists()
 
 

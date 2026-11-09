@@ -357,7 +357,7 @@ def test_tour_script_makes_the_page_inert_confirms_esc_and_uses_a_neutral_note()
     js = (REPO / "src" / "talent" / "static" / "app.js").read_text(encoding="utf-8")
     css = (REPO / "src" / "talent" / "static" / "style.css").read_text(encoding="utf-8")
     assert "inert" in js and "applyInert" in js
-    assert 'e.key === "Escape"' in js and "else skip()" in js and "function skip() { confirming = true" in js
+    assert 'e.key === "Escape"' in js and "else askToEnd()" in js and "function askToEnd() { confirming = true" in js  # c11 X: Skip tour ends in one click
     assert re.search(r"\.tour-note \{[^}]*color: var\(--muted\)", css)
 
 

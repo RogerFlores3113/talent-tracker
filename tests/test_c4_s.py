@@ -1,4 +1,5 @@
 """Cycle 4, fixer S: the sourcing Shortlist (propose, keep, pass, undo) and batch save_candidates."""
+import re
 import anyio
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
@@ -181,7 +182,7 @@ def test_the_ai_can_only_propose(store, monkeypatch):
     # visibility "app") and refused without the card's key (tests/test_c5_e.py). Cycle 6 A: listed only to hosts
     # that say they show views, with the card's own key tool.
     app_only = [n for n in tools if (tools[n].meta or {}).get("ui", {}).get("visibility") == ["app"]]
-    assert sorted(app_only) == ["keep_prospect", "keep_prospects", "pass_prospect", "pass_prospects", "shortlist_card_key"]
+    assert sorted(app_only) == ["candidate_cards", "keep_prospect", "keep_prospects", "pass_prospect", "pass_prospects", "shortlist_card_key"]
     assert not [n for n in tools if n not in app_only and any(w in n for w in ("keep", "pass", "delete", "remove"))]
     assert tools["propose_candidates"].meta["ui"]["resourceUri"].endswith("shortlist.html")
     assert "propose_candidates" in INSTRUCTIONS and "only when the recruiter asks you to save" in INSTRUCTIONS
@@ -202,9 +203,9 @@ def test_save_candidates_batches_with_the_same_rules_and_undo_all(store):
         {"name": "Bo Li", "email": "bo@new.com"},
         {"name": "Tom Ng", "email": "kim@x.com"},
     ])
-    d, t = data(res), uncaution(text(res))  # cycle 8 C: a poisoned reason adds a Caution line on top
+    d, t = data(res), re.sub(r"\ANote: [^\n]*\n", "", uncaution(text(res)))  # cycle 8 C: a poisoned reason adds a Caution line on top
     # Cycle 4 W: a batch merge keeps a saved title (Wei stays "SWE"), so Wei is "already saved".
-    assert t.startswith("Saved 1 new person, 1 already saved with nothing new, and 2 need the recruiter's answer "
+    assert t.startswith("Saved 1 new person, 1 already saved with nothing new, and 2 need your answer "
                         "before saving; "
                         "added 2 to Backend Engineer (Acme) in Contacted.")
     assert [r["name"] for r in d["saved"]] == ["Ana Ruiz"] and d["saved"][0]["ignored_fields"] == ["hobby"]

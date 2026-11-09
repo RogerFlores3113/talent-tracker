@@ -89,7 +89,7 @@ def test_mark_update_sent_tool_records_it_and_changes_can_take_it_back(store):
     assert reports.updates(store, "acme") == []
     res = call(server, "mark_update_sent", client="ACME", confirm=True)
     assert res.content[0].text.startswith('Marked the update to "Acme" as sent')
-    assert "hasn't reviewed" in text(res)  # it carried an AI move the recruiter hasn't seen
+    assert "haven't reviewed" in text(res)  # it carried an AI move the recruiter hasn't seen
     sent = reports.updates(store, "acme")
     assert len(sent) == 1 and "Ana Ruiz to Submitted" in sent[0]["body"]
     a = store.ai_actions()[0]
@@ -301,7 +301,7 @@ def test_the_send_out_page_lists_due_updates_with_email_and_mark_as_sent(store):
     assert first.startswith("Update 1: Acme (due today). Email to dana@acme.example, cc sam@acme.example")
     u = res.structuredContent["updates"][0]
     assert u["cc"] == ["sam@acme.example"] and u["unreviewed_ai_moves"][0]["name"] == "Maya Chen"
-    assert "For the recruiter only" in res.content[-1].text
+    assert "Private to you" in res.content[-1].text
     # Mark as sent from the page comes back to it, and the update is no longer due.
     # Cycle 5 fixer H: Mark as sent names the AI moves its page showed; one it didn't show stops it.
     r = c.post("/clients/acme/sent", data={"back": "due"}, follow_redirects=False)

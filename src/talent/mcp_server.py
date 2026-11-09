@@ -23,26 +23,27 @@ import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Annotated, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, WithJsonSchema, model_validator
 
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, duplicates, opsreview
 from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, trust
 from . import injection, mcp_guard, outreach, plan, wording
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
-from .store import AI_SESSION, AI_SOURCE, as_local
-from .mcp_views import MIME, URIS, tool_meta, view_html
+from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, stage_outcome
+from .mcp_views import MIME, RESOURCE_META, URIS, tool_meta, view_html
 from . import searchquery
 from .paths import app_url
+from .links import MAX_LINKS, clean_links, fold_link_args, link_label, stored_links, text_line
 from .store import (clean_color, clean_duration, AI_CLEAR_CAP, AI_NOTE_CAP, AI_OVERWRITE_CAP, CHANGE_SOURCES, NOTE_LIMIT, INTERVIEW_OUTCOME_LABELS, JOB_STATUSES, MERGE_OVERWRITES,
                     TIMELINE_KINDS, FEEDBACK_LIMIT, _EMAIL_RE, KIND_ALIASES, IdentityConflict, NotFound, Store, _labels, linkedin_lead_tool,
                     looks_like_name, normalize_linkedin, now_iso, parse_when, quoted, same_person_name, snippet_text, split_tags,
-                    to_dt)
+                    shown_zone, to_dt)
 from .typesense_index import SearchService, TypesenseIndex
 
 INSTRUCTIONS = """\
@@ -152,6 +153,8 @@ CARD_LIMIT = ("Nothing changed: the AI app has used its hourly limit on Keep and
               "Search, on the Shortlist, or try again later.")
 CARD_KEYS_KEPT = 500  # keys waiting at once, per session; the oldest go first
 CARD_TOOLS = ("keep_prospect", "pass_prospect", "keep_prospects", "pass_prospects", "shortlist_card_key")
+# App-only tools that only read: hidden from chat apps without MCP Apps, but any trust level may call them.
+APP_ONLY_READ = ("candidate_cards",)
 # A press on a card in a chat app that didn't say it shows Talent Search cards.
 CARD_NO_APPS = ("This chat app didn't say it shows Talent Search cards, so Keep and Pass work in Talent Search "
                 "instead. Open the Shortlist there.")
@@ -273,6 +276,13 @@ class Prospect(BaseModel):
     tags: list[str] | None = Field(None, description="Skills, saved with them if kept",
                                    validation_alias=AliasChoices("tags", "skills"))
     work_history: list[WorkEntry] | None = None
+    links: list[str] | str | None = Field(None, description="Other links: GitHub, portfolio, Scholar, X... "
+                                                            "(web addresses only; github, portfolio and urls work too)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _link_names(cls, data: Any) -> Any:
+        return fold_link_args(data) if isinstance(data, dict) else data
 
 
 class PersonIn(BaseModel):
@@ -281,8 +291,8 @@ class PersonIn(BaseModel):
     name: str
     email: str | None = None
     phone: str | None = None
-    linkedin_url: str | None = None
-    website: str | None = None
+    linkedin_url: str | None = Field(None, validation_alias=AliasChoices("linkedin_url", "linkedin", "linkedin_profile"))
+    website: str | None = Field(None, validation_alias=AliasChoices("website", "site", "url", "web"))
     current_title: str | None = Field(None, validation_alias=AliasChoices("current_title", "title"))
     current_company: str | None = Field(None, validation_alias=AliasChoices("current_company", "company"))
     location: str | None = None
@@ -293,7 +303,14 @@ class PersonIn(BaseModel):
     work_history: list[WorkEntry] | None = None
     source: str | None = None
     other_emails: list[str] | None = Field(None, description="More email addresses for someone new; never added to a person already saved")
+    links: list[str] | str | None = Field(None, description="Other links (GitHub, portfolio...): web addresses only; "
+                                                            "github, portfolio and urls work too")
     create_anyway: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _link_names(cls, data: Any) -> Any:
+        return fold_link_args(data) if isinstance(data, dict) else data
 
 
 def split_headline(headline: str) -> tuple[str, str | None]:
@@ -306,6 +323,61 @@ def split_headline(headline: str) -> tuple[str, str | None]:
 def _slim(c: dict[str, Any]) -> dict[str, Any]:
     """Drop empty fields so results stay short in the model's context."""
     return {k: v for k, v in c.items() if v not in (None, "", [])}
+
+
+CARDS_PER_CALL = 20
+_PAGE_KEYS = ("location", "title", "tag", "source", "client", "stage", "color", "company", "skill_mode", "exp_min",
+              "exp_max", "contacted", "contacted_days", "added_days")
+
+
+def _search_path(q: str, kw: dict[str, Any]) -> str:
+    """The Candidates page for this search with its query and filters, so Open in Talent Search shows the same people."""
+    params: list[tuple[str, str]] = [("q", q)] if q else []
+    for k in _PAGE_KEYS:
+        if kw.get(k) not in (None, "", []):
+            params.append((k, str(kw[k])))
+    if kw.get("job_id"):
+        params.append(("job", str(kw["job_id"])))
+    if kw.get("skills"):
+        params.append(("skills", ", ".join(kw["skills"])))
+    for k in ("remote", "has_email", "has_linkedin"):
+        if kw.get(k):
+            params.append((k, "1"))
+    if len(params) == 1 and q:
+        return "/?q=" + quote(q)
+    return "/candidates?" + urlencode(params) if params else "/candidates"
+
+
+def _card_links(c: dict[str, Any]) -> list[dict[str, str]]:
+    """The extra links saved on a person as {url, label} (labels as the app names them), at most 10."""
+    return [{"url": u, "label": link_label(u)} for u in stored_links(c.get("links"))[:MAX_LINKS]]
+
+
+def _card_fields(c: dict[str, Any], link) -> dict[str, Any]:
+    """One person's summary card for the in-chat People view: lean, no long text."""
+    now = now_iso()
+    tl = [t for t in c.get("timeline") or [] if not t.get("struck") and t["kind"] != CHANGE_KIND]
+    nxt = [t["at"] for t in c.get("timeline") or [] if t["kind"] == "interview" and not t.get("struck")
+           and t.get("status") == "scheduled" and (t.get("at") or "") >= now]
+    about = (c.get("about") or "").strip()
+    return _slim({
+        "id": c["id"], "name": c["name"], "current_title": c.get("current_title"),
+        "current_company": c.get("current_company"), "location": c.get("location"), "color": c.get("color"),
+        "email": c.get("email"), "phone": c.get("phone"), "linkedin_url": c.get("linkedin_url"),
+        "website": c.get("website"), "links": _card_links(c), "source": c.get("source"),
+        "tags": (c["tags"] if isinstance(c.get("tags"), list) else split_tags(c.get("tags")))[:12],
+        "about": about[:400] + ("..." if len(about) > 400 else ""),
+        "last_contacted_at": c.get("last_contacted_at"), "created_at": c.get("created_at"),
+        "updated_at": c.get("updated_at"), "next_interview": min(nxt) if nxt else None,
+        "jobs": [_slim({"job_id": p["job_id"], "job": _job_name({"title": p["job_title"],
+                                                                 "company": p.get("job_company")}),
+                        "stage": p["stage"], "since": p.get("stage_changed_at"),
+                        "app_url": link(f"/jobs/{p['job_id']}")}) for p in c.get("pipelines") or []][:8],
+        "work_history": [_slim({k: w.get(k) for k in ("title", "company", "start", "end")})
+                         for w in c.get("work_history") or []][:6],
+        "activity": [_slim({"kind": t["kind"], "at": t["at"], "body": (t.get("body") or "")[:140]})
+                     for t in tl][:3],
+        "app_url": link(f"/candidates/{c['id']}")})
 
 
 def _given(**kw: Any) -> dict[str, Any]:
@@ -365,6 +437,14 @@ def _zone_used_note(when: Any, iso: str) -> str:
             "a zone is read in that zone.")
 
 
+def _check_note_length(text: Any, what: str) -> None:
+    """The web caps an interview note at 500 characters; the AI app gets the same cap, with a plain error."""
+    n = len((text or "").strip()) if isinstance(text, str) else 0
+    if n > interviews.SUMMARY_LIMIT:
+        raise ValueError(f"The {what} can be up to {interviews.SUMMARY_LIMIT} characters, and this one has {n:,}. "
+                         "Nothing was saved. Shorten it and send it again.")
+
+
 def _unlisted_note(iv: dict[str, Any], who: str | None) -> str:
     """'Sam Roe isn't listed as an interviewer on this session.' when feedback names someone who isn't on it."""
     name = (who or "").strip()
@@ -374,7 +454,7 @@ def _unlisted_note(iv: dict[str, Any], who: str | None) -> str:
     if any(interviews.name_matches(name, w) or interviews.name_matches(interviews.display_name(w), name)
            for w in listed):
         return ""
-    return f"{interviews.display_name(name)} isn't listed as an interviewer on this session."
+    return f"{interviews.display_name(name)} isn't listed as an interviewer on this session, so it is kept but not counted in the session's result."
 
 
 def _wait_text(r: dict[str, Any], *, part: bool = False, hired: bool = False) -> str:
@@ -447,8 +527,25 @@ def _clean_entries(entries: list[WorkEntry]) -> list[WorkEntry]:
 
 def _line(c: dict[str, Any]) -> str:
     role = " at ".join(x for x in (c.get("current_title"), c.get("current_company")) if x)
-    bits = [f"{c['name']} (id {c['id']})", role, c.get("location")]
+    bits = [f"{c['name']} (id {c['id']}, {app_url('/candidates/' + str(c['id']))})", role, c.get("location")]
     return ", ".join(b for b in bits if b)
+
+
+def _then(line: str, more: str) -> str:
+    """line + ". more", without a double period when the line already ends in one (or in an ellipsis)."""
+    return line + (" " if line.rstrip().endswith((".", "…", "!", "?")) else ". ") + more
+
+
+def _contact_bits(c: dict[str, Any]) -> str:
+    """'email a@b.com, LinkedIn https://..., website https://...' for what is known (empty when nothing is)."""
+    bits = []
+    if c.get("email"):
+        bits.append(f"email {c['email']}")
+    if c.get("linkedin_url"):
+        bits.append(f"LinkedIn {c['linkedin_url']}")
+    if c.get("website"):
+        bits.append(f"website {c['website']}")
+    return ", ".join(bits)
 
 
 def _local(iso: str | None, all_day: bool = False) -> str:
@@ -522,6 +619,18 @@ def _identity_hold(store: Store, data: dict[str, Any]) -> tuple[list[str], str]:
     return touch, why
 
 
+def _stage_rank(store: Store, job_id: int, stage: str, cache: dict[int, list[dict[str, Any]]]) -> int:
+    """Where a stage sits in its job's pipeline, as a number to sort by: the stage's place in the job's stages,
+    with stages that are exits (rejected, withdrawn...) after every other stage."""
+    if job_id not in cache:
+        cache[job_id] = store.job_stages(job_id)
+    stages = cache[job_id]
+    for i, st in enumerate(stages):
+        if st["name"] == stage:
+            return (1000 if st.get("outcome") == "lost" else 0) + i
+    return 1000 if stage_outcome(stage) == "lost" else len(stages)
+
+
 def _result(text: str, data: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=data)
 
@@ -535,12 +644,55 @@ def _job_name(job: dict[str, Any] | None) -> str:
     return f"{title} ({company})" if company else str(title)
 
 
+_FACT_SKIP = {"data_note", "warning", "note", "nudge", "close_out_hint", "suggested_step", "description_note",
+              "pending_review", "links", "summary"}
+FACT_LINES = 24
+
+
+def _fact_value(v: Any) -> str | None:
+    if v is None or v == "" or v == [] or v == {}:
+        return None
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        v = " ".join(v.split())
+        return v if len(v) <= 160 else v[:157] + "..."
+    if isinstance(v, list):
+        if all(isinstance(x, (str, int, float)) for x in v):
+            shown = ", ".join(str(x) for x in v[:12])
+            return shown + (f" and {len(v) - 12} more" if len(v) > 12 else "")
+        return f"{len(v)} item{'' if len(v) == 1 else 's'}"
+    return None
+
+
+def _facts(data: dict[str, Any]) -> list[str]:
+    """The short facts of a write's record as plain bullets (never a JSON dump in the chat): its own simple fields,
+    lists of words joined, and a count for lists of records. The full record is still the structured result."""
+    out = []
+    for k, v in data.items():
+        if (k in _FACT_SKIP or k.endswith(("_note", "_at", "_id", "_url", "_name", "_title", "_company"))
+                or k in ("id", "created", "updated")):
+            continue
+        text = _fact_value(v)
+        if text is None:
+            continue
+        label = k.replace("_", " ")
+        out.append(f"- {label[:1].upper() + label[1:]}: {text}")
+        if len(out) >= FACT_LINES:
+            break
+    return out
+
+
 def _said(sentence: str, data: dict[str, Any]) -> CallToolResult:
     """A write tool's reply. The text leads with one plain sentence (who, which stage, which job and client,
-    times in local time with zone), then any warning or note, then the record itself as JSON, which is also
-    the structured result."""
+    times in local time with zone), then any warning or note, then a few plain facts under "Details" (no raw JSON).
+    The whole record is the structured result."""
     lines = [sentence, *(str(data[k]) for k in ("warning", "note", "nudge", "close_out_hint") if data.get(k))]
-    lines.append(json.dumps(data, ensure_ascii=False, default=str))
+    facts = _facts(data)
+    if facts:
+        lines += ["Details:", *facts]
     return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
 
 
@@ -728,6 +880,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
             out.append(f"{label}: {_local(c[k]) if k.endswith('_at') else c[k]}")
         if k == "email" and c.get("other_emails"):
             out.append("Other emails: " + ", ".join(c["other_emails"]))
+    if c.get("links"):
+        out.append(text_line(stored_links(c["links"])))
     if c.get("tags"):
         out.append("Skills: " + ", ".join(c["tags"]))
     if c.get("about"):
@@ -738,7 +892,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
             + (f" ({w.get('start') or ''} to {w.get('end') or 'now'})" if w.get("start") or w.get("end") else "")
             for w in c["work_history"]))
     for p in c.get("pipelines", []):
-        out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} (job id {p['job_id']})")
+        out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} "
+                   f"(job id {p['job_id']}, {app_url('/jobs/' + str(p['job_id']))})")
     recent = c.get("timeline", [])[:10]
     # What the recruiter typed in the app is theirs, not candidate-provided, so it is listed after its own heading.
     theirs = [t for t in recent if t.get("by_recruiter")]
@@ -760,14 +915,18 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
 def _interview_bits(t: dict[str, Any]) -> dict[str, Any]:
     """An interview's interviewer, outcome note and feedback, from a timeline row or its slim copy."""
     d = t.get("data") if isinstance(t.get("data"), dict) else {}
-    return {"interviewer": t.get("interviewer") or d.get("interviewer"),
+    who = t.get("interviewer") or d.get("interviewer")
+    feedback = t.get("feedback") or [f for f in d.get("feedback") or [] if isinstance(f, dict)]
+    session = {"data": {"interviewer": who}}
+    return {"interviewer": who,
             "outcome_note": t.get("outcome_note") or interview_note(d),
             "result": t.get("result") or interview_label(d),
-            "feedback": t.get("feedback") or [f for f in d.get("feedback") or [] if isinstance(f, dict)]}
+            "feedback": [{**f, "unlisted": interviews.is_unlisted(session, f.get("by"))} for f in feedback]}
 
 
 def _feedback_text(f: dict[str, Any]) -> str:
-    return f"Feedback from {f.get('by') or 'an interviewer'}: {f.get('text') or ''}"
+    note = f" ({interviews.UNLISTED_LABEL}, not counted in the result)" if f.get("unlisted") else ""
+    return f"Feedback from {f.get('by') or 'an interviewer'}{note}: {f.get('text') or ''}"
 
 
 def _timeline_line(t: dict[str, Any]) -> str:
@@ -858,10 +1017,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     for name, uri in URIS.items():
         def make(n: str = name):
             return lambda: view_html(n)
-        mcp.resource(uri, name=f"{name}-view", mime_type=MIME, description=f"Talent Search {name} view")(make())
+        mcp.resource(uri, name=f"{name}-view", mime_type=MIME, description=f"Talent Search {name} view",
+                     meta=RESOURCE_META)(make())
 
     # ------------------------------------------------------------ candidates
-    @mcp.tool(annotations=READ, meta=tool_meta("results"))
+    @mcp.tool(annotations=READ, meta=tool_meta("people"))
     def search_candidates(query: str = "", location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, limit: int = 10,
                           job_id: int | None = None, client: str | None = None,
@@ -870,7 +1030,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                           min_years: int | None = None, max_years: int | None = None,
                           contacted: str | None = None, contacted_days: int | None = None,
                           added_days: int | None = None, has_email: bool | None = None,
-                          has_linkedin: bool | None = None) -> CallToolResult:
+                          has_linkedin: bool | None = None, offset: int = 0) -> CallToolResult:
         """Search saved candidates by any words: skills, past or current companies, titles, names, places,
         the jobs they're in (title or company, like "Acme Fintech") and their timeline notes and interviews.
 
@@ -907,9 +1067,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         contacted is "never", "older" (last contact more than contacted_days ago) or "within" (in the last
         contacted_days); added_days is saved in the last N days; has_email / has_linkedin are true to require one.
         With no query this lists them, most recently updated first.
+        limit is at most 50; offset skips that many (offset 50 with limit 50 is the next page).
         """
         q = (query or "").strip()
         limit = max(1, min(limit, 50))
+        offset = max(0, int(offset or 0))
         member = {"job_id": job_id, "client": client, "stage": stage}
         if color and color.strip():
             member["color"] = clean_color(color) or "none"
@@ -922,22 +1084,30 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                contacted_days=contacted_days, added_days=added_days, has_email=has_email,
                                has_linkedin=has_linkedin)
         return _search_reply(q, {"location": location, "title": title, "tag": tag, "source": source,
-                                 **member, **more}, limit)
+                                 **member, **more}, limit, offset=offset)
 
     def _search_reply(q: str, kw: dict[str, Any], limit: int, heading: str | None = None,
-                      app_path: str | None = None) -> CallToolResult:
+                      app_path: str | None = None, offset: int = 0) -> CallToolResult:
         """The reply search_candidates and run_saved_search share: the people found, as text and structured."""
         is_id, _ = store.lookup_exact(q)
         res = (store.search_candidates(q, limit=limit) if is_id
-               else search.search(q, limit=limit, **kw))
+               else search.search(q, limit=limit, offset=offset, **kw))
         results = []
+        ranks: dict[int, list[dict[str, Any]]] = {}
         for h in res.hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
-                                                 "tags", "email", "linkedin_url", "source", "last_contacted_at",
-                                                 "updated_at", "color")}
+                                                 "tags", "email", "linkedin_url", "website", "source",
+                                                 "last_contacted_at", "updated_at", "created_at", "color")}
+            c["links"] = stored_links(h.candidate.get("links"))
             c["jobs"] = [_slim({"job_id": p["job_id"], "job": _job_name({"title": p["job_title"],
                                                                          "company": p.get("job_company")}),
-                                "stage": p["stage"]}) for p in store.candidate_pipelines(c["id"])]
+                                "stage": p["stage"], "since": p.get("stage_changed_at"),
+                                "stage_rank": _stage_rank(store, p["job_id"], p["stage"], ranks),
+                                "state": stage_outcome(p["stage"]) if stage_outcome(p["stage"]) != "open" else None})
+                        for p in store.candidate_pipelines(c["id"])]
+            if c["jobs"]:  # the stage shown first, as a number, so a table sorts in pipeline order
+                c["stage_rank"] = c["jobs"][0]["stage_rank"]
+            c["has_email"] = bool(c.get("email"))
             if h.snippet:
                 c["match"] = snippet_text(h.snippet)
             if h.reason:
@@ -961,6 +1131,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if is_id:
             head = f"Exact match for that {what}:" if results else (
                 f"No saved candidate has that {what}. Try searching their name too.")
+        elif getattr(res, "understood", None):  # a role and a place, read apart: say plainly what was understood
+            head = res.summary or res.understood
         elif res.closest:
             head = "No exact matches. Closest matches:"
         else:
@@ -974,24 +1146,37 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         else:
             lines.append(head)
         found = len(lines)
+        seen_jobs: set[int] = set()
         for c in results:
             line = f"- {_line(c)}"
+            if _contact_bits(c):
+                line += ", " + _contact_bits(c)
             if c.get("reason"):
-                line += f". {c['reason']}" + (f": {c['match']}" if c.get("match") else "")
+                line = _then(line, c["reason"] + (f": {c['match']}" if c.get("match") else ""))
             elif c.get("match"):
-                line += f". Match: {c['match']}"
+                line = _then(line, f"Match: {c['match']}")
             if c.get("closest") and not res.closest:
                 line += " (closest match)"
             if c.get("other_name") and not nobody:
                 line += " (a different name)"
             if c.get("jobs"):
-                line += ". In: " + "; ".join(f"{j['job']} [job_id {j['job_id']}], {j['stage']}" for j in c["jobs"])
+                line = _then(line, "In: " + "; ".join(
+                    f"{j['job']} [job_id {j['job_id']}{'' if j['job_id'] in seen_jobs else ', ' + app_url('/jobs/' + str(j['job_id']))}], {j['stage']}"
+                    for j in c["jobs"]))
+                seen_jobs.update(j["job_id"] for j in c["jobs"])
             lines.append(line)
         if results:  # the people found, between a marker made fresh for this reply
             lines[found:] = fenced(lines[found:])
         if not results and not is_id:
             lines = [f"No one named {quoted(q)} is saved." if named else
                      "No saved candidates match. Try fewer or different words, or no filters."]
+        listed_total = res.total
+        shown_n = len(results)
+        if results and not is_id and listed_total > offset + shown_n:
+            left = listed_total - offset - shown_n
+            nxt = min(left, limit)
+            lines.append(f"Showing {offset + shown_n} of {listed_total}. Ask for the next {nxt}"
+                         + f" (offset {offset + shown_n}).")
         if res.suggestion and not res.corrected:
             lines.append(f"Did you mean {res.suggestion}?")
         lines.extend(f"Note: {n}" for n in res.notes)
@@ -999,11 +1184,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.insert(0, heading)
         return _result("\n".join(lines), {
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
-            "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
+            "exact": res.exact, "understood": getattr(res, "understood", None),
+            **({"message": res.message} if getattr(res, "message", None) else {}),
+            **({"partial_total": res.partial_total} if getattr(res, "understood", None) else {}), "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
+            "offset": offset, "shown": len(results) - n_closest,
             **({"no_one_named": q} if nobody else {}),
-            "app_url": app_url(app_path or "/?q=" + quote(res.suggestion if res.corrected else q))})
+            "app_url": app_url(app_path or _search_path(res.suggestion if res.corrected else q, kw))})
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("searches"))
     def list_saved_searches() -> CallToolResult:
         """List the recruiter's saved searches (the quick links on their Candidates page): each one's id, name,
         what it searches for in plain words, how many people match now, and how many of those are new since the
@@ -1011,6 +1199,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         rows = store.list_saved_searches(counts=True)
         items = [_slim({"id": r["id"], "name": r["name"], "search": searchquery.describe(r["params"]),
                         "matches": r["count"], "new_since_opened": r["new"],
+                        "color": r["params"].get("color"), "last_opened": r.get("last_viewed_at"),
+                        "app_url": app_url(f"/saved-searches/{r['id']}"),
                         "saved_by": "your AI app" if r["created_by"] == "ai" else "the recruiter"}) for r in rows]
         if not items:
             return _result("No saved searches yet. save_search keeps one the recruiter can open from their "
@@ -1018,20 +1208,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         lines = [f"{len(items)} saved search{'' if len(items) == 1 else 'es'}:"]
         lines += [f"- [id {i['id']}] {quoted(i['name'])}: {i['search']}. {i['matches']} match"
                   f"{'' if i['matches'] == 1 else 'es'}" + (f", {i['new_since_opened']} new" if i.get("new_since_opened") else "")
-                  for i in items]
+                  + (f". Last opened in the app {_local(i['last_opened'])}" if i.get("last_opened") else ". Not opened in the app yet")
+                  + f". Open it: {i['app_url']}" for i in items]
         return _result("\n".join(lines), {"saved_searches": items, "app_url": app_url("/candidates")})
 
-    @mcp.tool(annotations=READ, meta=tool_meta("results"))
-    def run_saved_search(name_or_id: str | int, limit: int = 10) -> CallToolResult:
+    @mcp.tool(annotations=READ, meta=tool_meta("people"))
+    def run_saved_search(name_or_id: str | int, limit: int = 10, offset: int = 0) -> CallToolResult:
         """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches; `name` and
         `id` work too) and show the
         people who match now, like search_candidates. Running it does not mark it as looked at in the app."""
         limit = max(1, min(limit, 50))
+        offset = max(0, int(offset or 0))
         # text is looked up as a name first (even a number like "2"), then as an id; a JSON number is an id
         row = store.get_saved_search(name_or_id if isinstance(name_or_id, int) else str(name_or_id))
         q, kw = store._saved_kwargs(row)
         return _search_reply(q, kw, limit, heading=f"Saved search {quoted(row['name'])} "
-                             f"({searchquery.describe(row['params'])}):", app_path=f"/saved-searches/{row['id']}")
+                             f"({searchquery.describe(row['params'])}):", app_path=f"/saved-searches/{row['id']}", offset=offset)
 
     @mcp.tool(annotations=WRITE)
     def save_search(name: str, query: str = "", location: str | None = None, title: str | None = None,
@@ -1102,7 +1294,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             c["pending_review"] = waiting
         return {**_slim(c), "app_url": app_url(f"/candidates/{candidate_id}")}
 
-    @mcp.tool(annotations=READ, meta=tool_meta("candidate"))
+    @mcp.tool(annotations=READ, meta=tool_meta("people"))
     def get_candidate(candidate_id: int) -> CallToolResult:
         """Full record for one candidate: contact details, skills, work history, jobs and stages, recent activity."""
         c = {**candidate_view(candidate_id), "data_note": DATA_NOTE}
@@ -1113,7 +1305,21 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _slim({k: c.get(k) for k in (
             "id", "name", "current_title", "current_company", "location", "email", "linkedin_url")})
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=APP_ONLY)
+    def candidate_cards(candidate_ids: list[int]) -> CallToolResult:
+        """For the in-chat People view only (hidden from the model): the summary card of up to 20 saved people,
+        for the card, the carousel and the table. Read-only. Use get_candidate to read someone yourself."""
+        ids = list(dict.fromkeys(int(i) for i in candidate_ids))[:CARDS_PER_CALL]
+        cards, missing = [], []
+        for i in ids:
+            try:
+                cards.append(_card_fields(store.candidate_detail(i, timeline_limit=30), app_url))
+            except (KeyError, LookupError, ValueError):
+                missing.append(i)
+        data = {"cards": untag(cards), "missing": missing}
+        return _result(f"{len(cards)} card{'' if len(cards) == 1 else 's'}.", data)
+
+    @mcp.tool(annotations=READ, meta=tool_meta("duplicates"))
     def find_duplicates(limit: int = 20) -> CallToolResult:
         """People who may be saved twice, across the whole database: the same email, LinkedIn, name and phone,
         name and company, or a similar name at the same company. Strongest matches first, each with the reason and
@@ -1124,7 +1330,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         pairs = duplicates.find_pairs(store)
         out = []
         for p in pairs[:limit]:
-            people = [brief(store.get_candidate(p[k])) for k in ("keep", "other")]
+            people = []
+            for k in ("keep", "other"):
+                c = store.get_candidate(p[k])
+                people.append({**brief(c), **_slim({"source": c.get("source"), "created_at": c.get("created_at"),
+                                                    "phone": c.get("phone"),
+                                                    "app_url": app_url(f"/candidates/{c['id']}")})})
             out.append({"reasons": p["reasons"], "people": people,
                         "compare_and_merge_url": app_url(f"/candidates/{p['keep']}/merge/{p['other']}")})
         data = {"data_note": DATA_NOTE, "total": len(pairs), "shown": len(out), "pairs": untag(out),
@@ -1140,7 +1351,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             rows.append(f"- {who}: {', '.join(o['reasons'])}. Compare: {o['compare_and_merge_url']}")
         return _result("\n".join([head, *fenced(rows)]), data)
 
-    @mcp.tool(annotations=WRITE, meta=tool_meta("candidate"))
+    @mcp.tool(annotations=WRITE, meta=tool_meta("people"))
     def save_candidate(
         name: str,
         email: str | None = None,
@@ -1157,9 +1368,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
         other_emails: list[str] | None = None,
+        links: list[str] | str | None = None,
         create_anyway: bool = False,
     ) -> CallToolResult:
         """Add a candidate, or update the existing one if the email or LinkedIn URL already exists.
+
+        links: their other links (GitHub, portfolio, Google Scholar, X...), as web addresses only; github,
+        portfolio and urls work too. On a person already saved, new links are added and none are removed.
 
         other_emails: more addresses for someone new (a personal one next to the work one). They count when
         matching, so a saved person is found by any of their addresses. You can't add an address to a person who
@@ -1184,7 +1399,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        "what this person is called, then save them with that name.")
             return _result(f"{warning}\n{DATA_NOTE}\n- Name sent: {' '.join(name.split())[:200]}",
                            {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
-                            "incoming_name": name, "warning": warning, "data_note": DATA_NOTE})
+                            "incoming_name": name, "warning": warning, "data_note": DATA_NOTE,
+                            "recruiter_note": "Nothing was saved. That name reads like a sentence, not a person's name."})
         notes_text, headline_unused = (notes or "").strip(), ""
         if headline and headline.strip():  # a LinkedIn headline is the current title, and "X at Y" the company too
             head_title, head_company = split_headline(headline)
@@ -1202,9 +1418,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             saved_now = store.find_duplicate(email, linkedin_url)
             if saved_now is None or not (saved_now.get("about") or "").strip():
                 about, note_as_about = notes_text, True  # the notes are the about when there is none yet
+        link_list = clean_links(links, exclude=(linkedin_url, website)) if links not in (None, [], "") else None
         data = _given(name=name, email=email, phone=phone, linkedin_url=linkedin_url, website=website,
                       current_title=current_title, current_company=current_company, location=location,
-                      about=about, tags=tags, source=source)
+                      about=about, tags=tags, source=source, links=link_list or None)
         more = [e.strip().lower() for e in (other_emails or []) if isinstance(e, str) and _EMAIL_RE.match(e.strip())]
         someone_else: list[dict[str, Any]] = []
         if (not create_anyway and store.find_duplicate(email, linkedin_url) is None
@@ -1228,7 +1445,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 return _result(f"{warning}\n{DATA_NOTE}\n{lines}",
                                {"created": False, "saved_status": "Not saved", "needs_confirmation": True,
                                 "incoming_name": name, "possible_duplicates": dupes,
-                                "warning": warning, "data_note": DATA_NOTE})
+                                "warning": warning, "data_note": DATA_NOTE,
+                                "recruiter_note": (f"Nothing was saved yet. {name} is already saved"
+                                                   if n == 1 else f"Nothing was saved yet. {n} people named {name} are already saved")
+                                + ". Is this one of them, or someone new?"})
         held, held_why = _identity_hold(store, data)
         history = _history(work_history)
         over_held: list[str] = []
@@ -1274,7 +1494,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return _result(f"{warning}\n{DATA_NOTE}\n- {_line(other)}",
                            {"created": False, "conflict": True, "changed": [], "saved_status": "Not saved",
                             "data_note": DATA_NOTE, "existing": {**brief(other), "app_url": page},
-                            "incoming_name": exc.incoming_name, "warning": warning, "app_url": page})
+                            "incoming_name": exc.incoming_name, "warning": warning, "app_url": page,
+                            "recruiter_note": (f"Nothing was saved. That {what} already belongs to {other['name']}, "
+                                               f"but it came with the name {exc.incoming_name}. Are they the same person?")})
         if created and guarded:
             site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
@@ -1289,7 +1511,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             notes.append(f"Not saved, because save_candidate has no field for them: {', '.join(ignored)}. Put "
                          "skills in tags and anything else worth keeping in about or notes. It takes: name, email, phone, "
                          "linkedin_url, website, current_title (or title, headline), current_company (or company), "
-                         "location, about (or notes), tags (or skills), work_history, source, other_emails.")
+                         "location, about (or notes), tags (or skills), work_history, source, other_emails, links.")
         if headline_unused and (headline_unused.casefold() != (current_title or "").strip().casefold()):
             notes.append(f"Did not use the headline {headline_unused[:80]!r}, as you also sent a current_title. "
                          "Put it in notes or about if you want it kept.")
@@ -1358,8 +1580,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         work_history: list[WorkEntry] | None = None,
         source: str | None = None,
         last_contacted_at: str | None = None,
+        links: list[str] | str | None = None,
     ) -> CallToolResult:
         """Change fields on a candidate by id. Pass an empty string (or empty list) to clear a field.
+
+        links: other links (GitHub, portfolio, Google Scholar...), web addresses only. They are added to the
+        person's links; you can't remove one here (the recruiter does that in the app).
 
         You can clear at most one field per call. Name, email, phone and LinkedIn URL say who the person is: you
         can change one of them per person every 10 minutes; anything more needs the recruiter in the app. A new name must still look like the same person ("Priya R." to "Priya Raman" is fine; a
@@ -1374,6 +1600,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                       current_title=current_title, current_company=current_company, location=location,
                       about=about, tags=tags, source=source, last_contacted_at=last_contacted_at)
         current = store.get_candidate(candidate_id)
+        link_list = (clean_links(links, exclude=(linkedin_url or current.get("linkedin_url"),
+                                                 website or current.get("website")))
+                     if links not in (None, [], "") else [])
         if name and sentence_like_name(name):
             raise ValueError("No change made. The new name reads like a sentence, not a person's name. Ask the "
                              "recruiter what this person is called.")
@@ -1417,6 +1646,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError(_cap_text())
         cand = store.update_candidate(candidate_id, work_history=history, by="ai", **data)
         changed = cand.pop("_changed", [])
+        links_skipped: list[str] = []
+        if link_list:  # links only ever get added; not a replaced value, so no edit budget is used
+            more_links = store.add_links(candidate_id, link_list, by="ai")
+            links_skipped = more_links.pop("_links_skipped", [])
+            if more_links.pop("_changed", []):
+                changed = [*changed, "links"]
+            cand = {**cand, "links": more_links.get("links", cand.get("links"))}
         who = f"{quoted(cand['name'])} (id {candidate_id})"
         if not changed:
             sentence = (f"Nothing changed on {who} yet." if waiting
@@ -1428,6 +1664,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if waiting:
             sentence += " " + _wait_text(waiting, part=bool(changed))
         out: dict[str, Any] = {**_slim(cand), "changed": changed}
+        if links_skipped:
+            out["links_not_added"] = links_skipped
+            sentence += f" Not added, as a person can have 10 other links: {', '.join(links_skipped)}."
         if waiting:
             out["pending_review"] = {"id": waiting["id"], "summary": waiting["summary"]}
         if lead:
@@ -1527,6 +1766,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """Log one entry for log_activity: (sentence, structured result, the AI actions it made)."""
         if reply and not (summary or "").strip():
             summary = "Replied"
+        if what_kind == "interview":
+            _check_note_length(summary, "interview note")
         if what_kind == "interview" and not (when and str(when).strip()):
             raise ValueError("No change made. An interview needs a start time in `when`, with a time zone "
                              "(2026-11-12T15:00:00-08:00, or 2026-11-12 3:00 PM PT). Ask the recruiter when it is "
@@ -1754,6 +1995,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """
         if reason is None and note is not None and outcome is None and (when or cancel):
             reason, note = note, None  # a note sent with a new time is the reason it moved
+        _check_note_length(note, "interview note")
+        _check_note_length(reason, "reason")
         before = store.get_interview(interview_id)
         moves = bool(when and str(when).strip()) and parse_when(when) != before["at"]
         records = cancel or moves or outcome is not None or note is not None  # what replaces a saved value
@@ -1806,19 +2049,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     @mcp.tool(annotations=WRITE)
     def add_interview_feedback(interview_id: int, feedback: str, interviewer: str | None = None,
                                verdict: Annotated[str | None, WithJsonSchema({
-                                   "anyOf": [{"type": "string", "enum": [v for v, _ in interviews.VERDICT_CHOICES]},
+                                   "anyOf": [{"type": "string", "description": "strong yes, yes, lean yes, mixed, lean no, "
+                                              "no or strong no (underscores like lean_yes work too)"},
                                              {"type": "null"}], "default": None})] = None) -> CallToolResult:
         """Save one interviewer's feedback on an interview, in their own words (free text, no rubric).
 
         interview_id is from get_candidate's timeline or log_activity (logged.id). `interviewer` is who said it
         (for a panel, call once per person). verdict, only when that person gave one, is their own verdict on
-        the session (strong yes, yes, mixed, no, strong no); on a joint or panel session each person keeps theirs,
+        the session (strong yes, yes, lean yes, mixed, lean no, no, strong no); on a joint or panel session each person keeps theirs,
         and the session's outcome rolls up from everyone's latest (all yes is the least sure yes, a split is
         mixed). Feedback is kept with the interview, shows in the app's Decide view and in compare_finalists.
         The same words from the same person twice are kept once. The recruiter sees it under Changes and can
         undo it there.
         """
-        before = store.get_interview(interview_id)
+        try:
+            before = store.get_interview(interview_id)
+        except NotFound:
+            raise ValueError(f"There is no interview with id {interview_id}. Use list_interviews to see session ids "
+                             "(or get_candidate for one person's interviews).") from None
         _check_note_cap(store, before["candidate_id"], "Nothing saved")
         if verdict is not None:
             interviews._verdict_key(verdict)  # a bad word is refused before anything waits or is saved
@@ -1872,7 +2120,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             "interviewer": iv["data"].get("interviewer"), "feedback": notes}),
             "app_url": app_url(f"/candidates/{iv['candidate_id']}#iv-{iv['id']}")})
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("interviews"))
     def list_interviews(week: str | None = None) -> CallToolResult:
         """Every interview booked that week across all jobs (Monday to Friday, plus Saturday and Sunday when
         something is booked then), grouped into onsite loops, with each interviewer's load, clashes (an
@@ -1881,14 +2129,23 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         "next"; empty means this week (next week on a weekend)."""
         day = interviews.week_day(week)
         w = interviews.week(store, day)
+        zone = shown_zone()
         data = {"start": w["start"].isoformat(), "end": w["end"].isoformat(), "total": w["total"],
+                "tz": getattr(zone, "key", None), "now": now_iso(),
                 "loops": [{**{k: lp[k] for k in ("candidate_id", "name", "job_id", "job", "size")},
-                           "sessions": [_slim({"interview_id": x["interview_id"], "at_local": _local(x["at"]),
-                                               "name": x["name"], "interviewer": x["interviewer"], "status": x["status"],
+                           "candidate_url": app_url(f"/candidates/{lp['candidate_id']}"),
+                           "job_url": app_url(f"/jobs/{lp['job_id']}") if lp.get("job_id") else None,
+                           "sessions": [_slim({"interview_id": x["interview_id"], "at": x["at"], "end": x.get("end"),
+                                               "at_local": _local(x["at"]), "all_day": x.get("all_day") or None,
+                                               "candidate_tz": x.get("candidate_tz"),
+                                               "name": x["name"], "interviewer": x["interviewer"],
+                                               "interviewers": x.get("interviewers"), "status": x["status"],
+                                               "result": x.get("result"),
                                                "needs_outcome": x["needs_outcome"] or None,
                                                "feedback_owed_by": x["owed"] or None,
                                                "feedback_due": x.get("feedback_due"),
-                                               "feedback_overdue": x.get("feedback_overdue") or None}) for x in lp["sessions"]]}
+                                               "feedback_overdue": x.get("feedback_overdue") or None,
+                                               "app_url": app_url(x["href"])}) for x in lp["sessions"]]}
                           for lp in w["loops"]],
                 "load": [{"interviewer": e["name"], "sessions": e["count"]} for e in w["load"]],
                 "clashes": [{"kind": c["kind"], "text": c["text"], "interview_ids": c["ids"]} for c in w["clashes"]],
@@ -1900,12 +2157,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   unavailable: list[str] | None = None, candidate_tz: str | None = None) -> CallToolResult:
         """Propose an interview loop for a candidate: a slot for each session in the job's loop template (set on the
         job's Loop page in the app), over the next working days, inside the recruiter's working hours, inside
-        8 AM to 6 PM where the candidate and each interviewer are (when their time zones are known), and clear
+        8 AM to 6 PM where the candidate is and inside each interviewer's own working hours where they are (9 AM to
+        5 PM unless the recruiter set others; their time zones count when known), and clear
         of the interviewers' and the candidate's booked sessions. `candidate_tz` is the candidate's own time zone
         (America/Chicago, Asia/Kolkata, or PT, ET); the one saved for them is used when you leave it out. Warns about heavy days and busy interviewers,
         names who else is free to swap in, and returns paste-ready invite text for each interviewer and for the
         candidate (in the structured result: show it to the recruiter). Nothing is booked and no calendar is
-        written. `start` is the first day to try (2026-11-09; default tomorrow). `unavailable` names interviewers
+        written. `start` is the first day to try (2026-11-09; default tomorrow); add a time
+        (2026-11-12T13:00) for not before 1 PM that day, in the recruiter's time zone. `unavailable` names interviewers
         who are out; others are swapped in. After the recruiter agrees, book_loop logs the sessions. A job with no
         template yet needs one first: set_loop_template saves it."""
         job = store.get_job(job_id)
@@ -1915,9 +2174,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "app_url": app_url(f"/jobs/{job_id}/loop")})
         if candidate_id is None:
             raise ValueError("Which candidate? Send candidate_id (search_candidates finds it).")
+        reports.apply_zone(store)  # a zone saved in the app since this server started counts now
         p = loops.plan(store, job_id, candidate_id, start, unavailable, candidate_tz=candidate_tz)
         data = {"data_note": DATA_NOTE, "candidate_id": candidate_id, "job_id": job_id,
-                "candidate_tz": p.get("candidate_tz"),
+                "candidate_tz": p.get("candidate_tz"), "time_zone": p.get("zone"), "time_zone_note": p.get("zone_note"),
                 "sessions": [_slim({"session": x["name"], "minutes": x["minutes"], "at": x["at"], "at_local": x["at_local"],
                                     "interviewer": x["interviewer"], "swap_in": x["others"], "warnings": x["warnings"],
                                     "already_booked": x["already"] or None}) for x in p["sessions"]],
@@ -1928,7 +2188,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                      if p["candidate_invite"] else None),
                 "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
         return _result(DATA_NOTE + "\n" + loops.plan_text(p) + "\nInvite text for each interviewer and the "
-                       "candidate is in the structured result. The recruiter sends it from their own mail.", data)
+                       "candidate is in the structured result. The recruiter sends it from the recruiter's own mail.", data)
 
     def _template_write(job_id: int, sessions: Any, hours: str | None = None) -> tuple[str, dict[str, Any]]:
         """Save (or hold, in Cautious mode) a job's loop template: the sentence and the record."""
@@ -1974,6 +2234,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         step. Each session is logged like log_activity does (summary "System design (60
         min)", so the length counts for clashes), listed on Changes where the recruiter can undo each one, and
         held for review in Cautious mode. No calendar is written and nothing is sent."""
+        reports.apply_zone(store)
         p = loops.plan(store, job_id, candidate_id, start, unavailable)
         tpl = {x["name"].casefold(): x for x in loops.get_template(store, job_id)["sessions"]}
         warn: list[str] = []
@@ -2041,7 +2302,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 "warning": " ".join(warn) or None, "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
         return (_said if waiting else _plain)(sentence, _slim(data))
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("owed"))
     def list_feedback_owed(job_id: int | None = None) -> CallToolResult:
         """Interviewers who still owe feedback on sessions that have taken place (up to two weeks back), for
         people still in play on an open job, the same people Decide and compare_finalists name. A session under a
@@ -2058,7 +2319,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                               "chased")}) for o in r["owed"]]} for r in rows],
             "people": [{"name": p["name"], "email": p["email"], "owes": p["count"], "candidates": p["candidates"],
                         "interview_ids": [i["interview_id"] for i in p["items"]], "subject": p["subject"],
-                        "body": p["body"]} for p in interviews.owed_people(rows)],
+                        "body": p["body"], "chased": p["chased"],
+                        "items": [_slim({"interview_id": i["interview_id"], "candidate_id": i["candidate_id"],
+                                         "candidate": i["name"], "job": i.get("job"), "session": i["session"],
+                                         "day": i["day"], "at": i["at"], "days_overdue": i.get("days_overdue"),
+                                         "chased": i.get("chased", True),
+                                         "candidate_url": app_url(f"/candidates/{i['candidate_id']}"),
+                                         "job_url": app_url(f"/jobs/{i['job_id']}") if i.get("job_id") else None})
+                                  for i in p["items"]]} for p in interviews.owed_people(rows)],
             "app_url": app_url("/interviews")}
         return _result(DATA_NOTE + "\n" + interviews.feedback_owed_text(rows), data)
 
@@ -2075,8 +2343,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """
         d = decide.finalists(store, job_id, candidate_ids or None)
         job = d["job"]
+        stage_list = store.job_stages(job_id)
+
+        def next_stage(stage: str) -> str | None:  # the next stage in the job's pipeline that is still in play
+            names = [x["name"] for x in stage_list]
+            if stage not in names:
+                return None
+            for x in stage_list[names.index(stage) + 1:]:
+                if x.get("outcome") != "lost":
+                    return x["name"]
+            return None
+
         data = {"job": _job_out(_slim(job)), "data_note": DATA_NOTE, "people": [_slim({
-            **p, "app_url": app_url(f"/candidates/{p['candidate_id']}"),
+            **p, "next_stage": next_stage(p.get("stage") or ""), "app_url": app_url(f"/candidates/{p['candidate_id']}"),
             "interviews": [_slim({**i, "feedback": i["feedback"] or None}) for i in p["interviews"]],
             "todos": p["todos"] or None}) for p in d["people"]],
             "more": d["more"], "offer_stage": d["offer_stage"], "out_stage": d["out_stage"],
@@ -2084,21 +2363,28 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return _result(decide.finalists_text(d), data)
 
     # ------------------------------------------------------------------ jobs
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("jobs"))
     def list_jobs(status: str | None = "open") -> CallToolResult:
         """Jobs with their stages and how many candidates are in each. status: open, on_hold, closed, or null for all.
-        The text has one line per job, then the jobs as JSON."""
+        The text has one bulleted line per job with its link, and the structured result has every job."""
         jobs = [_job_out(_slim({**j, "stage_counts": {s["name"]: s["count"] for s in j["stage_counts"]}}))
                 for j in store.list_jobs(status)]
+        soon: dict[int, str] = {}
+        for iv in store.upcoming_interviews(days=60):  # the next interview on each job, for the in-chat Jobs view
+            if iv.get("job_id") and iv["job_id"] not in soon:
+                soon[iv["job_id"]] = iv["at"]
         for j in jobs:  # Cautious mode: what waits for the recruiter is read back as waiting
             waiting = review.ai_lines(store, job_id=j["id"])
             if waiting:
                 j["pending_review"] = waiting
+            j["app_url"] = app_url(f"/jobs/{j['id']}")
+            if j["id"] in soon:
+                j["next_interview"] = soon[j["id"]]
 
         def line(j: dict[str, Any]) -> str:
             openings, hired = j.get("openings") or 1, j.get("hired_count", 0)
             seats = f"{openings} opening{'' if openings == 1 else 's'}"
-            bits = [f"{j.get('active_count', 0)} in play",
+            bits = [f"{j.get('active_count', 0)} in the pipeline",
                     f"{hired} hired for {seats} (over by {hired - openings})" if hired > openings
                     else f"{hired} of {openings} hired" if openings > 1 else f"{hired} hired"]
             if j.get("hiring_manager"):
@@ -2107,12 +2393,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return (f"- {_job_name(j)} (job id {j['id']}, {str(j.get('status', 'open')).replace('_', ' ')}): "
                     + ", ".join(bits) + (f". In stages: {stages}." if stages else ". No one in the pipeline yet.")
                     + (" Waiting for the recruiter's review, not applied yet: " + "; ".join(j["pending_review"]) + "."
-                       if j.get("pending_review") else ""))
+                       if j.get("pending_review") else "")
+                    + (f" Next interview: {_local(j['next_interview'])}." if j.get("next_interview") else "")
+                    + f"\n  Open it: {j['app_url']}")
 
         which = {"open": "open ", "on_hold": "on-hold ", "closed": "closed "}.get(status or "", "")
         head = f"{len(jobs)} {which}job{'' if len(jobs) == 1 else 's'}" + (":" if jobs else ".")
-        text = "\n".join([head, *(line(j) for j in jobs), json.dumps(jobs, ensure_ascii=False, default=str)])
-        return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent={"jobs": jobs})
+        text = "\n".join([head, *(line(j) for j in jobs)])
+        return CallToolResult(content=[TextContent(type="text", text=text)],
+                              structuredContent={"jobs": jobs, "app_url": app_url("/jobs")})
 
     @mcp.tool(annotations=WRITE)
     def create_job(title: str, company: str | None = None, location: str | None = None,
@@ -2481,23 +2770,47 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         nums = actions.job_numbers(store, job_id)
         left_out = actions.omitted_stages(store, job_id, omit_stages)
         shown = actions.status_numbers(store, job_id, omit_stages)
-        stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [
-            _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"], "current_title": a["current_title"],
-                   "current_company": a["current_company"], "since": a["stage_changed_at"],
-                   "days_in_stage": _days_since(a["stage_changed_at"]), "next_interview": next_iv.get(a["candidate_id"]),
-                   "app_url": app_url(f"/candidates/{a['candidate_id']}")})
-            for a in s["candidates"]]} for s in store.pipeline_by_stage(job_id)]
+        by_stage = store.pipeline_by_stage(job_id)
+        sig = decide.signals(store, job_id, [a["candidate_id"] for s in by_stage if s["outcome"] == "open"
+                                             for a in s["candidates"]])
+
+        def card(a: dict[str, Any]) -> dict[str, Any]:  # what a board card shows: stage time, verdicts, feedback owed
+            g = sig.get(a["candidate_id"]) or {}
+            return _slim({"candidate_id": a["candidate_id"], "name": a["candidate_name"],
+                          "current_title": a["current_title"], "current_company": a["current_company"],
+                          "since": a["stage_changed_at"], "days_in_stage": _days_since(a["stage_changed_at"]),
+                          "next_interview": next_iv.get(a["candidate_id"]), "verdicts": g.get("tally"),
+                          "sessions_done": g.get("done"), "feedback_owed": len(g["owed"]) if g.get("owed") else None,
+                          "owed_by": g.get("owed", [])[:3], "app_url": app_url(f"/candidates/{a['candidate_id']}")})
+        stages = [{"name": s["name"], "outcome": s["outcome"], "candidates": [card(a) for a in s["candidates"]]}
+                  for s in by_stage]
         text = actions.job_status_text(store, job_id, omit_stages=omit_stages)
         total = sum(len(s["candidates"]) for s in stages)
         hidden = actions.hidden_note(store, job_id, omit_stages)
         booked = _booked_left_out(stages, left_out)
         content = [TextContent(type="text", text=text)]
         if total:  # the note, and who was left out (for the recruiter only), sit apart from the paste text
-            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}." if hidden else "")
+            gap = (f"\nThe update says {shown['active']} in process. {nums['active']} are in the pipeline: the update "
+                   "leaves out the stages named above." if shown["active"] != nums["active"] else "")
+            content.append(TextContent(type="text", text=PASTE_NOTE + (f"\n{HIDDEN_LEAD} {hidden}.{gap}" if hidden else "")
                                        + (f"\n{booked['text']}" if booked else "")))
+        seen = []  # verdicts and feedback owed, which the board cards show: for the recruiter, never pasted
+        for st in stages:
+            for c in st["candidates"]:
+                bits = [x for x in (c.get("verdicts"), "feedback still owed by " + ", ".join(c["owed_by"])
+                                    + (f" and {c['feedback_owed'] - len(c['owed_by'])} more"
+                                       if c.get("owed_by") and c["feedback_owed"] > len(c["owed_by"]) else "")
+                                    if c.get("feedback_owed") else None) if x]
+                if bits:
+                    seen.append(f"{c['name']} ({'; '.join(bits)})")
+        if seen:
+            content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} interview feedback so far: "
+                                       + "; ".join(seen) + "."))
         offer_lines = offers.recruiter_lines(store, job_id)  # status words only, never pasted
         if offer_lines:
             content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} offers: " + "; ".join(offer_lines) + "."))
+        content.append(TextContent(type="text", text=f"{HIDDEN_LEAD} open this job in Talent Search: "
+                                   f"{app_url('/jobs/' + str(job_id))}"))
         if limit is not None:
             cap = max(1, min(limit, 500))
             for st in stages:
@@ -2510,7 +2823,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             data["interviews_left_out"] = booked["people"]
         return CallToolResult(content=content, structuredContent=data)
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("digest"))
     def status_digest(company: str | None = None, omit_stages: list[str] | None = None,
                       hiring_manager: str | None = None) -> CallToolResult:
         """One paste-ready status update for every open job, or only one company's (a client or team) or one
@@ -2538,6 +2851,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "hired": r["hired"], "openings": r["openings"], "openings_filled": r["filled"],
                            "job_ids": [j["id"] for j in r["jobs"]]} for r in rollup if hiring_manager is None],
             "on_hold": [{"job_id": j["id"], "title": j["title"], "company": j.get("company")} for j in held],
+            # for the in-chat Digest view: the client-safe update, the notes that are not part of it, and job links
+            "update_text": text, "recruiter_notes": hidden,
+            "job_links": [{"id": j["id"], "title": j["title"], "company": j.get("company"), "app_url": app_url(f"/jobs/{j['id']}")}
+                          for r in rollup for j in r["jobs"]] + [{"id": j["id"], "title": j["title"], "company": j.get("company"),
+                                                                  "app_url": app_url(f"/jobs/{j['id']}")} for j in held],
             "app_url": app_url("/jobs")}
         if over:
             data["hired_over_openings"] = [{k: o[k] for k in ("job_id", "title", "hired", "openings")} for o in over]
@@ -2564,6 +2882,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 line += f". Fit: {p['fit']}"
             if p.get("tags"):
                 line += f". Skills: {', '.join(p['tags'])}"
+            if p.get("links"):
+                line += ". " + text_line(p["links"])
             if p.get("status") == "passed":
                 line += ". Passed" + (f": {p['pass_reason']}" if p.get("pass_reason") else "")
             elif p.get("status") == "kept" and p.get("candidate_id"):
@@ -2579,12 +2899,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         or with the buttons on the Shortlist card in the chat.
 
         Up to 25 people per call, each with name, linkedin_url (their linkedin.com/in/ link), title, company,
-        location, email and fit (one line on why they fit this job; reason works too). Add about (2 to 4 sentences), tags (skills) and
+        location, email, links (GitHub, portfolio or other web addresses) and fit (one line on why they fit this job; reason works too). Add about (2 to 4 sentences), tags (skills) and
         work_history when you know them: a kept person is saved with them, so search finds them later.
         People already proposed, kept or passed on for this
         job, or already in its pipeline, are skipped and named in the reply. People already saved are flagged
         with their candidate id and the jobs they're in. Undo in the app takes back the ones still waiting."""
         ignored = sorted({k for p in people for k in (p.model_extra or {})})
+        for p in people:  # a link that isn't a web address refuses the call, before anything is added
+            clean_links(p.links, exclude=(p.linkedin_url,)) if p.links else None
         if len(people) > ai_caps.proposed_left(store):
             raise ValueError(ai_caps.limit_text(f"propose {ai_caps.PROPOSE_CAP} people for Shortlists",
                                                 ai_caps.proposed_left(store)))
@@ -2605,7 +2927,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             shown = ", ".join(x[:40] for x in ignored[:8]) + (f" and {len(ignored) - 8} more" if len(ignored) > 8 else "")
             sentence += (f" Not saved, as the Shortlist doesn't take {'it' if len(ignored) == 1 else 'them'}: {shown}. "
                          "It takes name, linkedin_url, title (or headline), company, location, email, fit (or reason), "
-                         "source, about, tags and work_history.")
+                         "source, about, tags, links and work_history.")
         guard_site = next((x for x in listed if x), None)
         if guard_site:
             kept_names = {a.get("name") for a in added}  # the people actually added, not the ones skipped
@@ -2642,7 +2964,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                              "keep_stages": shortlist.keep_stages(store, job_id)}),
                               job_id, [p["id"] for p in rows if p.get("status") == "proposed"])
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("followups"))
     def list_followups(job_id: int | None = None, days_ahead: int = 0) -> CallToolResult:
         """Follow-ups due today or earlier, from each job's outreach sequence (set on the job page in the app),
         with the text to paste for each. days_ahead: also list the ones due in the next N days. The app sends
@@ -2657,7 +2979,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         rows = outreach.due(store, job_id, days_ahead=ahead)
         out = [{"candidate_id": p["candidate_id"], "name": p["name"], "job_id": p["job_id"], "job": p["job"],
                 "step": p["step"], "steps": p["steps"], "label": p["label"], "due_on": p["due_on"],
-                "due": outreach.due_text(p), "draft": p["draft"]} for p in rows]
+                "due": outreach.due_text(p), "draft": p["draft"],
+                "candidate_url": app_url(f"/candidates/{p['candidate_id']}"),
+                "app_url": app_url(f"/jobs/{p['job_id']}/outreach")} for p in rows]
         if not out:
             return _result("No follow-ups due" + (f" in the next {ahead} days" if ahead else " today") + ".",
                            {"followups": [], "app_url": app_url("/")})
@@ -2951,7 +3275,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     # Only hosts that say they show MCP Apps views (and hide app-only tools from the model) see the card tools.
     async def listed_tools() -> list[Any]:
         tools = await FastMCP.list_tools(mcp)
-        return tools if _client_apps(mcp) is True else [t for t in tools if t.name not in CARD_TOOLS]
+        return tools if _client_apps(mcp) is True else [t for t in tools if t.name not in CARD_TOOLS + APP_ONLY_READ]
 
     mcp.list_tools = listed_tools  # type: ignore[method-assign]
     mcp._mcp_server.list_tools()(listed_tools)
@@ -3028,11 +3352,17 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 _IGNORED.reset(token)
             if d.get("conflict") or d.get("needs_confirmation"):
                 groups["needs_answer"].append(_slim({
-                    "name": person.name, "reason": d.get("warning"), "existing": d.get("existing"),
-                    "possible_duplicates": d.get("possible_duplicates")}))
+                    "name": person.name, "reason": d.get("warning"), "recruiter_note": d.get("recruiter_note"),
+                    "existing": d.get("existing"),
+                    "possible_duplicates": (d.get("possible_duplicates") or [])[:25],
+                    "more_duplicates": max(0, len(d.get("possible_duplicates") or []) - 25) or None}))
                 continue
             kept = [*kept_saved, *(k for k in d.get("kept") or [] if k not in kept_saved)]
             row = _slim({"id": d["id"], "name": d["name"], "saved_status": d.get("saved_status"),
+                         "current_title": d.get("current_title"), "current_company": d.get("current_company"),
+                         "location": d.get("location"), "linkedin_url": d.get("linkedin_url"),
+                         "email": d.get("email"), "phone": d.get("phone"), "website": d.get("website"),
+                         "links": (d.get("links") or [])[:6], "no_contact": not (d.get("email") or d.get("linkedin_url")) or None,
                          "held": (d.get("identity_kept") or []) + (d.get("budget_kept") or []), "kept": kept,
                          "ignored_fields": d.get("ignored_fields"), "notes": notes,
                          "app_url": app_url(f"/candidates/{d['id']}")})
@@ -3070,6 +3400,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.append(f"{label}:")
             for r in groups[key]:
                 line = f"- {quoted(r['name'])}" + (f" (id {r['id']})" if r.get("id") else "")
+                role = " at ".join(x for x in (r.get("current_title"), r.get("current_company")) if x)
+                if role or r.get("location"):
+                    line += ", " + ", ".join(x for x in (role, r.get("location")) if x)
+                if _contact_bits(r):
+                    line += ", " + _contact_bits(r)
+                if r.get("no_contact"):
+                    line += ". No email or LinkedIn saved, so there is no way to reach them yet"
                 if r.get("saved_status") and key == "updated":
                     line += f": {r['saved_status']}"
                 if r.get("reason"):
@@ -3085,6 +3422,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 if r.get("pipeline_error"):
                     line += f". Not added to the job: {r['pipeline_error'].rstrip('.')}"
                 lines.append(line + ".")
+                for m in r.get("possible_duplicates") or []:  # who they might be, so the answer can name them
+                    lines.append(f"  - Could be {_line(m)}")
+                if r.get("more_duplicates"):
+                    lines.append(f"  - and {r['more_duplicates']} more saved under this name")
+                if r.get("existing"):
+                    lines.append(f"  - Matches {_line(r['existing'])}")
         kids = [r["id"] for r in store._rows("SELECT id FROM ai_actions WHERE id > ? AND kind IN"
                                              " ('candidate', 'profile', 'pipeline_add') ORDER BY id", (mark,))]
         batch_id = None
@@ -3107,7 +3450,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 **({"site_guard_note": site_guard.result_note(guard_site)} if guard_site else {})}
         return _said("\n".join(lines), data)
 
-    @mcp.tool(annotations=READ)
+    @mcp.tool(annotations=READ, meta=tool_meta("digest"))
     def client_report(client: str | None = None, since: str | None = None, hiring_manager: str | None = None,
                       company: str | None = None) -> CallToolResult:
         """A client's update for a period: where people stand by stage group (each person once), who moved (from
@@ -3169,6 +3512,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         data.update({"client": rep["client"]["name"], "time_zone": rep["client"].get("time_zone"),
                      "last_update_sent_at": rep["client"].get("last_update_sent_at"),
                      "jobs": rep["jobs"], "moves": rep["moves"][:100], "upcoming_interviews": rep["upcoming"],
+                     "updates": [{"for": (r["manager"] or "jobs with no hiring manager") if len(parts) > 1 else None,
+                                  "text": reports.report_text(r)} for r in parts],
+                     "recruiter_notes": notes,
+                     "job_links": [{"id": j["id"], "title": j["title"], "company": rep["client"]["name"],
+                                    "app_url": app_url(f"/jobs/{j['id']}")} for j in rep["jobs"]],
                      "left_out": rep["not_shown"], "overfilled": rep["overfilled"],
                      "app_url": app_url(f"/clients/{quote(rep['client']['slug'])}")})
         if rep.get("manager") is not None or len(parts) > 1:
@@ -3599,8 +3947,27 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         res = actions.action_items(store)
         keys = ("key", "kind", "title", "detail", "when", "candidate_id", "job_id", "suggestion_id", "interview_id",
                 "interview_ids", "interviewer", "stage", "next_stage", "due_on", "due_text", "overdue")
-        items = [_slim({k: i.get(k) for k in keys}) for i in res["items"]]
-        later = [_slim({k: i.get(k) for k in keys}) for i in res["next_week"]]
+        names: dict[tuple[str, int], str | None] = {}
+
+        def known(kind: str, i: int | None) -> str | None:  # who and which job a row is about, for the view's buttons
+            if i is None:
+                return None
+            if (kind, i) not in names:
+                try:
+                    if kind == "c":
+                        names[(kind, i)] = store.get_candidate(i)["name"]
+                    else:
+                        j = store.get_job(i)
+                        names[(kind, i)] = actions.job_label(j["title"], j.get("company"))
+                except (KeyError, LookupError, ValueError, NotFound):
+                    names[(kind, i)] = None
+            return names[(kind, i)]
+
+        def lean(i: dict[str, Any]) -> dict[str, Any]:
+            return _slim({**{k: i.get(k) for k in keys}, "name": known("c", i.get("candidate_id")),
+                          "job": known("j", i.get("job_id"))})
+        items = [lean(i) for i in res["items"]]
+        later = [lean(i) for i in res["next_week"]]
 
         def row(i: dict[str, Any]) -> str:
             return (f"- [{i['kind']}] {i['title']}" + (f" ({i['detail']})" if i.get("detail") else "")
@@ -3746,6 +4113,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return recipes.refresh_stale(guard=site_guard.enabled(store))
 
     _check_arguments(mcp)
+    _add_time_zone(mcp)
     _track_session(mcp, store, session, started)
     wording.install(mcp, store)  # own-company mode: "you" for "the recruiter" in what the tools say
     return mcp
@@ -3754,10 +4122,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 # Other names AI apps often send for a field, per tool.
 ARG_ALIASES = {
     "save_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
-                       "summary": "about", "linkedin": "linkedin_url"},
+                       "summary": "about", "linkedin": "linkedin_url", "linkedin_profile": "linkedin_url",
+                       "site": "website", "url": "website", "web": "website"},
     "set_candidate_color": {"colour": "color", "flag": "color", "id": "candidate_id"},
     "update_candidate": {"title": "current_title", "company": "current_company", "skills": "tags", "bio": "about",
-                         "summary": "about", "linkedin": "linkedin_url"},
+                         "summary": "about", "linkedin": "linkedin_url", "linkedin_profile": "linkedin_url",
+                         "site": "website", "url": "website", "web": "website"},
     "record_offer": {"base_salary": "salary", "base": "salary", "compensation": "salary", "comp": "salary",
                      "start": "start_date", "starts": "start_date", "deadline": "answer_by",
                      "respond_by": "answer_by", "answer_date": "answer_by", "note": "notes", "terms": "notes"},
@@ -3786,6 +4156,8 @@ ARG_ALIASES = {
 # Tools that save what they can and report the rest as ignored_fields, so a profile isn't lost over one
 # extra field. Every other tool refuses an argument it doesn't know.
 LENIENT_TOOLS = {"save_candidate"}
+# Tools whose github, portfolio and urls arguments are other names for links.
+LINK_TOOLS = {"save_candidate", "update_candidate"}
 _IGNORED: ContextVar[list[str]] = ContextVar("talent_ignored_args", default=[])
 
 
@@ -3810,6 +4182,25 @@ def _check_ids(tool: Any, name: str, args: dict[str, Any]) -> None:
                         + (f"; {where} shows them." if where else "."))
 
 
+def _add_time_zone(mcp: FastMCP) -> None:
+    """Every tool with an in-chat view says which time zone the recruiter's Settings use ("time_zone", an IANA
+    name), so the view shows times in it and not in the browser's zone. Left out when no zone is saved."""
+    manager = mcp._tool_manager
+    inner = manager.call_tool
+
+    async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
+        result = await inner(name, arguments, context=context, convert_result=convert_result)
+        tool = manager.get_tool(name)
+        meta = (getattr(tool, "meta", None) or {}).get("ui") or {}
+        zone = getattr(shown_zone(), "key", None)
+        data = getattr(result, "structuredContent", None)
+        if zone and meta.get("resourceUri") and isinstance(data, dict) and "time_zone" not in data:
+            result.structuredContent = {**data, "time_zone": zone}
+        return result
+
+    manager.call_tool = call_tool  # type: ignore[method-assign]
+
+
 def _check_arguments(mcp: FastMCP) -> None:
     """Map known aliases and refuse (or report) unknown arguments instead of silently dropping them."""
     manager = mcp._tool_manager
@@ -3820,6 +4211,8 @@ def _check_arguments(mcp: FastMCP) -> None:
         if tool is None:
             return await original(name, arguments, context=context, convert_result=convert_result)
         args = dict(arguments or {})
+        if name in LINK_TOOLS:
+            args = fold_link_args(args)
         for alias, real in ARG_ALIASES.get(name, {}).items():
             if alias in args and real not in args:
                 args[real] = args.pop(alias)
@@ -3845,8 +4238,20 @@ def _check_arguments(mcp: FastMCP) -> None:
         except ToolError as exc:
             if not isinstance(exc.__cause__, ValidationError):
                 raise
-            bad = list(dict.fromkeys(str(e["loc"][0]) for e in exc.__cause__.errors() if e.get("loc")))
+            errs = [e for e in exc.__cause__.errors() if e.get("loc")]
+            bad = list(dict.fromkeys(str(e["loc"][0]) for e in errs))
             read_only = bool(getattr(tool.annotations, "readOnlyHint", False))
+            missing = list(dict.fromkeys(str(e["loc"][0]) for e in errs if e.get("type") == "missing"))
+            if missing and len(missing) == len(bad):  # nothing sent for a required value: say what to send
+                asks = []
+                for k in missing:
+                    if k.endswith("_id"):
+                        where = ID_SOURCES.get(k)
+                        asks.append(f"Tell me which {k[:-3].replace('_', ' ')} ({k})."
+                                    + (f" {where} shows them." if where else ""))
+                    else:
+                        asks.append(f"{k} is needed.")
+                raise ToolError(("" if read_only else "No change made. ") + " ".join(asks)) from None
             raise ToolError(("" if read_only else "No change made. ") + f"{name} couldn't use "
                             + (", ".join(bad) if bad else "that input") + ": wrong kind of value."
                             + (f" It accepts: {', '.join(accepted)}." if accepted else "")) from None
@@ -3866,7 +4271,7 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
     bad = trust.size_problem(args)
     if bad:
         return bad
-    args = dict(args)
+    args = fold_link_args(dict(args)) if name in LINK_TOOLS else dict(args)
     for alias, real in ARG_ALIASES.get(name, {}).items():  # the same other names the tool itself takes
         if alias in args and real not in args:
             args[real] = args.pop(alias)
@@ -3891,6 +4296,8 @@ def _hold_problem(store: Store, tool: Any, name: str, args: dict[str, Any]) -> s
             bad = _save_search_blocker(store, args.get("name"))  # a taken name or a full list would be refused anyway
             if bad:
                 return f"No change made: {bad}"
+        if name in LINK_TOOLS and args.get("links") not in (None, [], ""):
+            clean_links(args["links"])  # a link that isn't a web address is refused now, not held
         if name == "set_candidate_color":
             clean_color(args.get("color"))  # a color that isn't one of the six is refused now, not held
         if name == "set_followup_sequence":

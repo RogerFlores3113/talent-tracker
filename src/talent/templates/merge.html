@@ -12,6 +12,7 @@
     {% for key, label in [('email', 'Email'), ('phone', 'Phone'), ('linkedin_url', 'LinkedIn'), ('website', 'Website'), ('location', 'Location'), ('source', 'Found via')] %}
     <dt>{{ label }}</dt><dd>{{ c[key] or '' }}{% if not c[key] %}<span class="muted">empty</span>{% endif %}</dd>
     {% endfor %}
+    <dt>Other links</dt><dd>{% if c.links %}{% for u in c.links %}{{ u | link_label }}{{ ', ' if not loop.last }}{% endfor %} <span class="fine">(both people's links are kept)</span>{% else %}<span class="muted">none</span>{% endif %}</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
     <dt>Jobs</dt><dd>{% if c.pipelines %}{% for p in c.pipelines %}{{ p.job_title }} ({{ p.stage }}){{ ', ' if not loop.last }}{% endfor %}{% else %}<span class="muted">none</span>{% endif %}</dd>
     <dt>Timeline</dt><dd>{{ c.timeline | length }}{{ '+' if c.timeline | length >= 5 }} entr{{ 'y' if c.timeline | length == 1 else 'ies' }}</dd>

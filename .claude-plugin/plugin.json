@@ -1,0 +1,14 @@
+{
+  "name": "talent-search",
+  "description": "Skills that teach your AI app to use Talent Search well: sourcing, triage, interviews, outreach, pipeline reviews, feedback and decisions.",
+  "author": {
+    "name": "Talent Search"
+  },
+  "homepage": "https://github.com/RogerFlores3113/talent-tracker",
+  "keywords": [
+    "recruiting",
+    "hiring",
+    "candidates",
+    "talent-search"
+  ]
+}

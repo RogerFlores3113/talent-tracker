@@ -11,6 +11,7 @@
   {% include "_job_tabs.html" %}
 </div>
 
+{% include "_zone_unset.html" %}
 <section class="panel" id="template">
   <div class="sec-head"><h2>Loop template</h2></div>
   <p class="fine">One session per line: name, minutes, then who may run it. Example: <code>System design | 60 | Priya Nair, Sam Okoye</code>. The first name listed is tried first.</p>
@@ -28,6 +29,7 @@
   <form method="get" action="/jobs/{{ job.id }}/loop" class="stack">
     <label>Candidate <select name="candidate" required><option value="">Pick someone</option>{% for a in people %}<option value="{{ a.candidate_id }}"{{ ' selected' if a.candidate_id == cand_id }}>{{ a.candidate_name }}</option>{% endfor %}</select></label>
     <label>First day to try (optional) <input type="date" name="start" value="{{ start }}"></label>
+    <label>Not before (optional, on that first day) <input type="time" name="start_time" value="{{ start_time }}"></label>
     <label>Candidate's time zone (optional) <input type="text" name="cz" value="{{ cz or '' }}" list="zone-list" autocomplete="off" placeholder="Saved or same as mine"></label>{{ zone_list() }}
     <label>Who is out (optional, names separated by commas) <input type="text" name="out" value="{{ out }}" maxlength="200"></label>
     <button class="btn primary" type="submit">Propose slots</button>

@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from .links import clean_links, link_label
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
 from . import sessions, skills
 from . import ai_caps, site_guard, trust
@@ -40,7 +41,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
-                    split_tags, to_dt)
+                    join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
 from .store import COLORS, clean_color, next_color
@@ -82,6 +83,19 @@ COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue":
 # Rainbow order as SQL: red first, then orange... purple, then people with no colour.
 COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
                   + f" ELSE {len(COLORS)} END")
+# Sorting a search by a column (qsort): its key, and whether the first click goes high to low. Without one the
+# search is in best match order.
+QSORTS = {
+    "name": (lambda c: (c.get("name") or "").casefold(), False),
+    "title": (lambda c: (c.get("current_title") or "").casefold(), False),
+    "company": (lambda c: (c.get("current_company") or "").casefold(), False),
+    "location": (lambda c: (c.get("location") or "").casefold(), False),
+    "contacted": (lambda c: c.get("last_contacted_at") or "", True),
+    "updated": (lambda c: c.get("updated_at") or "", True),
+    "added": (lambda c: c.get("id") or 0, True),
+    "job": (lambda c: (c.get("main_job") or "\U0010ffff").casefold(), False),
+    "stage": (lambda c: (c.get("main_stage") or "\U0010ffff").casefold(), False),
+}
 COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
 
 
@@ -105,7 +119,13 @@ TABLE_SORTS = {
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
     "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at", "added": "c.id",
+    # the person's main job (an open one first, then the latest move) and the stage they are in there
+    "job": "lower(coalesce((SELECT j.title FROM applications a JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id = c.id "
+           "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC LIMIT 1), ''))",
+    "stage": "lower(coalesce((SELECT a.stage FROM applications a JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id = c.id "
+             "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC LIMIT 1), ''))",
 }
+EMPTY_LAST = ("job", "stage")  # people with no job sort after everyone, in either direction
 
 
 class CandidateIn(BaseModel):
@@ -121,6 +141,7 @@ class CandidateIn(BaseModel):
     tags: str | list[str] | None = None
     source: str | None = None
     last_contacted_at: str | None = None
+    links: str | list[str] | None = None
 
 
 def _ago(iso: str | None, now: datetime | None = None) -> str:
@@ -356,6 +377,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["claude_link"] = recipes.claude_link
     env.filters["change_lines"] = change_lines
     env.filters["profile_label"] = profile_label
+    env.filters["link_label"] = link_label
     env.globals["version"] = __version__
     env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
     env.globals["themes"] = THEMES
@@ -375,6 +397,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["verdict_choices"] = interviews.VERDICT_CHOICES  # one interviewer's own verdict (Decide)
     env.globals["interview_label"] = interview_label  # 'Strong yes', 'Mixed', 'Passed'
     env.globals["interview_note"] = interview_note
+    env.globals["unlisted_label"] = interviews.UNLISTED_LABEL
+    env.globals["feedback_unlisted"] = lambda t, by: interviews.is_unlisted(t, by)
     env.globals["inhouse"] = lambda: actions.inhouse(store)  # "Hiring team" wording instead of "Client"
     env.globals["hiring_for_answered"] = lambda: actions.hiring_for_answered(store)
     env.globals["move_reasons"] = lambda: actions.reasons(store)
@@ -513,6 +537,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return ""
         pq = searchquery.parse_query(q)
         notes = list(getattr(result, "notes", None) or pq.notes)
+        said = getattr(result, "understood", None)
+        if said:  # "Looking for backend engineer in Boston, MA: 0 exact, 3 close"
+            return getattr(result, "summary", None) or said
         if not (pq.structured or pq.operator_mode or notes):
             return ""
         return " ".join([pq.explain(), *notes]).strip()
@@ -570,6 +597,24 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             out["none"] = max(0, all_total - sum(out[c] for c in COLORS))
         return out
 
+    def _attach_jobs(rows: list[dict[str, Any]]) -> None:
+        """Give each person row main_job, main_job_id, main_stage and more_jobs (an open job first, then the latest move)."""
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        by: dict[int, list[dict[str, Any]]] = {}
+        for a in store._rows(
+                f"SELECT a.candidate_id, a.job_id, a.stage, j.title, j.company, j.status FROM applications a "
+                f"JOIN jobs j ON j.id = a.job_id WHERE a.candidate_id IN ({marks}) "
+                "ORDER BY (j.status = 'open') DESC, a.stage_changed_at DESC, a.id DESC", tuple(ids)):
+            by.setdefault(a["candidate_id"], []).append(a)
+        for r in rows:
+            mine = by.get(r["id"]) or []
+            if mine:
+                r["main_job"] = mine[0]["title"] + (f" ({mine[0]['company']})" if mine[0]["company"] else "")
+                r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
+
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
@@ -577,8 +622,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
-              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = ""):
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
+              ids: str = "", qsort: str = "", qdir: str = ""):
         per = 100
+        # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
+        id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
         new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
         # The chips above the table are submit buttons: pressing the colour already chosen clears it.
         color = (color_pick if color_pick != color else "") if color_pick else color
@@ -602,13 +650,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
-        if q.strip():
+        if id_list:
+            marks = ",".join("?" * len(id_list))
+            rows = [store._hydrate(r) for r in store._rows(
+                f"SELECT c.* FROM candidates c WHERE c.id IN ({marks}) ORDER BY c.name COLLATE NOCASE", tuple(id_list))]
+            total = len(rows)
+            q = ""
+            result = None
+        elif q.strip():
             member["color"] = color or None
             if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
                                        limit=COLORED_FIRST_POOL, offset=0, **member)
                 ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
                                                             if h.candidate.get("color") in COLORS else len(COLORS)))
+                start = (page_no - 1) * per
+                rows = [h.candidate for h in ranked[start:start + per]]
+            elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                _attach_jobs([h.candidate for h in result.hits])
+                key, desc_first = QSORTS[qsort]
+                reverse = (qdir != "asc") if desc_first else (qdir == "desc")
+                ranked = sorted(result.hits, key=lambda h: key(h.candidate), reverse=reverse)
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
             else:
@@ -624,11 +688,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
             if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
                 order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
+            elif sort in EMPTY_LAST:
+                order = f"({sql_sort} = '') ASC, {sql_sort} {direction}, c.id DESC"
             else:
                 order = f"{sql_sort} {direction}, c.id DESC"
             rows = [store._hydrate(r) for r in store._rows(
                 f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        _attach_jobs(rows)
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -638,8 +705,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
+                                      ids=",".join(map(str, id_list)),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
@@ -650,6 +718,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    new_after=new_after_id, closest=bool(q.strip() and result.closest),
                    saved_notes=list(result.notes) if q.strip() else [],
                    colored_first=colored_first and bool(q.strip()),
+                   qsort=qsort if q.strip() and qsort in QSORTS and not colored_first else "",
+                   qdir=qdir if qdir in ("asc", "desc") else "",
                    color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
@@ -737,7 +807,60 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if already:
                 notice += f" {already} {'was' if already == 1 else 'were'} already in it and stayed where they are."
             return back(request, "/candidates", notice=notice)
-        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add to a job, or export.")
+        if action == "tag":
+            new = split_tags(str(form.get("tag") or ""))
+            if not new:
+                return back(request, "/candidates", error="Type the tag to add first. Nothing was changed.")
+            changed = had = skipped = 0
+            for cid in ids:
+                try:
+                    cur = store.get_candidate(cid)["tags"] or []
+                    have = {t.lower() for t in cur}
+                    if all(t.lower() in have for t in new):
+                        had += 1
+                        continue
+                    store.update_candidate(cid, tags=join_tags(split_tags([*cur, *new])), by="app")
+                    changed += 1
+                except (NotFound, ValueError):
+                    skipped += 1
+            notice = f"Added {', '.join(new)} to {changed} {'person' if changed == 1 else 'people'}."
+            if had:
+                notice += f" {had} already had {'it' if len(new) == 1 else 'them'}."
+            if skipped:
+                notice += f" {skipped} could not take another tag (their skills list is full)."
+            return back(request, "/candidates", notice=notice + " You can undo each under Changes.")
+        if action == "move":
+            raw_job = str(form.get("job_id") or "")
+            if not raw_job.isdigit():
+                return back(request, "/candidates", error="Pick the job whose stage you want to change.")
+            if not str(form.get("stage") or "").strip():
+                return back(request, "/candidates", error="Type the stage to move them to. Nothing was moved.")
+            job = job_or_404(int(raw_job))
+            try:
+                stage = store.resolve_stage(job["id"], str(form.get("stage") or "").strip())
+            except ValueError as exc:
+                return back(request, "/candidates", error=f"{exc} Nobody was moved.")
+            moved = same = 0
+            skipped_names: list[str] = []
+            for cid in ids:
+                row = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, job["id"]))
+                if row is None:
+                    skipped_names.append(str(cid))
+                    continue
+                if row["stage"] == stage["name"]:
+                    same += 1
+                    continue
+                store.move_stage(cid, job["id"], stage["name"], by="app")
+                moved += 1
+            notice = f"Moved {moved} {'person' if moved == 1 else 'people'} to {stage['name']} in {job['title']}."
+            if same:
+                notice += f" {same} {'was' if same == 1 else 'were'} already there."
+            if skipped_names:
+                k = len(skipped_names)
+                notice += (f" Skipped {k} {'person' if k == 1 else 'people'} who {'is' if k == 1 else 'are'} not in "
+                           "this job. Use Add to job for them.")
+            return back(request, "/candidates", notice=notice)
+        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add a tag, add to a job, move a stage, or export.")
 
     def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
                      more: dict[str, str]) -> list[dict[str, str]]:
@@ -1020,7 +1143,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_emails = _split_emails(form.get("other_emails"))
         if other_emails:
             data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
-        bad = _bad_email_fields(data, other_emails)
+        bad = {**_bad_email_fields(data, other_emails), **_bad_link_fields(data)}
         if bad:
             return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                         error="Nothing was saved. " + " ".join(bad.values()), field_errors=bad,
@@ -1073,7 +1196,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = _form_fields(form, keep_blank=True)
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
-        bad = _bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else [])
+        bad = {**_bad_email_fields(data, _split_emails(form.get("other_emails")) if "other_emails" in form else []),
+               **_bad_link_fields(data)}
         if bad:
             return page(request, "candidate_form.html",
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
@@ -1465,6 +1589,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             _save_lists(token, "preview", preview)
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
+                    years_cols={i for i, h in enumerate(header) if mapping[i] == "note"
+                                and importers._norm_header(h) in importers._YEARS_HEADERS},
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
                     export_phrase=importers.export_phrase(importers.detect_export(header)),
                     preview_lines=importers.preview_lines(preview) if preview else [],
@@ -1691,11 +1817,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return None
         try:
             if not tour.state(store)["active"]:
+                if request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
+                    return None  # never over the install buttons on their own
                 if request.query_params.get("tour") in tour.MODES:
                     tour.start(store, request.query_params["tour"])
                 elif tour.should_autostart(store):
                     tour.start(store, tour.FULL)
-            return tour.payload(store)
+            payload = tour.payload(store)
+            if payload and request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
+                if payload["steps"][payload["step"]].get("path") != "/connect":
+                    return None  # a tour running elsewhere doesn't cover the install buttons
+            return payload
         except Exception:  # the tour must never break a page
             log.exception("tour state could not be read")
             return None
@@ -1744,9 +1876,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error=str(exc))
         if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
             return RedirectResponse("/?" + urlencode({"notice": removal_notice(removed, "the demo data")}), status_code=303)
-        if mode == tour.SHORT:
-            return back(request)
-        return RedirectResponse("/", status_code=303)
+        return back(request)  # stay on the page the tour was ended from
 
     @app.post("/tour/skip")
     async def tour_skip(request: Request):
@@ -2650,27 +2780,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     # ------------------------------------------------- the loop planner
     def _loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
-                   cz: str = ""):
+                   cz: str = "", start_time: str = ""):
         job = job_or_404(job_id)
         tpl = loops.get_template(store, job_id)
         people = actions.in_play(store, job_id)
         plan, error = None, ""
         if candidate.isdigit() and tpl:
             try:
-                plan = loops.plan(store, job_id, int(candidate), start or None, interviews.interviewers(out),
+                plan = loops.plan(store, job_id, int(candidate),
+                                  (f"{start}T{start_time}" if start and start_time.strip() else start) or None,
+                                  interviews.interviewers(out),
                                   candidate_tz=cz or None)
             except (ValueError, NotFound) as exc:
                 error = str(exc)
         return page(request, "loop.html", job=job, tpl=tpl, tpl_text=loops.template_text(tpl["sessions"]) if tpl else "",
                     hours=f"{tpl['hours'][0]}-{tpl['hours'][1]}" if tpl else "9-17", people=people,
-                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, out=out, plan=plan,
-                    plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
+                    cand_id=int(candidate) if candidate.isdigit() else None, start=start, start_time=start_time, out=out,
+                    plan=plan, plan_error=error, cz=cz or (plan or {}).get("candidate_tz") or "")
 
     @app.get("/jobs/{job_id}/loop", response_class=HTMLResponse)
     def loop_page(request: Request, job_id: int, candidate: str = "", start: str = "", out: str = "",
-                  cz: str = ""):
+                  cz: str = "", start_time: str = ""):
         """Plan a candidate's onsite loop from the job's template: slots, warnings and invite text to paste."""
-        return _loop_page(request, job_id, candidate, start, out, cz)
+        return _loop_page(request, job_id, candidate, start, out, cz, start_time)
 
     @app.post("/jobs/{job_id}/loop/template")
     async def loop_template_form(request: Request, job_id: int):
@@ -3453,6 +3585,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
     # ----------------------------------------------------- AI app setup
+    def _plugin_where() -> str:
+        """Where the plugin file goes: the Downloads folder, or (with none) the folder it really goes to."""
+        folder = skills.downloads_dir()
+        return "your Downloads folder" if folder.name.lower() == "downloads" else f"the folder {folder} (there is no Downloads folder here)"
+
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
         status = integrations.claude_status()
@@ -3474,9 +3611,24 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             skill_names=skills.skill_names(),
             desktop_steps=skills.DESKTOP_STEPS[0],
             skills_source=str(skills.source_dir()),
+            detected=skills.detected_targets(),
+            skill_plan_missing=[{"target": t, "label": skills.TARGET_LABELS[t]} for t in skills.TARGETS
+                                if not skills.detect(t)],
+            plugin_file=skills.PLUGIN_FILE,
+            plugin_saved=(skills.downloads_dir() / skills.PLUGIN_FILE).is_file(),
+            skill_info=skills.skill_info(),
+            plugin_steps=skills.PLUGIN_STEPS,
+            plugin_commands=skills.CLAUDE_CODE_SLASH_COMMANDS,
+            plugin_where=_plugin_where(),
+            marketplace_repo=skills.REPO,
+            can_open_claude=skills.claude_app_command() is not None,
             skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
                         for n in skills.skill_names()],
         )
+
+    def _found_ctx() -> dict[str, Any]:
+        """What the 'Claude Code: found. No skills yet.' list needs, so an install can refresh it in place."""
+        return {"skill_status": [skills.status(t) for t in skills.TARGETS], "detected": skills.detected_targets()}
 
     @app.get("/connect/skills/{name}.zip")
     def skill_zip(name: str):
@@ -3491,6 +3643,49 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
         return Response(skills.build_zip(), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
+
+    @app.get("/connect/skills.plugin")
+    def skills_plugin():
+        """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
+        return Response(skills.build_plugin(), media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
+
+    @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
+    def skills_plugin_save(request: Request):
+        """Write talent-search.plugin to Downloads and show it in the file manager (best effort)."""
+        try:
+            path = skills.write_plugin()
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_plugin_result.html", error=integrations.friendly_error(exc))
+        shown = skills.reveal(path)
+        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown,
+                    can_open_claude=skills.claude_app_command() is not None, plugin_file=skills.PLUGIN_FILE)
+
+    @app.post("/connect/skills/claude-app/open", response_class=HTMLResponse)
+    def skills_open_claude(request: Request):
+        """Start the Claude desktop app (best effort)."""
+        ok = skills.open_claude_app()
+        return HTMLResponse('<span class="fine" role="status">' + (
+            "Opening Claude..." if ok else "Couldn't open Claude. Open it yourself.") + "</span>")
+
+    @app.post("/connect/skills/all/{action}", response_class=HTMLResponse)
+    async def connect_skills_all(request: Request, action: str):
+        """One preview and one confirm for every AI app found on this computer (or the ones named in 'targets')."""
+        if action not in ("preview-install", "install"):
+            raise HTTPException(404)
+        form = await request.form()
+        named = [t for t in str(form.get("targets") or "").split(",") if t in skills.TARGETS]
+        try:
+            if action == "preview-install":
+                result = skills.plan_all(named or None)
+            else:
+                result = skills.install_all(named or skills.detected_targets())
+        except Exception as exc:
+            integrations.log_failure(exc)
+            return page(request, "_skills_all_result.html", action="error", error=integrations.friendly_error(exc))
+        return page(request, "_skills_all_result.html", action=action, result=result,
+                    labels=skills.TARGET_LABELS, targets_csv=",".join(result["targets"]), **_found_ctx())
 
     @app.post("/connect/skills/{target}/{action}", response_class=HTMLResponse)
     def connect_skills(request: Request, target: str, action: str):
@@ -3511,7 +3706,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             integrations.log_failure(exc)
             return page(request, "_skills_result.html", action="error", target=target,
                         error=integrations.friendly_error(exc))
-        return page(request, "_skills_result.html", action=action, target=target, result=result)
+        return page(request, "_skills_result.html", action=action, target=target, result=result, **_found_ctx())
 
     @app.post("/connect/claude/report", response_class=HTMLResponse)
     def connect_report(request: Request):
@@ -3721,6 +3916,15 @@ def _bad_email_fields(data: dict[str, Any], others: list[str]) -> dict[str, str]
     if wrong:
         out["other_emails"] = f"{wrong[0][:60]!r} doesn't look like an email address. Fix that line or delete it."
     return out
+
+
+def _bad_link_fields(data: dict[str, Any]) -> dict[str, str]:
+    """An Other links line that isn't a web address, or too many: {"links": message}. Blank is fine."""
+    try:
+        clean_links(data.get("links"), exclude=(data.get("linkedin_url"), data.get("website")))
+    except ValueError as exc:
+        return {"links": str(exc)}
+    return {}
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

@@ -237,12 +237,12 @@ def test_edit_job_stages_outcome_limits(store):
     lee = store.add_candidate(name="Lee")
     store.add_to_pipeline(lee["id"], jid, "Interviewing")
     # Cycle 3 K: the AI can't change what any existing stage counts as, empty or not.
-    with pytest.raises(Exception, match="No change made. Ask the recruiter to change what Contacted counts as"):
+    with pytest.raises(Exception, match="No change made. Ask the user to change what Contacted counts as"):
         call(server, "edit_job_stages", job_id=jid,
              outcomes={"Interviewing": "lost", "Screening": "lost", "Contacted": "lost"})
-    with pytest.raises(Exception, match="Ask the recruiter to change what Interviewing counts as in the app"):
+    with pytest.raises(Exception, match="Ask the user to change what Interviewing counts as in the app"):
         call(server, "edit_job_stages", job_id=jid, outcomes={"Interviewing": "lost"})
-    with pytest.raises(Exception, match="Ask the recruiter"):  # a closing name counts too
+    with pytest.raises(Exception, match="Ask the user"):  # a closing name counts too
         call(server, "edit_job_stages", job_id=jid, rename={"Interviewing": {"name": "Passed", "outcome": "lost"}})
     assert {s["name"]: s["outcome"] for s in store.job_stages(jid)}["Interviewing"] == "open"
     with pytest.raises(Exception, match="change what Withdrawn counts as"):
@@ -275,7 +275,7 @@ def test_save_candidate_keeps_identity_fields_after_a_recent_ai_change(store):
     assert saved["website"] == "https://kenji.dev" and not saved["phone"]
     # Cycle 3 K: phone was empty, so it was not saved, but it isn't listed as a "kept" saved value.
     assert out["identity_kept"] == ["phone"] and "phone" not in out.get("kept", [])
-    assert "Ask the recruiter to confirm in the app" in said and "changed this person's email" in said
+    assert "Ask the user to confirm in the app" in said and "changed this person's email" in said
 
 
 def test_save_candidate_fills_at_most_one_identity_field(store):

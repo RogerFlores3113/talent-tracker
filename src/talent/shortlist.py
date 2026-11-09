@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable
 
 from .actions import job_label
+from .links import merge_links
 from .store import NotFound, Store, fold_name, linkedin_slug_ok, normalize_linkedin, now_iso, quoted, split_tags
 
 MAX_BATCH = 25
@@ -64,6 +65,9 @@ def _extra_in(raw: dict[str, Any]) -> dict[str, Any]:
     email = " ".join(str(raw.get("email") or "").split()).lower()
     if _EMAIL.match(email) and len(email) <= 200:
         out["email"] = email
+    links = merge_links(raw.get("links"))
+    if links:
+        out["links"] = links
     tags = raw.get("tags") or raw.get("skills")
     tags = [t[:60] for t in split_tags(tags if isinstance(tags, (str, list, tuple)) else None)][:TAG_LIMIT]
     if tags:
@@ -94,7 +98,7 @@ def _attach_extras(store: Store, rows: list[dict[str, Any]]) -> list[dict[str, A
         except ValueError:
             x = None
         if isinstance(x, dict) and x.get("name") == r["name"] and x.get("created_at") == r["created_at"]:
-            r.update({f: x[f] for f in ("about", "tags", "work_history", "email") if x.get(f)})
+            r.update({f: x[f] for f in ("about", "tags", "work_history", "email", "links") if x.get(f)})
     return rows
 
 
@@ -343,7 +347,8 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
         target = store.add_candidate(p.get("work_history"), name=p["name"], linkedin_url=p["linkedin_url"],
                                      current_title=p["title"], current_company=p["company"], location=p["location"],
                                      source=p["source"], about=p.get("about"), email=email,
-                                     tags=", ".join(p.get("tags") or []) or None)
+                                     tags=", ".join(p.get("tags") or []) or None,
+                                     links=p.get("links") or None)
     linked = None
     if not created:  # the recruiter said it's the same person: their blank fields take what the row has
         fill = {dst: p[src] for src, dst in (("linkedin_url", "linkedin_url"), ("title", "current_title"),
@@ -354,6 +359,11 @@ def keep(store: Store, job_id: int, prospect_id: int, *, link_id: int | None = N
         if p.get("tags") and not target.get("tags"):
             fill["tags"] = ", ".join(p["tags"])
         history = p.get("work_history") if p.get("work_history") and not store.work_history(target["id"]) else None
+        if p.get("links"):  # their links are added to the saved person's, never replacing any
+            try:
+                target = store.add_links(target["id"], p["links"], via=via)
+            except ValueError:
+                pass
         for attempt in (fill, {k: v for k, v in fill.items() if k != "linkedin_url"}):
             if not attempt and not history:
                 break
@@ -591,7 +601,7 @@ def today_items(store: Store) -> list[dict[str, Any]]:
 def row_view(p: dict[str, Any]) -> dict[str, Any]:
     """One Shortlist row as the AI app and the in-chat view see it."""
     out = {k: p.get(k) for k in ("id", "name", "linkedin_url", "title", "company", "location", "fit", "about",
-                                 "email", "tags", "work_history", "status", "pass_reason", "candidate_id", "stage")
+                                 "email", "tags", "links", "work_history", "status", "pass_reason", "candidate_id", "stage")
            if p.get(k) not in (None, "", [])}
     if p.get("checks"):
         out["checks"] = p["checks"]

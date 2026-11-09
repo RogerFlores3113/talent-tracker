@@ -38,7 +38,7 @@ def test_tools_are_listed_and_none_delete(store):
             "list_action_items", "add_suggestion", "complete_suggestion", "report_problem"} <= set(tools)
     # Product decision: the AI may never delete a candidate, job or record.
     assert not [n for n in tools if "delete" in n or "remove" in n]
-    for name, view in (("get_candidate", "candidate"), ("search_candidates", "search-results"),
+    for name, view in (("get_candidate", "people"), ("search_candidates", "people"),
                        ("job_pipeline", "pipeline-board"), ("list_action_items", "action-items")):
         meta = tools[name].meta or {}
         assert meta["ui"]["resourceUri"].endswith(view + ".html"), name

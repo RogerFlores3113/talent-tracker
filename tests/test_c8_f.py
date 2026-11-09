@@ -94,7 +94,7 @@ def test_full_tour_loads_the_demo_people_and_moves_on(store):
     c = local_client(store)
     c.get("/")
     c.post("/tour/step", data={"step": "4"})  # the load step
-    steps = tour_data(c.get("/connect"))["steps"]
+    steps = tour_data(c.get("/"))["steps"]
     assert steps[4]["id"] == "load" and steps[4]["action"] == "load"
     r = run_load(c)
     assert store.count_candidates() == 16 and sample_ids(store)[1]

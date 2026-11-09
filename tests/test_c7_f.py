@@ -161,7 +161,7 @@ def _pipeline(store, stage="Screening"):
 
 def test_a_move_into_a_lost_stage_needs_a_reason(store):
     job, c, server = _pipeline(store)
-    with pytest.raises(ToolError, match="Ask the recruiter why"):
+    with pytest.raises(ToolError, match="Ask the user why"):
         call(server, "move_stage", candidate_id=c["id"], job_id=job["id"], stage="Rejected")
     assert store.candidate_pipelines(c["id"])[0]["stage"] == "Screening"
     out = call(server, "move_stage", candidate_id=c["id"], job_id=job["id"], stage="Rejected", notes="Role changed")

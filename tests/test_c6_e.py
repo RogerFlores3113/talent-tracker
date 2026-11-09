@@ -324,7 +324,7 @@ def test_cautious_mode_holds_both_tools_and_keep_applies_once(store):
     review.set_cautious(store, True)
     server = build_server(store)
     res = call(server, "record_offer", candidate_id=m["id"], job_id=job["id"], salary="$185,000", status="out")
-    assert text(res).startswith("Waiting for the recruiter's review") and offers.get(store, m["id"], job["id"]) is None
+    assert text(res).startswith("Waiting for your review") and offers.get(store, m["id"], job["id"]) is None
     rid = res.structuredContent["pending_review"]["id"]
     page = local_client(store).get("/review").text
     assert "Offer change" in page and "would be $185,000" in page

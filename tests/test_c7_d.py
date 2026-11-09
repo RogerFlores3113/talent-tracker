@@ -130,7 +130,7 @@ def test_replies_say_you_for_a_founder_and_the_recruiter_for_an_agency(store):
     job, m = _offer_setup(store)
     server = build_server(store)
     agency = text(call(server, "record_offer", candidate_id=m["id"], job_id=job["id"], salary="190k"))
-    assert "The recruiter can undo it" in agency
+    assert "You can undo it" in agency
     actions.set_inhouse(store, True)
     own = text(call(server, "record_offer", candidate_id=m["id"], job_id=job["id"], salary="195k"))
     assert "You can undo it" in own and "recruiter" not in own
@@ -141,7 +141,7 @@ def test_replies_say_you_for_a_founder_and_the_recruiter_for_an_agency(store):
 def test_rewrite_keeps_candidate_text_and_verbs():
     from talent import wording
 
-    assert wording.rewrite("Ask the recruiter to confirm. The recruiter has seen it.") == \
+    assert wording.rewrite("Ask the user to confirm. The recruiter has seen it.") == \
         "Ask the user to confirm. You have seen it."
     fenced = "ok the recruiter <data-ab12>the recruiter said hi</data-ab12>"
     assert wording.rewrite(fenced) == "ok you <data-ab12>the recruiter said hi</data-ab12>"

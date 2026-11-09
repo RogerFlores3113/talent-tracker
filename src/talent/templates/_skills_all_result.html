@@ -1,0 +1,31 @@
+{% if action == 'error' %}
+<p class="error" role="alert" tabindex="-1" autofocus>That didn't work: {{ error }}</p>
+<p class="fine">Nothing was finished. You can also run <code>talent install-skills</code> in a terminal.</p>
+{% elif action == 'preview-install' %}
+  {% if result['plans'] %}
+  <p id="skills-all-sum"><strong>Ready to add the skills to {% for p in result['plans'] %}{{ p['label'] }}{{ ' and ' if not loop.last }}{% endfor %}.</strong>
+    {{ result['counts']['new'] }} new, {{ result['counts']['updated'] }} updated, {{ result['counts']['unchanged'] }} already there{% if result['edited'] %}, {{ result['edited']|length }} kept because you edited them{% endif %}{% if result['skipped'] %}, {{ result['skipped']|length }} left alone{% endif %}.</p>
+  {% for p in result['plans'] %}
+  <details class="fine" open>
+    <summary>{{ p['label'] }}: <code>{{ p['base'] }}</code></summary>
+    <ul class="plain code-list">{% for f in p['files'] %}<li><code>{{ f }}</code> <span class="fine">{{ p['labels'].get(f, 'new') }}</span></li>{% endfor %}{% for f in p['edited'] %}<li><code>{{ f }}</code> <span class="fine">edited by you, kept</span></li>{% endfor %}</ul>
+  </details>
+  {% endfor %}
+  {% for s in result['skipped'] %}
+  <p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>
+  {% endfor %}
+  <p class="fine">Nothing else is touched. Folders start with <code>talent-search-</code> and carry a small label file, so only these are ever updated or removed later. A file you change stays yours.</p>
+  <div role="group" aria-label="Add skills to {% for p in result['plans'] %}{{ p['base'] }}{{ ' and ' if not loop.last }}{% endfor %}">
+  <button class="btn primary" autofocus aria-describedby="skills-all-sum" hx-post="/connect/skills/all/install" hx-vals='{"targets": "{{ targets_csv }}"}' hx-target="#skills-all-result">Add the skills</button>
+  </div>
+  {% else %}
+  <p tabindex="-1" autofocus>No AI app was found on this computer to add skills to. Use Install anyway below, or get the Claude plugin.</p>
+  {% endif %}
+{% elif action == 'install' %}
+  <p class="ok" role="status" tabindex="-1" autofocus>Skills added for {% for r in result['results'] %}{{ r['label'] }}{{ ' and ' if not loop.last }}{% endfor %}.</p>
+  {% for s in result['skipped'] %}<p class="flash warn">Left alone: <code>{{ s['path'] }}</code>. {{ s['reason'] }}.</p>{% endfor %}
+  {% if result['edited'] %}<p class="flash warn">Edited by you, kept as they are: {% for f in result['edited'] %}<code>{{ f }}</code>{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
+  <p><strong>Done. Start a new chat in your AI app (or restart Claude Code) so it picks up the skills.</strong></p>
+  <details class="fine"><summary>Files written</summary><ul class="plain code-list">{% for f in result['written'] %}<li><code>{{ f }}</code></li>{% endfor %}</ul></details>
+{% endif %}
+{% if action in ('install', 'remove') %}{% set oob = true %}{% include "_skills_found.html" %}{% endif %}

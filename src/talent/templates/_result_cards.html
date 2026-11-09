@@ -6,14 +6,18 @@
   <li class="divider">Closest matches, with some of the words</li>
   {% endif %}
   <li>
-    <a class="card{{ ' closest' if h.closest }}" href="/candidates/{{ c.id }}">
-      <div class="row1"><strong>{{ c.name }} {{ sample_badge(c.id in sample[0]) }}</strong><span class="when">{% if c.last_contacted_at %}Contacted {{ c.last_contacted_at | ago }}{% else %}Never contacted{% endif %}</span></div>
+    <div class="card card-linked{{ ' closest' if h.closest }}">
+      <div class="row1"><strong><a class="card-name" href="/candidates/{{ c.id }}">{{ c.name }}</a> {{ sample_badge(c.id in sample[0]) }}</strong><span class="when">{% if c.last_contacted_at %}Contacted {{ c.last_contacted_at | ago }}{% else %}Never contacted{% endif %}</span></div>
       <div class="row2">{{ sub(c) }}</div>
       {% if h.reason %}<div class="why">{{ h.reason }}</div>{% endif %}
       {% if h.snippet %}<div class="snip">{{ h.snippet | snippet | safe }}</div>
       {% elif c.about and not h.reason %}<div class="snip">{{ c.about[:180] }}{{ '…' if c.about | length > 180 }}</div>{% endif %}
       {{ chips(c.tags[:8], link=False) }}
-    </a>
+      {% if (c.linkedin_url or '').startswith('http') or (c.website or '').startswith('http') %}<div class="card-links">
+        {% if (c.linkedin_url or '').startswith('http') %}<a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | profile_label }}<span class="sr-only"> for {{ c.name }} (opens in a new tab)</span></a>{% endif %}
+        {% if (c.website or '').startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">Website<span class="sr-only"> for {{ c.name }} (opens in a new tab)</span></a>{% endif %}
+      </div>{% endif %}
+    </div>
   </li>
 {% endfor %}
 {% if result.total > start + result.hits | length %}

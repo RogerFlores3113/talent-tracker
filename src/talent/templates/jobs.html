@@ -21,7 +21,7 @@
   <table class="dense">
     <thead><tr><th>{{ 'Hiring manager' if by_manager else 'Company' }}</th><th>Open jobs</th><th>In process</th><th>Openings filled</th><th></th></tr></thead>
     <tbody>{% for r in rollup %}
-    <tr><td>{{ r.label or ('No hiring manager' if by_manager else 'No company') }}</td><td>{{ r.jobs | length }}</td><td>{{ r.active }}</td><td>{% if r.hired is defined and r.hired > r.openings %}{{ r.hired }} for {{ r.openings }} <span class="badge overdue">over by {{ r.hired - r.openings }}</span>{% else %}{{ [r.filled, r.openings] | min }} of {{ r.openings }}{% endif %}</td>
+    <tr><td>{{ r.label or ('Jobs without a hiring manager' if by_manager else 'Jobs without a client') }}</td><td>{{ r.jobs | length }}</td><td>{{ r.active }}</td><td>{% if r.hired is defined and r.hired > r.openings %}{{ r.hired }} for {{ r.openings }} <span class="badge overdue">over by {{ r.hired - r.openings }}</span>{% else %}{{ [r.filled, r.openings] | min }} of {{ r.openings }}{% endif %}</td>
       <td>{% for c in companies if c.label == r.label %}<span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ c.text }}" data-copy-note="next" data-copy-msg="Copied.">Copy status for {{ r.label }}</button><span class="fine" role="status"></span></span>{% endfor %}</td></tr>
     {% endfor %}</tbody>
   </table>

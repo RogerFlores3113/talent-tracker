@@ -21,12 +21,14 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
+from . import places
+from .links import clean_links, link_key, merge_links, stored_links
 from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
 
 # Default pipeline for a new job: (name, outcome). outcome "open" means the
@@ -112,6 +114,7 @@ ALL_TIMELINE_KINDS = (*TIMELINE_KINDS, CHANGE_KIND)
 FIELD_LABELS = {
     "current_title": "title", "current_company": "company", "linkedin_url": "LinkedIn",
     "last_contacted_at": "last contacted", "tags": "skills", "work_history": "work history",
+    "links": "other links",
 }
 # Who made a change -> the timeline entry's source ("from AI app", "from CSV import").
 CHANGE_SOURCES = {"app": "App", "ai": "AI app", "import": "CSV import"}
@@ -123,6 +126,7 @@ FIELD_LIMITS = {
     "name": 200, "email": 320, "phone": 50, "linkedin_url": 500, "website": 500, "current_title": 200,
     "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
     "tags": 3000,  # all skills joined into one text
+    "links": 6000,  # the JSON list of other links (10 links of up to 500 characters)
 }
 # Longest timeline entry (a note, a call summary, an email summary) one log call takes.
 NOTE_LIMIT = 20000
@@ -144,6 +148,7 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "source",
     "last_contacted_at",
     "color",
+    "links",
 )
 # The colour bubbles on the Candidates table, in rainbow order (the order they cycle and sort in).
 COLORS: tuple[str, ...] = ("red", "orange", "yellow", "green", "blue", "purple")
@@ -790,6 +795,8 @@ _MIGRATIONS: tuple[Any, ...] = (
     # v10w3: an "Other emails: ..." note that only repeats addresses the person keeps in their Other emails field is
     # removed (older imports wrote both). A note with any other words in it is left alone.
     ("SELECT 1;", _migrate_v10w3_data),
+    # v11l: other links on a person (GitHub, portfolio, Scholar...), a JSON list of web addresses.
+    "ALTER TABLE candidates ADD COLUMN links TEXT;",
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1431,10 +1438,50 @@ class SearchResult:
     suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
     corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
     notes: list[str] = field(default_factory=list)  # how the search was read, when something needed saying
+    understood: str | None = None  # "Looking for backend engineer in Boston, MA": a role and a place, split apart
+    summary: str | None = None  # a role and a place: the counts in plain words (shared by the AI's reply and the web page)
+    message: str | None = None  # a role and a place with nobody matching both: "Nobody is a ... Closest: ..."
+    partial_total: int = 0  # a role and a place: people who match only part of it and are not listed
 
     def __post_init__(self) -> None:
         if self.exact_total is None:
             self.exact_total = 0 if self.closest else self.total
+
+
+ROLE_PLACE_CLOSE = 10  # a role-and-place search lists at most this many close people after the exact ones
+ROLE_PLACE_PARTIAL = 5  # ...and when nobody is close either, this many who match only part of it
+
+
+def _a(role: str) -> str:
+    """'a backend engineer', 'an engineer'; a role that is not a job title ('python') reads 'matches python'."""
+    return ("an " if role[:1].lower() in "aeiou" else "a ") + role
+
+
+def _role_place_words(role: str, place: str, exact: list[Any], ordered: list[Any], shown_close: int,
+                      unlisted: int, only_place: int) -> tuple[str, str | None]:
+    """(the counts of a role-and-place search in plain words, and the 'Nobody is ...' message when no one matches
+    both). Closest people are named, so the line stands on its own."""
+    last = role.split()[-1].lower() if role.split() else ""
+    titled = last.endswith(("er", "or", "ist", "ant", "ian", "ect", "ive", "ger", "lead", "head")) or last in (
+        "lead", "head", "director", "intern", "vp", "cto", "ceo", "cfo", "coo")
+    if not exact:
+        who = f"Nobody is {_a(role)} in {place}." if titled else f"Nobody matches \"{role}\" in {place}."
+        if not ordered:
+            return who, who
+        named = ", ".join(
+            f"{h.candidate['name']} ({', '.join(x for x in (h.candidate.get('current_title'), h.candidate.get('location')) if x)})"
+            for h in ordered[:3])
+        more = f" {unlisted} more match only part of it." if unlisted else ""
+        return f"{who} Closest: {named}.{more}", f"{who} Closest: {named}."
+    n = len(exact)
+    text = f"Looking for {role} in {place}: {n} match{'es' if n == 1 else ''} the role and the place"
+    if shown_close:
+        text += (f", plus {shown_close} close ({'the role in another place, or the place with part of the role'})")
+    if unlisted:
+        text += f", and {unlisted} more match only part of it"
+        if only_place:
+            text += f" ({only_place} are in {place} with a different role)"
+    return text + ".", None
 
 
 def _clean(value: Any) -> Any:
@@ -1769,6 +1816,15 @@ def _word_pattern(form: str, prefix: bool) -> re.Pattern[str]:
     body = r"\s+".join(re.escape(p) for p in base.split())
     tail = r"" if prefix and len(form) >= 4 else r"(?:e?s)?\b"
     return re.compile(rf"\b{body}{tail}", re.I)
+
+
+def _same_stem(form: str, folded: str) -> bool:
+    """engineers ~ engineering: a long word's stem (no -er, -ers, -ing, -es, -s) starting a word in the text."""
+    f = form.lower()
+    for suffix in ("ers", "ing", "er", "es", "s"):
+        if f.endswith(suffix) and len(f) - len(suffix) >= 5:
+            return re.search(rf"\b{re.escape(f[:-len(suffix)])}", folded) is not None
+    return False
 
 
 def _phrase_pattern(words: list[str]) -> re.Pattern[str]:
@@ -2354,15 +2410,25 @@ class Store:
     def _hydrate(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is not None:
             row["tags"] = stored_tags(row.get("tags"))
+            if "links" in row:
+                row["links"] = stored_links(row.get("links"))
             row.pop("history_text", None)
             row.pop("linkedin_key", None)
         return row
 
-    def _prepare(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _prepare(self, data: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
         unknown = set(data) - set(CANDIDATE_FIELDS)
         if unknown:
             raise ValueError(f"Unknown candidate field(s): {', '.join(sorted(unknown))}")
-        out = {k: _clean(v) for k, v in data.items()}
+        out = {k: (v if k == "links" else _clean(v)) for k, v in data.items()}
+        if "links" in out:  # a list (or text) of addresses -> the saved JSON text, or None when empty
+            keep = (out.get("linkedin_url") if "linkedin_url" in out else (existing or {}).get("linkedin_url"),
+                    out.get("website") if "website" in out else (existing or {}).get("website"))
+            if out.get("website"):
+                keep = (keep[0], web_link(out["website"]))
+            out["links"] = json.dumps(clean_links(out["links"], exclude=keep)) if out["links"] else None
+            if out["links"] == "[]":
+                out["links"] = None
         if "tags" in out:
             out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
@@ -2665,8 +2731,8 @@ class Store:
             by_email = bool(hit_email)
             raise IdentityConflict(existing, incoming_name, "email" if by_email else "linkedin_url",
                                    hit_email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
-        incoming = self._prepare(data)
         row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
+        incoming = self._prepare(data, row)
         merged: dict[str, Any] = {}
         kept: list[str] = []
         for k, v in incoming.items():
@@ -2675,6 +2741,12 @@ class Store:
             cur = row.get(k)
             if k == "tags":
                 merged[k] = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
+            elif k == "links":  # saved again: new links are added, none are ever dropped
+                both = merge_links(stored_links(cur), stored_links(v),
+                                   exclude=(row.get("linkedin_url"), incoming.get("linkedin_url") or None,
+                                            row.get("website"), incoming.get("website") or None))
+                if both != stored_links(cur):
+                    merged[k] = json.dumps(both)
             elif k in MERGE_OVERWRITES:
                 merged[k] = v
             elif k == "last_contacted_at":
@@ -2686,7 +2758,8 @@ class Store:
                 kept.append(k)
         history = work_history or self._history_for_new_role(existing["id"], row, merged)
         cand = self._update(existing["id"], merged, history, by=by, merge=True,
-                            derived=() if work_history or history is None else ("work_history",))
+                            derived=(() if work_history or history is None else ("work_history",))
+                            + (("links",) if "links" in merged else ()))
         cand["_kept"] = kept
         newer = [e for e in [_clean(data.get("email")), *extra] if e]  # a different address of theirs is kept too
         if by == "ai":  # an address says who someone is: the AI app never adds one to a person already saved
@@ -2757,11 +2830,32 @@ class Store:
         be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
         carries "_changed", the fields that actually changed. via="claude": the recruiter did it with a button in
         Claude (Changes says so)."""
-        fields = self._prepare(data)
+        row = self._row("SELECT linkedin_url, website FROM candidates WHERE id = ?", (candidate_id,))
+        fields = self._prepare(data, row)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
         return self._update(candidate_id, fields, work_history, by=by, via=via)
+
+    def add_links(self, candidate_id: int, links: Any, *, by: str = "app", via: str | None = None) -> dict[str, Any]:
+        """Add other links to a person, keeping the ones they have (nothing is ever removed this way). Raises
+        ValueError for an entry that isn't a web address. The returned candidate carries "_changed" and
+        "_links_added" (the new ones) and "_links_skipped" (left out because of the cap of 10)."""
+        row = self._row("SELECT linkedin_url, website, links FROM candidates WHERE id = ?", (candidate_id,))
+        if row is None:
+            raise NotFound(f"No candidate with id {candidate_id}")
+        wanted = clean_links(links, exclude=(row.get("linkedin_url"), row.get("website")))
+        have = stored_links(row.get("links"))
+        both = merge_links(have, wanted, exclude=(row.get("linkedin_url"), row.get("website")))
+        added = [u for u in both if u not in have]
+        skipped = [u for u in wanted if u not in both and link_key(u) not in {link_key(h) for h in have}]
+        if added:
+            cand = self._update(candidate_id, {"links": json.dumps(both)}, None, by=by, via=via, derived=("links",))
+        else:
+            cand = self.get_candidate(candidate_id)
+            cand["_changed"] = []
+        cand["_links_added"], cand["_links_skipped"] = added, skipped
+        return cand
 
     def set_color(self, candidate_id: int, color: str | None) -> dict[str, Any]:
         """The recruiter's quick colour tag from the bubble on the Candidates table. It saves at once and changes
@@ -3692,6 +3786,12 @@ class Store:
                 elif k == "last_contacted_at":
                     if ov and (not kv or ov > kv):
                         fields[k] = ov
+                elif k == "links":
+                    both = merge_links(stored_links(kv), stored_links(ov),
+                                       exclude=(fields.get("linkedin_url") or krow.get("linkedin_url"),
+                                                fields.get("website") or krow.get("website")))
+                    if both != stored_links(kv):
+                        fields[k] = json.dumps(both)
                 elif ov and not kv:
                     fields[k] = ov
                 elif k not in ("name", "color") and ov and kv and str(ov).strip() != str(kv).strip():
@@ -3732,7 +3832,7 @@ class Store:
             old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields}
             if fields:
                 self._apply(keep_id, fields)
-            filled = [k for k in fields if k not in ("tags", "work_history")]
+            filled = [k for k in fields if k not in ("tags", "work_history", "links")]
             kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
             new_main = self._promote_email(keep_id, want) if want else None
             bits = [f"filled {_labels(filled)}"] if filled else []
@@ -3743,6 +3843,8 @@ class Store:
                             f"({', '.join(kept_emails)})")
             if "tags" in fields:
                 bits.append("added skills")
+            if "links" in fields:
+                bits.append("added their other links")
             if moved:
                 bits.append(f"moved {moved} timeline entr{'y' if moved == 1 else 'ies'}")
             if jobs:
@@ -4040,7 +4142,7 @@ class Store:
             value = INTERVIEW_OUTCOMES.get(key) or INTERVIEW_VERDICTS.get(key)
             if value is None:
                 raise ValueError("Outcome must be one of: passed, not passed, no show, or the interviewer's word: "
-                                 "strong yes, yes, mixed, no, strong no.")
+                                 "strong yes, yes, lean yes, mixed, lean no, no, strong no.")
             if new_at > ts:
                 raise ValueError("That interview hasn't happened yet, so it can't have an outcome. Record how it "
                                  "went after it takes place, or change its time first.")
@@ -4569,6 +4671,11 @@ class Store:
         is_id, _ = self.lookup_exact(query)
         pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
         if not pq.structured and not pq.operator_mode:
+            if not is_id and not (location and location.strip()):
+                role_q, place = places.split_query(query)
+                if place is not None and not self._is_a_name(query):
+                    return self._search_role_place(query, role_q, place, limit=limit, offset=offset,
+                                                   fix_typos=fix_typos, kw=kw)
             res = self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
             if pq.advice and not res.corrected and not (res.total and not res.closest):  # "python near django"
                 res.suggestion = pq.apply_advice(res.suggestion or query) or res.suggestion
@@ -4634,6 +4741,111 @@ class Store:
                 res.suggestion = fixed
         res.notes = [*pq.notes, *notes, *(a.note for a in pq.advice if not a.always and not found)]
         res.query = query
+        return res
+
+    def _is_a_name(self, query: str) -> bool:
+        """True when every word of the query is in one saved person's name ("Austin Powers" is a person, not a role
+        in Austin), so a city that is also a first name is not taken for a place."""
+        words = [w for w in _search_tokens(query or "") if w.lower() not in STOPWORDS]
+        if len(words) < 2:
+            return False
+        match = " AND ".join(f'name : "{_fts_words(w)}"' for w in words)
+        try:
+            return self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1", (match,)) is not None
+        except sqlite3.Error:
+            return False
+
+    def _search_role_place(self, query: str, role_q: str, place: Any, *, limit: int, offset: int,
+                           fix_typos: bool, kw: dict[str, Any]) -> SearchResult:
+        """A search that is a role and a place ("backend engineer Boston"). Each part is matched on its own, and
+        people who match both come first (those are the exact matches). Then people in the place who have some of
+        the role words, people with the whole role in another place, some of the role elsewhere, and last people
+        in the place with none of the role words. Every hit's reason says which part matched."""
+        base = self._search_core(role_q, limit=500, offset=0, fix_typos=fix_typos, **kw)
+        terms = _query_terms(role_q)
+        tiers: list[list[SearchHit]] = [[], [], [], [], []]
+        seen: set[int] = set()
+
+        def note(hit: SearchHit, found: list[_Term], in_place: bool) -> str:
+            loc = (hit.candidate.get("location") or "").strip()
+            missing = [t.form for t in terms if t not in found]
+            if in_place and not missing:
+                return f"Matches the role ({role_q}) and the place ({place.label})"
+            bits = [f"the place matches ({place.label})" if in_place
+                    else f"the place differs ({loc or 'no place saved'})"]
+            if not missing:
+                bits.append("the role matches")
+            elif found:
+                bits.append(f"has {', '.join(t.form for t in found)}, not {', '.join(missing)}")
+            else:
+                bits.append("none of the role words found")
+            text = "; ".join(bits)
+            return text[0].upper() + text[1:]
+
+        pool = list(base.hits)
+        if len(terms) > 1:  # people with only some of the role words (the search adds those only when few match)
+            for t in terms:
+                part = self._search_core(t.form, limit=200, offset=0, fix_typos=False, **kw)
+                pool += [replace(h, closest=True) for h in part.hits]
+        for h in pool:
+            c = h.candidate
+            if c["id"] in seen:
+                continue
+            seen.add(c["id"])
+            hay = " ".join(str(v) for v in (c.get("name"), c.get("current_title"), c.get("current_company"),
+                                           c.get("about"), c.get("source"), " ".join(c.get("tags") or [])) if v)
+            for w in c.get("work_history") or self.work_history(c["id"]):  # earlier roles count, as they do in the everyday search
+                hay += " " + " ".join(str(w.get(k) or "") for k in ("title", "company"))
+            folded = fold(hay)
+            found = [t for t in terms if any(_word_pattern(f, pre).search(folded) or _same_stem(f, folded)
+                                             for f in (*t.forms, *t.names) for pre in {t.prefix, False})]
+            whole = not h.closest and len(found) == len(terms)  # the words are in the profile, not only a pipeline job
+            in_place = place.matches(c.get("location"))
+            # both parts, then the whole role in another place, then the place with part of the role, then part of
+            # the role elsewhere (people with only the place come last, below)
+            tier = 0 if (in_place and whole) else 1 if whole else 2 if in_place and found else 3
+            h.closest = tier != 0
+            h.reason = note(h, found, in_place) + (f" ({h.reason})" if h.reason and tier else "")
+            tiers[tier].append(h)
+            h.score = -len(found)  # the more of the role words, the earlier within a tier
+        for tier in tiers[:4]:
+            tier.sort(key=lambda h: h.score or 0)  # stable: the search's own order holds among equals
+        where, params, _ = self.candidate_filters(**kw)
+        clause = ("WHERE " + " AND ".join(where) + " AND ") if where else "WHERE "
+        rows = self._rows(f"SELECT c.id, c.location FROM candidates c {clause}c.location IS NOT NULL "
+                          "ORDER BY c.updated_at DESC, c.id DESC", params)
+        for r in rows:
+            if r["id"] in seen or not place.matches(r["location"]):
+                continue
+            if len(tiers[4]) >= 50:
+                break
+            h = SearchHit(candidate=self.get_candidate(r["id"]), closest=True)
+            h.reason = note(h, [], True)
+            tiers[4].append(h)
+        # Like the everyday search: with 3 or more people who match both parts, only they are listed. Otherwise the
+        # exact ones, then at most ROLE_PLACE_CLOSE people who are genuinely close (the whole role in another place,
+        # or the place with part of the role). People with only part of it are listed only when nobody else is.
+        exact = tiers[0]
+        close_all = tiers[1] + tiers[2]
+        partial = tiers[3] + tiers[4]
+        if len(exact) >= 3:
+            ordered = list(exact)
+        else:
+            ordered = [*exact, *close_all[:ROLE_PLACE_CLOSE]]
+            if not ordered:
+                ordered = partial[:ROLE_PLACE_PARTIAL]
+        shown_close = len(ordered) - len(exact) if close_all else 0
+        unlisted = len(tiers[1]) + len(tiers[2]) + len(partial) - (len(ordered) - len(exact))
+        res = SearchResult(hits=ordered[offset:offset + limit], total=len(ordered), query=query, filters=base.filters,
+                           closest=len(exact) == 0 and bool(ordered), exact_total=len(exact),
+                           understood=f"Looking for {role_q} in {place.label}", partial_total=max(0, unlisted))
+        res.summary, res.message = _role_place_words(role_q, place.label, exact, ordered, shown_close, unlisted,
+                                                     len(tiers[4]))
+        if base.suggestion:
+            fixed = (re.sub(re.escape(role_q), lambda _m: base.suggestion, query, count=1, flags=re.I)
+                     if re.search(re.escape(role_q), query, re.I) else f"{base.suggestion} {place.label}")
+            res.suggestion, res.corrected = fixed, base.corrected
+        res.notes = list(base.notes)
         return res
 
     def _skill_value_hint(self, pq: Any, text: str) -> str | None:

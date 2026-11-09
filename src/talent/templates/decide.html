@@ -37,7 +37,7 @@
         {% endif %}
         {% if i.owed %}<div class="fine">Owed: {{ i.owed | join(', ') }}</div>{% endif %}
         {% if i.note %}<blockquote>{{ i.note }}</blockquote>{% endif %}
-        {% for f in i.feedback %}<blockquote><span class="fine">{{ f.by or 'Interviewer' }}{% if f.source == 'AI app' %} (via your AI app){% endif %}:</span> {{ f.text }}</blockquote>{% endfor %}
+        {% for f in i.feedback %}<blockquote><span class="fine">{{ f.by or 'Interviewer' }}{% if f.unlisted %} ({{ unlisted_label }}, not counted in the result){% endif %}{% if f.source == 'AI app' %} (via your AI app){% endif %}:</span> {{ f.text }}</blockquote>{% endfor %}
         {% if not i.upcoming %}
         {% set back_to = '/jobs/' ~ job.id ~ '/decide' ~ ('?ids=' ~ ids if ids else '') %}
         <form method="post" action="/candidates/{{ p.candidate_id }}/interviews/{{ i.interview_id }}/verdict" class="inline-verdict">

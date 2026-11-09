@@ -135,7 +135,7 @@ def test_not_shown_line_is_for_the_recruiter_only(store):
     server = build_server(store)
     out = call(server, "job_pipeline", job_id=job["id"])
     assert "Not shown" not in out.content[0].text
-    assert "For the recruiter only, not part of the update: Not shown: Sourced (2)." in out.content[1].text
+    assert "Private to you, not part of the update: Not shown: Sourced (2)." in out.content[1].text
     digest = call(server, "status_digest")
     assert "Not shown" not in digest.content[0].text and "Backend, Acme: not shown: Sourced (2)" in digest.content[1].text
     page = local_client(store).get(f"/jobs/{job['id']}").text
@@ -191,9 +191,9 @@ def test_found_via_is_searchable_and_hits_show_jobs(store):
     server = build_server(store)
     out = call(server, "search_candidates", query="referral")
     assert "Dana Okafor" in text(out) and "Found via: Referral from Alex" in text(out)
-    assert f"In: Founding Backend (Us) [job_id {job['id']}], Contacted" in text(out)
+    assert f"In: Founding Backend (Us) [job_id {job['id']}, " in text(out) and "], Contacted" in text(out)
     hit = structured(out)["results"][0]
-    assert hit["jobs"] == [{"job_id": job["id"], "job": "Founding Backend (Us)", "stage": "Contacted"}]
+    assert [{k: v for k, v in j.items() if k != "since"} for j in hit["jobs"]] == [{"job_id": job["id"], "job": "Founding Backend (Us)", "stage": "Contacted", "stage_rank": 1}]
     only = structured(call(server, "search_candidates", query="", source="linkedin"))["results"]
     assert [r["name"] for r in only] == ["Alex Kim"]
     table = local_client(store).get("/candidates?q=referral").text

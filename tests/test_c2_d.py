@@ -1,4 +1,5 @@
 """Cycle 2, fixer D: interviews as records, one status update, job headcount, stage outcomes, to-dos, Today."""
+import re
 import shutil
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
@@ -139,14 +140,14 @@ def test_one_status_update_for_the_app_and_the_ai(store):
     assert "- Out: Lee Park (Rejected)" in lines and any(l.startswith("- New: ") and "Ana Ruiz in Screening" in l
                                                           for l in lines)
     res = call(build_server(store), "job_pipeline", job_id=job["id"])
-    assert res.content[0].text == text_ and "Candidate-provided" in res.content[1].text
+    assert re.sub(r"\nOpen in Talent Search:.*$", "", re.sub(r" \(http://127\.0\.0\.1:\d+/\w+/\d+\)", "", res.content[0].text), flags=re.S) == text_ and "Candidate-provided" in res.content[1].text
     assert structured(res)["counts"] == {"active": 2, "hired": 0, "out": 1}
 
     left = actions.job_status_text(store, job["id"], omit_stages=["sourced", "rej"])
     assert "Bo Li" not in left and "Lee Park" not in left and "Ana Ruiz" in left
     assert "1 candidate in process, none hired yet." in left and "out." not in left  # counts cover who's shown
     mcp_left = call(build_server(store), "job_pipeline", job_id=job["id"], omit_stages=["Sourced", "Rejected"])
-    assert mcp_left.content[0].text == left
+    assert re.sub(r"\nOpen in Talent Search:.*$", "", mcp_left.content[0].text, flags=re.S) == left
     page = local_client(store).get(f"/jobs/{job['id']}?omit=Sourced&omit=Rejected").text
     assert 'name="omit" value="Sourced" checked' in page and "Bo Li (today)" not in page
 

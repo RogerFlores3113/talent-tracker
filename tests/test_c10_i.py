@@ -130,6 +130,7 @@ def test_log_with_zones_saves_them_and_invites_use_them(store):
     store.set_candidate_zone(cid, "America/New_York")
     store.save_interviewer("Sam Roe", None, None)
     loops.save_template(store, jid, "System design | 60 | Dana Lee", "9-17")
+    loops.save_person_hours(store, "Dana Lee", "8-18")  # cycle 11: interviewers default to 9-17 on their own clock
     p = loops.plan(store, jid, cid, start="2026-11-10", now=datetime(2026, 11, 5, tzinfo=timezone.utc))
     s = p["sessions"][0]
     assert s["at_local"].endswith("PST") and "9:00 AM" in s["at_local"]

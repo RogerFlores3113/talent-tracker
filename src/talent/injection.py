@@ -310,8 +310,13 @@ def iter_strings(v: Any, owner: str = "", key: str = "") -> Iterator[tuple[str, 
             if isinstance(n, str) and n.strip() and len(n) < 120:
                 own = n.strip()
                 break
+        # A "needs your answer" row of save_candidates: its "reason" is the sentence Talent Search wrote about the
+        # saved people with the same name ("...then save_candidate with create_anyway..."), not text from outside.
+        app_reason = "reason" in v and ("existing" in v or "possible_duplicates" in v)
         for k, x in v.items():
             if k in _SKIP_KEYS or k.endswith("_url") or k.endswith("_id") or k.endswith("_at"):
+                continue
+            if k == "reason" and app_reason:
                 continue
             yield from iter_strings(x, own, str(k))
 

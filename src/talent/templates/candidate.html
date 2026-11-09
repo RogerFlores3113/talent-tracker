@@ -36,6 +36,7 @@
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
     {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}<span class="sr-only"> (opens in a new tab)</span></a></dd>{% endif %}
     {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}<span class="sr-only"> (opens in a new tab)</span></a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
+    {% for u in c.links or [] %}<dt>{{ u | link_label }}</dt><dd><a href="{{ u }}" target="_blank" rel="noopener noreferrer">{{ u | replace('https://', '') | replace('http://', '') | replace('www.', '') }}<span class="sr-only"> (opens in a new tab)</span></a></dd>{% endfor %}
     {% if c.source %}<dt>Found via</dt><dd>{{ c.source }}</dd>{% endif %}
     <dt>Profile updated</dt><dd>{{ c.updated_at | date }} ({{ c.updated_at | ago }})</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
@@ -88,6 +89,7 @@
         <input type="email" name="interviewer_email" placeholder="Their email (saved for invites)" aria-label="Their email (saved for invites)" maxlength="200">
         <input type="number" name="minutes" min="10" max="480" placeholder="Length (min)" aria-label="Length (min) of a new interview" style="width:9rem">
         <label class="followup">Interviewer's zone <input type="text" name="interviewer_tz" list="zone-list" autocomplete="off" placeholder="Same as mine" size="18"></label>
+        <label class="followup">Interviewer's working hours <input type="text" name="interviewer_hours" autocomplete="off" placeholder="9-17" size="8" pattern="\s*\d{1,2}\s*(-|to|until)\s*\d{1,2}\s*" title="Start hour, then end hour, 24-hour clock, like 9-17. Used when planning a loop."></label>
         <label class="followup">Candidate's zone <input type="text" name="candidate_tz" list="zone-list" autocomplete="off" placeholder="{{ ('Saved: ' ~ c_zone) if c_zone else 'Same as mine' }}" size="18"></label>
       </div>
       <p class="fine">For an interview, invites and calendar files show each person the time on their own clock. A zone you pick is remembered for that person. Type a city or zone name, like Asia/Dubai or Europe/Warsaw, and pick from the list.</p>
@@ -108,7 +110,7 @@
       {% if ivd.interviewer %}<div class="fine">Interviewer: {{ ivd.interviewer }}</div>{% endif %}
       {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% set ivnote = interview_note(ivd) %}{% if ivnote %}<div class="fine">How it went: {{ ivnote }}</div>{% endif %}
-      {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}: {{ f.text }}</div>{% endfor %}
+      {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}{% if feedback_unlisted(t, f.by) %} ({{ unlisted_label }}, not counted in the result){% endif %}: {{ f.text }}</div>{% endfor %}
       {% if t.kind == 'interview' and t.status != 'cancelled' %}<div class="fine"><a class="link small" href="/candidates/{{ c.id }}/interviews/{{ t.id }}.ics" download title="Downloads a calendar file you can open in your own calendar app.">Add to calendar</a></div>{% endif %}
       {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">

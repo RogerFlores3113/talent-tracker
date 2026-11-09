@@ -79,7 +79,7 @@ def test_cautious_mode_holds_the_template(store):
     jid = _job(store)
     review.set_cautious(store, True)
     res = call(build_server(store), "set_loop_template", job_id=jid, sessions=SESSIONS)
-    assert "Waiting for the recruiter's review" in text(res)
+    assert "Waiting for your review" in text(res)
     assert loops.get_template(store, jid) is None
     row = review.pending(store)[0]
     assert row["kind"] == "loop_template"

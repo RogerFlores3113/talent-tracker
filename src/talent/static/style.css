@@ -174,6 +174,12 @@ body.wide main { max-width: 1280px; }
 .card { display: block; padding: var(--space-4); background: var(--surface); border: 1px solid var(--line);
         border-radius: var(--radius); color: var(--text); text-decoration: none; box-shadow: var(--shadow);
         transition: background var(--ease), border-color var(--ease), box-shadow var(--ease), transform var(--ease); }
+.card-linked { position: relative; }
+.card-linked .card-name { color: var(--text); text-decoration: none; }
+.card-linked .card-name::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius); }
+.card-linked .card-name:hover { text-decoration: underline; }
+.card-linked:focus-within { box-shadow: var(--ring), var(--shadow-up); }
+.card-links { position: relative; z-index: 1; display: flex; gap: var(--space-3); margin-top: var(--space-2); font-size: var(--fs-sm); }
 .row1 { display: flex; justify-content: space-between; gap: var(--space-3); }
 .when { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
 .row2 { color: var(--muted); font-size: 14px; }
@@ -426,7 +432,7 @@ section.welcome.panel { margin-bottom: var(--space-5); }
 /* Onsite loops on Today: one card, its sessions inside */
 .sessions { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); }
 .sessions li { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-.session-acts { display: inline-flex; gap: var(--space-1); }
+.session-acts { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }
 .session-acts form { margin: 0; }
 /* Decide view and Interviews week */
 .decide { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-4); }
@@ -621,6 +627,8 @@ main:focus { outline: none; }
 /* Bulk actions on the Candidates table (tick people, then set a color, add to a job or export). */
 .bulkbar { margin: 0 0 var(--space-3); }
 .bulk-actions { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-2) var(--space-3); }
+.bulk-actions select { max-width: 100%; min-width: 0; }
+.bulk-actions label { max-width: 100%; }
 td.pickcell, th.pickcell { width: 1%; text-align: center; }
 
 /* ==== Access ==== */
@@ -639,3 +647,9 @@ td.pickcell, th.pickcell { width: 1%; text-align: center; }
   .cal-chip.clash { border-width: 3px; }
   .stage-form.unsent select[data-stage-pick], #tbl-move.unsent { border-style: dashed; }
 }
+
+/* Connect page: long commands wrap, and the three app cards stack on mid-size screens. */
+.connect-grid pre.code, #claude-code-panel pre.code { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+@media (max-width: 1300px) { .connect-three { grid-template-columns: 1fr; } }
+.btn.link { background: none; border: none; padding: 0; min-height: 0; text-decoration: underline; color: var(--accent, inherit); font: inherit; cursor: pointer; }
+.btn.link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
