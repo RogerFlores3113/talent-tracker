@@ -139,7 +139,11 @@ def test_a_big_import_stays_quick_with_many_people_saved(store):
     preview = importers.preview_import(store, header, more, mapping, add_stages=True)
     done = importers.import_rows(store, header, more, mapping, backup=False, add_stages=True)
     took = time.perf_counter() - t
-    assert preview["added"] == done["added"] == 1500 and store.count_candidates() == 3000
+    # A row with a name and company that are already here under another email is a changed email and updates that
+    # person (cycle 10 W3), so with random names some of the 1,500 are updates, not adds.
+    assert preview["added"] == done["added"] and preview["updated"] == done["updated"]
+    assert done["added"] + done["updated"] + done["unchanged"] == 1500
+    assert store.count_candidates() == 1500 + done["added"]
     assert calls == 0  # no saved link is normalised again inside a query
     assert took < 25, f"preview and import of 1,500 rows took {took:.1f}s"
 

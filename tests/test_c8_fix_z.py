@@ -407,8 +407,8 @@ def test_duplicates_page_buttons_carry_the_pair_and_keep_linkedin_capitalized(st
     store.add_candidate(name="Kim Lo", current_company="Acme", email="a@x.com")
     store.add_candidate(name="Kim Lo", current_company="Acme", email="b@x.com")
     page = local_client(store).get("/candidates/duplicates").text
-    assert 'aria-label="Compare and merge Kim Lo and Kim Lo"' in page
-    assert 'aria-label="Not the same person: Kim Lo and Kim Lo"' in page
+    assert 'aria-label="Compare and merge Kim Lo (a@x.com) and Kim Lo (b@x.com)"' in page  # same name: told apart by email
+    assert 'aria-label="Not the same person: Kim Lo (a@x.com) and Kim Lo (b@x.com)"' in page
     assert "Pairs found" in page
 
 

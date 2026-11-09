@@ -126,7 +126,8 @@ def test_symbol_index_follows_edits_and_deletes(store):
 def test_old_database_is_reindexed_by_the_new_migration(tmp_path, monkeypatch):
     path = tmp_path / "old.db"
     steps = store_mod._MIGRATIONS
-    monkeypatch.setattr(store_mod, "_MIGRATIONS", steps[:-1])
+    ours = next(i for i, st in enumerate(steps) if isinstance(st, tuple) and st[1] is store_mod._migrate_v10q_data)
+    monkeypatch.setattr(store_mod, "_MIGRATIONS", steps[:ours])
     s = Store(path)
     a = s.add_candidate(name="Old Sharp", tags="C#")["id"]
     b = s.add_candidate(name="Old Plus", tags="C++")["id"]

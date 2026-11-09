@@ -67,19 +67,20 @@
     {% if preview.closed_jobs or reopen_jobs %}<label class="check"><input type="checkbox" name="reopen_jobs" value="1" {{ 'checked' if reopen_jobs }}>
       <span>Open {{ 'this job' if (preview.closed_jobs or preview.reopened) | length == 1 else 'these jobs' }} again and sync {{ 'its' if (preview.closed_jobs or preview.reopened) | length == 1 else 'their' }} rows: {% for c in (preview.closed_jobs or []) %}{{ c.job }}{{ ', ' if not loop.last }}{% endfor %}{{ preview.reopened | join(', ') }}. Left unticked, a job you closed here stays closed and nobody is added or moved on it. Changed it? Check again to see the result.</span></label>{% endif %}
     {% if email_changes %}<fieldset class="panel" id="email-changes"><legend>{{ email_changes | length }} {{ 'person looks' if email_changes | length == 1 else 'people look' }} like existing people with a new email</legend>
-      <p class="fine">Same name and company, but an email we don't have. Update means the file's email becomes their main one and the old one is kept. Add as new person means a second profile. A match that also shares the job is updated unless you say otherwise. Press Check again after you change a choice.</p>
+      <p class="fine">Same name and company (or same name and phone), but an email we don't have. Update means the file's email becomes their main one and the old one is kept. Add as new person means a second profile. A clear match is updated unless you say otherwise. When several people fit, nobody is guessed: pick the right one, or add as new and merge on the result page. Press Check again after you change a choice.</p>
       <label>For all of them <select name="email_default" aria-label="What to do for every person with a changed email">
-        <option value="" {{ 'selected' if not email_default }}>Update when the job matches, otherwise add as new</option>
+        <option value="" {{ 'selected' if not email_default }}>Update a clear match, otherwise add as new</option>
         <option value="update" {{ 'selected' if email_default == 'update' }}>Update this person (add the new email)</option>
         <option value="new" {{ 'selected' if email_default == 'new' }}>Add as new person</option></select></label>
       <div class="table-wrap"><table class="dense">
-        <thead><tr><th>Person</th><th>Old email</th><th>New email</th><th>This one</th></tr></thead>
+        <thead><tr><th scope="col">Person</th><th scope="col">Old email</th><th scope="col">New email</th><th scope="col">This one</th></tr></thead>
         <tbody>{% for c in email_changes[:100] %}
-          <tr><td>{{ c.name }}{% if c.company %} <span class="muted">{{ c.company }}</span>{% endif %}{% if c.strong %} <span class="fine">same job</span>{% endif %}</td>
+          <tr><td>{{ c.name }}{% if c.company %} <span class="muted">{{ c.company }}</span>{% endif %}{% if c.strong %} <span class="fine">same {{ c.why }}{% if c.same_job %}, same job{% endif %}</span>{% endif %}</td>
             <td class="fine">{{ c.old_email or 'more than one match' }}</td><td class="fine">{{ c.new_email }}</td>
-            <td>{% if c.id %}{% set pick = email_picks.get(c.row, '') %}<select name="emailchg_{{ c.row }}" aria-label="What to do with row {{ c.row }}, {{ c.name }}">
+            <td>{% set pick = email_picks.get(c.row, '') %}{% if c.id or c.candidates %}<select name="emailchg_{{ c.row }}" aria-label="What to do with row {{ c.row }}, {{ c.name }}">
               <option value="" {{ 'selected' if not pick }}>As chosen above: {{ 'update' if c.action == 'update' else 'add as new person' }}</option>
-              <option value="update" {{ 'selected' if pick == 'update' }}>Update this person (add the new email)</option>
+              {% if c.id %}<option value="update" {{ 'selected' if pick == 'update' }}>Update this person (add the new email)</option>
+              {% else %}{% for k in c.candidates %}<option value="update:{{ k.id }}" {{ 'selected' if pick == 'update:' ~ k.id }}>Update {{ k.email }} (id {{ k.id }})</option>{% endfor %}{% endif %}
               <option value="new" {{ 'selected' if pick == 'new' }}>Add as new person</option></select>{% else %}Add as new person{% endif %}</td></tr>{% endfor %}
         </tbody></table></div>
       {% if email_changes | length > 100 %}<p class="fine">The first 100 are listed. The choice above covers all {{ email_changes | length }}.</p>{% endif %}
@@ -105,6 +106,24 @@
 </form>
 <p class="fine">Undo works until something else changes, here or on <a href="/changes">Changes</a>. After that, the backup is under Automatic backups in <a href="/settings#backups">Settings</a>.</p>
 {% else %}<p class="fine">Nothing changed, so no backup was needed.</p>{% endif %}
+{% set came_new = (result.email_changes or []) | selectattr('new_id') | list %}
+{% if came_new %}<section class="panel" id="came-in-as-new" aria-labelledby="came-in-as-new-h">
+  <h2 id="came-in-as-new-h">Came in as new, but a likely match was here ({{ came_new | length }})</h2>
+  <p class="fine">Each of these people was added as a new profile with the email in your file, and someone with the same name and company, or phone, is already here with another email. If it is the same person, Merge keeps the profile that was here, makes the new email their main one, keeps the old email, moves their jobs and timeline over, and deletes the extra profile. A backup is saved first, and you can open both profiles before you decide.</p>
+  <ul class="plain" id="came-in-as-new-list">
+    {% for c in came_new[:100] %}<li>
+      <span>{{ c.name }}{% if c.company %}, {{ c.company }}{% endif %}: new email {{ c.new_email }}{% if c.old_email %}, was {{ c.old_email }}{% endif %}.</span>
+      <a href="/candidates/{{ c.new_id }}">Open the new profile for {{ c.name }}{% if c.new_email %} ({{ c.new_email }}){% endif %}</a>
+      {% if c.id %}<form class="inline" method="post" action="/candidates/{{ c.id }}/merge/{{ c.new_id }}" hx-post="/candidates/{{ c.id }}/merge/{{ c.new_id }}" hx-target="closest li" hx-swap="outerHTML">
+        <input type="hidden" name="primary_email" value="{{ c.new_email }}">
+        <button class="btn small" type="submit" aria-label="Merge the new profile for {{ c.name }} ({{ c.new_email }}) into {{ c.name }} ({{ c.old_email }})">Merge</button></form>
+      {% else %}{% for k in c.candidates[:3] %}<form class="inline" method="post" action="/candidates/{{ k.id }}/merge/{{ c.new_id }}" hx-post="/candidates/{{ k.id }}/merge/{{ c.new_id }}" hx-target="closest li" hx-swap="outerHTML">
+        <input type="hidden" name="primary_email" value="{{ c.new_email }}">
+        <button class="btn small" type="submit" aria-label="Merge the new profile for {{ c.name }} ({{ c.new_email }}) into {{ c.name }} ({{ k.email }})">Merge with {{ k.email }}</button></form>{% endfor %}{% endif %}
+    </li>{% endfor %}
+  </ul>
+  {% if came_new | length > 100 %}<p class="fine">The first 100 are listed. The rest are on <a href="/candidates/duplicates?reason=name-company-emails">Possible duplicates</a>.</p>{% endif %}
+</section>{% endif %}
 {% for p in panels %}{{ panel_list(p, 'result') }}
 {% endfor %}
 {% if result.stages_added and result.missing_stages %}<p class="fine">Added {{ result.missing_stages | length }} new stage{{ '' if result.missing_stages | length == 1 else 's' }}: {% for m in result.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}

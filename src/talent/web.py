@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from html import escape as html_escape
 import json
 import logging
 import os
@@ -49,6 +50,8 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
+REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
+BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -629,6 +632,88 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
 
+    def _matching_ids(raw: dict[str, str]) -> list[int]:
+        """Everyone the Candidates table shows for these filters (the same ones its address carries), not only the
+        page on screen, so "all of the results" in the bulk bar means all of them. At most BULK_MAX people."""
+        def get(key: str) -> str:
+            return str(raw.get(key) or "")
+
+        q = get("q").strip()
+        color = get("color").strip().lower()
+        color = color if color in (*COLORS, "none") else ""
+        job = get("job").strip()
+        pipe = get("pipe") if get("pipe") in opsreview.PIPES else ""
+        days = get("days").strip()
+        more_params = searchquery.clean_params({k: get(k) for k in (
+            "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max", "contacted", "contacted_days",
+            "added_days", "has_email", "has_linkedin")})
+        member = dict(job_id=int(job) if job.isdigit() else None, client=get("client") or None,
+                      stage=get("stage") or None, pipe=pipe or None, days=int(days) if days.isdigit() else None,
+                      **searchquery.search_kwargs(more_params))
+        if q:
+            member["color"] = color or None
+            result = search.search(q, tag=get("tag") or None, location=get("location") or None,
+                                   source=get("source") or None, limit=BULK_MAX, offset=0, **member)
+            return [h.candidate["id"] for h in result.hits]
+        conds, params, _ = store.candidate_filters(tag=get("tag") or None, location=get("location") or None,
+                                                   source=get("source") or None, color=color or None, **member)
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        return [r["id"] for r in store._rows(f"SELECT c.id FROM candidates c {where} ORDER BY c.id LIMIT ?",
+                                             (*params, BULK_MAX))]
+
+    @app.post("/candidates/bulk")
+    async def candidates_bulk(request: Request):
+        """App window only: set a color, add to a job or export, for the people ticked on the Candidates table (or
+        every person in the results, when "all of the results" is ticked). There is no bulk delete, and the AI has
+        no tool for any of this."""
+        form = await request.form()
+        action = str(form.get("action") or "")
+        if str(form.get("select_all") or "") == "1":
+            ids = _matching_ids({k[2:]: str(v) for k, v in form.items() if k.startswith("f_")})
+        else:
+            ids = list(dict.fromkeys(int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()))
+        if not ids:
+            return back(request, "/candidates", error="Tick at least one person first.")
+        n = len(ids)
+        who = f"{n} {'person' if n == 1 else 'people'}"
+        if action == "export":
+            stamp = datetime.now().strftime("%Y-%m-%d")
+            return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
+        if action == "color":
+            try:
+                shade = clean_color(str(form.get("color") or ""))
+            except ValueError as exc:
+                return back(request, "/candidates", error=str(exc))
+            done = store.set_color_many(ids, shade)
+            return back(request, "/candidates", notice=(f"Set the color to {shade} for {done} "
+                                                        f"{'person' if done == 1 else 'people'}." if shade else
+                                                        f"Cleared the color for {done} {'person' if done == 1 else 'people'}."))
+        if action == "job":
+            raw_job = str(form.get("job_id") or "")
+            if not raw_job.isdigit():
+                return back(request, "/candidates", error="Pick a job to add them to.")
+            job = job_or_404(int(raw_job))
+            try:
+                stage = store.resolve_stage(job["id"], str(form.get("stage") or "").strip() or None)
+            except ValueError as exc:
+                return back(request, "/candidates", error=f"{exc} Nobody was added.")
+            added = already = 0
+            for cid in ids:
+                if store._row("SELECT 1 AS x FROM applications WHERE candidate_id = ? AND job_id = ?", (cid, job["id"])):
+                    already += 1
+                    continue
+                try:
+                    store.add_to_pipeline(cid, job["id"], stage["name"])
+                    added += 1
+                except NotFound:
+                    continue
+            notice = f"Added {added} {'person' if added == 1 else 'people'} to {job['title']} at {stage['name']}."
+            if already:
+                notice += f" {already} {'was' if already == 1 else 'were'} already in it and stayed where they are."
+            return back(request, "/candidates", notice=notice)
+        return back(request, "/candidates", error=f"Pick what to do with the {who}: set a color, add to a job, or export.")
+
     def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
                      more: dict[str, str]) -> list[dict[str, str]]:
         """One chip per filter that is on, each linking to the same table with just that filter off."""
@@ -733,14 +818,21 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
     # ------------------------------------------------------- duplicates
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
-    def duplicates_page(request: Request, shown: int = 50):
+    def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
         shown = max(50, min(shown, 2000))
-        pairs = duplicates.find_pairs(store)
+        every = duplicates.find_pairs(store)
+        want = duplicates.reason_slug(reason)
+        pairs = duplicates.filter_pairs(every, want)
         total = len(pairs)
         rows = []
         for p in pairs[:shown]:
-            rows.append({**p, "a": store.get_candidate(p["keep"]), "b": store.get_candidate(p["other"])})
-        return page(request, "duplicates.html", rows=rows, total=total, shown=shown,
+            a, b = store.get_candidate(p["keep"]), store.get_candidate(p["other"])
+            la, lb = duplicates.pair_labels(a, b)
+            rows.append({**p, "a": a, "b": b, "a_label": la, "b_label": lb})
+        return page(request, "duplicates.html", rows=rows, total=total, shown=shown, all_total=len(every),
+                    reason=reason if want else "", reason_label=next((x[2] for x in duplicates.REASON_FILTERS
+                                                                      if x[0] == reason), ""),
+                    reasons=duplicates.reason_counts(every),
                     dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)))
 
     def _pair_ids(form: Any) -> list[tuple[int, int]]:
@@ -751,10 +843,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 out.append((int(m[1]), int(m[2])))
         return out
 
+    def _ticked_pairs(form: Any) -> list[tuple[int, int]]:
+        """The pairs to act on: the ticked ones, or, when "every pair that matches this filter" is ticked, every
+        pair the finder shows for the filter right now (not only the ones on the page)."""
+        if str(form.get("all_filtered") or "") == "1":
+            want = duplicates.reason_slug(str(form.get("reason") or ""))
+            return [(p["keep"], p["other"]) for p in duplicates.filter_pairs(duplicates.find_pairs(store), want)]
+        return _pair_ids(form)
+
     @app.get("/candidates/duplicates/merge-exact", response_class=HTMLResponse)
     def duplicates_merge_exact(request: Request):
         """App window only: every pair with the same email or LinkedIn (and a matching name), to tick and merge."""
-        return page(request, "duplicates_exact.html", rows=duplicates.exact_matches(store))
+        rows = []
+        for r in duplicates.exact_matches(store):
+            la, lb = duplicates.pair_labels(r["a"], r["b"])
+            rows.append({**r, "a_label": la, "b_label": lb})
+        return page(request, "duplicates_exact.html", rows=rows)
 
     @app.post("/candidates/duplicates/merge-exact")
     async def duplicates_merge_exact_run(request: Request):
@@ -795,7 +899,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         known = _current_pairs()
         seen: set[frozenset[int]] = set()
         rows = []
-        for a, b in _pair_ids(form):
+        for a, b in _ticked_pairs(form):
             if (a, b) not in known or frozenset((a, b)) in seen:
                 continue
             seen.add(frozenset((a, b)))
@@ -806,7 +910,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not rows:
             return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
                                     status_code=303)
-        return page(request, "duplicates_review.html", rows=rows[:500], count=len(rows), cut=max(0, len(rows) - 500))
+        return page(request, "duplicates_review.html", rows=rows[:REVIEW_MAX], count=len(rows),
+                    cut=max(0, len(rows) - REVIEW_MAX))
 
     @app.post("/candidates/duplicates/merge-ticked")
     async def duplicates_merge_ticked(request: Request):
@@ -816,7 +921,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         known = _current_pairs()
         chosen: list[tuple] = []
-        for a, b in _pair_ids(form):
+        for a, b in _pair_ids(form):  # only what is ticked on the review page, never the whole filter
             if (a, b) not in known:
                 continue
             value = f"{a}-{b}"
@@ -844,7 +949,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """App window only: the ticked pairs are different people. They never come back."""
         form = await request.form()
         done = 0
-        for a, b in _pair_ids(form):
+        for a, b in _ticked_pairs(form):
             try:
                 duplicates.dismiss(store, a, b)
                 done += 1
@@ -981,6 +1086,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse("/?" + urlencode({"notice": f"Deleted {c['name']}. This can't be undone."}),
                                 status_code=303)
 
+    def _merge_labels(keep_id: int, other_id: int) -> dict[str, Any]:
+        """Names that tell two same-named people apart, and the newer email (the default main email)."""
+        a, b = store.get_candidate(keep_id), store.get_candidate(other_id)
+        la, lb = duplicates.pair_labels(a, b)
+        emails = [*store.all_emails(keep_id), *store.all_emails(other_id)]
+        newest = duplicates.newer_email(a, b)
+        return {"keep_label": la, "other_label": lb, "default_email": newest if newest in emails else ""}
+
     @app.get("/candidates/{candidate_id}/merge/{other_id}", response_class=HTMLResponse)
     def merge_confirm(request: Request, candidate_id: int, other_id: int):
         """App window only: look at two records side by side before merging them."""
@@ -990,7 +1103,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "Pick two different people")
         return page(request, "merge.html", keep=store.candidate_detail(candidate_id, timeline_limit=5),
                     other=store.candidate_detail(other_id, timeline_limit=5),
-                    emails=list(dict.fromkeys([*store.all_emails(candidate_id), *store.all_emails(other_id)])))
+                    emails=list(dict.fromkeys([*store.all_emails(candidate_id), *store.all_emails(other_id)])),
+                    **_merge_labels(candidate_id, other_id))
 
     @app.post("/candidates/{candidate_id}/merge/{other_id}")
     async def merge_form(request: Request, candidate_id: int, other_id: int):
@@ -1003,8 +1117,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             importers.backup_before_import(store, reason="merge")
             cand = store.merge_candidates(candidate_id, other_id, by="app", primary_email=primary)
         except ValueError as exc:
+            if is_htmx(request):  # from a button on the import result page: one line in place of the pair
+                return HTMLResponse(f'<li class="fine" role="status">Not merged: {html_escape(str(exc))}</li>')
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'flash_error': str(exc)})}",
                                     status_code=303)
+        if is_htmx(request):
+            return HTMLResponse(f'<li class="fine" role="status">Merged {html_escape(other["name"])} into '
+                                f'<a href="/candidates/{candidate_id}">{html_escape(cand["name"])}</a>. Their emails are now '
+                                f'{html_escape(", ".join(store.all_emails(candidate_id)))}. A backup was saved first.</li>')
         m = cand["_merged"]
         bits = [f"filled {_labels(m['filled'])}"] if m["filled"] else []
         if m["timeline"]:
@@ -1271,7 +1391,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         row (emailchg_<row>), which win over the one for all."""
         default = str(form.get("email_default") or "")
         picks = {int(k[9:]): str(v) for k, v in form.items()
-                 if k.startswith("emailchg_") and k[9:].isdigit() and str(v) in ("update", "new")}
+                 if k.startswith("emailchg_") and k[9:].isdigit() and re.fullmatch(r"update|new|update:\d+", str(v))}
         return (default if default in ("update", "new") else None), picks
 
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],

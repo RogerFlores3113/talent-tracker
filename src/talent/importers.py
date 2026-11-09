@@ -368,6 +368,32 @@ def _split_notes_cell(v: str) -> list[str]:
     return [p.replace("\\|", "|").strip() for p in parts if p.strip()]
 
 
+_OTHER_EMAILS_LINE = re.compile(r"Other emails:\s*(.+)", re.I)
+
+
+def other_emails_line(text: str | None) -> list[str] | None:
+    """The addresses in a note that is only "Other emails: a@x.com, b@y.com" (older imports wrote these), else None.
+    A note with any other words in it is a person's own note and gives None."""
+    m = _OTHER_EMAILS_LINE.fullmatch((text or "").strip())
+    if not m:
+        return None
+    found = _EMAIL.findall(m.group(1))
+    return [e.lower() for e in dict.fromkeys(found)] if found and _EMAIL.sub("", m.group(1)).strip(" ,;/") == "" else None
+
+
+_WORD_PART = re.compile(r"(^|[-'\u2019.])([^\W\d_])")
+
+
+def tidy_name(name: str | None) -> str:
+    """A name as it should be saved: spaces trimmed and doubles collapsed, and ALL CAPS or all lowercase turned
+    into Title Case ("PRIYA NGUYEN" becomes "Priya Nguyen", "o'brien" becomes "O'Brien"). A name that already
+    has mixed case ("McDonald", "de la Cruz") is left exactly as written."""
+    s = re.sub(r"\s+", " ", name or "").strip()
+    if not any(ch.isalpha() for ch in s) or not (s == s.upper() or s == s.lower()):
+        return s
+    return " ".join(_WORD_PART.sub(lambda m: m.group(1) + m.group(2).upper(), w) for w in s.lower().split(" "))
+
+
 def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -> Iterable[dict[str, Any]]:
     """Each row as {"rows": [row number], "data": candidate fields, "notes", "note_at", "jobs", "warnings"}.
 
@@ -433,6 +459,9 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 if _looks_email_header(head) and _EMAIL.search(v):  # "Email (Personal)": an address, never lost
                     email_cols.append((col_name, v))
                     continue
+                if (found := other_emails_line(v)) is not None:  # only addresses: they go in Other emails, not a note
+                    more_emails.extend(found)
+                    continue
                 text = f"{col_name}: {v}" if note_cols > 1 or head not in _PLAIN_NOTE_HEADERS else v
                 notes.append(text)
                 if head in _DATED_NOTE_HEADERS:
@@ -443,7 +472,11 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             elif target == "other_emails":
                 more_emails.extend(e.lower() for e in _EMAIL.findall(v))
             elif target == "notes":
-                notes.extend(reversed(_split_notes_cell(v)))  # oldest first, so the newest ends up on top
+                for line in reversed(_split_notes_cell(v)):  # oldest first, so the newest ends up on top
+                    if (found := other_emails_line(line)) is not None:
+                        more_emails.extend(found)  # an older export's "Other emails: ..." line: the field has them
+                    else:
+                        notes.append(line)
             elif target in job:
                 job[target] = v
             elif target == "jobs":
@@ -487,14 +520,15 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             if extra_emails and not data.get("email"):
                 data["email"] = extra_emails.pop(0)
             if extra_emails:
-                notes.append("Other emails: " + ", ".join(extra_emails))
-                more_emails.extend(extra_emails)
+                more_emails.extend(extra_emails)  # kept in their Other emails field only, not again in a note
         if loc_parts:
             data["location"] = ", ".join(dict.fromkeys(v for _, v in sorted(loc_parts, key=lambda x: x[0])))
         if site and "website" not in data:
             data["website"] = site
         if not data.get("name") and (first or last):
             data["name"] = f"{first} {last}".strip()
+        if data.get("name"):
+            data["name"] = tidy_name(data["name"])
         if data.get("current_title") and not data.get("current_company"):
             split = _split_role(data["current_title"])
             if split:
@@ -847,20 +881,37 @@ class _People:
                 return e, []
         return None, list(same)
 
-    def changed_email(self, data: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        """For a row whose email nobody here has: (the one saved person with the same name and company who has a
-        different email, or None; everyone who fits when more than one does). A different phone number says
-        a different person. Both name and company have to be there."""
+    def changed_email(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        """For a row whose email nobody here has: every saved person who could be that person with a new email,
+        each with `why`. Same name plus the same current company fits, and so does same name plus the same
+        phone number (a different phone number says a different person). Someone this import just made never
+        fits, and neither does someone with no email (there is nothing to change)."""
         company, phone = _fold(data.get("current_company")), _digits(data.get("phone"))
-        if not company:
-            return None, []
         fits = []
         for e in self.by_name.get(_fold(data.get("name")), []):
             theirs = _digits(e["phone"])
-            if e["id"] in self.fresh or not e["email"] or _fold(e["current_company"]) != company or (phone and theirs and phone != theirs):
+            if e["id"] in self.fresh or not e["email"] or (phone and theirs and phone != theirs):
                 continue
-            fits.append(e)
-        return (fits[0] if len(fits) == 1 else None), fits
+            same_phone = bool(phone and theirs and phone == theirs)
+            same_company = bool(company) and _fold(e["current_company"]) == company
+            if same_company or same_phone:
+                fits.append({**e, "why": "name and company" if same_company else "name and phone",
+                             "phone_match": same_phone})
+        return fits
+
+
+def _likeliest(store: Store, fits: list[dict[str, Any]], rec_jobs: list[tuple]) -> dict[str, Any] | None:
+    """The one person this row is when several fit: the one with the same phone number, else the only one who
+    is already on the job the row names. None when that still doesn't pick one (never a guess)."""
+    if len(fits) == 1:
+        return fits[0]
+    for pick in (lambda e: e["phone_match"], lambda e: _on_job(store, e["id"], rec_jobs)):
+        hit = [e for e in fits if pick(e)]
+        if len(hit) == 1:
+            return hit[0]
+        if hit:
+            fits = hit
+    return None
 
 
 def _on_job(store: Store, candidate_id: int, rec_jobs: list[tuple]) -> bool:
@@ -966,12 +1017,15 @@ def import_rows(store: Store, header: list[str], rows: list[list[str]], mapping:
                 email_default: str | None = None, email_choices: dict[int, str] | None = None) -> dict[str, Any]:
     """Add or update one candidate per row. A bad row is skipped and listed, never fatal.
 
-    A row whose email is new here but whose name and company match one saved person (who has a different email)
-    looks like a changed email, not a new person. It is never added as a copy without saying so: it is listed in
-    `email_changes` (row, who, old and new email, `strong` when they are also on the same job, and the `action`
-    taken). email_default is "update" or "new" for all of them; left out, a strong match updates the person (the
-    file's email becomes their main one, the old one is kept as another address) and a weaker one is added as
-    a new person and flagged. email_choices {first row number: "update" | "new"} overrides one row.
+    A row whose email is new here but whose name matches one saved person (who has a different email) at the same
+    current company, or with the same phone number, looks like a changed email, not a new person. It is never added
+    as a copy without saying so: it is listed in `email_changes` (row, who, old and new email, `why`, `strong` when
+    one person clearly fits, `candidates` when several do, and the `action` taken; `new_id` is the person made when
+    it was added as new, so the result page can offer a merge). When several fit, the one with the same phone, or
+    the only one on the row's job, is the match. email_default is "update" or "new" for all of them; left out, a
+    strong match updates the person (the file's email becomes their main one, the old one is kept as another
+    address) and an unclear one is added as a new person and flagged. email_choices {first row number: "update" |
+    "new" | "update:<id>"} overrides one row ("update:<id>" picks one of several).
 
     Backs up the database first (see backup_before_import). Rows with the same email or LinkedIn
     in one file are folded into one first. A row with neither is matched to a saved person by
@@ -1207,18 +1261,26 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
         if data.get("email") and not owners and not by_li:  # an email nobody here has: a changed email, or new?
             people = people or _People(store)
             people.fresh = made_ids
-            same, fits = people.changed_email(data)
+            fits = people.changed_email(data)
             if fits:
                 first = rec["rows"][0]
-                strong = bool(same) and _on_job(store, same["id"], rec["jobs"])
+                same = _likeliest(store, fits, rec["jobs"])
+                pick = str((email_choices or {}).get(first) or "")
+                if pick.startswith("update:") and pick[7:].isdigit():  # the recruiter chose one of several
+                    same = next((e for e in fits if e["id"] == int(pick[7:])), same)
+                strong = same is not None  # one clear match: same name and company, or same name and phone
                 want = (email_choices or {}).get(first) or (email_default if email_default in ("update", "new")
                                                            else ("update" if strong else "new"))
+                if want.startswith("update:"):
+                    want = "update" if same else "new"
                 if not same:
                     want = "new"  # more than one person fits: never guess which
                 change = {"row": first, "name": data["name"], "company": data.get("current_company") or "",
                           "old_email": same["email"] if same else "", "new_email": data["email"].lower(),
                           "id": same["id"] if same else None, "strong": strong, "action": want,
-                          "ambiguous": len(fits) > 1}
+                          "why": (same or fits[0])["why"], "same_job": bool(same) and _on_job(store, same["id"], rec["jobs"]),
+                          "ambiguous": len(fits) > 1 and not strong,
+                          "candidates": [{"id": e["id"], "email": e["email"]} for e in fits[:5]] if len(fits) > 1 else []}
                 email_changes.append(change)
         try:
             match = None
@@ -1259,6 +1321,8 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             continue
         if created:
             made_ids.add(cand["id"])
+            if change and change["action"] == "new":
+                change["new_id"] = cand["id"]
         if people is not None:
             people.add(cand)
         if rec["created_at"] and (created or rec["created_at"] < (cand.get("created_at") or "")):
@@ -1272,7 +1336,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                 possible.append(f"{label}: {cand['name']} was added as a new person with {change['new_email']}, but "
                                 f"someone with that name and company is already here ({who}, "
                                 f"{change['old_email'] or 'other emails'}). Their email may have changed. "
-                                "Merge them on the Duplicates page, or import again and choose Update.")
+                                "Merge them with the button under \"Came in as new\" on this page, or on the Duplicates page.")
             if others:
                 ids = ", ".join(f"id {o['id']}" for o in others[:3])
                 possible.append(f"{label}: {cand['name']} was added, but someone with that name is already "
@@ -1320,7 +1384,7 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                     + f", {c['old_email'] or 'another email'} to {c['new_email']}: "
                     + ("updated, the new email is now their main one" if c["action"] == "update"
                        else "added as a new person")
-                    + (", and the job matches" if c["strong"] else "") for c in email_changes]
+                    + (", and the job matches" if c.get("same_job") else "") for c in email_changes]
     return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
             "email_change_lines": change_lines,
             "skipped_rows": skipped_rows, "conflicts": conflicts, "warnings": warned, "notes": notes,
@@ -1912,7 +1976,7 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
         n = len(changes)
         upd = sum(1 for c in changes if c["action"] == "update")
         lines.append(f"{_plural(n, 'person looks', 'people look')} like existing people with a new email (same "
-                     f"name and company): {upd} will be updated with the new email as their main one (the old one "
+                     f"name and company, or same name and phone): {upd} will be updated with the new email as their main one (the old one "
                      f"is kept), and {n - upd} will be added as new people. You can change this for each person, "
                      "or for all of them.")
     extra = []
@@ -2034,19 +2098,22 @@ def _stage_dates_text(store: Store, candidate_id: int) -> str:
     return "; ".join(p["stage_changed_at"] or "" for p in store.candidate_pipelines(candidate_id))
 
 
-def export_csv_bytes(store: Store) -> bytes:
+def export_csv_bytes(store: Store, ids: Iterable[int] | None = None) -> bytes:
     """The export as UTF-8 with a byte-order mark, so Excel reads names like Søren and Łukasz right.
-    Importing accepts a file with or without the mark (decode)."""
-    return b"\xef\xbb\xbf" + export_csv(store).encode("utf-8")
+    Importing accepts a file with or without the mark (decode). `ids` limits it to those people."""
+    return b"\xef\xbb\xbf" + export_csv(store, ids).encode("utf-8")
 
 
 def _notes_text(store: Store, candidate_id: int) -> str:
     out: list[str] = []
     size = 0
+    mine = {*store.other_emails(candidate_id)}
     for t in store.timeline(candidate_id, limit=200):  # newest first
         text = _export_note(t)
         if text is None:
             continue
+        if (found := other_emails_line(text)) is not None and set(found) <= mine:
+            continue  # already in the Other emails column
         body = text.replace("|", "\\|")
         if len(out) >= EXPORT_NOTES_KEPT or size + len(body) > EXPORT_NOTES_CHARS:
             break
@@ -2055,7 +2122,9 @@ def _notes_text(store: Store, candidate_id: int) -> str:
     return " | ".join(out)
 
 
-def export_csv(store: Store) -> str:
+def export_csv(store: Store, ids: Iterable[int] | None = None) -> str:
+    """Everyone as CSV, or only the people with these ids (the ticked rows of the Candidates table)."""
+    only = None if ids is None else set(ids)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([EXPORT_HEADERS[f] for f in EXPORT_FIELDS]
@@ -2063,6 +2132,8 @@ def export_csv(store: Store) -> str:
                   EXPORT_HEADERS["notes"], EXPORT_HEADERS["work_history"]])
     others = store.other_emails_by_id()
     for c in store.all_candidates():
+        if only is not None and c["id"] not in only:
+            continue
         history = "; ".join(
             " at ".join(x for x in (h["title"], h["company"]) if x)
             + (f" ({h['start'] or ''}-{h['end'] or 'now'})" if h["start"] or h["end"] else "")

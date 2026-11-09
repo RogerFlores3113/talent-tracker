@@ -513,7 +513,7 @@ def test_city_state_country_combine_small_to_large_whatever_the_column_order():
 def test_several_emails_in_one_cell_keep_the_first_and_the_rest_as_a_note():
     (r,) = _rows('Name,Emails\nAna,"Ana@Work.com; ana@home.org, ana@old.net"\n')
     assert r["data"]["email"] == "ana@work.com"
-    assert r["notes"] == ["Other emails: ana@home.org, ana@old.net"]
+    assert r["notes"] == [] and r["other_emails"] == ["ana@home.org", "ana@old.net"]  # in their field only (cycle 10 W3)
     (r,) = _rows("Name,Email\nBo,bo@x.com\n")
     assert r["notes"] == []
 

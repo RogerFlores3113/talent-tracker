@@ -254,7 +254,7 @@ def test_exact_matches_list_and_bulk_merge_with_a_preview_and_checkboxes(store):
     page = c.get("/candidates/duplicates")
     assert "Merge all exact email or LinkedIn matches (1)" in page.text and 'form="bulk-dismiss"' in page.text
     prev = c.get("/candidates/duplicates/merge-exact")
-    assert prev.status_code == 200 and 'name="pair"' in prev.text and "checked" in prev.text
+    assert prev.status_code == 200 and 'name="pair"' in prev.text and "checked" not in prev.text  # destructive: nothing starts ticked
     pair = f"{pairs[0]['keep']}-{pairs[0]['other']}"
     r = c.post("/candidates/duplicates/merge-exact", data={"pair": [pair, "999-1000"]}, follow_redirects=False)
     assert "Merged 1 pair" in flash_of(r)
