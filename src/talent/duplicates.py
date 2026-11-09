@@ -28,6 +28,57 @@ STRONG = (REASONS[0], REASONS[1])  # exact email or LinkedIn: what "Merge all ex
 _RANK = {r: i for i, r in enumerate(REASONS)}
 
 
+# What the reason filter on the duplicates page offers: (slug in the address, the reason it matches, short label).
+REASON_FILTERS = (("email", REASONS[0], "Same email"), ("linkedin", REASONS[1], "Same LinkedIn"),
+                  ("name-phone", REASONS[2], "Same name and phone"), ("name-company", REASONS[3], "Same name and company"),
+                  ("similar-name", REASONS[4], "Similar name, same company"),
+                  ("name-company-emails", REASONS[5], "Same name and company, different emails"),
+                  ("similar-name-emails", REASONS[6], "Similar name and company, different emails"))
+
+
+def reason_slug(slug: str | None) -> str | None:
+    """The reason a slug from the address stands for, or None for no filter (or one we don't know)."""
+    return next((r for k, r, _ in REASON_FILTERS if k == (slug or "").strip().lower()), None)
+
+
+def filter_pairs(pairs: list[dict[str, Any]], reason: str | None) -> list[dict[str, Any]]:
+    """Only the pairs that have this reason (any of their reasons); all of them when there is no filter."""
+    return [p for p in pairs if reason in p["reasons"]] if reason else pairs
+
+
+def reason_counts(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """For each filter: its slug, label and how many pairs have that reason. A reason with no pairs is left out."""
+    out = []
+    for slug, reason, label in REASON_FILTERS:
+        n = sum(1 for p in pairs if reason in p["reasons"])
+        if n:
+            out.append({"slug": slug, "label": label, "count": n})
+    return out
+
+
+def pair_labels(a: dict[str, Any], b: dict[str, Any]) -> tuple[str, str]:
+    """How to name the two people of a pair in a checkbox, menu or button. By name, unless the two have the same
+    name: then each gets the email, else the company, else the phone, else the id, so they can be told apart."""
+    if (a.get("name") or "").strip().casefold() != (b.get("name") or "").strip().casefold():
+        return a["name"], b["name"]
+
+    def tell(c: dict[str, Any], other: dict[str, Any]) -> str:
+        for key in ("email", "current_company", "phone"):
+            v = (c.get(key) or "").strip()
+            if v and v.casefold() != (other.get(key) or "").strip().casefold():
+                return f"{c['name']} ({v})"
+        return f"{c['name']} (id {c['id']})"
+
+    return tell(a, b), tell(b, a)
+
+
+def newer_email(a: dict[str, Any], b: dict[str, Any]) -> str | None:
+    """The main email of the person who was saved later (the newer address, when one person changed email and was
+    saved again), else the other one's. None when neither has one."""
+    first, second = sorted((a, b), key=lambda c: (c.get("created_at") or "", c["id"]), reverse=True)
+    return ((first.get("email") or "").lower() or (second.get("email") or "").lower()) or None
+
+
 def email_key(email: str | None) -> str | None:
     """A cleaned email: lowercase; for Gmail, dots and a +tag don't count ('a.b+jobs@gmail.com' is 'ab@gmail.com')."""
     e = (email or "").strip().lower()
@@ -254,8 +305,12 @@ def merge_pairs(store: Store, pairs: list[tuple]) -> dict[str, Any]:
 
 def pair_details(store: Store, keep: int, other: int) -> dict[str, Any]:
     """Both people of a pair as saved, with every address each has, for the "who is kept" step."""
-    return {"keep": keep, "other": other, "a": store.get_candidate(keep), "b": store.get_candidate(other),
-            "emails": list(dict.fromkeys([*store.all_emails(keep), *store.all_emails(other)]))}
+    a, b = store.get_candidate(keep), store.get_candidate(other)
+    la, lb = pair_labels(a, b)
+    emails = list(dict.fromkeys([*store.all_emails(keep), *store.all_emails(other)]))
+    newest = newer_email(a, b)
+    return {"keep": keep, "other": other, "a": a, "b": b, "a_label": la, "b_label": lb, "emails": emails,
+            "default_email": newest if newest in emails else (emails[0] if emails else None)}
 
 
 def plausible_for(store: Store, c: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

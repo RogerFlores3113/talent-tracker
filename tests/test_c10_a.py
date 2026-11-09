@@ -161,7 +161,7 @@ def test_candidates_table_caption_scope_and_sort(store):
     c = local_client(store)
     html = c.get("/candidates?sort=name&dir=asc").text
     assert '<caption class="sr-only">Candidates, sorted by name, ascending</caption>' in html
-    assert html.count('<th scope="col"') == 9  # eight before, plus the Added column
+    assert html.count('<th scope="col"') == 10  # nine before, plus the tick-a-person column (cycle 10 W3)
     assert re.search(r'<th scope="col" aria-sort="ascending"><a [^>]*>Name <span aria-hidden="true">▲</span></a></th>', html)
     assert html.count("aria-sort=") == 1
     html = c.get("/candidates?sort=updated&dir=desc").text

@@ -32,6 +32,10 @@ All notable changes to Talent Search. Newest first.
 - Merge many duplicate pairs at once, with one backup, and pick which email stays main.
 - Today and Jobs load fast with thousands of people.
 - CSV exports open correctly in Excel (names like Søren and Łukasz) and keep stage dates on a round trip.
+- Tick people on the Candidates table (or all the results) to set a color, add them to a job at a stage, or export just them as CSV. There is no bulk delete.
+- A re-import matches a changed email by name plus company, or name plus phone, and updates by default. When several people fit, the one with the same phone or job is picked, or you choose. People who still came in as new show on the result page with a Merge button for each.
+- Possible duplicates can be filtered by reason, one tick covers every pair of a filter, bulk merge pages start unticked, the newer email is the default main email, and same-named people are told apart by email or company.
+- Import tidies names: spaces trimmed, ALL CAPS or all lowercase turned into Title Case (McDonald and de la Cruz are left alone). "Other emails" are kept in their own field, not repeated in Notes.
 
 ### Paste and connect
 - Pasting a resume reads every role with its dates, and a note reads name, title and company. The check page says what wasn't found.

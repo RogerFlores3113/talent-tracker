@@ -1,6 +1,7 @@
 // Talent Search app window. All page scripts live here so the Content-Security-Policy
 // can forbid inline scripts. Pages opt in with data- attributes:
-//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form)
+//   data-confirm="question"   on a form: ask before submitting ("{stage}" in it names the stage picked in the form);
+//                             on a submit button: ask only when that button sent the form
 //   data-autosubmit           on a select: submit its form when it changes by mouse or touch. Picked with the keyboard
 //                             (arrow keys), it submits on Enter or when the select loses focus, so each arrow press
 //                             doesn't reload the page. On a checkbox it submits at once.
@@ -157,6 +158,7 @@
     const form = e.target;
     if (form.dataset && form.dataset.decide !== undefined && !window.confirm(decideQuestion(form))) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.confirm && !window.confirm(confirmText(form))) { e.preventDefault(); return; }
+    if (e.submitter && e.submitter.dataset && e.submitter.dataset.confirm && !window.confirm(e.submitter.dataset.confirm)) { e.preventDefault(); return; }
     if (form.dataset && form.dataset.busy) {
       // A big import takes a while: say so, and don't let a second click send it again.
       if (form.dataset.sent) { e.preventDefault(); return; }

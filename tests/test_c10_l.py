@@ -43,10 +43,11 @@ def test_changed_email_with_same_job_updates_the_person_by_default(store):
     assert c["strong"] and c["action"] == "update" and c["old_email"] == "ana@old.com"
 
 
-def test_changed_email_without_the_job_is_flagged_and_added_as_new_by_default(store):
+def test_changed_email_with_several_possible_people_is_flagged_and_added_as_new_by_default(store):
     _week1(store)
+    store.add_candidate(name="Cy Dan", email="cy.other@old.com", current_company="Zed")  # a second Cy Dan at Zed
     r = _run(store, [["Cy Dan", "cy@new.com", "Zed", "", "", ""]])
-    assert r["added"] == 1 and store.count_candidates() == 4
+    assert r["added"] == 1 and store.count_candidates() == 5
     [c] = r["email_changes"]
     assert not c["strong"] and c["action"] == "new"
     assert any("Cy Dan" in line and "already here" in line for line in r["possible_duplicates"])  # never silent
@@ -61,7 +62,7 @@ def test_preview_says_how_many_look_like_existing_people(store):
     assert len(p["email_changes"]) == 2
     line = importers.preview_lines(p)[1]
     assert line.startswith("2 people look like existing people with a new email")
-    assert "1 will be updated" in line and "1 will be added as new people" in line
+    assert "2 will be updated" in line and "0 will be added as new people" in line
     assert p["email_change_lines"] and store.count_candidates() == 3  # a preview changes nothing
 
 

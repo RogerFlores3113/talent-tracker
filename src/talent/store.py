@@ -228,6 +228,21 @@ def _migrate_v10q_data(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO candidates_fts(candidates_fts) VALUES('rebuild')")
 
 
+def _migrate_v10w3_data(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, candidate_id, body FROM timeline WHERE kind = 'note' AND body LIKE 'Other emails:%'")
+    drop = []
+    for tid, cid, body in rows.fetchall():
+        head, sep, rest = (body or "").partition(": ")
+        if head != "Other emails" or not sep or "\n" in body or _NOTE_EMAIL.sub("", rest).strip(" ,;/") != "":
+            continue
+        found = {a.lower() for a in _NOTE_EMAIL.findall(rest)}
+        kept = {r[0] for r in conn.execute("SELECT email FROM candidate_emails WHERE candidate_id = ?", (cid,))}
+        main = conn.execute("SELECT lower(email) FROM candidates WHERE id = ?", (cid,)).fetchone()
+        if found and found <= kept | {main[0] if main and main[0] else ""}:
+            drop.append((tid,))
+    conn.executemany("DELETE FROM timeline WHERE id = ?", drop)
+
+
 def _words_index() -> str:
     """Unstemmed copy of the index, kept only for its word list (candidates_words_vocab).
 
@@ -772,6 +787,9 @@ _MIGRATIONS: tuple[Any, ...] = (
     """,
     # v10q: c#, c++, f# and .net are words of their own in search (they used to be read as c and net).
     (_sym_index(), _migrate_v10q_data),
+    # v10w3: an "Other emails: ..." note that only repeats addresses the person keeps in their Other emails field is
+    # removed (older imports wrote both). A note with any other words in it is left alone.
+    ("SELECT 1;", _migrate_v10w3_data),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -2735,6 +2753,20 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("UPDATE candidates SET color = ? WHERE id = ?", (want, candidate_id))
         return self.get_candidate(candidate_id)
+
+    def set_color_many(self, candidate_ids: Iterable[int], color: str | None) -> int:
+        """The bulk colour tag on the Candidates table: the same quiet save as set_color for each person, in one
+        go. Returns how many people were changed (an id nobody has is skipped)."""
+        want = clean_color(color)
+        ids = list(dict.fromkeys(int(i) for i in candidate_ids))
+        done = 0
+        with self._lock, self._conn:
+            for at in range(0, len(ids), 500):
+                chunk = ids[at:at + 500]
+                done += self._conn.execute(
+                    f"UPDATE candidates SET color = ? WHERE id IN ({', '.join('?' * len(chunk))})",
+                    (want, *chunk)).rowcount
+        return done
 
     def color_counts(self, **filters: Any) -> dict[str, int]:
         """How many people have each colour ("none" counts the untagged), for the chips above the table. With
