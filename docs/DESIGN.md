@@ -113,9 +113,14 @@ profile can't blank out what the recruiter filled in.
   Francisco, `swe` to software engineer, etc.). User input is tokenized, never
   passed as FTS syntax, so quotes or operators can't break it.
 - **Query language (`searchquery.py`):** `"machine learning"` (phrase), `python OR go`
-  (OR in capitals), `-recruiter` or `NOT manager` (leave out), and field prefixes
+  (OR in capitals, or a lowercase `or` between two words), `-recruiter` or `NOT manager`
+  (leave out people who have that exact word, not stems), and field prefixes
   `title:`, `company:`, `location:`, `skill:`/`tag:`, `source:` that set the same
-  filters as the Candidates bar. Typed text is parsed into pieces and the FTS5 text is
+  filters as the Candidates bar. Prefix values keep their punctuation (`skill:c++`,
+  `skill:node.js`), `skill:python OR go` joins the skill, a minus or NOT before a prefix
+  (`-title:manager`) filters that field, `source:` also matches one word of the Found via
+  label, and the last word is a prefix only when it is plain and 3+ characters. The
+  Candidates page shows a "How we read your search" line built from the parser. Typed text is parsed into pieces and the FTS5 text is
   built from quoted pieces, so nothing typed is ever syntax; a lone OR, an unbalanced
   quote or `title:` with nothing after it is dropped or read as plain words. Parentheses
   are not supported (ignored). Plain words keep the everyday search (typo help, notes,

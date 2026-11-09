@@ -7,9 +7,12 @@ builds its own FTS5 expression from those pieces, quoting every one, so no typed
 What the box understands (AND stays the default):
     machine learning          every word must match
     "machine learning"        that exact phrase
-    python OR go              either word (OR in capitals)
-    -recruiter, NOT manager   leave out people who have that word
-    title:engineer            the same as the Title filter (also company:, location:, skill: or tag:, source:)
+    python OR go              either word (a lowercase "or" between two words counts too)
+    -recruiter, NOT manager   leave out people who have that exact word
+    title:engineer            the same as the Title filter (also company:, location:, skill: or tag:, source:);
+                              punctuation stays, so skill:c++ and skill:node.js work
+    skill:python OR go        an OR after a prefix value joins that same prefix (skill:python OR skill:go)
+    -title:manager            a minus or NOT before a prefix leaves out people whose field has it
 Parentheses are not supported: they are ignored, so `(python OR go)` reads as `python OR go`.
 """
 from __future__ import annotations
@@ -32,6 +35,7 @@ class Item:
     text: str  # words joined by one space, lowercase
     phrase: bool = False  # two or more words that must sit together
     raw: str = ""  # the same words as typed (capitals kept: "Dana Okafor" reads as a name)
+    plain: bool = True  # typed as ordinary letters and digits (no c++, c#, o'brien)
 
     @classmethod
     def of(cls, raw: str, phrase: bool = False) -> "Item | None":
@@ -39,7 +43,13 @@ class Item:
         words = [w.lower() for w in typed]
         if not words:
             return None
-        return cls(" ".join(words), phrase and len(words) > 1, " ".join(typed))
+        return cls(" ".join(words), phrase and len(words) > 1, " ".join(typed),
+                   plain=bool(re.fullmatch(r"\w+", (raw or "").strip())))
+
+    @property
+    def prefix_ok(self) -> bool:
+        """The last word while typing ("pyth" finds Python) needs 3 plain characters: "c++" or "go" don't spread."""
+        return self.plain and not self.phrase and " " not in self.text and len(self.text) >= 3
 
 
 @dataclass
@@ -48,6 +58,8 @@ class ParsedQuery:
     exclude: list[Item] = field(default_factory=list)
     fields: dict[str, list[str]] = field(default_factory=dict)  # title, company, location, source, skill
     skill_any: bool = False  # skill:a OR skill:b
+    not_fields: dict[str, list[str]] = field(default_factory=dict)  # -title:x, NOT skill:x
+    notes: list[str] = field(default_factory=list)  # things that could not be read as typed, in plain words
     used_syntax: bool = False  # quotes, OR, NOT, a minus or a field prefix was understood
 
     @property
@@ -65,6 +77,30 @@ class ParsedQuery:
     @property
     def structured(self) -> bool:
         return self.used_syntax
+
+    def explain(self) -> str:
+        """The search as it was read, in plain words: '(python OR go) AND NOT recruiter AND title: engineer'.
+        Empty when nothing special was typed."""
+        if not (self.used_syntax or self.operator_mode):
+            return ""
+
+        def show(i: Item) -> str:
+            return f'"{i.text}"' if i.phrase else (i.raw or i.text)
+
+        label = {"skill": "skill", "title": "title", "company": "company", "location": "location",
+                 "source": "found via"}
+        many = len(self.groups) + len(self.fields) > 1
+        parts = []
+        for g in self.groups:
+            one = " OR ".join(show(i) for i in g)
+            parts.append(f"({one})" if len(g) > 1 and many else one)
+        for fld, vals in self.fields.items():
+            joiner = " AND " if fld == "skill" and not self.skill_any else " OR "
+            parts.append(f"{label.get(fld, fld)}: " + joiner.join(vals))
+        parts += [f"NOT {show(i)}" for i in self.exclude]
+        for fld, vals in self.not_fields.items():
+            parts += [f"NOT {label.get(fld, fld)}: {v}" for v in vals]
+        return " AND ".join(parts)
 
 
 def parse_query(text: str | None) -> ParsedQuery:
@@ -115,8 +151,16 @@ def parse_query(text: str | None) -> ParsedQuery:
             continue
         toks.append(("word", raw, neg, fld))
 
+    # A lowercase "or" between two words is an OR too ("python or go").
+    for k, (kind, value, neg, fld) in enumerate(toks):
+        if (kind == "word" and value == "or" and not neg and fld is None and 0 < k < len(toks) - 1
+                and toks[k - 1][0] in ("word", "phrase") and toks[k + 1][0] in ("word", "phrase")
+                and not toks[k + 1][2]):
+            toks[k] = ("op", "OR", False, None)
+            pq.used_syntax = True
+
     pending_or = pending_not = False
-    last_field_value: dict[str, bool] = {}
+    last: str | None = None  # the prefix of the value just before (None after a plain word or phrase)
     for kind, value, neg, fld in toks:
         if kind == "op":
             if value == "OR":
@@ -124,30 +168,44 @@ def parse_query(text: str | None) -> ParsedQuery:
             elif value == "NOT":
                 pending_not = True
             continue
-        item = Item.of(value, phrase=(kind == "phrase"))
         neg = neg or pending_not
         pending_not = False
+        item = Item.of(value, phrase=(kind == "phrase"))
         if item is None:
             continue
+        # A prefix value keeps its punctuation: skill:c++, skill:node.js, source:ci/cd.
+        text = " ".join((value or "").lower().split()).rstrip(",;")
         if neg:  # a minus or NOT leaves people out; an OR before it means nothing
-            pq.exclude.append(item)
+            if fld:
+                pq.not_fields.setdefault(fld, []).append(text)
+            else:
+                pq.exclude.append(item)
             pending_or = False
             continue
         if fld:
             vals = pq.fields.setdefault(fld, [])
-            if fld == "skill":
-                if pending_or and last_field_value.get(fld):
-                    pq.skill_any = True
-                vals.append(item.text)
-                last_field_value[fld] = True
+            if pending_or and last == fld and vals:
+                vals.append(text)  # skill:python OR skill:go
+                pq.skill_any = pq.skill_any or fld == "skill"
             else:
-                pq.fields[fld] = [item.text]  # the last one given wins
-            pending_or = False
+                if pending_or:
+                    pq.notes.append(f"An OR next to {fld}: only works between values of the same prefix, "
+                                    f"like {fld}:a OR {fld}:b, so it was read as AND.")
+                if fld == "skill":
+                    vals.append(text)
+                else:
+                    pq.fields[fld] = [text]  # the last one given wins
+            last, pending_or = fld, False
             continue
-        if pending_or and pq.groups:
+        if pending_or and last:  # skill:python OR go: the word joins that prefix
+            pq.fields[last].append(text)
+            pq.skill_any = pq.skill_any or last == "skill"
+        elif pending_or and pq.groups:
             pq.groups[-1].append(item)
+            last = None
         else:
             pq.groups.append([item])
+            last = None
         pending_or = False
     return pq
 
@@ -232,6 +290,7 @@ PARAM_KEYS = ("q", "tag", "location", "source", "job", "client", "stage", "title
               "remote", "exp_min", "exp_max", "contacted", "contacted_days", "added_days", "has_email", "has_linkedin",
               "color")
 CONTACTED_CHOICES = ("never", "older", "within")
+COLOR_CHOICES = ("red", "orange", "yellow", "green", "blue", "purple")
 MORE_KEYS = ("title", "company", "skills", "remote", "exp_min", "exp_max", "contacted", "added_days", "has_email",
              "has_linkedin")
 
@@ -265,7 +324,7 @@ def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
             continue
         if k in ("exp_min", "exp_max", "contacted_days", "added_days", "job"):
             num = _num(s)
-            if num is None:
+            if num is None or (k == "added_days" and num == 0):  # "in the last 0 days" means nothing: not set
                 continue
             s = str(num)
         elif k in ("remote", "has_email", "has_linkedin"):
@@ -279,6 +338,10 @@ def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
         elif k == "skills":
             s = ", ".join(split_skills(s))
             if not s:
+                continue
+        elif k == "color":
+            s = s.lower()
+            if s not in (*COLOR_CHOICES, "none"):
                 continue
         elif k == "skill_mode":
             if s.lower() != "all":
@@ -307,6 +370,8 @@ def search_kwargs(params: Mapping[str, Any]) -> dict[str, Any]:
     for k in ("remote", "has_email", "has_linkedin"):
         if k in p:
             kw[k] = True
+    if "color" in p:
+        kw["color"] = p["color"]
     for k in ("exp_min", "exp_max", "added_days"):
         if k in p:
             kw[k] = int(p[k])
@@ -329,6 +394,8 @@ def describe(params: Mapping[str, Any]) -> str:
             bits.append(label.format(p[k]))
     if "skills" in p:
         bits.append(("all of " if p.get("skill_mode") == "all" else "any of ") + p["skills"])
+    if "color" in p:
+        bits.append("no color" if p["color"] == "none" else f"{p['color']} color")
     if "remote" in p:
         bits.append("remote")
     if "exp_min" in p or "exp_max" in p:

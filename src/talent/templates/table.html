@@ -62,6 +62,8 @@
     <p class="fine">Remote means the location says remote, or the person has a Remote tag. Years of experience are worked out from the dates in each work history (overlapping jobs count once, a job with no end date runs to today). People with no dated work history are left out when you set a minimum.</p>
   </details>
 </form>
+{% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
+{% if range_note %}<p class="suggest">{{ range_note }}</p>{% endif %}
 {% if active_chips %}<p class="filter-chips" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 <div class="savedbar">
   {% if saved %}<span class="fine">Saved searches:</span>
