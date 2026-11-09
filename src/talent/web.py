@@ -27,20 +27,22 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import __version__, actions, backups, importers, integrations, paths, recipes, review, shortlist, reports
-from . import sessions
-from . import ai_caps, trust
-from . import outreach
+from . import sessions, skills
+from . import ai_caps, site_guard, trust
+from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, desk, opsreview
+from . import chase, desk, duplicates, opsreview, tour
+from . import searchquery
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
                     JOB_EXTRA_FIELDS, JOB_STATUSES, STAGE_OUTCOMES, TIMELINE_KINDS, NotFound,
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     split_tags, to_dt)
-from .store import as_local, parse_when
+from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
+from .store import COLORS, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -72,7 +74,31 @@ CHANGE_SINCE = {"1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days"}
 # "Undo all AI changes from the last ...": hours back.
 UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"}
 CHANGES_SHOWN = 300
+# The colour bubble's words: one letter in the bubble too, so colour is never the only clue.
+COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue": "B", "purple": "P"}
+# Rainbow order as SQL: red first, then orange... purple, then people with no colour.
+COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
+                  + f" ELSE {len(COLORS)} END")
+COLORED_FIRST_POOL = 500  # a search with Colored first sorts this many best matches by colour
+
+
+def color_info(color: str | None, who: str = "") -> dict[str, Any]:
+    """What a colour bubble says and does: its name, letter, the colours a click and a right-click go to, and
+    the label for screen readers. With the person's name it reads "Daniel Example: color red. Click for orange.
+    Shift+Enter goes back one color." so a list of bubbles has a different name for each."""
+    color = color if color in COLORS else None
+    nxt, prev = next_color(color, 1), next_color(color, -1)
+    name = color or "none"
+    go = f"Click for {nxt}" if nxt else "Click to clear it"
+    back = "Shift+Enter, Shift-click or right-click goes back one color."
+    lead = f"{who}: color" if who else "Color:"
+    return {"color": color or "", "name": name, "letter": COLOR_LETTERS.get(color or "", ""),
+            "next": nxt or "none", "prev": prev or "none", "aria": f"{lead} {name}. {go}. {back}",
+            "title": f"{lead} {name}. {go}. {back}"}
+
+
 TABLE_SORTS = {
+    "color": COLOR_RANK_SQL,
     "name": "lower(c.name)", "title": "lower(coalesce(c.current_title, ''))",
     "company": "lower(coalesce(c.current_company, ''))", "location": "lower(coalesce(c.location, ''))",
     "contacted": "coalesce(c.last_contacted_at, '')", "updated": "c.updated_at",
@@ -315,6 +341,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.filters["local"] = _local
     env.filters["day"] = actions.day_text  # a date, Windows-safe
     env.globals["IV_TIME"] = IV_TIME
+    env.globals["color_info"] = color_info
+    env.globals["COLORS"] = COLORS
     env.globals["local_zone"] = lambda: as_local(datetime.now(timezone.utc)).tzname() or ""
     env.globals["computer_zone"] = lambda: datetime.now().astimezone().tzname() or ""
     env.globals["user_zone"] = lambda: reports.user_zone(store)
@@ -326,7 +354,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["version"] = __version__
     env.globals["theme"] = lambda: current_theme(store)  # base.html puts it on <html>, so there is no flash of another theme
     env.globals["themes"] = THEMES
+    env.globals["guarded_sites"] = [d for d, _ in site_guard.GUARDED_SITES]  # listed under Stricter site guards
+    env.globals["guard_cap"] = site_guard.CAP
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["tour_payload"] = lambda request: tour_for_page(request)  # base.html draws the tour from this
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
     env.globals["ai_email_changes"] = lambda job_ids=None: review.email_changes(store, job_ids)  # job emails it set
@@ -484,7 +515,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"today": actions.action_items(store), "jobs": store.list_jobs("open"),
+        return {"saved_searches": store.list_saved_searches(counts=True, limit=6),
+                "today": actions.action_items(store), "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
@@ -502,41 +534,255 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     # ------------------------------------------------------------ table
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
-              sort: str = "updated", dir: str = "desc", page_no: int = 1, more: int = 0, job: str = "",
-              client: str = "", stage: str = "", pipe: str = "", days: str = ""):
+              sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
+              color_pick: str = "", cf: str = "",
+              title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
+              exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
+              added_days: str = "", has_email: str = "", has_linkedin: str = ""):
         per = 100
+        # The chips above the table are submit buttons: pressing the colour already chosen clears it.
+        color = (color_pick if color_pick != color else "") if color_pick else color
+        color = color.strip().lower()
+        color = color if color in (*COLORS, "none") else ""
+        colored_first = cf == "1"
+        if sort not in TABLE_SORTS:
+            sort = "color"
+        dir = dir if dir in ("asc", "desc") else ("asc" if sort == "color" else "desc")
         job_id = int(job) if job.strip().isdigit() else None
         pipe = pipe if pipe in opsreview.PIPES else ""
         day_n = int(days) if days.strip().isdigit() else None
-        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n)
+        # The "More filters" (searchquery.py): cleaned once, used for the search and kept in every link.
+        more_params = searchquery.clean_params(dict(
+            title=title, company=company, skills=skills, skill_mode=skill_mode, remote=remote, exp_min=exp_min,
+            exp_max=exp_max, contacted=contacted, contacted_days=contacted_days, added_days=added_days,
+            has_email=has_email, has_linkedin=has_linkedin))
+        member = dict(job_id=job_id, client=client or None, stage=stage or None, pipe=pipe or None, days=day_n,
+                      **searchquery.search_kwargs(more_params))
         page_no = max(1, page_no)
-        sql_sort = TABLE_SORTS.get(sort, TABLE_SORTS["updated"])
+        sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
         if q.strip():
-            result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                   limit=per, offset=(page_no - 1) * per, **member)
-            rows, total = [h.candidate for h in result.hits], result.total
+            member["color"] = color or None
+            if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
+                                                            if h.candidate.get("color") in COLORS else len(COLORS)))
+                start = (page_no - 1) * per
+                rows = [h.candidate for h in ranked[start:start + per]]
+            else:
+                result = search.search(q, tag=tag or None, location=location or None, source=source or None,
+                                       limit=per, offset=(page_no - 1) * per, **member)
+                rows = [h.candidate for h in result.hits]
+            total = result.total
             suggestion = result.suggestion
         else:
             conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
-                                                       source=source or None, **member)
+                                                       source=source or None, color=color or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
+            if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
+                order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
+            else:
+                order = f"{sql_sort} {direction}, c.id DESC"
             rows = [store._hydrate(r) for r in store._rows(
-                f"SELECT c.* FROM candidates c {where} ORDER BY {sql_sort} {direction}, c.id DESC LIMIT ? OFFSET ?",
+                f"SELECT c.* FROM candidates c {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (*params, per, (page_no - 1) * per))]
+        pq = searchquery.parse_query(q) if q.strip() and not store.lookup_exact(q)[0] else None
+        how_read = ""
+        if pq and (pq.structured or pq.operator_mode):  # "How we read your search", built from the parser
+            how_read = " ".join([pq.explain(), *pq.notes]).strip()
+        range_note = ""
+        if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
+            range_note = (f"Years of experience at least {more_params['exp_min']} and at most {more_params['exp_max']} "
+                          "can't both be true, so nobody matches. Swap the two numbers.")
         keep = {k: v for k, v in dict(tag=tag, location=location, source=source, job="" if job_id is None else job_id,
-                                      client=client, stage=stage, pipe=pipe,
-                                      days="" if not pipe or day_n is None else day_n).items() if v != ""}
+                                      client=client, stage=stage, pipe=pipe, color=color,
+                                      cf="1" if colored_first and q.strip() else "",
+                                      days="" if not pipe or day_n is None else day_n,
+                                      **more_params).items() if v != ""}
         ctx = dict(rows=rows, total=total, q=q, tag=tag, location=location, source=source, sort=sort, dir=dir,
-                   job=job_id or "", client=client, stage=stage, keep=keep,
+                   job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
+                   more_open=any(k in more_params for k in searchquery.MORE_KEYS),
+                   active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
+                   saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
+                   min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
                    pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
-                   suggestion=suggestion, corrected=bool(suggestion and result.corrected))
+                   suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
+                   colored_first=colored_first and bool(q.strip()), color_counts=store.color_counts())
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx, tags=store.list_tags(40), sources=store.list_sources(),
+                    dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    def filter_chips(q: str, keep: dict[str, Any], sort: str, dir: str, job_id: int | None,
+                     more: dict[str, str]) -> list[dict[str, str]]:
+        """One chip per filter that is on, each linking to the same table with just that filter off."""
+        names = {"tag": "Skill", "location": "Location", "source": "Found via", "client": "Client", "stage": "Stage",
+                 "title": "Title", "company": "Company"}
+        out: list[dict[str, str]] = []
+
+        def chip(label: str, *drop: str) -> None:
+            rest = {k: v for k, v in keep.items() if k not in drop}
+            if "q" not in drop and q:
+                rest["q"] = q
+            rest.update(sort=sort, dir=dir)
+            out.append({"label": label, "href": "/candidates?" + urlencode(rest)})
+
+        for k, label in names.items():
+            if keep.get(k):
+                chip(f"{label}: {keep[k]}", k)
+        if job_id is not None:
+            chip("In one job", "job", "stage")
+        if "skills" in more:
+            chip(("All of: " if more.get("skill_mode") == "all" else "Any of: ") + more["skills"], "skills", "skill_mode")
+        if "remote" in more:
+            chip("Remote", "remote")
+        if "exp_min" in more or "exp_max" in more:
+            lo, hi = more.get("exp_min"), more.get("exp_max")
+            chip(f"{lo} to {hi} years" if lo and hi else f"{lo}+ years" if lo else f"Up to {hi} years", "exp_min", "exp_max")
+        c = more.get("contacted")
+        if c:
+            n = more.get("contacted_days", "")
+            chip("Never contacted" if c == "never" else f"Last contacted over {n} days ago" if c == "older"
+                 else f"Contacted in the last {n} days", "contacted", "contacted_days")
+        if "added_days" in more:
+            chip(f"Added in the last {more['added_days']} days", "added_days")
+        if "has_email" in more:
+            chip("Has email", "has_email")
+        if "has_linkedin" in more:
+            chip("Has LinkedIn", "has_linkedin")
+        return out
+
+    # ------------------------------------------------------ saved searches
+    @app.post("/saved-searches")
+    async def saved_search_create(request: Request):
+        form = await request.form()
+        params = searchquery.clean_params({k: str(v) for k, v in form.items()})
+        try:
+            row = store.save_search(str(form.get("search_name") or ""), params, by="app")
+        except ValueError as exc:
+            return back(request, "/candidates", error=str(exc))
+        return RedirectResponse("/candidates?" + urlencode([*params.items(), ("notice", f"Saved search “{row['name']}”.")]),
+                                status_code=303)
+
+    @app.get("/saved-searches/{search_id}")
+    def saved_search_open(search_id: int):
+        """Open a saved search: the Candidates table with its words and filters, and note that it was looked at
+        (so "new" counts only people added after now)."""
+        try:
+            row = store.get_saved_search(search_id)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        store.mark_search_viewed(search_id)
+        return RedirectResponse("/candidates?" + urlencode(row["params"]), status_code=303)
+
+    @app.post("/saved-searches/{search_id}/rename")
+    async def saved_search_rename(request: Request, search_id: int):
+        form = await request.form()
+        try:
+            row = store.rename_saved_search(search_id, str(form.get("search_name") or ""))
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        except ValueError as exc:
+            return back(request, "/candidates", error=str(exc))
+        return back(request, "/candidates", notice=f"Renamed to “{row['name']}”.")
+
+    @app.post("/saved-searches/{search_id}/delete")
+    def saved_search_delete(request: Request, search_id: int):
+        """The recruiter's own action: the AI has no tool that deletes a saved search."""
+        try:
+            row = store.delete_saved_search(search_id)
+        except NotFound:
+            raise HTTPException(404, "That saved search isn't there any more.")
+        return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
+    # ------------------------------------------------------- duplicates
+    @app.get("/candidates/duplicates", response_class=HTMLResponse)
+    def duplicates_page(request: Request, shown: int = 50):
+        shown = max(50, min(shown, 2000))
+        pairs = duplicates.find_pairs(store)
+        total = len(pairs)
+        rows = []
+        for p in pairs[:shown]:
+            rows.append({**p, "a": store.get_candidate(p["keep"]), "b": store.get_candidate(p["other"])})
+        return page(request, "duplicates.html", rows=rows, total=total, shown=shown,
+                    dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)))
+
+    def _pair_ids(form: Any) -> list[tuple[int, int]]:
+        out = []
+        for v in form.getlist("pair"):
+            m = re.fullmatch(r"(\d+)-(\d+)", str(v))
+            if m:
+                out.append((int(m[1]), int(m[2])))
+        return out
+
+    @app.get("/candidates/duplicates/merge-exact", response_class=HTMLResponse)
+    def duplicates_merge_exact(request: Request):
+        """App window only: every pair with the same email or LinkedIn (and a matching name), to tick and merge."""
+        return page(request, "duplicates_exact.html", rows=duplicates.exact_matches(store))
+
+    @app.post("/candidates/duplicates/merge-exact")
+    async def duplicates_merge_exact_run(request: Request):
+        """App window only. Merges the ticked pairs, and only pairs that are still exact matches right now.
+        The AI has no merge tool."""
+        form = await request.form()
+        ok = {(r["keep"], r["other"]) for r in duplicates.exact_matches(store)}
+        ok |= {(b, a) for a, b in ok}
+        chosen = [(a, b) for a, b in _pair_ids(form) if (a, b) in ok]
+        if not chosen:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        try:
+            importers.backup_before_import(store, reason="merge")
+        except ValueError as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}),
+                                    status_code=303)
+        res = duplicates.merge_pairs(store, chosen)
+        n = res["merged"]
+        notice = f"Merged {n} pair{'' if n == 1 else 's'}. A backup was saved first."
+        if res["skipped"]:
+            notice += f" {len(res['skipped'])} could not be merged and were left alone."
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
+
+    @app.post("/candidates/duplicates/dismiss-many")
+    async def duplicates_dismiss_many(request: Request):
+        """App window only: the ticked pairs are different people. They never come back."""
+        form = await request.form()
+        done = 0
+        for a, b in _pair_ids(form):
+            try:
+                duplicates.dismiss(store, a, b)
+                done += 1
+            except (NotFound, ValueError):
+                continue
+        if not done:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "No pairs were ticked."}),
+                                    status_code=303)
+        return RedirectResponse("/candidates/duplicates?" + urlencode(
+            {"notice": f"Got it. {done} pair{'' if done == 1 else 's'} won't show up again."}), status_code=303)
+
+    @app.post("/candidates/duplicates/dismiss")
+    async def duplicates_dismiss(request: Request):
+        """App window only: these two are different people. The pair never comes back."""
+        form = await request.form()
+        a, b = str(form.get("a") or ""), str(form.get("b") or "")
+        if not (a.isdigit() and b.isdigit()):
+            raise HTTPException(400, "Pick two people")
+        try:
+            duplicates.dismiss(store, int(a), int(b))
+        except (NotFound, ValueError):
+            raise HTTPException(404, "Candidate not found")
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": "Got it. That pair won't show up again."}),
+                                status_code=303)
+
+    @app.post("/candidates/duplicates/reset")
+    def duplicates_reset():
+        n = duplicates.forget_dismissed(store)
+        return RedirectResponse("/candidates/duplicates?" + urlencode(
+            {"notice": f"{n} pair{'' if n == 1 else 's'} can show up again."}), status_code=303)
 
     # -------------------------------------------------------- candidates
     @app.get("/candidates/new", response_class=HTMLResponse)
@@ -549,8 +795,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         data = _form_fields(form)
         history = _history_from_text(str(form.get("work_history", "")))
         job_id = str(form.get("job_id") or "")
+        other_emails = _split_emails(form.get("other_emails"))
+        if other_emails:
+            data["other_emails"] = "\n".join(other_emails)  # shown again if the form comes back
         if (form.get("create_anyway") != "1" and data.get("name")
-                and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None):
+                and store.find_duplicate(data.get("email"), data.get("linkedin_url")) is None
+                and not any(store.find_duplicate(e) for e in other_emails)):
             same_name = store.find_by_name(str(data["name"]))  # the same check the AI app's save gets
             if same_name:
                 in_job = ({p["candidate_id"] for p in store.pipeline(int(job_id))}
@@ -560,14 +810,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job,
                             same_exact=same_exact, fill_fields=FILL_FIELDS)
         try:
-            cand, created = store.upsert_candidate(work_history=history or None, **data)
+            data.pop("other_emails", None)
+            cand, created = store.upsert_candidate(work_history=history or None, other_emails=other_emails, **data)
             if job_id.isdigit():
                 warning = add_with_warning(cand["id"], int(job_id))
                 return RedirectResponse(f"/jobs/{job_id}" + (f"?{urlencode({'flash_error': warning})}" if warning else ""),
                                         status_code=303)
         except ValueError as exc:
-            return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
-                        error=str(exc), job_id=form.get("job_id"))
+            return page(request, "candidate_form.html", c={**data, "other_emails": "\n".join(other_emails)},
+                        history_text=str(form.get("work_history", "")), error=str(exc), job_id=form.get("job_id"))
         dest = f"/candidates/{cand['id']}" + ("" if created else "?merged=1")
         return RedirectResponse(dest, status_code=303)
 
@@ -584,9 +835,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, other_jobs=other_jobs, stages=stages, merged=merged,
-                    dupes=store.possible_duplicates(candidate_id),
+                    inject_warnings=injection.candidate_warnings(c),
+                    dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
-                    refresh_prompt=recipes.refresh_candidate(c))
+                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)))
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
@@ -596,10 +848,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         history = _history_from_text(str(form.get("work_history", ""))) if "work_history" in form else None
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
+            if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
+                store.set_other_emails(candidate_id, _split_emails(form.get("other_emails")))
         except ValueError as exc:
-            return page(request, "candidate_form.html", c={"id": candidate_id, **data},
+            return page(request, "candidate_form.html",
+                        c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
         return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/color")
+    async def set_candidate_color(request: Request, candidate_id: int):
+        """The colour bubble: save one colour (or none) at once. A fetch from the page gets JSON back so the bubble
+        updates in place; a plain form post (no script) goes back to the page it came from."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        wants_json = "application/json" in request.headers.get("accept", "")
+        try:
+            saved = store.set_color(candidate_id, clean_color(str(form.get("color", ""))))
+        except ValueError as exc:
+            if wants_json:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return back(request, default=f"/candidates/{candidate_id}", error=str(exc))
+        if wants_json:
+            return JSONResponse({"id": candidate_id, **color_info(saved.get("color"), saved.get("name") or ""),
+                                 "counts": store.color_counts()})
+        return back(request, default=f"/candidates/{candidate_id}")
 
     @app.post("/candidates/{candidate_id}/delete")
     def delete_candidate_form(candidate_id: int):
@@ -817,13 +1090,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "paste.html", text="", prompt=recipes.save_from_text(""),
                         error="Paste some profile or resume text first.")
         guess = importers.quick_parse(text)
+        found, missing = duplicates.found_fields(guess)
         history_text = _history_to_text(guess.pop("work_history", None) or [])
-        dupe = store.find_duplicate(guess.get("email"), guess.get("linkedin_url"))
+        dupe = duplicates.already_here(store, guess)
         if dupe and len(text.split()) == 1 and guess.get("linkedin_url"):  # just their link: open who has it
             return RedirectResponse(f"/candidates/{dupe['id']}?{urlencode({'notice': f'Already saved: {dupe['name']}.'})}",
                                     status_code=303)
         return page(request, "candidate_form.html", c=guess, history_text=history_text, error=None, job_id=None,
-                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text))
+                    from_paste=True, dupe=dupe, prompt=recipes.save_from_text(text), found=found, missing=missing,
+                    dupe_same_id=store.find_duplicate(guess.get("email"), guess.get("linkedin_url")) is not None,
+                    dupe_name_differs=bool(dupe and guess.get("name") and store.find_duplicate(
+                        guess.get("email"), guess.get("linkedin_url")) is not None
+                        and not same_person_name(dupe["name"], guess["name"])))
 
     # ----------------------------------------------------------- csv
     @app.get("/import", response_class=HTMLResponse)
@@ -849,10 +1127,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         mapping, prof = importers.mapping_for(store, header, rows)
+        # A file from a different tool than the last import doesn't move stages unless the recruiter ticks it.
         return map_step(request, token, header, rows, mapping,
                         (prof or {}).get("source") or importers.default_source(header), _file_name(upload.filename),
                         add_stages=bool((prof or {}).get("add_stages", True)),
-                        move_stages=True, client=(prof or {}).get("client"),
+                        move_stages=importers.other_tool(store, header) is None, client=(prof or {}).get("client"),
                         replace_stages=bool((prof or {}).get("replace_stages", True)))
 
     def _file_name(name: Any) -> str:
@@ -873,7 +1152,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def map_step(request: Request, token: str, header: list[str], rows: list[list[str]], mapping: list[str],
                  source: str, filename: str | None = None, error: str | None = None,
                  add_stages: bool = True, move_stages: bool = True, client: str | None = None,
-                 reopen_jobs: bool = False, replace_stages: bool = True) -> HTMLResponse:
+                 reopen_jobs: bool = False, replace_stages: bool = True,
+                 allow_backward: bool = False) -> HTMLResponse:
         has_name = any(m in ("name", "first_name", "last_name") for m in mapping)
         prof = importers.sync_profile(store, header)
         client = (client or "").strip()[:120]
@@ -882,7 +1162,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             try:
                 preview = importers.preview_import(store, header, rows, mapping, source=source, add_stages=add_stages,
                                                    move_stages=move_stages, profile={**(prof or {}), "client": client},
-                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages)
+                                                   reopen_jobs=reopen_jobs, replace_stages=replace_stages,
+                                                   allow_backward=allow_backward)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
         if preview:
@@ -890,11 +1171,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     filename=filename, source=source, error=error, has_name=has_name, preview=preview,
+                    export_phrase=importers.export_phrase(importers.detect_export(header)),
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
-                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping)
+                    replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
+                    allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
+                    this_tool=importers.detect_export(header),
+                    skipped_email=importers.skipped_email_columns(header, mapping))
 
     def _upload(form: Any) -> tuple[str, Path] | None:
         token = str(form.get("token") or "")
@@ -918,7 +1203,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         str(form.get("source") or "CSV import"), _file_name(form.get("filename")),
                         add_stages=form.get("add_stages") == "1", move_stages=form.get("move_stages") == "1",
                         client=str(form.get("client") or ""), reopen_jobs=form.get("reopen_jobs") == "1",
-                        replace_stages=form.get("replace_stages") == "1")
+                        replace_stages=form.get("replace_stages") == "1",
+                        allow_backward=form.get("allow_backward") == "1")
 
     @app.post("/import/run", response_class=HTMLResponse)
     async def import_run(request: Request):
@@ -933,19 +1219,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         add_stages = form.get("add_stages") == "1"
         move_stages = form.get("move_stages") == "1"
         reopen_jobs, replace_stages = form.get("reopen_jobs") == "1", form.get("replace_stages") == "1"
+        allow_backward = form.get("allow_backward") == "1"
         client = str(form.get("client") or "").strip()[:120]
         filename = _file_name(form.get("filename"))
         if not any(m in ("name", "first_name", "last_name") for m in mapping):
             return map_step(request, token, header, rows, mapping, source, filename,
                             error="Pick which column holds the name.", add_stages=add_stages,
                             move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
-                            replace_stages=replace_stages)
+                            replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
                                            profile={**prof, "client": client}, reopen_jobs=reopen_jobs,
-                                           replace_stages=replace_stages)
+                                           replace_stages=replace_stages, allow_backward=allow_backward)
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
@@ -1066,22 +1353,110 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         load_sample_data(store)
         return RedirectResponse("/?sample=1", status_code=303)
 
+    def removal_notice(r: dict[str, Any], what: str = "the sample data") -> str:
+        """One line on what removing the sample data did, and what it kept because the recruiter worked with it."""
+        people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
+        dp, ds = r.get("deleted_people") or [], r.get("deleted_searches") or []
+        kp = [n for n in kp if n not in dp]
+        msg = (f"Removed {what}: {people} candidate{'' if people == 1 else 's'} and "
+               f"{jobs} job{'' if jobs == 1 else 's'}.")
+        kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
+                if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
+        if kept:
+            msg += " Kept " + " and ".join(kept) + ". They are your own data now."
+        if dp:
+            msg += f" Also deleted {', '.join(dp)}."
+        if ds:
+            msg += f" Also removed the saved search{'' if len(ds) == 1 else 'es'} {', '.join(ds)}."
+        empty = [x["name"] for x in store.list_saved_searches(counts=True) if x["count"] == 0]
+        if empty:
+            msg += (f" {len(empty)} saved search{'' if len(empty) == 1 else 'es'} now match nobody ({', '.join(empty[:3])}"
+                    f"{', and more' if len(empty) > 3 else ''}). Delete what you don't need under Manage saved searches.")
+        return msg + " A backup was saved first."
+
     @app.post("/sample-data/remove")
     def sample_data_remove(request: Request):
         try:
             r = remove_sample_data(store)
         except ValueError as exc:  # the backup failed, so nothing was removed
             return back(request, error=str(exc))
-        people, jobs, kp, kj = r["people"], r["jobs"], r["kept_people"], r["kept_jobs"]
-        if not (people or jobs or kp or kj):
+        if not (r["people"] or r["jobs"] or r["kept_people"] or r["kept_jobs"]):
             return back(request, notice="There was no sample data to remove.")
-        msg = (f"Removed the sample data: {people} candidate{'' if people == 1 else 's'} and "
-               f"{jobs} job{'' if jobs == 1 else 's'}.")
-        kept = ([f"{len(kp)} sample {'person' if len(kp) == 1 else 'people'} you worked with ({', '.join(kp)})"]
-                if kp else []) + ([f"the job{'' if len(kj) == 1 else 's'} {', '.join(kj)}"] if kj else [])
-        if kept:
-            msg += " Kept " + " and ".join(kept) + ". They are your own data now."
-        return back(request, notice=msg + " A backup was saved first.")
+        return back(request, notice=removal_notice(r))
+
+    # ------------------------------------------------------------ first-run tour
+    def tour_for_page(request: Request) -> dict[str, Any] | None:
+        """The tour to draw on this page, or None. A first run starts it; ?tour=short or ?tour=full starts a replay."""
+        if request.method != "GET" or request.url.path.startswith(("/static/", "/api/")):
+            return None
+        try:
+            if not tour.state(store)["active"]:
+                if request.query_params.get("tour") in tour.MODES:
+                    tour.start(store, request.query_params["tour"])
+                elif tour.should_autostart(store):
+                    tour.start(store, tour.FULL)
+            return tour.payload(store)
+        except Exception:  # the tour must never break a page
+            log.exception("tour state could not be read")
+            return None
+
+    def tour_start_path() -> str:
+        p = tour.payload(store)
+        return (p["steps"][p["step"]]["path"] if p else None) or "/"
+
+    @app.post("/tour/start")
+    async def tour_start(request: Request):
+        """Start the tour (mode full or short) and go to its first page."""
+        mode = str((await request.form()).get("mode") or tour.SHORT)
+        if mode not in tour.MODES:
+            raise HTTPException(422, "mode must be full or short")
+        tour.start(store, mode)
+        return RedirectResponse(tour_start_path(), status_code=303)
+
+    @app.post("/tour/step")
+    async def tour_step(request: Request):
+        """Remember which step the user is on, so the tour carries across pages."""
+        raw = str((await request.form()).get("step") or "")
+        if not raw.lstrip("-").isdigit():
+            raise HTTPException(422, "step must be a number")
+        n = tour.set_step(store, int(raw))
+        if n is None:
+            return JSONResponse({"ok": False, "detail": "No tour is running."}, status_code=409)
+        return {"ok": True, "step": n}
+
+    @app.post("/tour/load")
+    def tour_load(request: Request):
+        """The tour's own button: add the demo people (full tour only), then show the next step."""
+        added = tour.load_demo(store)
+        if added is None:
+            return back(request, error="The demo people are only added by the full tour.")
+        return RedirectResponse(tour_start_path(), status_code=303)
+
+    def _id_set(raw: Any) -> set[int]:
+        return {int(x) for x in str(raw or "").split(",") if x.strip().isdigit()}
+
+    async def tour_end(request: Request):
+        mode = tour.state(store)["mode"]
+        form = await request.form()
+        try:
+            removed = tour.end(store, _id_set(form.get("delete_people")), _id_set(form.get("delete_searches")))
+        except ValueError as exc:  # the backup failed, so nothing was removed and the tour stays open
+            return back(request, error=str(exc))
+        if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
+            return RedirectResponse("/?" + urlencode({"notice": removal_notice(removed, "the demo data")}), status_code=303)
+        if mode == tour.SHORT:
+            return back(request)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/tour/skip")
+    async def tour_skip(request: Request):
+        """End the tour now. Demo people the tour added are cleared; nothing else is touched."""
+        return await tour_end(request)
+
+    @app.post("/tour/finish")
+    async def tour_finish(request: Request):
+        """The last step: clear the demo people the tour added and close the tour for good."""
+        return await tour_end(request)
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)
@@ -1169,7 +1544,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
-                   q=q, add_results=add_results, prompt=recipes.source_for_job(job),
+                   inject_warnings=injection.job_warnings(job),
+                   q=q, add_results=add_results, prompt=recipes.source_for_job(job, guard=site_guard.enabled(store)),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
                    status_text=actions.job_status_text(store, job_id, omit_stages=omit),
                    hidden_note=actions.hidden_note(store, job_id, omit),
@@ -2099,13 +2475,43 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                 status_code=303)
 
     @app.get("/interviews", response_class=HTMLResponse)
-    def interviews_page(request: Request, week: str = ""):
-        """The week: every session booked across all jobs, grouped into loops, with clashes and what's owed flagged."""
+    def interviews_page(request: Request, week: str = "", view: str = "", month: str = ""):
+        """The month calendar (the default), or with ?view=week or ?week=<day> the week: every session booked
+        across all jobs, grouped into loops, with clashes and what's owed flagged."""
+        calendar_prompt = recipes.log_calendar_interviews()
+        if week or view == "week":
+            try:
+                day = interviews.week_day(week)
+            except ValueError:
+                day = None  # not a usable day: show this week
+            return page(request, "interviews.html", w=interviews.week(store, day), calendar_prompt=calendar_prompt)
         try:
-            day = interviews.week_day(week)
+            first = interviews.month_first(month)
         except ValueError:
-            day = None
-        return page(request, "interviews.html", w=interviews.week(store, day))
+            first = interviews.month_first("")
+        return page(request, "interviews_month.html", m=interviews.month(store, first), calendar_prompt=calendar_prompt)
+
+    @app.get("/interviews.ics")
+    def interviews_ics(month: str = "", cancelled: str = ""):
+        """The month's interviews (or every upcoming one) as a calendar file for the recruiter's own calendar app."""
+        try:
+            first = interviews.month_first(month) if month.strip() else None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        name = f"interviews-{first.strftime('%Y-%m')}.ics" if first else "interviews-upcoming.ics"
+        body = interviews.ics_for_month(store, first, True if cancelled == "1" else None)
+        return Response(body, media_type="text/calendar; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/candidates/{candidate_id}/interviews/{entry_id:int}.ics")
+    def interview_ics(candidate_id: int, entry_id: int):
+        """One interview as a calendar file (Add to calendar on the profile)."""
+        try:
+            body = interviews.ics_for_interview(store, candidate_id, entry_id)
+        except LookupError:
+            raise HTTPException(404, "Interview not found")
+        return Response(body, media_type="text/calendar; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="interview-{entry_id}.ics"'})
 
     @app.post("/candidates/{candidate_id}/interviews/{entry_id}/session")
     async def add_session_form(request: Request, candidate_id: int, entry_id: int):
@@ -2674,6 +3080,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 errors[key] = "Use a whole number from 1 to 9999."
         if form.get("pipeline_view") in ("board", "table"):
             values["pipeline_view"] = str(form.get("pipeline_view"))
+        if whole or site_guard.SETTING in form:  # the switch: ticked or not on the Settings page
+            values[site_guard.SETTING] = ("1" if str(form.get(site_guard.SETTING) or "") not in ("", "0", "false", "off")
+                                          else "0")
         if str(form.get("theme") or "") in {t[0] for t in THEMES}:  # anything else is ignored
             values["theme"] = str(form.get("theme"))
         if errors:
@@ -2687,9 +3096,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/recipes", response_class=HTMLResponse)
     def recipes_page(request: Request):
-        items = [(r, recipes.render(r.key)) for r in recipes.RECIPES]
+        guard = site_guard.enabled(store)
+        items = [(r, recipes.render(r.key, guard=guard)) for r in recipes.RECIPES]
         return page(request, "recipes.html", items=items, jobs=store.list_jobs("open"),
-                    job_prompts={j["id"]: recipes.source_for_job(j) for j in store.list_jobs("open")})
+                    job_prompts={j["id"]: recipes.source_for_job(j, guard=guard) for j in store.list_jobs("open")})
 
     @app.get("/privacy", response_class=HTMLResponse)
     def privacy(request: Request):
@@ -2735,7 +3145,48 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             lmstudio_on=integrations.lmstudio_connected(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
+            skill_status=[skills.status(t) for t in skills.TARGETS],
+            skill_names=skills.skill_names(),
+            desktop_steps=skills.DESKTOP_STEPS[0],
+            skills_source=str(skills.source_dir()),
+            skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
+                        for n in skills.skill_names()],
         )
+
+    @app.get("/connect/skills/{name}.zip")
+    def skill_zip(name: str):
+        """One skill as its own zip, for Claude Desktop's Customize > Skills."""
+        if name not in skills.skill_names():
+            raise HTTPException(404)
+        return Response(skills.build_skill_zip(name), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+
+    @app.get("/connect/skills.zip")
+    def skills_zip():
+        """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
+        return Response(skills.build_zip(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
+
+    @app.post("/connect/skills/{target}/{action}", response_class=HTMLResponse)
+    def connect_skills(request: Request, target: str, action: str):
+        """Add or remove the Talent Search skills. 'preview-*' only lists the files; nothing is written until
+        the person presses the confirm button, which posts 'install' or 'remove'."""
+        if target not in skills.TARGETS or action not in ("preview-install", "install", "preview-remove", "remove"):
+            raise HTTPException(404)
+        try:
+            if action == "preview-install":
+                result = skills.plan_install(target)
+            elif action == "install":
+                result = skills.install(target)
+            elif action == "preview-remove":
+                result = skills.plan_remove(target)
+            else:
+                result = skills.remove(target)
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_result.html", action="error", target=target,
+                        error=integrations.friendly_error(exc))
+        return page(request, "_skills_result.html", action=action, target=target, result=result)
 
     @app.post("/connect/claude/report", response_class=HTMLResponse)
     def connect_report(request: Request):
@@ -2894,6 +3345,11 @@ FILL_FIELDS = ("email", "phone", "current_company", "current_title", "location")
 
 def _and(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _split_emails(raw: Any) -> list[str]:
+    """The Other emails box: one address per line (commas and semicolons work too)."""
+    return [e for e in (x.strip() for x in re.split(r"[\n,;]+", str(raw or ""))) if e]
 
 
 def _form_fields(form: Any, keep_blank: bool = False) -> dict[str, Any]:

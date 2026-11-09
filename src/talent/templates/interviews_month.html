@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Interviews · {{ m.label }} · Talent Search{% endblock %}
+{% block bodyclass %}wide{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <div>
+    <h1>Interviews</h1>
+    <p class="sub">{{ m.label }} · {{ m.total }} session{{ '' if m.total == 1 else 's' }} across all jobs (cancelled ones not counted)</p>
+  </div>
+  <nav class="seg" aria-label="View">
+    <a class="on" href="/interviews?view=month&amp;month={{ m.first.strftime('%Y-%m') }}" aria-current="page">Month</a>
+    <a href="/interviews?view=week&amp;week={{ (m.today if m.this_month else m.first).isoformat() }}">Week</a>
+  </nav>
+  <nav class="cal-nav" aria-label="Month">
+    <a class="btn ghost small" href="/interviews?view=month&amp;month={{ m.prev.strftime('%Y-%m') }}" rel="prev"><span aria-hidden="true">&larr;</span> <span class="cal-vh">Previous month: </span>{{ m.prev_label }}</a>
+    <a class="btn ghost small" href="/interviews?view=month">Today</a>
+    <a class="btn ghost small" href="/interviews?view=month&amp;month={{ m.next.strftime('%Y-%m') }}" rel="next"><span class="cal-vh">Next month: </span>{{ m.next_label }} <span aria-hidden="true">&rarr;</span></a>
+  </nav>
+</div>
+
+{% if m.clashes %}
+<section class="panel" id="clashes">
+  <h2>{{ m.clashes | length }} clash{{ '' if m.clashes | length == 1 else 'es' }} to fix</h2>
+  <ul>{% for c in m.clashes %}<li>{{ c.text }}.</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% include "_interviews_zone.html" %}
+
+<section class="panel" id="interviews-view">
+  {% if not m.total %}<p class="none">Nothing booked in {{ m.label }}. Interviews you or your AI app log on profiles show up here.</p>{% endif %}
+  <div class="cal" aria-label="Interviews in {{ m.label }}">
+    <div class="cal-head" aria-hidden="true">{% for n in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] %}<div class="{{ 'weekend' if loop.index > 5 }}">{{ n }}</div>{% endfor %}</div>
+    {% for wk in m.weeks %}
+    <ul class="cal-week">
+      {% for d in wk %}
+      <li class="cal-day{{ ' other' if not d.in_month }}{{ ' today' if d.today }}{{ ' weekend' if d.weekend }}{{ ' empty' if not d.sessions }}"{% if d.today %} aria-current="date"{% endif %}>
+        <a class="cal-num" href="/interviews?view=week&amp;week={{ d.week }}"><span class="dow">{{ d.day | day('%a') }} </span>{{ d.day | day('%b %-d') if (d.day.day == 1 or not d.in_month) else d.day.day }}<span class="cal-vh">{{ '' if (d.day.day == 1 or not d.in_month) else ' ' ~ (d.day | day('%B')) }}, week of {{ d.week_label }}</span></a>
+        {% for x in d.shown %}
+        <a class="cal-chip st-{{ x.state }}{{ ' clash' if x.clash and x.state != 'cancelled' }}" href="{{ x.href }}" title="{{ x.candidate }}{% if x.job %}, {{ x.job }}{% endif %}: {{ x.name }}{% if x.interviewer %} with {{ x.interviewer }}{% endif %} ({{ {'upcoming': 'upcoming', 'done': x.result or interview_outcomes.get(x.status, 'done'), 'owes': 'still needs an outcome or feedback', 'cancelled': 'cancelled'}[x.state] }}{% if x.clash and x.state != 'cancelled' %}, clash{% endif %})"><span class="cal-vh">{{ {'upcoming': 'Upcoming', 'done': 'Done', 'owes': 'Needs feedback', 'cancelled': 'Cancelled'}[x.state] }}: </span><span class="cal-time">{{ x.at | local('%-I:%M %p') }}</span> <span class="cal-who">{{ x.candidate }}</span>{% if x.tag %} <span class="cal-tag">{{ x.tag }}</span>{% endif %}{% if x.clash and x.state != 'cancelled' %} <span class="cal-vh">Clash</span>{% endif %}</a>
+        {% endfor %}
+        {% if d.more %}<a class="cal-more" href="/interviews?view=week&amp;week={{ d.day.isoformat() }}#day-{{ d.day.isoformat() }}">+{{ d.more }} more<span class="cal-vh"> on {{ d.day | day('%A %B %-d') }}</span></a>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+  </div>
+  <p class="cal-key fine" aria-label="Colour key">
+    <span class="cal-chip st-upcoming">Upcoming</span>
+    <span class="cal-chip st-done">Done</span>
+    <span class="cal-chip st-owes">Needs outcome or feedback</span>
+    <span class="cal-chip st-cancelled">Cancelled</span>
+    <span class="cal-chip st-upcoming clash">Clash</span>
+  </p>
+</section>
+
+{% set ics_month = m.first.strftime('%Y-%m') %}
+{% include "_interviews_calendar.html" %}
+{% endblock %}

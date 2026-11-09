@@ -30,11 +30,22 @@ def session_minutes(t: dict[str, Any]) -> int:
     return min(480, max(10, int(m.group(1)))) if m else SESSION_MINUTES
 
 
+MIN_YEAR, MAX_YEAR = 1970, 2200  # days outside this are refused (a plain message) rather than overflowing
+
+
+def _in_range(day: date) -> date:
+    if not MIN_YEAR <= day.year <= MAX_YEAR:
+        raise ValueError(f"Pick a day between {MIN_YEAR} and {MAX_YEAR}.")
+    return day
+
+
 def week_start(day: date | None = None) -> date:
-    """The Monday of the week holding `day` (today by default); on a weekend, the coming Monday."""
-    day = day or as_local(datetime.now(timezone.utc)).date()
-    if day.weekday() >= 5:
-        day += timedelta(days=7 - day.weekday())
+    """The Monday on or before `day`, so a Saturday or Sunday session shows in the week it belongs to. With no day
+    (today), a weekend opens on the coming Monday instead."""
+    if day is None:
+        day = as_local(datetime.now(timezone.utc)).date()
+        if day.weekday() >= 5:
+            day += timedelta(days=7 - day.weekday())
     return day - timedelta(days=day.weekday())
 
 
@@ -60,24 +71,33 @@ def week_day(value: str | None, today: date | None = None) -> date | None:
     words = {"this": 0, "this week": 0, "current": 0, "now": 0, "next": 7, "next week": 7, "last": -7,
              "last week": -7, "previous": -7, "previous week": -7}
     if v in words:
-        return week_start(today) + timedelta(days=words[v]) if words[v] else None
+        if not words[v]:
+            return None
+        base = today + timedelta(days=7 - today.weekday()) if today.weekday() >= 5 else today
+        return week_start(base) + timedelta(days=words[v])
     try:
-        return as_local(to_dt(v)).date() if "t" in v else date.fromisoformat(v)
-    except (ValueError, TypeError, AttributeError):
+        return _in_range(as_local(to_dt(v)).date() if "t" in v else date.fromisoformat(v))
+    except (ValueError, TypeError, AttributeError, OverflowError):
         raise ValueError("week is a day like 2026-11-09, or this or next.") from None
+
+
+def _session_rows(store: Store, lo: str, hi: str, cancelled: bool = False) -> list[dict[str, Any]]:
+    """Interviews starting from `lo` up to (not including) `hi` (UTC ISO times), in time order, with the candidate's
+    name and the job's title and company. Cancelled ones are left out unless asked for."""
+    skip = "" if cancelled else " AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled'"
+    return store._rows(
+        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
+           JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ?""" + skip + " ORDER BY t.at, t.id", (lo, hi))
 
 
 def week(store: Store, start: date | None = None) -> dict[str, Any]:
     """{start, end, prev, next, days: [{day, label, loops: [...]}], load: [{name, count}], clashes: [...],
     total, loops, owed}. Each loop is one person's sessions for one job that day, in time order. Monday to
     Friday always show; Saturday and Sunday only when something is booked then."""
-    monday = week_start(start)
+    monday = week_start(_in_range(start) if start else None)
     lo, hi = _midnight(monday), _midnight(monday + timedelta(days=7))
-    rows = store._rows(
-        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
-           JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
-           WHERE t.kind = 'interview' AND t.at >= ? AND t.at < ?
-             AND coalesce(json_extract(t.data, '$.status'), 'scheduled') <> 'cancelled' ORDER BY t.at, t.id""", (lo, hi))
+    rows = _session_rows(store, lo, hi)
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     days = [{"day": monday + timedelta(days=i), "label": actions.day_text(monday + timedelta(days=i)),
              "loops": []} for i in range(7)]
@@ -607,3 +627,174 @@ __all__ = ["CHASE_DAYS", "CHASE_HOURS", "VERDICT_CHOICES", "feedback_owed", "fee
            "give_verdict", "group_owed", "interviewers", "name_matches", "named", "owed_by", "owed_people",
            "pick_interviewer", "resolve_name", "session_minutes", "verdicts_missing", "rollup", "tally", "today_items", "verdict_rows",
            "verdicts", "week", "week_day", "week_start", "week_text"]
+
+
+# ------------------------------------------------------------ the month
+MONTH_CHIPS = 3  # sessions listed in a day's box before "+N more"
+_DONE = ("passed", "not_passed", "no_show", "mixed")
+
+
+def month_first(value: str | None, today: date | None = None) -> date:
+    """The first day of the month to show: '2026-11' (or any day in it), else this month."""
+    today = today or as_local(datetime.now(timezone.utc)).date()
+    v = (value or "").strip()
+    if not v:
+        return today.replace(day=1)
+    try:
+        d = date.fromisoformat(v + "-01") if re.fullmatch(r"\d{4}-\d{2}", v) else date.fromisoformat(v)
+    except (ValueError, OverflowError):
+        raise ValueError("month is like 2026-11.") from None
+    return _in_range(d.replace(day=1))
+
+
+def _month_shift(first: date, by: int) -> date:
+    n = first.year * 12 + first.month - 1 + by
+    return date(n // 12, n % 12 + 1, 1)
+
+
+def _chip_state(x: dict[str, Any]) -> str:
+    if x["status"] == "cancelled":
+        return "cancelled"
+    if x["status"] in _DONE:
+        return "done"
+    if x["needs_outcome"] or x["owed"]:
+        return "owes"
+    return "upcoming"
+
+
+def month(store: Store, first_day: date | None = None, today: date | None = None) -> dict[str, Any]:
+    """{first, label, prev, next, today, weeks: [[day]], total, clashes}. A day is {day, in_month, today, weekend,
+    week, sessions, shown, more}: every session that starts that day on the recruiter's clock (cancelled ones
+    too, marked), in time order, `shown` the first MONTH_CHIPS of them and `more` how many are left. Each
+    session is {interview_id, at, name, candidate_id, candidate, job, state, clash, href, ...} with state one of
+    upcoming, done, owes (it needs an outcome or feedback) or cancelled. Weeks run Monday to Sunday and cover
+    whole weeks, so the first and last rows can hold days of the neighbouring months."""
+    today = today or as_local(datetime.now(timezone.utc)).date()
+    first = _in_range((first_day or today).replace(day=1))
+    grid_start = first - timedelta(days=first.weekday())
+    nxt = _month_shift(first, 1)
+    grid_end = nxt + timedelta(days=(7 - nxt.weekday()) % 7)  # the Monday after the last row
+    rows = _session_rows(store, _midnight(grid_start), _midnight(grid_end), cancelled=True)
+    live = [t for t in rows if actions._iv_data(t).get("status") != "cancelled"]
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    chase = _chase_pairs(store, {(t["candidate_id"], t.get("job_id")) for t in live})
+    clashes = _clashes(live)
+    flagged = {i for c in clashes for i in c["ids"]}
+    by_day: dict[date, list[dict[str, Any]]] = {}
+    for t in rows:
+        x = _owing(t, now, chase)
+        x.update({"candidate_id": t["candidate_id"], "candidate": t["candidate_name"],
+                  "job": actions.job_label(t.get("job_title"), t.get("job_company")) if t.get("job_title") else None,
+                  "clash": x["interview_id"] in flagged})
+        x["state"] = _chip_state(x)
+        by_day.setdefault(actions._local_day(t["at"]), []).append(x)
+    for ss in by_day.values():  # the same person twice in a day: say which session each chip is
+        counts: dict[int, int] = {}
+        for x in ss:
+            counts[x["candidate_id"]] = counts.get(x["candidate_id"], 0) + 1
+        for x in ss:
+            x["tag"] = (x["interviewer"] or x["name"]) if counts[x["candidate_id"]] > 1 else ""
+    weeks = []
+    day = grid_start
+    while day < grid_end:
+        row = []
+        for _ in range(7):
+            ss = by_day.get(day, [])
+            row.append({"day": day, "in_month": day.month == first.month, "today": day == today,
+                        "weekend": day.weekday() >= 5, "week": (day - timedelta(days=day.weekday())).isoformat(),
+                        "week_label": actions.day_text(day - timedelta(days=day.weekday()), "%b %-d"),
+                        "sessions": ss, "shown": ss[:MONTH_CHIPS], "more": max(0, len(ss) - MONTH_CHIPS)})
+            day += timedelta(days=1)
+        weeks.append(row)
+    inside = [x for w in weeks for d in w if d["in_month"] for x in d["sessions"] if x["state"] != "cancelled"]
+    ids = {x["interview_id"] for x in inside}
+    return {"first": first, "label": actions.day_text(first, "%B %Y"), "prev": _month_shift(first, -1),
+            "next": _month_shift(first, 1), "today": today,
+            "prev_label": actions.day_text(_month_shift(first, -1), "%B %Y"),
+            "next_label": actions.day_text(_month_shift(first, 1), "%B %Y"), "weeks": weeks, "total": len(inside),
+            "clashes": [c for c in clashes if set(c["ids"]) & ids], "this_month": first == today.replace(day=1)}
+
+
+# ------------------------------------------------------------ .ics for the recruiter's own calendar
+_FOREVER = "9999-12-31T00:00:00+00:00"
+
+
+def _ics_text(value: Any) -> str:
+    """Text for an iCalendar value: backslash, semicolon, comma and line breaks escaped, other control
+    characters dropped (RFC 5545 section 3.3.11)."""
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+    return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _ics_fold(line: str) -> list[str]:
+    """Lines over 75 bytes continue on the next line after a space (never inside a multi-byte character)."""
+    out, cur, size = [], "", 0
+    for ch in line:
+        n = len(ch.encode("utf-8"))
+        if size + n > (75 if not out else 74):
+            out.append(cur)
+            cur, size = "", 0
+        cur += ch
+        size += n
+    out.append(cur)
+    return [out[0], *(" " + p for p in out[1:])]
+
+
+def _ics_time(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def ics_event(t: dict[str, Any], stamp: datetime) -> list[str]:
+    """One VEVENT for an interview row (from _session_rows): UID stable per interview, times in UTC, as long as
+    the session runs. Only the session's own summary line and interviewer go in the description, never notes."""
+    start = to_dt(t["at"])
+    job = actions.job_label(t.get("job_title"), t.get("job_company")) if t.get("job_title") else ""
+    who = actions.interviewer_of(t)
+    desc = "; ".join(x for x in (actions.interview_name(t), f"with {who}" if who else "") if x)
+    # Nothing records when an interview was last edited, so each download gets a higher SEQUENCE (minutes since
+    # 2020) and the download time as LAST-MODIFIED: a calendar app that already has the event then takes the
+    # changed times, status or summary instead of keeping the old copy.
+    seq = max(0, int((stamp - datetime(2020, 1, 1, tzinfo=timezone.utc)).total_seconds() // 60))
+    lines = ["BEGIN:VEVENT", f"UID:interview-{t['id']}@talent-search.local", f"DTSTAMP:{_ics_time(stamp)}",
+             f"LAST-MODIFIED:{_ics_time(stamp)}", f"SEQUENCE:{seq}",
+             f"DTSTART:{_ics_time(start)}", f"DTEND:{_ics_time(start + timedelta(minutes=session_minutes(t)))}",
+             "SUMMARY:" + _ics_text(f"Interview: {t['candidate_name']}" + (f" ({job})" if job else ""))]
+    if desc:
+        lines.append("DESCRIPTION:" + _ics_text(desc))
+    lines.append("STATUS:" + ("CANCELLED" if actions._iv_data(t).get("status") == "cancelled" else "CONFIRMED"))
+    lines.append("END:VEVENT")
+    return lines
+
+
+def ics_calendar(rows: list[dict[str, Any]], now: datetime | None = None) -> str:
+    """An iCalendar file (CRLF line ends) holding these interview rows."""
+    stamp = now or datetime.now(timezone.utc)
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Talent Search//Interviews//EN", "CALSCALE:GREGORIAN",
+             "METHOD:PUBLISH", "X-WR-CALNAME:Talent Search interviews"]
+    for t in rows:
+        lines += ics_event(t, stamp)
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(part for line in lines for part in _ics_fold(line)) + "\r\n"
+
+
+def ics_for_month(store: Store, first: date | None, cancelled: bool | None = None) -> str:
+    """The interviews that start in that month (on the recruiter's clock, cancelled ones marked so a calendar app
+    drops them), or every upcoming one when first is None (cancelled left out, and sessions already over today,
+    unless `cancelled` is True)."""
+    if first is not None:
+        lo, hi = _midnight(first), _midnight(_month_shift(_in_range(first), 1))
+        return ics_calendar(_session_rows(store, lo, hi, cancelled=True if cancelled is None else cancelled))
+    now = datetime.now(timezone.utc)
+    rows = _session_rows(store, _midnight(as_local(now).date()), _FOREVER, cancelled=bool(cancelled))
+    return ics_calendar([t for t in rows if to_dt(t["at"]) + timedelta(minutes=session_minutes(t)) > now])
+
+
+def ics_for_interview(store: Store, candidate_id: int, entry_id: int) -> str:
+    """One interview as a calendar file; LookupError when it isn't on that profile."""
+    t = store._row(
+        """SELECT t.*, c.name AS candidate_name, j.title AS job_title, j.company AS job_company FROM timeline t
+           JOIN candidates c ON c.id = t.candidate_id LEFT JOIN jobs j ON j.id = t.job_id
+           WHERE t.kind = 'interview' AND t.id = ? AND t.candidate_id = ?""", (entry_id, candidate_id))
+    if t is None:
+        raise LookupError(f"No interview with id {entry_id} on this profile")
+    return ics_calendar([t])

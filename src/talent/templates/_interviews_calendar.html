@@ -1,0 +1,11 @@
+{% from "_macros.html" import recipe_buttons %}
+<section class="panel iv-calendar-tools" id="calendar-tools">
+  <h2>Your calendar</h2>
+  <p class="fine">Put these sessions in your own calendar app: download a file and open it there. Nothing is sent anywhere. The month file marks cancelled sessions as cancelled, and some calendar apps then remove them; "all upcoming" leaves cancelled and finished sessions out.</p>
+  <p class="actions-inline">
+    {% if ics_month %}<a class="btn" href="/interviews.ics?month={{ ics_month }}" download>Download this month (.ics)</a>{% endif %}
+    <a class="btn ghost" href="/interviews.ics" download>Download all upcoming (.ics)</a>
+  </p>
+  <p class="fine">Interviews already in your calendar? Ask your AI app to log them here.</p>
+  {{ recipe_buttons(calendar_prompt, "Log interviews from my calendar", small=True) }}
+</section>

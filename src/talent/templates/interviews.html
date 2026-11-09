@@ -7,12 +7,17 @@
     <h1>Interviews</h1>
     <p class="sub">{{ w.start|day }} to {{ w.end|day }} · {{ w.total }} session{{ '' if w.total == 1 else 's' }} across all jobs</p>
   </div>
-  <nav class="seg" aria-label="Week">
-    <a href="/interviews?week={{ w.prev.isoformat() }}">Previous week</a>
-    <a href="/interviews">This week</a>
-    <a href="/interviews?week={{ w.next.isoformat() }}">Next week</a>
+  <nav class="seg" aria-label="View">
+    <a href="/interviews?view=month&amp;month={{ w.start.strftime('%Y-%m') }}">Month</a>
+    <a class="on" href="/interviews?view=week&amp;week={{ w.start.isoformat() }}" aria-current="page">Week</a>
+  </nav>
+  <nav class="cal-nav" aria-label="Week">
+    <a class="btn ghost small" href="/interviews?week={{ w.prev.isoformat() }}" rel="prev"><span aria-hidden="true">&larr;</span> Previous week</a>
+    <a class="btn ghost small" href="/interviews">This week</a>
+    <a class="btn ghost small" href="/interviews?week={{ w.next.isoformat() }}" rel="next">Next week <span aria-hidden="true">&rarr;</span></a>
   </nav>
 </div>
+{% include "_interviews_zone.html" %}
 
 {% if w.clashes %}
 <section class="panel" id="clashes">
@@ -26,7 +31,7 @@
   <div class="week days-{{ w.days | length }}">
   {% for d in w.days %}
     <div class="day">
-      <h3>{{ d.label }}</h3>
+      <h3 id="day-{{ d.day.isoformat() }}">{{ d.label }}</h3>
       {% for lp in d.loops %}
       <div class="slot{{ ' clash' if lp.sessions | selectattr('clash') | list }}">
         <a href="/candidates/{{ lp.candidate_id }}#timeline"><strong>{{ lp.name }}</strong></a>{% if lp.size > 1 %} <span class="badge">Loop of {{ lp.size }}</span>{% endif %}
@@ -67,4 +72,6 @@
   <ul>{% for e in w.load %}<li>{{ e.name }}: {{ e.count }} session{{ '' if e.count == 1 else 's' }}</li>{% endfor %}</ul>
 </section>
 {% endif %}
+{% set ics_month = w.start.strftime('%Y-%m') %}
+{% include "_interviews_calendar.html" %}
 {% endblock %}

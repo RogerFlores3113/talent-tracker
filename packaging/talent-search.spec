@@ -19,7 +19,7 @@ hidden = (
     collect_submodules("uvicorn")
     + collect_submodules("mcp", filter=lambda name: not name.startswith("mcp.cli"))
     + ["talent.web", "talent.mcp_server", "talent.sample_data", "talent.typesense_index",
-       "talent.actions", "talent.recipes", "talent.importers", "talent.mcp_views", "python_multipart"]
+       "talent.actions", "talent.skills", "talent.recipes", "talent.importers", "talent.mcp_views", "python_multipart"]
 )
 
 a = Analysis(
@@ -28,6 +28,8 @@ a = Analysis(
     datas=[
         (os.path.join(SRC, "talent", "templates"), os.path.join("talent", "templates")),
         (os.path.join(SRC, "talent", "static"), os.path.join("talent", "static")),
+        # Skills the Connect page installs for Claude Code / Codex (read by talent.skills.source_dir)
+        (os.path.join(HERE, "..", "skills"), "skills"),
     ],
     hiddenimports=hidden,
     excludes=["tkinter", "pytest", "mcp.cli", "typer"],

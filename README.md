@@ -74,7 +74,9 @@ cd "Talent Search"
 Talent Search opens in your web browser at http://127.0.0.1:8765. It only listens on
 your own computer. No candidates yet? Press **Try it with sample data**. Sample people
 and jobs are marked Sample, and **Remove sample data** (on Today and in Settings)
-deletes exactly those.
+deletes exactly those. A first-time tour walks you through connecting your AI app and
+the main pages, using demo people it clears at the end; skip it any time, and replay a
+shorter version from **Settings** (**Take the tour**).
 
 Your data is one file, `talent.db`, in `~/Library/Application Support/Talent Search`
 (Mac), `%LOCALAPPDATA%\Talent Search` (Windows) or `~/.local/share/Talent Search`
@@ -100,6 +102,21 @@ report** copies a report you can paste into a bug report.
 
 **Codex and LM Studio:** press **Connect Codex** or **Connect LM Studio** on the same
 page, then quit and reopen that app.
+
+## Skills for your AI app
+
+Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline
+reviews, feedback and decisions) that teach your AI app how to use it well. On the
+Connect AI page, press **Add Talent Search skills** for Claude Code or Codex. You see the
+exact files first, and only folders named `talent-search-*` that the app made are ever
+updated or removed. Claude Desktop takes skills as an upload: download the zip from the
+same page and add it under Customize > Skills.
+
+From a terminal: `talent install-skills [--claude-code] [--codex] [--zip PATH]` and
+`talent remove-skills [--claude-code] [--codex] [--yes]` (it lists what goes and asks first). A skill file you edit yourself is never overwritten or deleted.
+
+Ask Claude Code or Codex: "install the skills in skills/ by following
+skills/INSTALL-SKILLS.md".
 
 ## Troubleshooting
 

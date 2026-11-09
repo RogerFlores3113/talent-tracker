@@ -140,7 +140,28 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "tags",
     "source",
     "last_contacted_at",
+    "color",
 )
+# The colour bubbles on the Candidates table, in rainbow order (the order they cycle and sort in).
+COLORS: tuple[str, ...] = ("red", "orange", "yellow", "green", "blue", "purple")
+
+
+def clean_color(value: Any) -> str | None:
+    """A colour as stored: one of COLORS or None (blank or "none" clears it). Anything else is refused."""
+    v = " ".join(str(value or "").split()).lower()
+    if v in COLORS:
+        return v
+    if v in ("none", "no color", "no colour", "clear", ""):
+        return None
+    raise ValueError(f"{str(value)[:30]!r} isn't a colour. Use one of: {', '.join(COLORS)} (or none to clear it).")
+
+
+def next_color(color: str | None, step: int = 1) -> str | None:
+    """The colour after this one when clicking the bubble (step 1) or before it (step -1): none, red, orange,
+    yellow, green, blue, purple, then back to none."""
+    ring = (None, *COLORS)
+    return ring[(ring.index(color) + step) % len(ring)] if color in ring else None
+
 
 _FTS_COLS = "name, current_title, current_company, location, about, tags, history_text"
 
@@ -276,6 +297,28 @@ def _fill_linkedin_keys(conn: sqlite3.Connection, everyone: bool = True) -> None
                      [(k, cid) for cid, url, key in rows if (k := normalize_linkedin(url)) != key])
     conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                  (LINKEDIN_RULE_KEY, _linkedin_rule()))
+
+
+_NOTE_EMAIL = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+_NOTE_EMAIL_HEAD = re.compile(r"\be ?mails?\b", re.I)
+
+
+def _migrate_v9a_data(conn: sqlite3.Connection) -> None:
+    """Fill candidate_emails from the importers' notes. Only a one-line note that is a label and addresses counts."""
+    mains = {r[0] for r in conn.execute("SELECT lower(email) FROM candidates WHERE email IS NOT NULL AND email <> ''")}
+    seen: set[str] = set()
+    for cid, body in conn.execute("SELECT candidate_id, body FROM timeline WHERE kind = 'note' AND body LIKE '%@%'"
+                                  " ORDER BY id").fetchall():
+        head, sep, rest = (body or "").partition(": ")
+        if not sep or len(head) > 60 or "\n" in body or not (head == "Other emails" or _NOTE_EMAIL_HEAD.search(head)):
+            continue
+        if _NOTE_EMAIL.sub("", rest).strip(" ,;/") != "":
+            continue  # words besides addresses: a person's own note, not an importer's line
+        for e in dict.fromkeys(a.lower() for a in _NOTE_EMAIL.findall(rest)):
+            if e in mains or e in seen:
+                continue
+            seen.add(e)
+            conn.execute("INSERT OR IGNORE INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (cid, e))
 
 
 _MIGRATIONS: tuple[Any, ...] = (
@@ -630,6 +673,40 @@ _MIGRATIONS: tuple[Any, ...] = (
         trust      TEXT NOT NULL DEFAULT 'trusted' CHECK (trust IN ('read_only', 'suggest', 'trusted'))
     );
     """,
+    # v8b: a colour tag on each person (red, orange, yellow, green, blue or purple), for the bubble on the
+    # Candidates table. NULL means no colour.
+    """
+    ALTER TABLE candidates ADD COLUMN color TEXT
+        CHECK (color IS NULL OR color IN ('red', 'orange', 'yellow', 'green', 'blue', 'purple'));
+    """,
+    # v8d: saved searches (searchquery.py): a name and the search's own parameters as JSON, when it was last opened
+    # (for "new since you looked"), and who saved it (the app window or an AI app).
+    """
+    CREATE TABLE saved_searches (
+        id             INTEGER PRIMARY KEY,
+        name           TEXT NOT NULL,
+        params         TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        last_viewed_at TEXT,
+        created_by     TEXT NOT NULL DEFAULT 'app'
+    );
+    CREATE UNIQUE INDEX saved_searches_name_uq ON saved_searches(name COLLATE NOCASE);
+    """,
+    # v9a: candidate_emails: a person's other email addresses (a work and a home one), lowercased and unique across
+    # everyone, so they count wherever identity is checked. candidates.email stays the main address. Filled from
+    # the "Other emails: ..." and "<Email column>: addr" notes the importers wrote (the first person to claim an
+    # address keeps it; an address that is already someone's main email is skipped). The notes stay as they are.
+    (
+        """
+        CREATE TABLE candidate_emails (
+            candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+            email        TEXT NOT NULL,
+            PRIMARY KEY (candidate_id, email)
+        );
+        CREATE UNIQUE INDEX candidate_emails_email_uq ON candidate_emails(email);
+        """,
+        _migrate_v9a_data,
+    ),
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -972,6 +1049,16 @@ def to_dt(iso: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+class AIForbidden(PermissionError):
+    """The AI app tried something only the recruiter may do (delete, merge)."""
+
+
+def refuse_ai(what: str, by: str | None = None) -> None:
+    """The AI never deletes. Raised for by="ai", and for anything running inside an AI session's tool call."""
+    if by == "ai" or AI_SESSION.get():
+        raise AIForbidden(f"{what} is only for the recruiter, in the Talent Search window. The AI app can't do it.")
+
+
 class NotFound(LookupError):
     pass
 
@@ -1147,7 +1234,7 @@ def split_tags(value: str | Iterable[str] | None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for p in parts:
-        t = re.sub(r"\s+", " ", p).strip().strip("#").strip()
+        t = re.sub(r"\s+", " ", p).strip().lstrip("#").strip()  # a leading # only: c# and f# keep theirs
         if t and t.lower() not in seen:
             seen.add(t.lower())
             out.append(t[:60])
@@ -1359,6 +1446,9 @@ class _Term:
 def _query_terms(text: str) -> list[_Term]:
     words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
     kept = [w for w in words if w not in STOPWORDS] or words
+    tail = (text or "").split()
+    # Only a plain last word of 3+ letters is a prefix: "c++", "c#" or "go" must not spread to every word that starts so.
+    plain_end = bool(tail) and re.fullmatch(r"\w+", tail[-1], flags=re.UNICODE) is not None
     terms: list[_Term] = []
     i = 0
     while i < len(kept):
@@ -1368,7 +1458,7 @@ def _query_terms(text: str) -> list[_Term]:
         else:
             form, step = kept[i], 1
         last = i + step >= len(kept)
-        terms.append(_Term(form, last and step == 1, ALIASES.get(form, ())))
+        terms.append(_Term(form, last and step == 1 and plain_end and len(form) >= 3, ALIASES.get(form, ())))
         i += step
     # A nickname as the first of several words is that first name too ("mike okonkwo" finds Michael
     # Okonkwo), but only in the name, and only with the rest of the query matching as well.
@@ -1378,6 +1468,25 @@ def _query_terms(text: str) -> list[_Term]:
         group |= {nick for formal in _NICK_GROUPS[first.form] for nick in _NICKNAMES[formal].split()}
         terms[0] = _Term(first.form, first.prefix, (), tuple(sorted(group - {first.form})))
     return terms
+
+
+def _item_fts(text: str, phrase: bool) -> str:
+    """One parsed word or phrase as FTS5 text, every piece quoted. A word keeps its shorthand ('sf' also finds
+    San Francisco); a phrase must sit together. `text` holds only letters, digits and spaces."""
+    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    if phrase or " " in text:
+        return f'"{text}"'
+    return _Term(text, False, ALIASES.get(text, ())).fts()
+
+
+def _exact_fts(text: str, phrase: bool) -> str:
+    """One word or phrase to leave out, as FTS5 text for the unstemmed word index: the exact word (and its plain
+    plural and shorthand), so -recruiter does not drop a Recruiting Coordinator."""
+    text = " ".join(re.findall(r"\w+", text or "", flags=re.UNICODE))
+    if phrase or " " in text:
+        return f'"{text}"'
+    forms = [text, text + "s", *ALIASES.get(text, ())]
+    return "(" + " OR ".join(f'"{f}"' for f in dict.fromkeys(forms)) + ")"
 
 
 def _query_groups(text: str) -> list[str]:
@@ -1548,6 +1657,14 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "stale_days": "180",
     "pipeline_view": "board",
     "theme": "sunset",
+    "strict_site_guards": "0",  # "1": the AI app is told to stay off sites whose terms forbid scraping (site_guard.py)
+    # First-run guided tour (see tour.py): where the user is in it, and whether it ever ran.
+    "tour_active": "0",
+    "tour_mode": "full",
+    "tour_step": "0",
+    "tour_loaded": "0",
+    "tour_loaded_at": "",  # when the tour added the demo people: saved searches made after it are offered for removal
+    "tour_seen": "0",
 }
 
 # The color themes on the Settings page: (value, name, one-line description). The first is the default.
@@ -1978,6 +2095,8 @@ class Store:
             out["tags"] = join_tags(split_tags(out["tags"]))
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
+        if "color" in out:
+            out["color"] = clean_color(out["color"])
         for k, v in out.items():
             limit = FIELD_LIMITS.get(k)
             if limit and isinstance(v, str) and len(v) > limit:
@@ -2008,8 +2127,9 @@ class Store:
         )
 
     def add_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
-                      **data: Any) -> dict[str, Any]:
-        """by="ai" also logs the add, so the recruiter can take the person out again from Changes."""
+                      other_emails: Iterable[str] | None = None, **data: Any) -> dict[str, Any]:
+        """by="ai" also logs the add, so the recruiter can take the person out again from Changes.
+        other_emails: more addresses for them (one that someone else has is left out)."""
         fields = self._prepare(data)
         if not fields.get("name"):
             raise ValueError("A candidate needs a name.")
@@ -2030,6 +2150,8 @@ class Store:
             self._sync_tags(new_id, fields.get("tags"))
             if work_history:
                 self._write_history(new_id, work_history)
+            if other_emails:
+                self.add_other_emails(new_id, other_emails, strict=False)
             if by == "ai":
                 self._log_ai("candidate", candidate_id=new_id)
         return self.get_candidate(new_id)
@@ -2038,6 +2160,9 @@ class Store:
         email = _clean(email)
         if email:
             hit = self._row(f"SELECT * FROM candidates WHERE {_EMAIL_MATCH}", (email,))
+            if hit is None:  # an other email counts like the main one
+                hit = self._row("SELECT c.* FROM candidates c JOIN candidate_emails e ON e.candidate_id = c.id"
+                                " WHERE e.email = lower(?)", (email,))
             if hit:
                 return self._hydrate(hit)
         li = normalize_linkedin(linkedin_url)
@@ -2048,8 +2173,7 @@ class Store:
     def _clash(self, candidate_id: int | None, fields: dict[str, Any]) -> DuplicateValue | None:
         """The first prepared email or LinkedIn value in `fields` that someone else already has."""
         if fields.get("email"):
-            owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?",
-                              (fields["email"], candidate_id or 0))
+            owner = self._email_owner(fields["email"], candidate_id or 0)
             if owner:
                 return DuplicateValue("email", owner)
         key = normalize_linkedin(fields.get("linkedin_url"))
@@ -2058,6 +2182,93 @@ class Store:
             if owner:
                 return DuplicateValue("linkedin_url", owner)
         return None
+
+    def _email_owner(self, email: str, exclude_id: int = 0) -> dict[str, Any] | None:
+        """{"id", "name"} of someone other than `exclude_id` who has this address, as their main or an other email."""
+        owner = self._row(f"SELECT id, name FROM candidates WHERE {_EMAIL_MATCH} AND id <> ?", (email, exclude_id))
+        return owner or self._row("SELECT c.id, c.name FROM candidates c JOIN candidate_emails e ON e.candidate_id"
+                                  " = c.id WHERE e.email = lower(?) AND c.id <> ?", (email, exclude_id))
+
+    def other_emails(self, candidate_id: int) -> list[str]:
+        """The person's other addresses (not the main one), oldest first."""
+        return [r["email"] for r in self._rows(
+            "SELECT email FROM candidate_emails WHERE candidate_id = ? ORDER BY rowid", (candidate_id,))]
+
+    def other_emails_by_id(self) -> dict[int, list[str]]:
+        """Everyone's other addresses in one pass: {candidate id: [addresses]}."""
+        out: dict[int, list[str]] = {}
+        for r in self._rows("SELECT candidate_id, email FROM candidate_emails ORDER BY rowid"):
+            out.setdefault(r["candidate_id"], []).append(r["email"])
+        return out
+
+    def all_emails(self, candidate_id: int) -> list[str]:
+        """Every address the person has: the main one first, then the others."""
+        main = (self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,)) or {}).get("email")
+        return ([main.lower()] if main else []) + self.other_emails(candidate_id)
+
+    def add_other_emails(self, candidate_id: int, emails: Iterable[str | None], *, strict: bool = True) -> list[str]:
+        """Keep more addresses for this person. Returns the ones newly added. An address the person already has is
+        skipped quietly. One that someone else has raises DuplicateValue (strict), or is left out (not strict)."""
+        row = self._row("SELECT email FROM candidates WHERE id = ?", (candidate_id,))
+        if row is None:
+            raise NotFound(f"No candidate with id {candidate_id}")
+        main = (row.get("email") or "").lower()
+        added: list[str] = []
+        with self._lock, self._conn:
+            have = set(self.other_emails(candidate_id))
+            for raw in emails:
+                e = (_clean(raw) or "").lower()
+                if not e or e == main or e in have or e in added:
+                    continue
+                if not _EMAIL_RE.match(e) or len(e) > FIELD_LIMITS["email"]:
+                    if strict:
+                        raise ValueError(f"{raw!r} doesn't look like an email address.")
+                    continue
+                owner = self._email_owner(e, candidate_id)
+                if owner:
+                    if strict:
+                        raise DuplicateValue("email", owner)
+                    continue
+                self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, e))
+                added.append(e)
+        if added:
+            self._dup_count = None
+        return added
+
+    def remove_other_email(self, candidate_id: int, email: str) -> bool:
+        """The recruiter takes one other address off a person (the app window only; the AI never removes)."""
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = lower(?)",
+                                     (candidate_id, (email or "").strip()))
+        self._dup_count = None
+        return cur.rowcount > 0
+
+    def set_other_emails(self, candidate_id: int, emails: Iterable[str | None]) -> tuple[list[str], list[str]]:
+        """The edit form: the person's other addresses become exactly this list. Returns (added, removed).
+        Nothing changes when any address is invalid or belongs to someone else."""
+        want: list[str] = []
+        for raw in emails:
+            e = (_clean(raw) or "").lower()
+            if e and e not in want:
+                want.append(e)
+        main = ((self.get_candidate(candidate_id).get("email")) or "").lower()
+        want = [e for e in want if e != main]
+        for e in want:
+            if not _EMAIL_RE.match(e) or len(e) > FIELD_LIMITS["email"]:
+                raise ValueError(f"{e!r} doesn't look like an email address.")
+            owner = self._email_owner(e, candidate_id)
+            if owner:
+                raise DuplicateValue("email", owner)
+        with self._lock, self._conn:
+            have = self.other_emails(candidate_id)
+            gone = [e for e in have if e not in want]
+            for e in gone:
+                self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = ?", (candidate_id, e))
+            new = [e for e in want if e not in have]
+            for e in new:
+                self._conn.execute("INSERT INTO candidate_emails(candidate_id, email) VALUES (?, ?)", (candidate_id, e))
+        self._dup_count = None
+        return new, gone
 
     def split_same_name(self, name: str, email: str | None = None, linkedin_url: str | None = None
                         ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2108,10 +2319,14 @@ class Store:
             """SELECT * FROM candidates WHERE id <> ? AND (
                    (? <> '' AND fold_name(name) = ?)
                    OR (? IS NOT NULL AND lower(email) = lower(?))
+                   OR lower(email) IN (SELECT value FROM json_each(?))
+                   OR id IN (SELECT candidate_id FROM candidate_emails WHERE email IN (SELECT value FROM json_each(?))
+                             OR email = lower(coalesce(?, '')))
                    OR (? IS NOT NULL AND coalesce(linkedin_key, li_key(linkedin_url)) = ?)
                    OR (? IS NOT NULL AND phone_key(phone) = ?))
                ORDER BY updated_at DESC LIMIT 10""",
-            (candidate_id, key, key, c.get("email"), c.get("email"), li, li, phone, phone))
+            (candidate_id, key, key, c.get("email"), c.get("email"), json.dumps(self.other_emails(candidate_id)),
+             json.dumps(self.other_emails(candidate_id)), c.get("email"), li, li, phone, phone))
         if _clean(c.get("current_company")) and len(rows) < 10:
             seen = {r["id"] for r in rows}
             rows += [r for r in self._rows(
@@ -2122,7 +2337,7 @@ class Store:
         return [self._hydrate(r) for r in rows]
 
     def upsert_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
-                         **data: Any) -> tuple[dict[str, Any], bool]:
+                         other_emails: Iterable[str] | None = None, **data: Any) -> tuple[dict[str, Any], bool]:
         """Add, or merge into an existing candidate matched by email or LinkedIn.
 
         Merges are conservative, because a CSV row or an AI re-save can be stale or wrong:
@@ -2135,16 +2350,27 @@ class Store:
 
         A match whose saved name clearly isn't the incoming one (see same_person_name) raises
         IdentityConflict and changes nothing, so one person's row can't overwrite someone else.
+
+        Every address counts: the match is by the email, any of other_emails, or the LinkedIn URL. When a saved
+        person is found that way and the row's own email is a new address for them, it becomes one of their
+        other emails (their main email is never replaced), and so does each of other_emails.
         """
+        extra = [e.lower() for e in (_clean(x) for x in (other_emails or [])) if e]
         existing = self.find_duplicate(data.get("email"), data.get("linkedin_url"))
+        hit_email = _clean(data.get("email")) if existing and self.find_duplicate(data.get("email")) else None
         if existing is None:
-            return self.add_candidate(work_history=work_history, by=by, **data), True
+            for e in extra:
+                existing = self.find_duplicate(e)
+                if existing:
+                    hit_email = e
+                    break
+        if existing is None:
+            return self.add_candidate(work_history=work_history, by=by, other_emails=extra, **data), True
         incoming_name = _clean(data.get("name"))
         if incoming_name and not same_person_name(existing["name"], incoming_name):
-            email = _clean(data.get("email"))
-            by_email = bool(email and (existing.get("email") or "").lower() == email.lower())
+            by_email = bool(hit_email)
             raise IdentityConflict(existing, incoming_name, "email" if by_email else "linkedin_url",
-                                   email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
+                                   hit_email.lower() if by_email else normalize_linkedin(data.get("linkedin_url")))
         incoming = self._prepare(data)
         row = self._row("SELECT * FROM candidates WHERE id = ?", (existing["id"],))
         merged: dict[str, Any] = {}
@@ -2168,6 +2394,19 @@ class Store:
         cand = self._update(existing["id"], merged, history, by=by, merge=True,
                             derived=() if work_history or history is None else ("work_history",))
         cand["_kept"] = kept
+        newer = [e for e in [_clean(data.get("email")), *extra] if e]  # a different address of theirs is kept too
+        if by == "ai":  # an address says who someone is: the AI app never adds one to a person already saved
+            have = set(self.all_emails(existing["id"]))
+            skipped = [e for e in dict.fromkeys(x.lower() for x in newer) if e not in have]
+            if skipped:
+                cand["other_emails_not_added"] = skipped
+            newer = []
+        if newer and self.add_other_emails(existing["id"], newer, strict=False):
+            cand["_changed"] = [*cand["_changed"], "other_emails"]
+            cand["other_emails_added"] = True
+        mine = (_clean(data.get("email")) or "").lower()
+        if "email" in kept and mine in self.other_emails(existing["id"]):
+            cand["_kept"] = [k for k in kept if k != "email"]  # nothing lost: it is now one of their other emails
         return cand, False
 
     def _history_for_new_role(self, candidate_id: int, row: dict[str, Any],
@@ -2212,6 +2451,7 @@ class Store:
         """Everything the candidate page and the AI's get_candidate need."""
         c = self.get_candidate(candidate_id)
         c["work_history"] = self.work_history(candidate_id)
+        c["other_emails"] = self.other_emails(candidate_id)
         c["pipelines"] = self.candidate_pipelines(candidate_id)
         c["timeline"] = self.timeline(candidate_id, limit=timeline_limit)
         return c
@@ -2228,6 +2468,24 @@ class Store:
             raise ValueError("A candidate needs a name.")
         self.get_candidate(candidate_id)
         return self._update(candidate_id, fields, work_history, by=by, via=via)
+
+    def set_color(self, candidate_id: int, color: str | None) -> dict[str, Any]:
+        """The recruiter's quick colour tag from the bubble on the Candidates table. It saves at once and changes
+        nothing else: no timeline entry and no new "updated" date, so triaging a list doesn't reorder it by
+        date. (The AI app's colour changes go through update_candidate, which logs them so Undo works.)"""
+        want = clean_color(color)
+        self.get_candidate(candidate_id)
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE candidates SET color = ? WHERE id = ?", (want, candidate_id))
+        return self.get_candidate(candidate_id)
+
+    def color_counts(self) -> dict[str, int]:
+        """How many people have each colour ("none" counts the untagged), for the chips above the table."""
+        out = {c: 0 for c in COLORS}
+        out["none"] = 0
+        for r in self._rows("SELECT color, count(*) AS n FROM candidates GROUP BY color"):
+            out[r["color"] or "none"] = r["n"]
+        return out
 
     def _update(self, candidate_id: int, fields: dict[str, Any], work_history: list[dict[str, Any]] | None,
                 *, by: str, merge: bool = False, derived: tuple[str, ...] = (),
@@ -2271,6 +2529,9 @@ class Store:
         self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))
         if "tags" in cols:
             self._sync_tags(candidate_id, cols["tags"])
+        if cols.get("email"):  # an address that becomes the main one is no longer an "other"
+            self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = lower(?)",
+                               (candidate_id, cols["email"]))
         if "work_history" in new:
             self._write_history(candidate_id, new["work_history"] or [])
 
@@ -3047,8 +3308,9 @@ class Store:
         if old.get("_at") and job.get("updated_at") == new.get("_at"):
             self._conn.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (old["_at"], job_id))
 
-    def delete_candidate(self, candidate_id: int) -> None:
+    def delete_candidate(self, candidate_id: int, *, by: str = "app") -> None:
         """Only the recruiter can do this, from the app window. The AI has no delete tool."""
+        refuse_ai("Deleting a candidate", by)
         with self._lock, self._conn:
             cur = self._conn.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
         if cur.rowcount == 0:
@@ -3057,6 +3319,7 @@ class Store:
 
     def merge_candidates(self, keep_id: int, other_id: int, *, by: str = "app") -> dict[str, Any]:
         """App window only (the AI has no merge tool): fold `other` into `keep`, then delete `other`.
+        Refused for by="ai" and inside an AI session.
 
         keep's empty fields are filled from other (last contacted takes the later date), skills are
         combined, and other's timeline, to-dos, work history and jobs move to keep. When both are in
@@ -3064,6 +3327,7 @@ class Store:
         from where (it can't be undone with Undo; the backup taken before merging can). The
         returned candidate carries "_merged": {"name", "filled", "timeline", "jobs"}.
         """
+        refuse_ai("Merging candidates", by)
         if keep_id == other_id:
             raise ValueError("Pick two different people to merge.")
         self.get_candidate(keep_id)
@@ -3084,7 +3348,7 @@ class Store:
                         fields[k] = ov
                 elif ov and not kv:
                     fields[k] = ov
-                elif k != "name" and ov and kv and str(ov).strip() != str(kv).strip():
+                elif k not in ("name", "color") and ov and kv and str(ov).strip() != str(kv).strip():
                     dropped[k] = ov
             mine = self.work_history(keep_id)
             seen = {((e.get("title") or "").casefold(), (e.get("company") or "").casefold()) for e in mine}
@@ -3112,6 +3376,8 @@ class Store:
             # Offers come along, unless the kept profile has its own on that job (offers.py, v11).
             self._conn.execute("UPDATE offers SET candidate_id = ? WHERE candidate_id = ? AND job_id NOT IN"
                                " (SELECT job_id FROM offers WHERE candidate_id = ?)", (keep_id, other_id, keep_id))
+            # The merged-away person's addresses (main and others) become keep's other emails.
+            their_emails = ([orow["email"].lower()] if orow.get("email") else []) + self.other_emails(other_id)
             # other's email and LinkedIn URL are unique, so other goes before keep takes them.
             self._conn.execute("DELETE FROM candidates WHERE id = ?", (other_id,))
             created = min(krow["created_at"], orow["created_at"])
@@ -3121,7 +3387,11 @@ class Store:
             if fields:
                 self._apply(keep_id, fields)
             filled = [k for k in fields if k not in ("tags", "work_history")]
+            kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
             bits = [f"filled {_labels(filled)}"] if filled else []
+            if kept_emails:
+                bits.append(f"kept {len(kept_emails)} more email{'' if len(kept_emails) == 1 else 's'} "
+                            f"({', '.join(kept_emails)})")
             if "tags" in fields:
                 bits.append("added skills")
             if moved:
@@ -3135,7 +3405,8 @@ class Store:
             by = by if by in CHANGE_SOURCES else "app"
             info = {"id": other_id, "name": other["name"], "email": orow.get("email"),
                     "linkedin_url": orow.get("linkedin_url"), "phone": orow.get("phone"), "timeline": moved,
-                    "jobs": jobs, "dropped": dropped}
+                    "jobs": jobs, "dropped": dropped,
+                    "other_emails": kept_emails}
             self._conn.execute(
                 "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (keep_id, CHANGE_KIND, body, ts, ts, CHANGE_SOURCES[by],
@@ -3424,19 +3695,35 @@ class Store:
     def candidate_filters(self, *, location: str | None = None, title: str | None = None,
                           tag: str | None = None, source: str | None = None, job_id: int | None = None,
                           client: str | None = None, stage: str | None = None, pipe: str | None = None,
-                          days: int | None = None) -> tuple[list[str], list[Any], dict]:
-        """SQL conditions on `c` for the search filters. Location and title take shorthand (sf, nyc, la,
-        bay area, swe) and ignore case and accents; tag and source ignore case."""
+                          days: int | None = None, color: str | None = None, company: str | None = None,
+                          skills: list[str] | None = None, skill_mode: str = "any", remote: bool = False,
+                          exp_min: int | None = None, exp_max: int | None = None,
+                          contacted: str | None = None, contacted_days: int | None = None,
+                          added_days: int | None = None, added_since: str | None = None,
+                          has_email: bool = False, has_linkedin: bool = False,
+                          exclude: list[tuple[str, bool]] | None = None,
+                          field_any: dict[str, list[str]] | None = None,
+                          field_not: dict[str, list[str]] | None = None) -> tuple[list[str], list[Any], dict]:
+        """SQL conditions on `c` for the search filters. Location, title and company take shorthand (sf, nyc,
+        la, bay area, swe) and ignore case and accents; tag and source ignore case.
+
+        skills: several skill tags, any of them or (skill_mode "all") every one. remote: the location says
+        remote, or a tag does. exp_min / exp_max: years of work from the work history (people with no dated
+        history are left out when exp_min is set). contacted: "never", "older" (last contact more than
+        contacted_days ago) or "within". added_days / added_since: when they were saved. exclude: (words, is a
+        phrase) that must not appear anywhere in the profile, as whole words. field_any / field_not: values typed
+        after a prefix in the search box (title:, company:, location:, source:, skill:), any of them or none of them."""
         where: list[str] = []
         params: list[Any] = []
         filters: dict[str, str] = {}
-        for col, value, singular in (("location", location, False), ("current_title", title, True)):
+        for col, value, singular in (("location", location, False), ("current_title", title, True),
+                                     ("current_company", company, False)):
             if value and value.strip():
                 forms = _filter_forms(value, singular=singular)
                 where.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
                 for f in forms:
                     params += [f, int(len(f) <= 3)]
-                filters["title" if col == "current_title" else col] = value
+                filters[{"current_title": "title", "current_company": "company"}.get(col, col)] = value
         if tag and tag.strip():
             where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
             params.append(tag.strip())
@@ -3445,6 +3732,17 @@ class Store:
             where.append("lower(trim(c.source)) = lower(?)")
             params.append(source.strip())
             filters["source"] = source
+        self._prefix_filters(where, params, filters, field_any or {}, field_not or {})
+        if color and color.strip():  # one of the six colours, or "none" for people with no colour
+            want = clean_color(color)
+            where.append("c.color = ?" if want else "c.color IS NULL")
+            if want:
+                params.append(want)
+            filters["color"] = want or "none"
+        self._more_filters(where, params, filters, skills=skills, skill_mode=skill_mode, remote=remote,
+                           exp_min=exp_min, exp_max=exp_max, contacted=contacted, contacted_days=contacted_days,
+                           added_days=added_days, added_since=added_since, has_email=has_email,
+                           has_linkedin=has_linkedin, exclude=exclude)
         from .opsreview import PIPES, pipe_sql
         pipe = pipe if pipe in PIPES else None  # a column of the Ops review: in process, stuck, offers out...
         if job_id or (client and client.strip()) or (stage and stage.strip()) or pipe:
@@ -3476,6 +3774,230 @@ class Store:
                          + " AND ".join(sub) + ")")
             params += sp
         return where, params, filters
+
+    def _prefix_filters(self, where: list[str], params: list[Any], filters: dict[str, str],
+                        any_of: dict[str, list[str]], none_of: dict[str, list[str]]) -> None:
+        """title:, company:, location:, source: and skill: typed in the search box. Several values of one prefix
+        are alternatives; a negated prefix (-title:manager) leaves out people whose own field has the value."""
+        cols = {"title": ("current_title", True), "company": ("current_company", False), "location": ("location", False)}
+        for negate, groups in ((False, any_of), (True, none_of)):
+            for fld, vals in groups.items():
+                vals = [v for v in vals if v and v.strip()]
+                if not vals:
+                    continue
+                if fld == "skill":
+                    if not negate:
+                        continue  # skills that must be there go through the `skills` filter
+                    marks = ", ".join("?" for _ in vals)
+                    where.append(f"c.id NOT IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
+                    params += vals
+                    filters["without_skill"] = ", ".join(vals)
+                    continue
+                conds: list[str] = []
+                for v in vals:
+                    if fld == "source":  # the exact Found via label, or one whole word of it (source:sample finds Sample data)
+                        conds.append("(lower(trim(coalesce(c.source, ''))) = lower(?) OR tt_has(c.source, ?, 1))")
+                        params += [v.strip(), v.strip()]
+                    elif fld in cols:
+                        col, singular = cols[fld]
+                        forms = _filter_forms(v, singular=singular)
+                        conds.append("(" + " OR ".join(f"tt_has(c.{col}, ?, ?)" for _ in forms) + ")")
+                        for f in forms:
+                            params += [f, int(len(f) <= 3)]
+                if not conds:
+                    continue
+                where.append(("NOT " if negate else "") + "(" + " OR ".join(conds) + ")")
+                key = ("without_" if negate else "") + fld
+                filters.setdefault(key, " or ".join(vals))
+
+    def _more_filters(self, where: list[str], params: list[Any], filters: dict[str, str], *, skills, skill_mode,
+                      remote, exp_min, exp_max, contacted, contacted_days, added_days, added_since, has_email,
+                      has_linkedin, exclude) -> None:
+        """The newer filters of candidate_filters: more than one skill, remote, years, contact and added dates,
+        has email / LinkedIn, and words to leave out."""
+        names = [x.strip() for x in (skills or []) if x and x.strip()]
+        if names:
+            marks = ", ".join("?" for _ in names)
+            if skill_mode == "all":
+                where.append(f"(SELECT count(DISTINCT lower(tag)) FROM candidate_tags WHERE candidate_id = c.id"
+                             f" AND tag IN ({marks}) COLLATE NOCASE) = ?")
+                params += [*names, len({x.lower() for x in names})]
+            else:
+                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
+                params += names
+            filters["skills"] = (" and " if skill_mode == "all" else " or ").join(names)
+        if remote:
+            where.append("(tt_has(c.location, 'remote', 1) OR c.id IN (SELECT candidate_id FROM candidate_tags"
+                         " WHERE tag IN ('remote', 'open to remote', 'remote ok') COLLATE NOCASE))")
+            filters["remote"] = "yes"
+        if exp_min is not None or exp_max is not None:
+            years = self.experience_years()
+            lo = float(exp_min) if exp_min is not None else None
+            hi = float(exp_max) if exp_max is not None else None
+            # No dated history: left out when a minimum is set (we can't say they have it), kept for a maximum.
+            ids = [cid for cid, y in years.items()
+                   if (lo is None or (y is not None and y >= lo)) and (hi is None or y is None or y <= hi)]
+            if lo is None:
+                ids += [r["id"] for r in self._rows("SELECT id FROM candidates WHERE id NOT IN"
+                                                    " (SELECT DISTINCT candidate_id FROM work_history)")]
+            where.append("c.id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(ids))
+            filters["experience"] = (f"{exp_min} to {exp_max} years" if exp_min is not None and exp_max is not None
+                                     else f"{exp_min}+ years" if exp_min is not None else f"up to {exp_max} years")
+        if contacted == "never":
+            where.append("(c.last_contacted_at IS NULL OR trim(c.last_contacted_at) = '')")
+            filters["contacted"] = "never"
+        elif contacted in ("older", "within") and contacted_days is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=int(contacted_days))).replace(microsecond=0).isoformat()
+            if contacted == "older":
+                where.append("(c.last_contacted_at IS NOT NULL AND trim(c.last_contacted_at) <> ''"
+                             " AND datetime(c.last_contacted_at) < datetime(?))")
+            else:
+                where.append("(c.last_contacted_at IS NOT NULL AND datetime(c.last_contacted_at) >= datetime(?))")
+            params.append(cutoff)
+            filters["contacted"] = f"{contacted} {contacted_days} days"
+        since = added_since
+        if added_days is not None:
+            since = (datetime.now(timezone.utc) - timedelta(days=int(added_days))).replace(microsecond=0).isoformat()
+            filters["added"] = f"last {added_days} days"
+        if since:
+            where.append(f"datetime(c.created_at) {'>=' if added_days is not None else '>'} datetime(?)")
+            params.append(since)
+        if has_email:
+            where.append("(c.email IS NOT NULL AND trim(c.email) <> '')")
+            filters["has_email"] = "yes"
+        if has_linkedin:
+            where.append("(c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) <> '')")
+            filters["has_linkedin"] = "yes"
+        if exclude:
+            expr = " OR ".join(_exact_fts(text, phrase) for text, phrase in exclude)
+            where.append("c.id NOT IN (SELECT rowid FROM candidates_words WHERE candidates_words MATCH ?)")
+            params.append(expr)
+            filters["without"] = ", ".join(t for t, _ in exclude)
+
+    def experience_years(self) -> dict[int, float | None]:
+        """Years of work for everyone with a work history: candidate id -> years (None when no role has dates
+        that can be read). Overlapping roles count once and a role with no end date runs to today."""
+        from .searchquery import years_of_experience
+        roles: dict[int, list[tuple[str | None, str | None]]] = {}
+        for r in self._rows('SELECT candidate_id, start, "end" AS finish FROM work_history'):
+            roles.setdefault(r["candidate_id"], []).append((r["start"], r["finish"]))
+        return {cid: years_of_experience(rs) for cid, rs in roles.items()}
+
+    # ---------------------------------------------------------- saved searches
+    SAVED_SEARCH_LIMIT = 50
+
+    @staticmethod
+    def _search_name(name: Any) -> str:
+        n = " ".join(str(name or "").split())
+        if not n:
+            raise ValueError("Give the saved search a name, like Senior Python in SF.")
+        if len(n) > 60:
+            raise ValueError("A saved search's name can be up to 60 characters.")
+        return n
+
+    def _saved_row(self, r: dict[str, Any]) -> dict[str, Any]:
+        try:
+            params = json.loads(r["params"])
+        except (TypeError, ValueError):
+            params = {}
+        from .searchquery import clean_params
+        return {**r, "params": clean_params(params if isinstance(params, dict) else {})}
+
+    def save_search_problem(self, name: str, *, by: str = "app") -> str | None:
+        """Why a saved search under this name would be refused (name already used, too many), or None. The words
+        for the AI say what it can do: it can't rename or delete."""
+        n = self._search_name(name)
+        if self._row("SELECT 1 AS x FROM saved_searches WHERE name = ? COLLATE NOCASE", (n,)):
+            return (f"You already have a saved search called {n}. Pick another name." if by == "ai" else
+                    f"You already have a saved search called {n}. Pick another name, or rename that one.")
+        if self._row("SELECT count(*) AS n FROM saved_searches")["n"] >= self.SAVED_SEARCH_LIMIT:
+            return (f"The recruiter already has {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
+                    "Tell them they can delete ones they no longer use in the app." if by == "ai" else
+                    f"You have {self.SAVED_SEARCH_LIMIT} saved searches, which is the most. "
+                    "Delete one you don't use first.")
+        return None
+
+    def save_search(self, name: str, params: dict[str, Any], *, by: str = "app") -> dict[str, Any]:
+        """Keep a search (its words and filters) under a name. A name already in use is refused, never replaced."""
+        from .searchquery import clean_params
+        n = self._search_name(name)
+        p = clean_params(params)
+        if not p:
+            raise ValueError("There is nothing to save yet: type a search or pick a filter first.")
+        with self._write():
+            problem = self.save_search_problem(n, by=by)
+            if problem:
+                raise ValueError(problem)
+            now = now_iso()
+            cur = self._conn.execute(
+                "INSERT INTO saved_searches(name, params, created_at, last_viewed_at, created_by) VALUES (?, ?, ?, ?, ?)",
+                (n, json.dumps(p, ensure_ascii=False), now, now, "ai" if by == "ai" else "app"))
+        return self.get_saved_search(cur.lastrowid)
+
+    def get_saved_search(self, ref: int | str) -> dict[str, Any]:
+        """By id, or by name (ignoring case). NotFound when there is none."""
+        r = None
+        if not isinstance(ref, int):  # text: a saved search's name wins, even a number like "2", then its id
+            r = self._row("SELECT * FROM saved_searches WHERE name = ? COLLATE NOCASE", (" ".join(str(ref).split()),))
+        if r is None and (isinstance(ref, int) or str(ref).strip().isdigit()):
+            r = self._row("SELECT * FROM saved_searches WHERE id = ?", (int(str(ref).strip()),))
+        if r is None:
+            raise NotFound("That saved search isn't there any more.")
+        return self._saved_row(r)
+
+    def list_saved_searches(self, *, counts: bool = False, limit: int | None = None) -> list[dict[str, Any]]:
+        """Saved searches, newest first. counts=True adds `count` (people who match now) and `new` (of those, saved
+        since the search was last opened)."""
+        rows = [self._saved_row(r) for r in self._rows(
+            "SELECT * FROM saved_searches ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else ""))]
+        if counts:
+            for r in rows:
+                r["count"], r["new"] = self.saved_search_counts(r)
+        return rows
+
+    def _saved_kwargs(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        from .searchquery import search_kwargs
+        return row["params"].get("q", ""), search_kwargs(row["params"])
+
+    def run_saved_search(self, ref: int | str, *, limit: int = 25, offset: int = 0) -> tuple[dict[str, Any], SearchResult]:
+        row = self.get_saved_search(ref)
+        q, kw = self._saved_kwargs(row)
+        return row, self.search_candidates(q, limit=limit, offset=offset, **kw)
+
+    def saved_search_counts(self, row: dict[str, Any]) -> tuple[int, int]:
+        """(people who match now, how many of them were saved after the search was last opened)."""
+        q, kw = self._saved_kwargs(row)
+        # the same search as opening it (typo help included), so the count matches what the page then shows
+        res = self.search_candidates(q, limit=1, **kw)
+        total = res.exact_total if res.exact_total is not None else res.total
+        since = row.get("last_viewed_at") or row["created_at"]
+        new = 0
+        if total:
+            res = self.search_candidates(q, limit=1, added_since=since, **kw)
+            new = res.exact_total if res.exact_total is not None else res.total
+        return total or 0, new or 0
+
+    def rename_saved_search(self, search_id: int, name: str) -> dict[str, Any]:
+        n = self._search_name(name)
+        self.get_saved_search(search_id)
+        with self._write():
+            other = self._row("SELECT id FROM saved_searches WHERE name = ? COLLATE NOCASE AND id <> ?", (n, search_id))
+            if other:
+                raise ValueError(f"You already have a saved search called {n}. Pick another name.")
+            self._conn.execute("UPDATE saved_searches SET name = ? WHERE id = ?", (n, search_id))
+        return self.get_saved_search(search_id)
+
+    def mark_search_viewed(self, search_id: int) -> None:
+        with self._write():
+            self._conn.execute("UPDATE saved_searches SET last_viewed_at = ? WHERE id = ?", (now_iso(), search_id))
+
+    def delete_saved_search(self, search_id: int) -> dict[str, Any]:
+        """The recruiter's own action in the app window. No AI tool calls this."""
+        row = self.get_saved_search(search_id)
+        with self._write():
+            self._conn.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+        return row
 
     def membership_choices(self, job_id: int | None = None) -> dict[str, Any]:
         """Job, client and stage choices for the Candidates filter bar. Stages follow the chosen job."""
@@ -3515,15 +4037,110 @@ class Store:
         stage: str | None = None,
         pipe: str | None = None,
         days: int | None = None,
+        **more: Any,
     ) -> SearchResult:
         """Ranked search, best matches first; empty query lists most recent.
 
-        Order: people with every word in their profile (ranked), then people who have every word once
-        their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the closest
-        matches with some of the words. A word nobody has gets a spelling fix from the saved words.
+        The query may use quotes ("machine learning"), OR (python OR go), a leading minus or NOT to leave
+        people out, and field prefixes (title:, company:, location:, skill:, tag:, source:). See searchquery.py.
+        Whatever is typed is parsed into pieces and the FTS5 text is built here from quoted pieces, so nothing
+        typed is ever passed on as syntax. Plain words use the everyday search below; a phrase or an OR uses
+        the operator search (profile text only, no typo help or note matching).
+
+        `more` takes the newer filters of candidate_filters (company, skills, skill_mode, remote, exp_min,
+        exp_max, contacted, contacted_days, added_days, added_since, has_email, has_linkedin).
+
+        Everyday search order: people with every word in their profile (ranked), then people who have every
+        word once their pipeline jobs and timeline notes count, then (when that's fewer than 3 people) the
+        closest matches with some of the words. A word nobody has gets a spelling fix from the saved words.
         """
+        from . import searchquery as sq
+        kw: dict[str, Any] = dict(location=location, title=title, tag=tag, source=source, job_id=job_id,
+                                  client=client, stage=stage, pipe=pipe, days=days, **more)
+        is_id, _ = self.lookup_exact(query)
+        pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
+        if not pq.structured and not pq.operator_mode:
+            return self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+        # Field prefixes fill the matching filter when the form did not set it; skills add to the skill list.
+        # the form's own Title, Company, Location or Found via filter stays; the prefix does not override it
+        field_any = {f: v for f, v in pq.fields.items()
+                     if f in ("title", "company", "location", "source") and v and not kw.get(f)}
+        if field_any:
+            kw["field_any"] = field_any
+        if pq.not_fields:
+            kw["field_not"] = pq.not_fields
+        if pq.fields.get("skill"):
+            have = list(kw.get("skills") or [])
+            kw["skills"] = [*have, *(x for x in pq.fields["skill"] if x.lower() not in {h.lower() for h in have})]
+            if pq.skill_any and not have:
+                kw["skill_mode"] = "any"
+            elif not have:
+                kw["skill_mode"] = "all"
+        if pq.exclude:
+            kw["exclude"] = [(i.text, i.phrase) for i in pq.exclude]
+        if pq.operator_mode:
+            res = self._search_operators(pq, limit=limit, offset=offset, **kw)
+        else:
+            res = self._search_core(pq.bare, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
+            if res.suggestion and pq.bare:
+                res.suggestion = sq.rewrite_suggestion(query, pq.bare, res.suggestion)
+        res.query = query
+        return res
+
+    def _search_operators(self, pq: Any, *, limit: int, offset: int, **kw: Any) -> SearchResult:
+        """The search for a query with a phrase or an OR: every group must match (AND), a group matches when any
+        of its words or phrases does. Profile text only, ranked by bm25; the last bare word is still a prefix."""
+        where, params, filters = self.candidate_filters(**kw)
+        groups = []
+        for gi, g in enumerate(pq.groups):
+            parts = []
+            for ii, item in enumerate(g):
+                last = gi == len(pq.groups) - 1 and ii == len(g) - 1 and item.prefix_ok
+                if last:
+                    parts.append(_Term(item.text, True, ALIASES.get(item.text, ())).fts())
+                else:
+                    parts.append(_item_fts(item.text, item.phrase))
+            groups.append("(" + " OR ".join(parts) + ")" if len(parts) > 1 else parts[0])
+        match = " AND ".join(groups)
+        cond = " AND ".join(["candidates_fts MATCH ?", *where])
+        base = f"FROM candidates_fts JOIN candidates c ON c.id = candidates_fts.rowid WHERE {cond}"
+        total = self._row(f"SELECT count(*) AS n {base}", (match, *params))["n"]
+        patterns = [[_word_pattern(w, False) for w in i.text.split()] if i.phrase else [_word_pattern(i.text, False)]
+                    for g in pq.groups for i in g]
+        snips = ", ".join(f"snippet(candidates_fts, {i}, char(2), char(3), '…', 16) AS _snip{i}" for i in _SNIPPET_ORDER)
+        rows = self._rows(
+            f"""SELECT c.*, {snips}, bm25(candidates_fts, 10.0, 5.0, 3.0, 2.0, 1.0, 3.0, 2.0) AS _score
+                {base} ORDER BY _score, c.id LIMIT ? OFFSET ?""",
+            (match, *params, limit, max(0, offset)))
+        hits = []
+        for r in rows:
+            snippet = _match_snippet([r.pop(f"_snip{i}") for i in _SNIPPET_ORDER], patterns)
+            score = r.pop("_score")
+            hits.append(SearchHit(candidate=self._hydrate(r), score=score,
+                                  snippet=snippet if HL_START in (snippet or "") else None))
+        return SearchResult(hits=hits, total=total, query="", filters=filters, exact_total=total)
+
+    def _search_core(
+        self,
+        query: str = "",
+        *,
+        location: str | None = None,
+        title: str | None = None,
+        tag: str | None = None,
+        source: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+        fix_typos: bool = True,
+        job_id: int | None = None,
+        client: str | None = None,
+        stage: str | None = None,
+        pipe: str | None = None,
+        days: int | None = None,
+        **more: Any,
+    ) -> SearchResult:
         where, params, filters = self.candidate_filters(location=location, title=title, tag=tag, source=source,
-                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                                                         job_id=job_id, client=client, stage=stage, pipe=pipe, days=days,
+                                                         **more)
         is_id, person = self.lookup_exact(query)
         if is_id:  # emails and LinkedIn URLs aren't in the word index; look them up directly
             hits = [SearchHit(candidate=person)] if person else []
@@ -3550,24 +4167,24 @@ class Store:
                     fixed = query
                     for word, fix in all_fixes.items():
                         fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
-                    res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                                 limit=limit, offset=offset, fix_typos=False,
-                                                 job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                    res = self._search_core(query, location=location, title=title, tag=tag, source=source,
+                                               limit=limit, offset=offset, fix_typos=False,
+                                               job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                     res.suggestion = fixed
                     return res
             if fixes:
                 fixed = query
                 for word, fix in fixes.items():
                     fixed = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", fix, fixed, flags=re.I)
-                res = self.search_candidates(fixed, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                res = self._search_core(fixed, location=location, title=title, tag=tag, source=source,
+                                           limit=limit, offset=offset, fix_typos=False,
+                                           job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                 if res.exact_total:
                     res.query, res.suggestion, res.corrected = query, fixed, True
                     return res
-                res = self.search_candidates(query, location=location, title=title, tag=tag, source=source,
-                                             limit=limit, offset=offset, fix_typos=False,
-                                             job_id=job_id, client=client, stage=stage, pipe=pipe, days=days)
+                res = self._search_core(query, location=location, title=title, tag=tag, source=source,
+                                           limit=limit, offset=offset, fix_typos=False,
+                                           job_id=job_id, client=client, stage=stage, pipe=pipe, days=days, **more)
                 res.suggestion = fixed
                 return res
 
@@ -3844,12 +4461,13 @@ class Store:
                                  new={**fields, "_at": ts})
         return self.get_job(job_id)
 
-    def delete_job(self, job_id: int) -> None:
+    def delete_job(self, job_id: int, *, by: str = "app") -> None:
         """App window only: remove a job, its stages and its pipeline. The candidates stay.
 
         Timeline entries keep their text but lose the job link; to-dos about a
         candidate stay, without the job. The AI has no tool for this.
         """
+        refuse_ai("Deleting a job", by)
         with self._lock, self._conn:
             self._conn.execute("UPDATE suggestions SET job_id = NULL WHERE job_id = ? AND candidate_id IS NOT NULL",
                                (job_id,))
@@ -4081,8 +4699,9 @@ class Store:
                     f"{was['name']} counts as {_OUTCOME_WORDS.get(s['outcome'], s['outcome'])}. Ask the recruiter "
                     f"to rename {was['name']} in the app, or pick a name that reads the same way.")
 
-    def remove_empty_stage(self, job_id: int, name: str) -> list[dict[str, Any]]:
+    def remove_empty_stage(self, job_id: int, name: str, *, by: str = "app") -> list[dict[str, Any]]:
         """App window only: drop a stage nobody is in. Refuses if it would lose anyone's place."""
+        refuse_ai("Removing a stage", by)
         stage = self.resolve_stage(job_id, name)
         n = self._row("SELECT count(*) AS n FROM applications WHERE job_id = ? AND lower(stage) = lower(?)",
                       (job_id, stage["name"]))["n"]

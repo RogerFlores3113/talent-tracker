@@ -246,6 +246,66 @@ def _import_stage_opts(args: argparse.Namespace, prof: dict | None) -> dict[str,
             "replace_stages": not args.keep_default_stages and bool(prof.get("replace_stages", True))}
 
 
+def _skill_targets(args: argparse.Namespace, default_all: bool = True) -> list[str]:
+    from . import skills
+
+    targets = [t for t, on in (("claude-code", args.claude_code), ("codex", args.codex)) if on]
+    if not targets and default_all:
+        targets = list(skills.TARGETS)
+    return targets
+
+
+def _install_skills(args: argparse.Namespace) -> None:
+    from . import skills
+
+    targets = _skill_targets(args, default_all=not args.zip)
+    for target in targets:
+        plan = skills.plan_install(target)
+        print(f"{plan['label']}: will add {len(plan['items'])} skills to {plan['base']}")
+        for f in plan["files"]:
+            print(f"  add {f}")
+        for f in plan["edited"]:
+            print(f"  edited by you, kept: {f}")
+        for sk in plan["skipped"]:
+            print(f"  left alone {sk['path']}: {sk['reason']}")
+    for target in targets:
+        res = skills.install(target)
+        print(f"{res['label']}: added {len(res['items'])} skills ({res['base']})")
+    if args.zip:
+        print(f"Wrote {skills.write_zip(Path(args.zip))}. In Claude Desktop: Customize > Skills, add each zip inside.")
+
+
+def _remove_skills(args: argparse.Namespace) -> None:
+    from . import skills
+
+    targets = _skill_targets(args)
+    plans = [skills.plan_remove(t) for t in targets]
+    if not any(p["folders"] or p["left"] for p in plans):
+        print("There are no Talent Search skills to remove.")
+        return
+    for p in plans:
+        print(f"{p['label']} ({p['base']}):")
+        for f in p["folders"]:
+            print(f"  remove {f}")
+        for f in p["edited"]:
+            print(f"  edited by you, kept: {f}")
+        for left in p["left"]:
+            print(f"  stays, because you changed or added files in it: {left['folder']}")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            sys.exit("Nothing removed. Run again with --yes to remove these, or from a terminal to be asked.")
+        if input("Remove these? Type yes to go ahead: ").strip().lower() not in ("y", "yes"):
+            print("Nothing removed.")
+            return
+    for target in targets:
+        res = skills.remove(target)
+        for f in res["removed"]:
+            print(f"Removed {f}")
+        for f in res["kept"]:
+            print(f"Kept {f} (it holds files that aren't ours or that you edited; it is yours now)")
+    print("Done. Only files Talent Search installed, and you hadn't changed, were removed.")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="talent", description="Talent Search")
     sub = parser.add_subparsers(dest="cmd")
@@ -256,6 +316,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("open", help="open the window of the running app (unlocks it in this browser)")
     sub.add_parser("mcp", help="run the MCP server over stdio (AI apps start this)")
     sub.add_parser("sample-data", help="load made-up candidates to try the app")
+    sub.add_parser("tour-reset", help="forget that the first-run tour ran, so it starts again on an empty database")
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
     sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
@@ -263,6 +324,14 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
     sub.add_parser("check-codex", help="check that Codex can start Talent Search")
     sub.add_parser("check-lmstudio", help="check that LM Studio can start Talent Search")
+    inst = sub.add_parser("install-skills", help="add the Talent Search skills to Claude Code and Codex (or write a zip)")
+    inst.add_argument("--claude-code", action="store_true", help="install into ~/.claude/skills")
+    inst.add_argument("--codex", action="store_true", help="install into ~/.agents/skills")
+    inst.add_argument("--zip", metavar="PATH", help="write a zip to upload in Claude Desktop (Customize > Skills)")
+    rem = sub.add_parser("remove-skills", help="remove the Talent Search skills this app installed (only those)")
+    rem.add_argument("--claude-code", action="store_true", help="only from ~/.claude/skills")
+    rem.add_argument("--codex", action="store_true", help="only from ~/.agents/skills")
+    rem.add_argument("--yes", action="store_true", help="don't ask first")
     imp = sub.add_parser("import-csv", help="import candidates from a CSV file (columns guessed from the header)")
     imp.add_argument("file")
     imp.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
@@ -310,6 +379,12 @@ def main(argv: list[str] | None = None) -> None:
         from .store import Store
 
         print(f"Added {load_sample_data(Store(db_path()))} sample candidates.")
+    elif cmd == "tour-reset":
+        from . import tour
+        from .store import Store
+
+        tour.reset(Store(db_path()))
+        print("The first-run tour will start again the next time the app opens with no candidates or jobs.")
     elif cmd == "reindex":
         from .store import Store
         from .typesense_index import TypesenseIndex
@@ -325,6 +400,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Indexed {index.rebuild(Store(db_path()))} candidates.")
     elif cmd == "sync":
         _sync(args)
+    elif cmd == "install-skills":
+        _install_skills(args)
+    elif cmd == "remove-skills":
+        _remove_skills(args)
     elif cmd in ("import-csv", "export-csv"):
         from pathlib import Path
 

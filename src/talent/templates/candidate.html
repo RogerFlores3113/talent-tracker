@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, chips, sub %}
+{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble, injection_box %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
+{{ injection_box(inject_warnings) }}
 {% if dupes %}
 <section class="panel" id="duplicates">
   <h2>Same person?</h2>
@@ -16,7 +17,7 @@
 <article class="profile">
   <div class="head">
     <div>
-      <h1>{{ c.name }}</h1>
+      <div class="namerow">{{ color_bubble(c, True) }}<h1>{{ c.name }}</h1></div>
       <p class="sub">{{ sub(c) }}</p>
       {{ chips(c.tags) }}
     </div>
@@ -31,6 +32,7 @@
   {% if c.about %}<p class="about">{{ c.about }}</p>{% endif %}
   <dl class="facts">
     {% if c.email %}<dt>Email</dt><dd><a href="mailto:{{ c.email }}">{{ c.email }}</a></dd>{% endif %}
+    {% if c.other_emails %}<dt>Other emails</dt><dd>{% for e in c.other_emails %}<a href="mailto:{{ e }}">{{ e }}</a>{{ ', ' if not loop.last }}{% endfor %}</dd>{% endif %}
     {% if c.phone %}<dt>Phone</dt><dd>{{ c.phone }}</dd>{% endif %}
     {% if c.linkedin_url %}<dt>{{ c.linkedin_url | profile_label }}</dt><dd><a href="{{ c.linkedin_url }}" target="_blank" rel="noopener noreferrer">{{ c.linkedin_url | replace('https://', '') | replace('www.', '') }}</a></dd>{% endif %}
     {% if c.website %}<dt>Website</dt><dd>{% if c.website.startswith('http') %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website }}</a>{% else %}{{ c.website }}{% endif %}</dd>{% endif %}
@@ -94,6 +96,7 @@
       {% if ivd.reschedule_note %}<div class="fine">Reason: {{ ivd.reschedule_note }}</div>{% endif %}
       {% set ivnote = interview_note(ivd) %}{% if ivnote %}<div class="fine">How it went: {{ ivnote }}</div>{% endif %}
       {% for f in ivd.feedback or [] %}<div class="fine">Feedback from {{ f.by or 'an interviewer' }}: {{ f.text }}</div>{% endfor %}
+      {% if t.kind == 'interview' and t.status != 'cancelled' %}<div class="fine"><a class="link small" href="/candidates/{{ c.id }}/interviews/{{ t.id }}.ics" download title="Downloads a calendar file you can open in your own calendar app.">Add to calendar</a></div>{% endif %}
       {% if not t.struck %}<details class="iv-edit" id="iv-{{ t.id }}" {{ 'open' if request.query_params.get('iv') == t.id | string }}><summary class="small">Reschedule, cancel, record how it went or add feedback</summary>
         <form method="post" action="/candidates/{{ c.id }}/interviews/{{ t.id }}" class="inline">
           <input type="hidden" name="op" value="reschedule">

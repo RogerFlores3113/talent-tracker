@@ -3,6 +3,7 @@
 {% block body %}
 <h1>Connect your AI app</h1>
 <p class="lead">Once connected, ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
+{% include "_site_note.html" %}
 
 <div class="connect-grid">
   <section class="panel" id="claude-panel">
@@ -49,7 +50,7 @@
   {% for key, name, on, blurb in [
       ('codex', 'Codex', codex_on, 'Works for the Codex app and the codex command.'),
       ('lmstudio', 'LM Studio', lmstudio_on, 'For local models. Pick one that supports tool use, like Qwen 3 or Llama 3.1.')] %}
-  <section class="panel">
+  <section class="panel" id="{{ key }}-panel">
     <h2>{{ name }}</h2>
     <p>{% if on %}<span class="ok">Added to its settings.</span> Press again to repair it.{% else %}{{ blurb }}{% endif %}</p>
     <button class="btn primary" hx-post="/connect/{{ key }}" hx-target="#{{ key }}-result" hx-indicator="#{{ key }}-busy">{{ 'Reconnect' if on else 'Connect' }} {{ name }}</button>
@@ -66,6 +67,33 @@
   </section>
 </div>
 
+<section class="panel" id="skills-panel">
+  <h2>Skills for your AI app</h2>
+  <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> Press the button for the app you use: Claude Code and Codex get the files copied into their own folder, and Claude Desktop takes a zip you upload.</p>
+  <p class="fine">{{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs. If a folder in those places is a link to somewhere else, it is skipped.</p>
+  <div class="connect-grid">
+    {% for s in skill_status %}
+    <div>
+      <h3>{{ s.label }}</h3>
+      <p class="fine">{% if s.count %}{% if s.current and not s.skipped %}<span class="ok">Installed ({{ s.count }} skills, version {{ s.versions|join(', ') }}).</span>{% else %}Installed: {{ s.count }} of {{ s.total }} skills{% if s.versions %}, version {{ s.versions|join(', ') }}{% endif %}.{% if s.skipped %} {{ s.skipped }} left alone because you have your own.{% else %} Add again to update.{% endif %}{% endif %}{% else %}{% if s.skipped %}{{ s.skipped }} left alone because you have your own. {% endif %}Not added yet.{% endif %}{% if s.edited %} {{ s.edited }} file{{ '' if s.edited == 1 else 's' }} edited by you will be kept.{% endif %} Folder: <code>{{ s.base }}</code></p>
+      <button class="btn primary" hx-post="/connect/skills/{{ s.target }}/preview-install" hx-target="#skills-{{ s.target }}-result">{{ 'Update' if s.count else 'Add' }} Talent Search skills for {{ s.label }}</button>
+      {% if s.count %}<button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-remove" hx-target="#skills-{{ s.target }}-result">Remove Talent Search skills</button>{% endif %}
+      <div id="skills-{{ s.target }}-result"></div>
+    </div>
+    {% endfor %}
+    <div>
+      <h3>Claude Desktop</h3>
+      <p class="fine">{{ desktop_steps }}</p>
+      <a class="btn" href="/connect/skills.zip" download>Download all skills as one .zip</a>
+      <details class="fine">
+        <summary>Or download one skill at a time</summary>
+        <ul class="plain">{% for z in skill_zips %}<li><a href="/connect/skills/{{ z.name }}.zip" download>{{ z.label }} (.zip)</a></li>{% endfor %}</ul>
+      </details>
+    </div>
+  </div>
+  <p class="fine">Prefer to have your AI app do it? Ask Claude Code or Codex: “Install the Talent Search skills by following INSTALL-SKILLS.md in <code>{{ skills_source }}</code>”. Or run <code>talent install-skills</code> in a terminal, which lists what it adds first.</p>
+</section>
+
 <section class="panel">
   <h2>Try asking</h2>
   <ul class="plain">
@@ -78,7 +106,7 @@
   <p><a href="/recipes">More ready-made requests</a></p>
 </section>
 
-<details class="panel">
+<details class="panel" id="by-hand">
   <summary>By hand</summary>
   <p>Paste this into the app's MCP settings (the mcpServers JSON most apps use):</p>
   <pre class="code" id="json-snip">{{ json_snippet }}</pre>

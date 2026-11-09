@@ -14,7 +14,9 @@
 {% elif from_paste %}
 <h1>Check the details</h1>
 <p class="lead">We filled in what we could find. Fix anything that's off, then save.</p>
-{% if dupe %}<p class="flash warn">This looks like <a href="/candidates/{{ dupe.id }}">{{ dupe.name }}</a>, who is already saved. Saving will add these details to their profile.</p>{% endif %}
+{% if found is defined %}<p class="fine" id="paste-found"><strong>Found:</strong> {{ found | join(', ') if found else 'nothing we could read' }}.{% if missing and found %} <strong>Not found:</strong> {{ missing | join(', ') }}.{% endif %}</p>{% endif %}
+{% if dupe and dupe_name_differs %}<p class="flash warn" id="paste-name-differs" role="alert">The email or LinkedIn in this text already belongs to <a href="/candidates/{{ dupe.id }}">{{ dupe.name }}</a>, but the text says {{ c.name }}. They may be two different people, or one person's details were pasted under another's. Nothing is added to {{ dupe.name }} unless you choose it: saving as it is will be refused. Check the name, email and LinkedIn below, or open {{ dupe.name }} first.</p>
+{% elif dupe %}<p class="flash warn">Looks like <a href="/candidates/{{ dupe.id }}">{{ dupe.name }}</a> is already here. {{ 'They are already saved, and saving will add these details to their profile.' if dupe_same_id else "Open them first, so you don't add the same person twice." }}</p>{% endif %}
 <details class="panel"><summary>Rather let AI read the whole thing?</summary>
   <p class="fine">Claude fills every field, including work history and skills.</p>
   {{ recipe_buttons(prompt, "Do it with Claude") }}
@@ -44,6 +46,7 @@
   {% set v = c[f] or '' %}
   <label>{{ label }}<input type="{{ kind }}" name="{{ f }}" value="{{ v[:10] if kind == 'date' else v }}" {{ 'required autofocus' if f == 'name' and not c.id }}></label>
   {% endfor %}
+  <label class="wide">Other emails (one per line; delete a line to remove it)<textarea name="other_emails" rows="2" placeholder="a personal or older address">{{ c.other_emails | join('\n') if c.other_emails is iterable and c.other_emails is not string else (c.other_emails or '') }}</textarea></label>
   <label class="wide">Skills (comma separated)<input type="text" name="tags" value="{{ c.tags | join(', ') if c.tags is not string else c.tags }}" placeholder="python, sql, leadership"></label>
   <label class="wide">About (search looks here first)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
   <label class="wide">Work history, one role per line: Title | Company | Start | End

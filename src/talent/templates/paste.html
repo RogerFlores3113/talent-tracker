@@ -6,11 +6,12 @@
 <p class="lead">Copy the text from a LinkedIn page, a resume or an email and paste it here.</p>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <form method="post" action="/paste" class="stack">
+  <label for="paste-text" class="sr-only">Resume or profile text to paste</label>
   <textarea id="paste-text" name="text" rows="14" placeholder="Paste here" autofocus>{{ text }}</textarea>
   <div class="choice-row">
     <section class="option static">
       <strong>Quick fill, on this computer</strong>
-      <span>Finds the name, email, phone and links. Nothing leaves your computer.</span>
+      <span>Finds the name, email, phone, links, title, company, location, skills and work history. You check it before it's saved. Nothing leaves your computer.</span>
       <button class="btn primary" type="submit">Fill the form</button>
     </section>
     <section class="option static">

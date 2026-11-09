@@ -188,12 +188,31 @@ def hold(store: Store, tool: str, args: dict[str, Any], session: str | None, app
     cid = args.get("candidate_id") if isinstance(args.get("candidate_id"), int) else None
     jid = args.get("job_id") if isinstance(args.get("job_id"), int) else None
     payload = {"tool": tool, "args": args, **({"app": app} if app else {})}
+    if tool == "set_candidate_color" and cid is not None:
+        _replace_older_color_holds(store, cid, args, app)
     try:
         return review._queue(store, "tool_call", _summary(tool, args), payload, candidate_id=cid, job_id=jid,
                              session=session,
                              app=app or "")
     except NotFound:  # a missing person or job: hold it without the link, Keep will say it is gone
         return review._queue(store, "tool_call", _summary(tool, args), payload, session=session, app=app or "")
+
+
+def _replace_older_color_holds(store: Store, cid: int, args: dict[str, Any], app: str | None) -> None:
+    """A newer color for the same person replaces this app's older waiting one, so Review never stacks two."""
+    with store._write():
+        for r in store._rows("SELECT id, payload FROM ai_review WHERE status = 'pending' AND kind = 'tool_call'"
+                             " AND candidate_id = ?", (cid,)):
+            try:
+                old = json.loads(r["payload"] or "{}")
+            except ValueError:
+                continue
+            if old.get("tool") != "set_candidate_color" or (old.get("app") or "") != (app or ""):
+                continue
+            if old.get("args") == args:
+                continue  # the same request again is deduplicated by the queue itself
+            store._conn.execute("UPDATE ai_review SET status = 'passed', decided_at = ?, result = ? WHERE id = ?",
+                                (now_iso(), "Replaced by a newer color for the same person", r["id"]))
 
 
 def lines(r: dict[str, Any]) -> list[dict[str, str]]:

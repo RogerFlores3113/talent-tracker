@@ -63,7 +63,16 @@ def plan_my_day(now: datetime | None = None) -> str:
     )
 
 
-def source_for_job(job: dict | None = None, count: int = 10, missing_job: str | None = None) -> str:
+def _guard_line(guard: bool) -> str:
+    """The Stricter site guards line, only when the recruiter turned the switch on (nothing otherwise)."""
+    if not guard:
+        return ""
+    from .site_guard import instruction_line  # here: keeps this module's imports as they were
+    return "\n\n" + instruction_line()
+
+
+def source_for_job(job: dict | None = None, count: int = 10, missing_job: str | None = None,
+                   guard: bool = False) -> str:
     if job:
         role = job["title"] + (f" at {job['company']}" if job.get("company") else "")
         where = f" in or near {job['location']}" if job.get("location") else ""
@@ -85,16 +94,17 @@ def source_for_job(job: dict | None = None, count: int = 10, missing_job: str | 
         f"I keep or pass each one in Talent Search.\n"
         f"Ask me before saving anyone new yourself; if I ask you to save someone, use save_candidate (or "
         f"save_candidates for several) with a 2 to 4 sentence `about`, skills as tags and work history. {GUARD}"
+        + _guard_line(guard)
     )
 
 
-def save_from_linkedin(url: str = "") -> str:
+def save_from_linkedin(url: str = "", guard: bool = False) -> str:
     return (
         f"Save this person to Talent Search: {url or '[paste LinkedIn URL]'}\n\n"
         "Open or read the profile, then call save_candidate with name, linkedin_url, current title, company, "
         "location, a 2 to 4 sentence `about`, skills as tags, and work history (title, company, start, end). "
         "Set source to \"LinkedIn\". Search first (search_candidates with the LinkedIn URL) so you don't create "
-        "a duplicate. If you can't open the link, ask me to paste the profile text. " + GUARD
+        "a duplicate. If you can't open the link, ask me to paste the profile text. " + GUARD + _guard_line(guard)
     )
 
 
@@ -109,7 +119,7 @@ def linkedin_profile(url: str | None) -> str | None:
     return url.strip() if ok and url else None
 
 
-def refresh_candidate(c: dict) -> str:
+def refresh_candidate(c: dict, guard: bool = False) -> str:
     """The candidate page's "Refresh with Claude": update someone already saved, never save them again.
 
     Built from the candidate id and LinkedIn URL only. The recruiter pastes it as their own message, so the
@@ -125,7 +135,7 @@ def refresh_candidate(c: dict) -> str:
         f"Call update_candidate on candidate {c.get('id')} with only what changed: current title, company, "
         "location, a fresh 2 to 4 sentence `about`, skills as tags (the full list, since it replaces the saved "
         "one), and work history. Don't use save_candidate, because it never changes the saved `about`. "
-        "If you can't open the profile, ask me to paste it. Tell me what you changed. " + GUARD
+        "If you can't open the profile, ask me to paste it. Tell me what you changed. " + GUARD + _guard_line(guard)
     )
 
 
@@ -156,15 +166,20 @@ def log_calendar_interviews(days: int = 7, now: datetime | None = None) -> str:
     )
 
 
-def refresh_stale(limit: int = 5) -> str:
+def refresh_stale(limit: int = 5, guard: bool = False) -> str:
     return (
         f"Call list_action_items and pick up to {limit} \"stale profile\" candidates. For each, look up their "
         "current role, then call update_candidate with what changed (title, company, location, about, work "
-        "history). Tell me what you changed for each person. " + GUARD
+        "history). Tell me what you changed for each person. " + GUARD + _guard_line(guard)
     )
 
 
-def render(key: str, **kw) -> str:
+GUARDED_RECIPES = ("source_for_job", "save_from_linkedin", "refresh_stale")  # the ones that send the AI to the web
+
+
+def render(key: str, guard: bool = False, **kw) -> str:
+    if key in GUARDED_RECIPES:
+        kw["guard"] = guard
     fn = {
         "plan_my_day": plan_my_day, "source_for_job": source_for_job, "save_from_linkedin": save_from_linkedin,
         "save_from_text": save_from_text, "log_recent_emails": log_recent_emails,

@@ -44,6 +44,14 @@
     <label class="check"><input type="radio" name="pipeline_view" value="{{ v }}" {{ 'checked' if s.pipeline_view == v }}> <span>{{ label }}</span></label>
     {% endfor %}
   </section>
+  <section class="panel" id="site-guards">
+    <h2>Stricter site guards</h2>
+    {% include "_site_note.html" %}
+    <label class="check"><input type="checkbox" name="strict_site_guards" value="1" {{ 'checked' if s.strict_site_guards == '1' }}>
+      <span><strong>Stricter site guards</strong> <span class="fine">Off by default.</span></span></label>
+    <p class="fine">Sites on the list: {{ guarded_sites | join(', ') }}.</p>
+    <p class="fine">When this is on, your AI app is told not to browse, crawl or bulk-collect from those sites, and it can save or propose only {{ guard_cap }} new people an hour whose source or profile link is on one of them. It guides and limits your AI app through Talent Search. It can't control what your AI app does elsewhere. Adding people yourself (paste, CSV import, the form) is never limited.</p>
+  </section>
   <div><button class="btn primary" type="submit">Save settings</button></div>
 </form>
 
@@ -51,7 +59,7 @@
   <h2>Your data</h2>
   <p>Everything is in one file on this computer:</p>
   <pre class="code">{{ db_file }}</pre>
-  <p class="actions-inline"><a class="btn" href="/backup">Download a backup</a> <a class="btn" href="/export.csv">Export candidates as CSV</a> <a class="btn" href="/import">Import a CSV</a></p>
+  <p class="actions-inline"><a class="btn" href="/backup">Download a backup</a> <a class="btn" href="/export.csv">Export candidates as CSV</a> <a class="btn" href="/import">Import a CSV</a> <a class="btn" href="/candidates/duplicates">Find duplicates</a></p>
   <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
 </section>
 
@@ -152,6 +160,14 @@
   {% include "_typesense_note.html" %}
 </section>
 {% endif %}
+
+<section class="panel" id="tour">
+  <h2>Take the tour</h2>
+  <p>A short walk through the pages, with the buttons to connect your AI app. It only looks: it never adds or removes anything.</p>
+  <form method="post" action="/tour/start" class="actions-inline"><input type="hidden" name="mode" value="short"><button class="btn" type="submit">Take the tour</button></form>
+  <p class="fine">Want the first-run version, with made-up demo people to click on? It adds them only if you say so, and clears them when it ends. People you worked with are kept unless you tick the box to delete them.</p>
+  <form method="post" action="/tour/start"><input type="hidden" name="mode" value="full"><button class="btn" type="submit">Take the full tour</button></form>
+</section>
 
 {% if sample_people or sample_jobs %}
 <section class="panel">
