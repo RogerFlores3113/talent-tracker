@@ -319,7 +319,8 @@ def _session(t: dict[str, Any], now_iso: str) -> dict[str, Any]:
                                  else interview_result(_iv_data(t)) or "scheduled")
     return {"interview_id": t["id"], "at": t["at"], "name": interview_name(t) or "Interview",
             "interviewer": interviewer_of(t) or None, "status": status, "result": result_label(_iv_data(t)),
-            "started": t["at"] <= now_iso,
+            "started": t["at"] <= now_iso, "all_day": bool(_iv_data(t).get("all_day")),
+            "time_text": "All day" if _iv_data(t).get("all_day") else local_time(t["at"], "%-I:%M %p"),
             "href": f"/candidates/{t['candidate_id']}?iv={t['id']}#iv-{t['id']}"}
 
 

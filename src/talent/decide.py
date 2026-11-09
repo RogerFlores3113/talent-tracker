@@ -1,7 +1,9 @@
 """Deciding between finalists: the Decide view, the compare_finalists tool, and a decision made as one change.
 
-A job's finalists are the people still in play who have interviewed for it, or who sit in a late stage (an
-interview, onsite or offer stage). For each one: every interview with who ran it, how it went and what each
+A job's finalists are the people still in play who either sit in a late stage (an interview, onsite, hiring
+manager or offer stage: the first such stage in the job's own order, and everything after it) or have already had
+an interview for the job that took place. An interview that is only booked doesn't count: booking a loop for
+someone in an early stage (Sourced, Contacted) doesn't make them a finalist, or offer them an offer. For each one: every interview with who ran it, how it went and what each
 interviewer said, days in process, where they came from and open to-dos. Recording a decision moves one person
 to the offer stage and the others out (cancelling their interviews still ahead), and is listed on Changes as
 one row with its own Undo. Nothing is deleted.
@@ -52,7 +54,8 @@ def _interviews(store: Store, candidate_id: int, job_id: int) -> list[dict[str, 
         row = {**r, "data": d}
         out.append({"_data": d, "verdicts": interviews.verdict_rows(row), "owed": [] if ahead else interviews.owed_by(row),
                     "needs_outcome": status == "scheduled" and not ahead,
-                    "names": [interviews.display_name(n) for n in interviews.named(row)],"interview_id": r["id"], "at": r["at"], "at_local": actions.local_time(r["at"], actions.IV_TIME),
+                    "names": [interviews.display_name(n) for n in interviews.named(row)],"interview_id": r["id"], "at": r["at"], "at_local": (actions.local_time(r["at"], "%a %b %-d") + ", all day") if d.get("all_day")
+                    else actions.local_time(r["at"], actions.IV_TIME),
                     "name": actions.interview_name(r) or "Interview", "summary": r.get("body"),
                     "interviewer": d.get("interviewer"), "status": status, "upcoming": ahead,
                     "outcome": interview_label(d) or ("Coming up" if ahead else "Not recorded yet"),
@@ -85,10 +88,10 @@ def finalists(store: Store, job_id: int, ids: list[int] | None = None, now: date
     play = actions.in_play(store, job_id)
     late = [s["position"] for s in stages if s["outcome"] == "open" and actions.late_like(s["name"])]
     first_late = min(late) if late else None
-    interviewed = {r["candidate_id"] for r in store._rows(
-        """SELECT DISTINCT candidate_id FROM timeline WHERE kind = 'interview' AND job_id = ?
-             AND coalesce(json_extract(data, '$.status'), 'scheduled') <> 'cancelled'""", (job_id,))}
-    pool = [a for a in play if a["candidate_id"] in interviewed
+    held = {r["candidate_id"] for r in store._rows(  # sessions that already took place (a booked one doesn't count)
+        """SELECT DISTINCT candidate_id FROM timeline WHERE kind = 'interview' AND job_id = ? AND at <= ?
+             AND coalesce(json_extract(data, '$.status'), 'scheduled') <> 'cancelled'""", (job_id, _now()))}
+    pool = [a for a in play if a["candidate_id"] in held
             or (first_late is not None and pos.get(a["stage"].lower(), 0) >= first_late)]
     pool.sort(key=lambda a: (-pos.get(a["stage"].lower(), 0), a["stage_changed_at"] or ""))
     if ids:

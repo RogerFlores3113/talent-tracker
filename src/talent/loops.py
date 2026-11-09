@@ -14,7 +14,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from . import actions, interviews
-from .store import NotFound, Store, as_local, now_iso, shown_zone, to_dt
+from .store import NotFound, Store, _zone_or_error, as_local, now_iso, shown_zone, to_dt, zone_named
 
 TEMPLATE_PREFIX = "loop_template:"  # settings key per job
 MAX_SESSIONS = 8
@@ -202,10 +202,45 @@ def _at(day: date, minute: int) -> datetime:
     return (naive.replace(tzinfo=zone) if zone is not None else naive.astimezone()).astimezone(timezone.utc)
 
 
+# ------------------------------------------------------------ US public holidays (built in, no network)
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7, weeks=n - 1)
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    last = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _observed(d: date) -> date:
+    """A holiday on a Saturday is taken on the Friday before, one on a Sunday on the Monday after."""
+    return d - timedelta(days=1) if d.weekday() == 5 else d + timedelta(days=1) if d.weekday() == 6 else d
+
+
+def us_holidays(year: int) -> dict[date, str]:
+    """The major US public holidays of a year (the days offices close), by the day they are taken. Plain rules,
+    no network: New Year's Day, Martin Luther King Jr. Day, Presidents' Day, Memorial Day, Juneteenth,
+    Independence Day, Labor Day, Thanksgiving and the day after, Christmas Day."""
+    thanks = _nth_weekday(year, 11, 3, 4)
+    out = {_observed(date(year, 1, 1)): "New Year's Day", _nth_weekday(year, 1, 0, 3): "Martin Luther King Jr. Day",
+           _nth_weekday(year, 2, 0, 3): "Presidents' Day", _last_weekday(year, 5, 0): "Memorial Day",
+           _observed(date(year, 6, 19)): "Juneteenth", _observed(date(year, 7, 4)): "Independence Day",
+           _nth_weekday(year, 9, 0, 1): "Labor Day", thanks: "Thanksgiving",
+           thanks + timedelta(days=1): "the day after Thanksgiving", _observed(date(year, 12, 25)): "Christmas Day"}
+    return {d: n for d, n in out.items() if d.year == year}
+
+
+def us_holiday(day: date) -> str | None:
+    """The name of the US public holiday `day` is, or None."""
+    return us_holidays(day.year).get(day)
+
+
 def _working_days(first: date, n: int) -> list[date]:
+    """The next n weekdays from `first`, skipping US public holidays."""
     out, d = [], first
     while len(out) < n:
-        if d.weekday() < 5:
+        if d.weekday() < 5 and not us_holiday(d):
             out.append(d)
         d += timedelta(days=1)
     return out
@@ -216,6 +251,7 @@ def _when(dt: datetime) -> str:
 
 
 def _first_day(start: str | None, now: datetime) -> date:
+    """The day to start looking: the one asked for (or tomorrow), moved past a weekend or a US holiday."""
     if start and start.strip():
         try:
             d = date.fromisoformat(start.strip()[:10])
@@ -223,14 +259,44 @@ def _first_day(start: str | None, now: datetime) -> date:
             raise ValueError("start is a day like 2026-11-09.") from None
     else:
         d = as_local(now).date() + timedelta(days=1)
-    while d.weekday() >= 5:
+    while d.weekday() >= 5 or us_holiday(d):
         d += timedelta(days=1)
     return d
 
 
+def _skipped_holidays(asked: date, last: date) -> list[str]:
+    """'Thanksgiving (Thu Nov 26)' for each weekday US holiday from `asked` to `last`, which the plan skips."""
+    out, d = [], asked
+    while d <= last:
+        name = us_holiday(d)
+        if name and d.weekday() < 5:
+            out.append(f"{name} ({actions.day_text(d)})")
+        d += timedelta(days=1)
+    return out
+
+
+def _clock(dt: datetime) -> str:
+    return actions.day_text(dt, "%-I:%M %p")
+
+
+def _odd_hours(name: str, zone: str | None, s: datetime, e: datetime) -> str | None:
+    """'Dana Lee would be at 5:00 AM GMT (early) in their time zone.' when a session starts before 7 AM or runs
+    past 8 PM where that person is. None when it's a sensible hour (or no zone is known)."""
+    z = zone_named(zone) if zone else None
+    if z is None:
+        return None
+    a, b = s.astimezone(z), e.astimezone(z)
+    if a.hour < 7 or a.date() != b.date() or b.hour > 20 or (b.hour == 20 and b.minute):
+        word = "early" if a.hour < 12 else "late"
+        return (f"{name} would be at {_clock(a)} {interviews.zone_label(a)} ({word}) in their time zone. "
+                "Pick another time or check it works for them.")
+    return None
+
+
 # ------------------------------------------------------------ the plan
 def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
-         unavailable: list[str] | None = None, now: datetime | None = None) -> dict[str, Any]:
+         unavailable: list[str] | None = None, now: datetime | None = None,
+         candidate_tz: str | None = None) -> dict[str, Any]:
     """{job, candidate, hours, sessions, warnings, invites, candidate_invite}. Each session: {name, minutes, at,
     at_local, end_local, interviewer, others, warnings, placed, already}. Sessions go in template order, each
     after the one before (with a short break), on the earliest half hour when the candidate and a free eligible
@@ -238,19 +304,26 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     now = now or datetime.now(timezone.utc)
     job = store.get_job(job_id)
     cand = store.get_candidate(candidate_id)
+    cz = _zone_or_error(candidate_tz) or store.candidate_zone(candidate_id)  # the candidate's own clock, if known
+    book = store.interviewer_book()
     tpl = get_template(store, job_id)
     if not tpl:
         raise ValueError("This job has no loop template yet. Add one on the job's Loop page (one session per line, "
                          "like: System design | 60 | Priya Nair, Sam Okoye), or with set_loop_template.")
     h0, h1 = tpl["hours"]
     out_of = [u.strip() for u in (unavailable or []) if u and u.strip()][:10]
-    days = _working_days(_first_day(start, now), HORIZON_DAYS)
+    first = _first_day(start, now)
+    days = _working_days(first, HORIZON_DAYS)
+    asked = date.fromisoformat(start.strip()[:10]) if start and start.strip() else first
     cal = _Cal.load(store, _at(days[0], 0), _at(days[-1] + timedelta(days=1), 0))
     have = [t for t in actions.upcoming_for(store, candidate_id, job_id, now)]
     cursor = _at(days[0], h0 * 60)
     if as_local(now).date() == days[0]:
         cursor = max(cursor, now + timedelta(hours=2))
     warnings: list[str] = []
+    skipped = _skipped_holidays(asked, days[-1])
+    if skipped:
+        warnings.append("Skipped " + ", ".join(skipped) + ", a US public holiday. Nothing is planned on it.")
     sessions = []
     for spec in tpl["sessions"]:
         mins = int(spec["minutes"])
@@ -299,8 +372,17 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
             continue
         s, e, who, others = found
         day = as_local(s).date()
-        row.update({"at": s.replace(microsecond=0).isoformat(), "at_local": _when(s), "end_local": _when(e),
-                    "interviewer": who, "others": others, "placed": True})
+        iso = s.replace(microsecond=0).isoformat()
+        email = interviews.email_for(who, book) if who else None
+        iz = interviews.interviewer_zone({}, who, book) if who else None
+        row.update({"at": iso, "at_local": _when(s), "end_local": _when(e),
+                    "interviewer": who, "others": others, "placed": True, "interviewer_email": email,
+                    "interviewer_tz": iz, "candidate_tz": cz,
+                    "at_for_interviewer": interviews.when_for(iso, iz), "at_for_candidate": interviews.when_for(iso, cz)})
+        for who_name, zone in ((cand["name"], cz), (who, iz)):
+            odd = _odd_hours(who_name, zone, s, e) if who_name else None
+            if odd:
+                row["warnings"].append(odd)
         if who:
             top = spec["interviewers"][0]
             if top != who:
@@ -324,7 +406,7 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     if unplaced:
         warnings.append("Not placed: " + ", ".join(unplaced) + ".")
     result = {"job": job, "candidate": cand, "hours": [h0, h1], "sessions": sessions, "warnings": warnings,
-              "unavailable": out_of}
+              "unavailable": out_of, "candidate_tz": cz}
     result["invites"] = invites(result)
     result["candidate_invite"] = candidate_invite(result)
     return result
@@ -343,12 +425,15 @@ def invites(p: dict[str, Any]) -> list[dict[str, Any]]:
         if not s["placed"] or not s["interviewer"]:
             continue
         first = interviews.display_name(s["interviewer"]).split(" ")[0] or "there"
-        subject = f"Interview: {cand}, {s['name']} ({s['at_local']})"
+        when = s.get("at_for_interviewer") or s["at_local"]  # on their own clock first, mine in brackets
+        subject = f"Interview: {cand}, {s['name']}, {when}"
         body = (f"Hi {first},\n\nCould you run the {s['name']} interview ({s['minutes']} minutes) with {cand} for "
-                f"{job} on {s['at_local']}? I'll send the details and a feedback request after.\n\n"
+                f"{job} on {when}? I'll send the details and a feedback request after.\n\n"
                 "If that time doesn't work for you, tell me and I'll find someone else.\n\nThanks!")
+        email = s.get("interviewer_email")
+        who = f"{interviews.display_name(s['interviewer'])} <{email}>" if email else s["interviewer"]
         out.append({"session": s["name"], "interviewer": s["interviewer"], "subject": subject, "body": body,
-                    "mailto": interviews.mailto(s["interviewer"], subject, body)})
+                    "email": email, "mailto": interviews.mailto(who, subject, body)})
     return out
 
 
@@ -358,7 +443,7 @@ def candidate_invite(p: dict[str, Any]) -> dict[str, Any] | None:
         return None
     cand, job = p["candidate"], _job_name(p["job"])
     first = cand["name"].split(" ")[0]
-    lines = "\n".join(f"- {s['at_local']} ({s['minutes']} min): {s['name']}"
+    lines = "\n".join(f"- {s.get('at_for_candidate') or s['at_local']} ({s['minutes']} min): {s['name']}"
                       + (f" with {interviews.display_name(s['interviewer'])}" if s["interviewer"] else "")
                       for s in placed)
     subject = f"Your interview schedule for {job}"
@@ -417,17 +502,20 @@ def slots_from(p: dict[str, Any]) -> list[dict[str, Any]]:
             for s in p["sessions"] if s["placed"]]
 
 
-def book(store: Store, candidate_id: int, job_id: int, slots: list[dict[str, Any]], by: str = "app") -> list[int]:
-    """Log each slot as an interview (what log_activity does). by app logs them as the recruiter's own."""
+def book(store: Store, candidate_id: int, job_id: int, slots: list[dict[str, Any]], by: str = "app",
+         candidate_tz: str | None = None) -> list[int]:
+    """Log each slot as an interview (what log_activity does). by app logs them as the recruiter's own. The
+    candidate's time zone, when given, is kept on each session and for the candidate."""
     ids = []
     for sl in slots:
         entry = store.log(candidate_id, "interview", session_summary(sl["session"], int(sl["minutes"])), at=sl["at"],
-                          job_id=job_id, source="AI app" if by == "ai" else "App", interviewer=sl.get("interviewer"))
+                          job_id=job_id, source="AI app" if by == "ai" else "App", interviewer=sl.get("interviewer"),
+                          candidate_tz=candidate_tz)
         if by == "ai":
             store.mark_ai_note(entry)
         ids.append(entry["id"])
     return ids
 
 
-__all__ = ["NotFound", "book", "candidate_invite", "check_slot", "get_template", "invites", "parse_template", "plan",
+__all__ = ["us_holiday", "us_holidays", "NotFound", "book", "candidate_invite", "check_slot", "get_template", "invites", "parse_template", "plan",
            "plan_text", "save_template", "session_summary", "slots_from", "template_text"]

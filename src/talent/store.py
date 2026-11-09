@@ -713,6 +713,21 @@ _MIGRATIONS: tuple[Any, ...] = (
     ALTER TABLE saved_searches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE saved_searches ADD COLUMN seen_max_id INTEGER;
     """,
+    # v10i: time zones per person for interviews, and a small interviewer address book. person_zones is the zone a
+    # candidate is in (their own, when it isn't the recruiter's); interviewers keeps an interviewer's email and zone
+    # by their folded name, so invite emails open with the right address and show the time on their clock.
+    """
+    CREATE TABLE IF NOT EXISTS person_zones (
+        candidate_id INTEGER PRIMARY KEY REFERENCES candidates(id) ON DELETE CASCADE,
+        time_zone    TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS interviewers (
+        key       TEXT PRIMARY KEY,
+        name      TEXT NOT NULL,
+        email     TEXT,
+        time_zone TEXT
+    );
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -1010,10 +1025,125 @@ def _split_zone(s: str) -> tuple[str, tzinfo | None]:
     if word.lower() in ("am", "pm", "a", "p"):
         return s, None
     zone = zone_named(word)
+    if zone is None and word.lower() in _ZONE_GUESS:
+        raise ValueError(f"I don't know the time zone {word!r} ({word.upper()} can mean more than one place). Use a "
+                         f"name like {_ZONE_GUESS[word.lower()]}, or PT, ET, CT or MT.")
     if zone is None and "/" in word:
         raise ValueError(f"Couldn't read the time zone {word!r}. Use a name like America/Los_Angeles, a short one "
                          "like PT or ET, or an offset like 2026-11-09T13:00:00-08:00.")
     return (m.group("rest"), zone) if zone is not None else (s, None)
+
+
+_HAS_TIME = re.compile(r":|\b\d{1,2}\s*[ap]\.?m\b|\bnoon\b|\bmidnight\b|\bnow\b", re.I)
+_ZONE_GUESS = {"ist": "Asia/Kolkata", "cet": "Europe/Paris", "cest": "Europe/Paris", "bst": "Europe/London",
+               "eet": "Europe/Athens", "eest": "Europe/Athens", "jst": "Asia/Tokyo", "aest": "Australia/Sydney",
+               "aedt": "Australia/Sydney", "sgt": "Asia/Singapore", "hkt": "Asia/Hong_Kong", "kst": "Asia/Seoul",
+               "msk": "Europe/Moscow", "nzst": "Pacific/Auckland", "nzdt": "Pacific/Auckland"}
+
+
+def zone_key(name: str | None) -> str | None:
+    """The saved name of a time zone a person typed ('PT', 'est', 'Europe/London') or None when it isn't one:
+    an IANA name like America/Los_Angeles, or UTC."""
+    word = (name or "").strip()
+    if not word:
+        return None
+    key = _ZONE_WORDS.get(word.lower(), word)
+    zone = zone_named(key)
+    if zone is None:
+        return None
+    if zone is timezone.utc:
+        return "UTC"
+    return getattr(zone, "key", None) or getattr(zone, "_name", None) or key
+
+
+def _clock12(dt: datetime) -> str:
+    return f"{dt.hour % 12 or 12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _place(zone: tzinfo | None) -> str:
+    key = getattr(zone, "key", None) or getattr(zone, "_name", None)
+    if key == "UTC":
+        return "UTC"
+    return key.split("/")[-1].replace("_", " ") if key else "your time zone"
+
+
+@dataclass
+class When:
+    """A time as typed, read: `iso` in UTC, `notes` the things worth telling the person (an ambiguous time that
+    defaulted to the first), `date_only` when no time of day was given, `day` the calendar day as typed."""
+    iso: str
+    notes: list[str] = field(default_factory=list)
+    date_only: bool = False
+    day: Any = None
+
+
+def _localize(naive: datetime, zone: tzinfo | None) -> tuple[datetime, list[str]]:
+    """A clock time on a zone's wall: a time that doesn't exist (clocks spring forward) is refused with a message
+    that offers the nearest real ones; one that happens twice (clocks fall back) is read as the first, with a
+    note saying so."""
+    naive = naive.replace(tzinfo=None, fold=0)
+
+    def mk(n: datetime, fold: int) -> datetime:
+        n = n.replace(fold=fold)
+        return n.replace(tzinfo=zone) if zone is not None else n.astimezone()
+
+    def real(n: datetime) -> bool:
+        at = mk(n, 0).astimezone(timezone.utc)
+        back = at.astimezone(zone) if zone is not None else at.astimezone()
+        return back.replace(tzinfo=None) == n
+
+    first, second = mk(naive, 0), mk(naive, 1)
+    off_a, off_b = first.utcoffset(), second.utcoffset()
+    if off_a == off_b:
+        return first, []
+    day = f"{naive.strftime('%b')} {naive.day}"
+    if not real(naive):
+        gap = off_b - off_a
+        start = naive.replace(minute=naive.minute // 15 * 15, second=0)
+        for _ in range(200):
+            if real(start - timedelta(minutes=15)):
+                break
+            start -= timedelta(minutes=15)
+        end = start + gap
+        a, b = _clock12(start), _clock12(end)
+        jump = f"{a[:-3]} to {b[:-3]}" if a[-2:] == b[-2:] else f"{a} to {b}"
+        raise ValueError(f"{_clock12(naive)} doesn't exist on {day} in {_place(zone)}; clocks jump from {jump}. "
+                         f"Pick {_clock12(naive + gap)} or {_clock12(naive - gap)}?")
+    off = second.isoformat(timespec="minutes")
+    return first, [f"{_clock12(naive)} happens twice on {day} in {_place(zone)} because the clocks go back. I used "
+                   f"the first one ({first.tzname()}). For the second one ({second.tzname()}), write the time with "
+                   f"its offset, like {off}."]
+
+
+def resolve_when(value: str | datetime | None, *, default_now: bool = True) -> When | None:
+    """parse_when, with what it learned: the UTC time, notes (a fall-back time that happens twice defaulted to the
+    first), and whether the person gave only a day. A time in a spring-forward gap raises ValueError."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return When(now_iso()) if default_now else None
+    zone: tzinfo | None = None
+    date_only = False
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = re.sub(r"\s+", " ", value.strip())
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            date_only = not _HAS_TIME.search(s) and not re.search(r"\dT\d", s)
+        except ValueError:
+            s, zone = _split_zone(s)
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except ValueError:
+                loose = _parse_loose(s, zone)
+                if loose is None:
+                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
+                dt = loose
+            date_only = not _HAS_TIME.search(s)
+    notes: list[str] = []
+    day = dt.date()
+    if dt.tzinfo is None:
+        dt, notes = _localize(dt, zone if zone is not None else _SHOWN_ZONE[0])
+    return When(dt.astimezone(timezone.utc).replace(microsecond=0).isoformat(), notes, date_only, day)
 
 
 def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str | None:
@@ -1024,29 +1154,11 @@ def parse_when(value: str | datetime | None, *, default_now: bool = True) -> str
     A time can end with a zone: an IANA name ('America/Los_Angeles') or PT, ET, CT, MT (PST, EST... too),
     or UTC. A time with no zone is taken as this computer's local time, which is what a recruiter means
     when they type one. Slash dates read month first (US), unless the first number can't be a month.
+    A time that doesn't exist where it was typed (clocks spring forward) raises ValueError saying so; a time
+    that happens twice (clocks fall back) is read as the first one (resolve_when says so in its notes).
     """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return now_iso() if default_now else None
-    zone: tzinfo | None = None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        s = re.sub(r"\s+", " ", value.strip())
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except ValueError:
-            s, zone = _split_zone(s)
-            try:
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            except ValueError:
-                loose = _parse_loose(s, zone)
-                if loose is None:
-                    raise ValueError(f"Couldn't read the date {value!r}. {DATE_HELP}") from None
-                dt = loose
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=zone) if zone is not None else (  # else local time
-            dt.replace(tzinfo=_SHOWN_ZONE[0]) if _SHOWN_ZONE[0] is not None else dt.astimezone())
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    w = resolve_when(value, default_now=default_now)
+    return w.iso if w else None
 
 
 def to_dt(iso: str | None) -> datetime | None:
@@ -1054,6 +1166,25 @@ def to_dt(iso: str | None) -> datetime | None:
         return None
     dt = datetime.fromisoformat(iso)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _zone_or_error(name: str | None) -> str | None:
+    """A zone name a person typed or picked as its saved form; blank is None; one that isn't a zone is an error."""
+    if not name or not str(name).strip():
+        return None
+    key = zone_key(str(name))
+    if key is None:
+        raise ValueError(f"I don't know the time zone {str(name).strip()!r}. Use a name like America/New_York or "
+                         "Europe/London, or PT, ET, CT or MT.")
+    return key
+
+
+def _noon_utc(day: Any) -> str:
+    """Midday on `day` on the recruiter's clock, in UTC: where an all-day entry sits, so it stays on its day."""
+    naive = datetime(day.year, day.month, day.day, 12)
+    zone = _SHOWN_ZONE[0]
+    at = naive.replace(tzinfo=zone) if zone is not None else naive.astimezone()
+    return at.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 class AIForbidden(PermissionError):
@@ -3536,11 +3667,17 @@ class Store:
     # -------------------------------------------------------------- timeline
     def log(self, candidate_id: int, kind: str, body: str | None = None, *, at: str | datetime | None = None,
             job_id: int | None = None, source: str | None = None,
-            interviewer: str | None = None) -> dict[str, Any]:
+            interviewer: str | None = None, candidate_tz: str | None = None,
+            interviewer_tz: str | None = None) -> dict[str, Any]:
         """Add a note, call, email, message, meeting or interview to the candidate's timeline.
 
         Logging the same thing twice (same kind, time and text) is a no-op, so
-        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`).
+        an AI re-reading an inbox doesn't double up. An interview can name who runs it (`interviewer`), the
+        candidate's own time zone (`candidate_tz`, also remembered for the candidate) and the interviewers' zone
+        (`interviewer_tz`, remembered for each named interviewer), so invites show each person their own clock.
+        An interview given only a day (no time) is an all-day entry: it keeps its day and says "all day" rather
+        than turning into midnight. The returned entry's `when_notes` lists anything worth telling the person
+        (a time that happens twice when clocks go back was read as the first).
         """
         kind = " ".join((kind or "").lower().replace("_", " ").replace("-", " ").split())
         kind = KIND_ALIASES.get(kind, kind)
@@ -3556,10 +3693,23 @@ class Store:
         self.get_candidate(candidate_id)
         if job_id is not None:
             self.get_job(job_id)
-        when = parse_when(at)
+        w = resolve_when(at)
+        when, notes = w.iso, list(w.notes)
+        extra: dict[str, Any] = {}
         who = _clean(interviewer) if kind == "interview" else None
         if who and len(who) > 200:
             raise ValueError("The interviewer can be up to 200 characters. Name the people, not the whole invite.")
+        if kind == "interview":
+            if at is not None and str(at).strip() and w.date_only and w.day is not None:
+                when = _noon_utc(w.day)  # a day with no time: all day, kept on that day in the recruiter's zone
+                extra.update(all_day=True, all_day_date=w.day.isoformat())
+            ctz = _zone_or_error(candidate_tz)
+            itz = _zone_or_error(interviewer_tz)
+            if ctz:
+                extra["candidate_tz"] = ctz
+            if itz and who:
+                from . import interviews  # here: interviews imports this module
+                extra["interviewer_tz"] = {interviews.display_name(n): itz for n in interviews.interviewers(who)}
         with self._lock, self._conn:
             dupe = self._conn.execute(
                 "SELECT id FROM timeline WHERE candidate_id = ? AND kind = ? AND at = ? AND coalesce(body, '') = ?",
@@ -3582,13 +3732,73 @@ class Store:
                         " AND (last_contacted_at IS NULL OR last_contacted_at < ?)",
                         (when, candidate_id, when),
                     )
-            if who:  # who runs the interview lives in its data, like its status (a re-log fills it in)
+            if who or extra:  # who runs the interview lives in its data, like its status (a re-log fills it in)
                 raw = self._conn.execute("SELECT data FROM timeline WHERE id = ?", (entry_id,)).fetchone()["data"]
                 old = json.loads(raw) if raw else {}
-                if not old.get("interviewer"):
+                fill = {k: v for k, v in extra.items() if k not in old}
+                if who and not old.get("interviewer"):
+                    fill["interviewer"] = who
+                if fill:
                     self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?",
-                                       (json.dumps({**old, "interviewer": who}), entry_id))
-        return self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
+                                       (json.dumps({**old, **fill}), entry_id))
+            if kind == "interview" and extra.get("candidate_tz"):
+                self._conn.execute("INSERT INTO person_zones(candidate_id, time_zone) VALUES (?, ?) ON CONFLICT"
+                                   "(candidate_id) DO UPDATE SET time_zone = excluded.time_zone",
+                                   (candidate_id, extra["candidate_tz"]))
+        if who:
+            self._remember_interviewers(who, interviewer_tz)
+        out = self._row("SELECT * FROM timeline WHERE id = ?", (entry_id,))
+        out["when_notes"] = notes
+        return out
+
+    # ------------------------------------------------ time zones and the interviewer address book
+    def candidate_zone(self, candidate_id: int) -> str | None:
+        """The candidate's own time zone name (America/New_York), when one was saved."""
+        row = self._row("SELECT time_zone FROM person_zones WHERE candidate_id = ?", (candidate_id,))
+        return row["time_zone"] if row else None
+
+    def set_candidate_zone(self, candidate_id: int, zone: str | None) -> str | None:
+        """Save (or with an empty value, clear) a candidate's own time zone. Returns the saved name."""
+        self.get_candidate(candidate_id)
+        key = _zone_or_error(zone)
+        with self._lock, self._conn:
+            if key:
+                self._conn.execute("INSERT INTO person_zones(candidate_id, time_zone) VALUES (?, ?) ON CONFLICT"
+                                   "(candidate_id) DO UPDATE SET time_zone = excluded.time_zone", (candidate_id, key))
+            else:
+                self._conn.execute("DELETE FROM person_zones WHERE candidate_id = ?", (candidate_id,))
+        return key
+
+    def interviewer_book(self) -> dict[str, dict[str, Any]]:
+        """{folded name: {key, name, email, time_zone}} for the interviewers saved so far."""
+        return {r["key"]: r for r in self._rows("SELECT key, name, email, time_zone FROM interviewers")}
+
+    def save_interviewer(self, name: str, email: str | None = None, time_zone: str | None = None) -> dict[str, Any]:
+        """Remember an interviewer's email and time zone by name. A value left as None stays as it was; an
+        empty one clears it."""
+        name = " ".join((name or "").split())
+        if not name or len(name) > 200:
+            raise ValueError("Give the interviewer's name (up to 200 characters).")
+        if email is not None and email.strip() and not re.fullmatch(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", email.strip()):
+            raise ValueError(f"{email.strip()!r} doesn't look like an email address.")
+        key = fold_text(name)
+        zone = _zone_or_error(time_zone) if time_zone is not None else None
+        with self._lock, self._conn:
+            old = self._conn.execute("SELECT email, time_zone FROM interviewers WHERE key = ?", (key,)).fetchone()
+            em = (email.strip() or None) if email is not None else (old["email"] if old else None)
+            tz = (zone if time_zone is not None else (old["time_zone"] if old else None))
+            self._conn.execute("INSERT INTO interviewers(key, name, email, time_zone) VALUES (?, ?, ?, ?) ON CONFLICT"
+                               "(key) DO UPDATE SET name = excluded.name, email = excluded.email, "
+                               "time_zone = excluded.time_zone", (key, name, em, tz))
+        return {"key": key, "name": name, "email": em, "time_zone": tz}
+
+    def _remember_interviewers(self, who: str, zone: str | None) -> None:
+        """Interviewers typed as 'Dana Lee <dana@x.com>' keep that email, and a zone given with them is kept too."""
+        from . import interviews  # here: interviews imports this module
+        for n in interviews.interviewers(who):
+            email = interviews.email_of(n)
+            if email or zone:
+                self.save_interviewer(interviews.display_name(n), email, _zone_or_error(zone) if zone else None)
 
     def timeline(self, candidate_id: int, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._rows(
@@ -3648,8 +3858,16 @@ class Store:
         data = dict(iv["data"])
         ts = now_iso()
         new_at = iv["at"]
+        notes: list[str] = []
         if at is not None and str(at).strip():
-            new_at = parse_when(at)
+            w = resolve_when(at)
+            new_at, notes = w.iso, list(w.notes)
+            if w.date_only and w.day is not None:  # a day with no time: all day, as when it is logged
+                new_at = _noon_utc(w.day)
+                data["all_day"], data["all_day_date"] = True, w.day.isoformat()
+            else:
+                data.pop("all_day", None)
+                data.pop("all_day_date", None)
             if new_at != iv["at"]:
                 data["rescheduled_from"] = [*data.get("rescheduled_from", []), iv["at"]]
                 data["rescheduled_at"] = ts
@@ -3711,7 +3929,9 @@ class Store:
                 self._conn.execute(
                     "UPDATE candidates SET last_contacted_at = ? WHERE id = ?"
                     " AND (last_contacted_at IS NULL OR last_contacted_at < ?)", (new_at, iv["candidate_id"], new_at))
-        return self.get_interview(entry_id)
+        out = self.get_interview(entry_id)
+        out["when_notes"] = notes
+        return out
 
     def add_interview_feedback(self, entry_id: int, text: str, interviewer: str | None = None, *,
                                candidate_id: int | None = None, by: str = "app") -> dict[str, Any]:

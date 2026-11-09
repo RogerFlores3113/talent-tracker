@@ -96,10 +96,11 @@ def test_the_migration_fills_other_emails_from_the_importers_notes(tmp_path):
     s.close()
     con = sqlite3.connect(path)
     con.execute("DROP TABLE candidate_emails")
-    steps = __import__("talent.store", fromlist=["x"])._MIGRATIONS
-    # rewind to just before the v9a step; the steps after it (v10n adds two saved_searches columns) are undone too
-    version_before = next(i for i, m in enumerate(steps) if isinstance(m, tuple) and m[1].__name__ == "_migrate_v9a_data")
-    for col in ("pinned", "seen_max_id"):
+    migrations = __import__("talent.store", fromlist=["x"])._MIGRATIONS
+    # the migration just before v9a's data step runs again, whatever later cycles appended after it
+    version_before = next(i for i, m in enumerate(migrations) if isinstance(m, tuple)
+                          and getattr(m[1], "__name__", "") == "_migrate_v9a_data")
+    for col in ("pinned", "seen_max_id"):  # v10n, after v9a, is rewound too
         con.execute(f"ALTER TABLE saved_searches DROP COLUMN {col}")
     con.execute(f"PRAGMA user_version = {version_before}")
     con.commit()
