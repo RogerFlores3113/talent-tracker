@@ -26,9 +26,15 @@
   {{ person(keep, 'Keep this one', same_name) }}
   {{ person(other, 'Merge in and delete this one', same_name) }}
 </div>
-<form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="actions-inline">
+<form method="post" action="/candidates/{{ keep.id }}/merge/{{ other.id }}" class="stack">
+  {% if emails | length > 1 %}<fieldset class="panel"><legend>Which email is their main one?</legend>
+    <p class="fine">Every address is kept. The one you pick is shown first and used for email. The rest stay as other emails.</p>
+    {% for e in emails %}<label class="check"><input type="radio" name="primary_email" value="{{ e }}" {{ 'checked' if e == (keep.email or '') | lower or (loop.first and not keep.email) }}> <span>{{ e }}</span></label>
+    {% endfor %}</fieldset>{% endif %}
+  <div class="actions-inline">
   <button class="btn primary" type="submit">Merge into {{ nm(keep, same_name) }}</button>
   <a class="btn" href="/candidates/{{ other.id }}/merge/{{ keep.id }}">Keep {{ nm(other, same_name) }} instead</a>
   <a class="btn" href="/candidates/{{ keep.id }}">Cancel</a>
+  </div>
 </form>
 {% endblock %}
