@@ -97,8 +97,10 @@ fetch("/api/tools").then(r=>r.json()).then(ts=>{for(const t of ts){TOOLS[t.name]
 $("tool").onchange=()=>{const t=TOOLS[$("tool").value];$("desc").textContent=t?(t.description||""):""};
 $("dark").onchange=()=>{document.body.classList.toggle("dark",$("dark").checked);for(const f of FRAMES)f.ctx({theme:$("dark").checked?"dark":"light"})};
 let FRAMES=[];
+function reset(){for(const r of FRAMES)window.removeEventListener("message",r.onmsg);FRAMES=[];$("frames").replaceChildren();$("chat").classList.remove("full")}
 async function call(name,args){const r=await fetch("/api/call",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name,arguments:args})});return r.json()}
 $("run").onclick=async()=>{$("err").textContent="";let args;try{args=JSON.parse($("args").value||"{}")}catch(e){$("err").textContent="Arguments aren't JSON";return}
+ reset();  // each Run replaces the frame: the last tool's view never stays on the page
  const name=$("tool").value,t=TOOLS[name];const res=await call(name,args);
  const text=(res.content||[]).map(c=>c.text||"").join("\n");const b=document.createElement("div");b.className="bubble";b.textContent=name+": "+text.slice(0,600)+(text.length>600?"…":"");$("frames").append(b);
  const uri=t&&t._meta&&t._meta.ui&&t._meta.ui.resourceUri;if(!uri){log("no view for",name);return}
@@ -108,11 +110,11 @@ function mount(html,args,result,toolName){
  let mode="inline";const modes=()=>$("nofull").checked?["inline"]:["inline","fullscreen"];
  const send=m=>f.contentWindow.postMessage(m,"*");
  const ctx=p=>send({jsonrpc:"2.0",method:"ui/notifications/host-context-changed",params:p});
- const rec={f,ctx,toolName};FRAMES.push(rec);
+ const rec={f,ctx,toolName,onmsg:null};FRAMES.push(rec);
  function setMode(m){mode=m;if(m==="fullscreen"){$("chat").classList.add("full");f.style.height="calc(100vh - 80px)"}else{$("chat").classList.remove("full")}
   ctx({displayMode:mode,containerDimensions:m==="fullscreen"?{height:window.innerHeight-80,width:$("chat").clientWidth}:{maxHeight:6000,width:$("chat").clientWidth}})}
  $("close").onclick=()=>{if(mode==="fullscreen")setMode("inline")};
- window.addEventListener("message",async ev=>{if(ev.source!==f.contentWindow)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+ rec.onmsg=async ev=>{if(ev.source!==f.contentWindow)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
   window.HOSTLOG.push(m);if(m.method!=="ui/notifications/size-changed")log("view →",m);
   const ok=r=>send({jsonrpc:"2.0",id:m.id,result:r}),bad=(msg)=>send({jsonrpc:"2.0",id:m.id,error:{code:-32000,message:msg}});
   switch(m.method){
@@ -132,7 +134,8 @@ function mount(html,args,result,toolName){
    case"resources/read":ok({contents:[{uri:m.params.uri,mimeType:MIME,text:await (await fetch("/api/resource?uri="+encodeURIComponent(m.params.uri))).text()}]});break;
    case"ping":ok({});break;
    default:if(m.id!=null)bad("Not supported by this host")}
- });
+ };
+ window.addEventListener("message",rec.onmsg);
 }
 </script></body></html>"""
 

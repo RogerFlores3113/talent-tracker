@@ -192,7 +192,7 @@ def test_suggest_mode_save_search_checks_name_and_cap_before_holding(store, peop
     assert "Pick another name." in str(e.value)
     assert not trust_pending(store)
     res = call(s, "save_search", name="Free", query="go")
-    assert text(res).startswith("Waiting for the recruiter's review")
+    assert text(res).startswith("Waiting for your review")
 
 
 def trust_pending(store):

@@ -79,7 +79,7 @@ def test_reply_offers_move_to_screening_and_moves_nobody(store):
     assert stage_of(store, dev["id"], job["id"]) == "Contacted"
     res = call(server, "log_activity", candidate_id=dev["id"], kind="reply", summary="Keen to chat")
     assert stage_of(store, dev["id"], job["id"]) == "Contacted"  # never moved by itself
-    assert "Ask the recruiter whether to move them to Screening" in text(res) and "{" not in text(res).split("move_stage")[0]
+    assert "Ask the user whether to move them to Screening" in text(res) and "{" not in text(res).split("move_stage")[0]
     assert res.structuredContent["suggested_step"] == {"tool": "move_stage", "candidate_id": dev["id"],
                                                        "job_id": job["id"], "stage": "Screening"}
     item = next(i for i in actions.action_items(store)["items"] if i["kind"] == "replied")

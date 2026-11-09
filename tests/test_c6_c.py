@@ -247,7 +247,7 @@ def test_mcp_feedback_with_a_verdict_is_logged_and_waits_in_cautious_mode(store)
     review.set_cautious(store, True)
     res = call(server, "add_interview_feedback", interview_id=iv, feedback="Not for us", interviewer="Alex Ruiz",
                verdict="no")
-    assert "Waiting for the recruiter's review" in text(res) and "verdict: no" in text(res)
+    assert "Waiting for your review" in text(res) and "verdict: no" in text(res)
     assert store.get_interview(iv)["data"]["verdict"] == "strong_yes"
     review.keep(store, data(res)["pending_review"]["id"])
     assert store.get_interview(iv)["data"]["verdict"] == "mixed"

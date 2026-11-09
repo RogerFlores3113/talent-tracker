@@ -223,8 +223,8 @@ def test_hired_waits_even_for_a_trusted_app(store):
     cid, jid = _world(store)
     s = build_server(store)
     res = call(s, "move_stage", candidate_id=cid, job_id=jid, stage="Hired")
-    assert "Waiting for the recruiter's review" in text(res)
-    assert "marking someone Hired and closing a job wait for the recruiter by default" in text(res)
+    assert "Waiting for your review" in text(res)
+    assert "marking someone Hired and closing a job wait for you by default" in text(res)
     assert "Cautious mode" not in text(res)
     assert [p["stage"] for p in store.candidate_pipelines(cid)] != ["Hired"]
     assert len(review.pending(store)) == 1
@@ -234,11 +234,11 @@ def test_closing_a_job_waits_by_default_and_keeps_other_edits(store):
     cid, jid = _world(store)
     s = build_server(store)
     res = call(s, "close_job", job_id=jid)
-    assert "Waiting for the recruiter's review" in text(res) or "waits" in text(res).lower()
+    assert "Waiting for your review" in text(res) or "waits" in text(res).lower()
     assert store.get_job(jid)["status"] == "open"
     both = call(s, "update_job", job_id=jid, location="Austin", status="closed")
     assert store.get_job(jid)["location"] == "Austin" and store.get_job(jid)["status"] == "open"
-    assert "Held for the recruiter's review" in text(both)
+    assert "Held for your review" in text(both)
 
 
 def test_the_settings_switch_lets_trusted_apps_do_both(store):

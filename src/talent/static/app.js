@@ -119,6 +119,12 @@
     document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
     // One click: "Use America/Chicago" saves this browser's zone as it is.
     document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
+    // The banner says what it found, so the one click is the obvious thing to do.
+    document.querySelectorAll("form[data-tz-banner]:not([data-tz-saved]), form[data-tz-banner][data-tz-saved='']").forEach(f => {
+      const t = f.querySelector("[data-tz-text]");
+      const m = t && t.textContent.match(/^Times show in ([^.]+)\./);
+      if (t && m && m[1].trim() !== zone) t.textContent = "Times show in " + m[1].trim() + ", but this browser is in " + zone + ". Is that yours?";
+    });
   }
   // The banner only shows when it matters: the server shows it when this computer says UTC with no zone saved; for a
   // saved zone it stays hidden unless this browser's zone has a different offset now.

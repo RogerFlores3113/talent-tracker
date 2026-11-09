@@ -281,13 +281,13 @@ def test_cautious_overwrite_waits_and_a_blank_fill_applies(store):
     cid = store.add_candidate(name="Ana Ruiz", current_title="Engineer")["id"]
     res = call(server, "update_candidate", candidate_id=cid, current_title="CTO", location="Austin")
     t = text(res)
-    assert "Updated" in t and "Held for the recruiter's review: Change \"Ana Ruiz\"'s title" in t
+    assert "Updated" in t and "Held for your review: Change \"Ana Ruiz\"'s title" in t
     assert "The rest of this call went through" in t and data(res)["pending_review"]["id"]
     cand = store.get_candidate(cid)
     assert cand["current_title"] == "Engineer" and cand["location"] == "Austin"
     # Read back: the AI sees it as pending.
     got = text(call(server, "get_candidate", candidate_id=cid))
-    assert "Waiting for the recruiter's review (not applied yet" in got and "title to 'CTO'" in got
+    assert "Waiting for your review (not applied yet" in got and "title to 'CTO'" in got
     # Today and Review.
     item = next(i for i in _ai_items(store) if i["href"] == "/review")
     assert item["title"] == "1 change from your AI app waits for your review."
@@ -319,7 +319,7 @@ def test_cautious_pass_drops_it_and_new_people_still_save(store):
     assert data(res)["created"]  # a new person applies straight away
     res = call(server, "save_candidate", name="Bo Li", email="bo@x.com", current_title="VP Engineering",
                location="Denver")
-    assert "Waiting for the recruiter's review" in text(res)
+    assert "Waiting for your review" in text(res)
     bo = store.find_by_name("Bo Li")[0]
     assert bo["current_title"] == "Engineer" and bo["location"] == "Denver"
     rid = data(res)["pending_review"]["id"]
@@ -336,17 +336,17 @@ def test_cautious_hire_move_close_and_note_wait_then_keep_all(store):
     cid = store.add_candidate(name="Maya Okafor")["id"]
     store.add_to_pipeline(cid, jid, "Interviewing")
     res = call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Hired")
-    assert text(res).startswith("Waiting for the recruiter's review: Move \"Maya Okafor\" from Interviewing to Hired")
+    assert text(res).startswith("Waiting for your review: Move \"Maya Okafor\" from Interviewing to Hired")
     assert store.pipeline(jid)[0]["stage"] == "Interviewing"
     call(server, "move_stage", candidate_id=cid, job_id=jid, stage="Offer")  # in play: applies
     assert store.pipeline(jid)[0]["stage"] == "Offer"
     res = call(server, "update_job", job_id=jid, status="closed")
-    assert "Waiting for the recruiter's review: Close Backend (Acme)" in text(res)
+    assert "Waiting for your review: Close Backend (Acme)" in text(res)
     assert store.get_job(jid)["status"] == "open"
     listed = text(call(server, "list_jobs"))
     assert "Waiting for the recruiter's review, not applied yet: Move" in listed and "Close Backend (Acme)" in listed
     res = call(server, "log_activity", candidate_id=cid, kind="note", summary="Do not contact")
-    assert "Waiting for the recruiter's review: Log a note" in text(res)
+    assert "Waiting for your review: Log a note" in text(res)
     assert not [t for t in store.timeline(cid) if t["kind"] == "note"]
     groups = review.sessions(store)
     assert len(groups) == 1 and len(groups[0]["items"]) == 3

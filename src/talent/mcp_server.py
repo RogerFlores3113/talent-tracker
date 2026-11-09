@@ -525,7 +525,7 @@ def _clean_entries(entries: list[WorkEntry]) -> list[WorkEntry]:
 
 def _line(c: dict[str, Any]) -> str:
     role = " at ".join(x for x in (c.get("current_title"), c.get("current_company")) if x)
-    bits = [f"{c['name']} (id {c['id']})", role, c.get("location")]
+    bits = [f"{c['name']} (id {c['id']}, {app_url('/candidates/' + str(c['id']))})", role, c.get("location")]
     return ", ".join(b for b in bits if b)
 
 
@@ -613,12 +613,55 @@ def _job_name(job: dict[str, Any] | None) -> str:
     return f"{title} ({company})" if company else str(title)
 
 
+_FACT_SKIP = {"data_note", "warning", "note", "nudge", "close_out_hint", "suggested_step", "description_note",
+              "pending_review", "links", "summary"}
+FACT_LINES = 24
+
+
+def _fact_value(v: Any) -> str | None:
+    if v is None or v == "" or v == [] or v == {}:
+        return None
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        v = " ".join(v.split())
+        return v if len(v) <= 160 else v[:157] + "..."
+    if isinstance(v, list):
+        if all(isinstance(x, (str, int, float)) for x in v):
+            shown = ", ".join(str(x) for x in v[:12])
+            return shown + (f" and {len(v) - 12} more" if len(v) > 12 else "")
+        return f"{len(v)} item{'' if len(v) == 1 else 's'}"
+    return None
+
+
+def _facts(data: dict[str, Any]) -> list[str]:
+    """The short facts of a write's record as plain bullets (never a JSON dump in the chat): its own simple fields,
+    lists of words joined, and a count for lists of records. The full record is still the structured result."""
+    out = []
+    for k, v in data.items():
+        if (k in _FACT_SKIP or k.endswith(("_note", "_at", "_id", "_url", "_name", "_title", "_company"))
+                or k in ("id", "created", "updated")):
+            continue
+        text = _fact_value(v)
+        if text is None:
+            continue
+        label = k.replace("_", " ")
+        out.append(f"- {label[:1].upper() + label[1:]}: {text}")
+        if len(out) >= FACT_LINES:
+            break
+    return out
+
+
 def _said(sentence: str, data: dict[str, Any]) -> CallToolResult:
     """A write tool's reply. The text leads with one plain sentence (who, which stage, which job and client,
-    times in local time with zone), then any warning or note, then the record itself as JSON, which is also
-    the structured result."""
+    times in local time with zone), then any warning or note, then a few plain facts under "Details" (no raw JSON).
+    The whole record is the structured result."""
     lines = [sentence, *(str(data[k]) for k in ("warning", "note", "nudge", "close_out_hint") if data.get(k))]
-    lines.append(json.dumps(data, ensure_ascii=False, default=str))
+    facts = _facts(data)
+    if facts:
+        lines += ["Details:", *facts]
     return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
 
 
@@ -818,7 +861,8 @@ def _candidate_text(c: dict[str, Any], note: bool = True) -> str:
             + (f" ({w.get('start') or ''} to {w.get('end') or 'now'})" if w.get("start") or w.get("end") else "")
             for w in c["work_history"]))
     for p in c.get("pipelines", []):
-        out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} (job id {p['job_id']})")
+        out.append(f"Job: {_job_name(p)}: {p['stage']}, since {_local(p['stage_changed_at'])} "
+                   f"(job id {p['job_id']}, {app_url('/jobs/' + str(p['job_id']))})")
     recent = c.get("timeline", [])[:10]
     # What the recruiter typed in the app is theirs, not candidate-provided, so it is listed after its own heading.
     theirs = [t for t in recent if t.get("by_recruiter")]
@@ -1052,6 +1096,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if is_id:
             head = f"Exact match for that {what}:" if results else (
                 f"No saved candidate has that {what}. Try searching their name too.")
+        elif getattr(res, "understood", None):  # a role and a place, read apart: say plainly what was understood
+            n_close = res.total - exact_total
+            head = f"{res.understood}: {exact_total} exact, {n_close} close:"
         elif res.closest:
             head = "No exact matches. Closest matches:"
         else:
@@ -1065,6 +1112,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         else:
             lines.append(head)
         found = len(lines)
+        seen_jobs: set[int] = set()
         for c in results:
             line = f"- {_line(c)}"
             if c.get("reason"):
@@ -1076,7 +1124,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if c.get("other_name") and not nobody:
                 line += " (a different name)"
             if c.get("jobs"):
-                line += ". In: " + "; ".join(f"{j['job']} [job_id {j['job_id']}], {j['stage']}" for j in c["jobs"])
+                line += ". In: " + "; ".join(
+                    f"{j['job']} [job_id {j['job_id']}{'' if j['job_id'] in seen_jobs else ', ' + app_url('/jobs/' + str(j['job_id']))}], {j['stage']}"
+                    for j in c["jobs"])
+                seen_jobs.update(j["job_id"] for j in c["jobs"])
             lines.append(line)
         if results:  # the people found, between a marker made fresh for this reply
             lines[found:] = fenced(lines[found:])
@@ -1090,7 +1141,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.insert(0, heading)
         return _result("\n".join(lines), {
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
-            "exact": res.exact, "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
+            "exact": res.exact, "understood": getattr(res, "understood", None), "suggestion": res.suggestion, "corrected": res.corrected, "query": q, "notes": res.notes,
             "offset": offset, "shown": len(results) - n_closest,
             **({"no_one_named": q} if nobody else {}),
             "app_url": app_url(app_path or _search_path(res.suggestion if res.corrected else q, kw))})
@@ -2050,9 +2101,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                            "app_url": app_url(f"/jobs/{job_id}/loop")})
         if candidate_id is None:
             raise ValueError("Which candidate? Send candidate_id (search_candidates finds it).")
+        reports.apply_zone(store)  # a zone saved in the app since this server started counts now
         p = loops.plan(store, job_id, candidate_id, start, unavailable, candidate_tz=candidate_tz)
         data = {"data_note": DATA_NOTE, "candidate_id": candidate_id, "job_id": job_id,
-                "candidate_tz": p.get("candidate_tz"),
+                "candidate_tz": p.get("candidate_tz"), "time_zone": p.get("zone"), "time_zone_note": p.get("zone_note"),
                 "sessions": [_slim({"session": x["name"], "minutes": x["minutes"], "at": x["at"], "at_local": x["at_local"],
                                     "interviewer": x["interviewer"], "swap_in": x["others"], "warnings": x["warnings"],
                                     "already_booked": x["already"] or None}) for x in p["sessions"]],
@@ -2063,7 +2115,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                      if p["candidate_invite"] else None),
                 "app_url": app_url(f"/jobs/{job_id}/loop?candidate={candidate_id}")}
         return _result(DATA_NOTE + "\n" + loops.plan_text(p) + "\nInvite text for each interviewer and the "
-                       "candidate is in the structured result. The recruiter sends it from their own mail.", data)
+                       "candidate is in the structured result. The recruiter sends it from the recruiter's own mail.", data)
 
     def _template_write(job_id: int, sessions: Any, hours: str | None = None) -> tuple[str, dict[str, Any]]:
         """Save (or hold, in Cautious mode) a job's loop template: the sentence and the record."""
@@ -2109,6 +2161,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         step. Each session is logged like log_activity does (summary "System design (60
         min)", so the length counts for clashes), listed on Changes where the recruiter can undo each one, and
         held for review in Cautious mode. No calendar is written and nothing is sent."""
+        reports.apply_zone(store)
         p = loops.plan(store, job_id, candidate_id, start, unavailable)
         tpl = {x["name"].casefold(): x for x in loops.get_template(store, job_id)["sessions"]}
         warn: list[str] = []

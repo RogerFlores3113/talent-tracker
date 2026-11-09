@@ -63,9 +63,9 @@ def test_one_ai_identity_change_per_person_per_ten_minutes(store):
     server = build_server(store)
     with pytest.raises(Exception) as exc:
         call(server, "update_candidate", candidate_id=lee["id"], email="e@evil.example", phone="555 9999")
-    assert "one at a time" not in str(exc.value) and "Ask the recruiter to confirm" in str(exc.value)
+    assert "one at a time" not in str(exc.value) and "Ask the user to confirm" in str(exc.value)
     call(server, "update_candidate", candidate_id=lee["id"], email="harvest@evil.example")
-    with pytest.raises(Exception, match="changed this person's email a few minutes ago. Ask the recruiter"):
+    with pytest.raises(Exception, match="changed this person's email a few minutes ago. Ask the user"):
         call(server, "update_candidate", candidate_id=lee["id"], phone="555 9999")
     assert store.get_candidate(lee["id"])["phone"] == "555 0100"
     # Other fields still go through, and so does another person.

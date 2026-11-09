@@ -21,12 +21,13 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
+from . import places
 from .links import clean_links, link_key, merge_links, stored_links
 from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
 
@@ -1437,6 +1438,7 @@ class SearchResult:
     suggestion: str | None = None  # a spelling fix for a word nobody has ("kubernets" -> "kubernetes")
     corrected: bool = False  # True: these results are for the suggestion. False: just "Did you mean"
     notes: list[str] = field(default_factory=list)  # how the search was read, when something needed saying
+    understood: str | None = None  # "Looking for backend engineer in Boston, MA": a role and a place, split apart
 
     def __post_init__(self) -> None:
         if self.exact_total is None:
@@ -4621,6 +4623,11 @@ class Store:
         is_id, _ = self.lookup_exact(query)
         pq = sq.parse_query(query) if not is_id else sq.ParsedQuery()
         if not pq.structured and not pq.operator_mode:
+            if not is_id and not (location and location.strip()):
+                role_q, place = places.split_query(query)
+                if place is not None and not self._is_a_name(query):
+                    return self._search_role_place(query, role_q, place, limit=limit, offset=offset,
+                                                   fix_typos=fix_typos, kw=kw)
             res = self._search_core(query, limit=limit, offset=offset, fix_typos=fix_typos, **kw)
             if pq.advice and not res.corrected and not (res.total and not res.closest):  # "python near django"
                 res.suggestion = pq.apply_advice(res.suggestion or query) or res.suggestion
@@ -4686,6 +4693,96 @@ class Store:
                 res.suggestion = fixed
         res.notes = [*pq.notes, *notes, *(a.note for a in pq.advice if not a.always and not found)]
         res.query = query
+        return res
+
+    def _is_a_name(self, query: str) -> bool:
+        """True when every word of the query is in one saved person's name ("Austin Powers" is a person, not a role
+        in Austin), so a city that is also a first name is not taken for a place."""
+        words = [w for w in _search_tokens(query or "") if w.lower() not in STOPWORDS]
+        if len(words) < 2:
+            return False
+        match = " AND ".join(f'name : "{_fts_words(w)}"' for w in words)
+        try:
+            return self._row("SELECT 1 AS x FROM candidates_fts WHERE candidates_fts MATCH ? LIMIT 1", (match,)) is not None
+        except sqlite3.Error:
+            return False
+
+    def _search_role_place(self, query: str, role_q: str, place: Any, *, limit: int, offset: int,
+                           fix_typos: bool, kw: dict[str, Any]) -> SearchResult:
+        """A search that is a role and a place ("backend engineer Boston"). Each part is matched on its own, and
+        people who match both come first (those are the exact matches). Then people in the place who have some of
+        the role words, people with the whole role in another place, some of the role elsewhere, and last people
+        in the place with none of the role words. Every hit's reason says which part matched."""
+        base = self._search_core(role_q, limit=500, offset=0, fix_typos=fix_typos, **kw)
+        terms = _query_terms(role_q)
+        tiers: list[list[SearchHit]] = [[], [], [], [], []]
+        seen: set[int] = set()
+
+        def note(hit: SearchHit, found: list[_Term], in_place: bool) -> str:
+            loc = (hit.candidate.get("location") or "").strip()
+            missing = [t.form for t in terms if t not in found]
+            if in_place and not missing:
+                return f"Matches the role ({role_q}) and the place ({place.label})"
+            bits = [f"the place matches ({place.label})" if in_place
+                    else f"the place differs ({loc or 'no place saved'})"]
+            if not missing:
+                bits.append("the role matches")
+            elif found:
+                bits.append(f"has {', '.join(t.form for t in found)}, not {', '.join(missing)}")
+            else:
+                bits.append("none of the role words found")
+            text = "; ".join(bits)
+            return text[0].upper() + text[1:]
+
+        pool = list(base.hits)
+        if len(terms) > 1:  # people with only some of the role words (the search adds those only when few match)
+            for t in terms:
+                part = self._search_core(t.form, limit=200, offset=0, fix_typos=False, **kw)
+                pool += [replace(h, closest=True) for h in part.hits]
+        for h in pool:
+            c = h.candidate
+            if c["id"] in seen:
+                continue
+            seen.add(c["id"])
+            hay = " ".join(str(v) for v in (c.get("name"), c.get("current_title"), c.get("current_company"),
+                                           c.get("about"), c.get("source"), " ".join(c.get("tags") or [])) if v)
+            folded = fold(hay)
+            found = [t for t in terms if any(_word_pattern(f, t.prefix).search(folded)
+                                             for f in (*t.forms, *t.names))]
+            whole = not h.closest
+            if whole:
+                found = list(terms)
+            in_place = place.matches(c.get("location"))
+            tier = 0 if (in_place and whole) else 1 if in_place and found else 2 if whole else 3
+            h.closest = tier != 0
+            h.reason = note(h, found, in_place) + (f" ({h.reason})" if h.reason and tier else "")
+            tiers[tier].append(h)
+            h.score = -len(found)  # the more of the role words, the earlier within a tier
+        for tier in tiers[:4]:
+            tier.sort(key=lambda h: h.score or 0)  # stable: the search's own order holds among equals
+        where, params, _ = self.candidate_filters(**kw)
+        clause = ("WHERE " + " AND ".join(where) + " AND ") if where else "WHERE "
+        rows = self._rows(f"SELECT c.id, c.location FROM candidates c {clause}c.location IS NOT NULL "
+                          "ORDER BY c.updated_at DESC, c.id DESC", params)
+        for r in rows:
+            if r["id"] in seen or not place.matches(r["location"]):
+                continue
+            if len(tiers[4]) >= 50:
+                break
+            h = SearchHit(candidate=self.get_candidate(r["id"]), closest=True)
+            h.reason = note(h, [], True)
+            tiers[4].append(h)
+        # Like the everyday search: with 3 or more people who match both parts, only they are listed.
+        ordered = tiers[0] if len(tiers[0]) >= 3 else [h for tier in tiers for h in tier]
+        exact = len(tiers[0])
+        res = SearchResult(hits=ordered[offset:offset + limit], total=len(ordered), query=query, filters=base.filters,
+                           closest=exact == 0 and bool(ordered), exact_total=exact,
+                           understood=f"Looking for {role_q} in {place.label}")
+        if base.suggestion:
+            fixed = (re.sub(re.escape(role_q), lambda _m: base.suggestion, query, count=1, flags=re.I)
+                     if re.search(re.escape(role_q), query, re.I) else f"{base.suggestion} {place.label}")
+            res.suggestion, res.corrected = fixed, base.corrected
+        res.notes = list(base.notes)
         return res
 
     def _skill_value_hint(self, pq: Any, text: str) -> str | None:

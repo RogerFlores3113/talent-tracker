@@ -151,7 +151,7 @@ def test_mark_chased_waits_in_cautious_mode_and_checks_the_client(store):
     review.set_cautious(store, True)
     server = build_server(store)
     res = call(server, "mark_chased", client="pinecrest")
-    assert "Waiting for the recruiter's review" in text(res)
+    assert "Waiting for your review" in text(res)
     assert chase.chase_list(store)[0]["next_on"] is None
     with pytest.raises(Exception, match="No client matches"):
         call(server, "mark_chased", client="nobody")

@@ -300,6 +300,40 @@ def _when(dt: datetime) -> str:
     return actions.local_time(dt.replace(microsecond=0).isoformat(), actions.IV_TIME)
 
 
+_OFFSET_TAIL = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$", re.I)
+
+
+def _on_my_clock(start: str | None) -> str | None:
+    """A start with an offset ("2026-11-10T10:00:00-08:00") is that moment, shown on the recruiter's clock
+    ("2026-11-10T18:00" in UTC), so the day and the not-before time are read where the recruiter is."""
+    text = (start or "").strip()
+    if len(text) > 11 and _OFFSET_TAIL.search(text):
+        try:
+            dt = datetime.fromisoformat(re.sub(r"(?i)z$", "+00:00", text))
+        except ValueError:
+            return start
+        if dt.tzinfo is not None:
+            return as_local(dt).strftime("%Y-%m-%dT%H:%M")
+    return start
+
+
+def zone_line(store: Store) -> tuple[str, str]:
+    """(the zone times are shown in, where it came from): the recruiter's saved zone, else the company's own when it
+    is the only one (own-company mode), else this computer's. Used so a plan says whose clock it is on."""
+    from . import reports
+    saved = reports.user_zone(store)
+    if saved:
+        return saved, "the time zone saved in Settings"
+    other = reports.fallback_zone(store)
+    if other:
+        return other, "your company's time zone"
+    z = shown_zone()
+    name = getattr(z, "key", None) if z is not None else None
+    if not name:
+        name = datetime.now().astimezone().tzname() or "this computer's clock"
+    return name, "this computer's time zone, because none is saved in Settings"
+
+
 def _first_day(start: str | None, now: datetime) -> date:
     """The day to start looking: the one asked for (or tomorrow), moved past a weekend or a US holiday."""
     if start and start.strip():
@@ -386,6 +420,7 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
     after the one before (with a short break), on the earliest half hour when the candidate and a free eligible
     interviewer (the least loaded that day, template order on a tie) are both free, inside working hours."""
     now = now or datetime.now(timezone.utc)
+    start = _on_my_clock(start)
     job = store.get_job(job_id)
     cand = store.get_candidate(candidate_id)
     cz = _zone_or_error(candidate_tz) or store.candidate_zone(candidate_id)  # the candidate's own clock, if known
@@ -500,6 +535,8 @@ def plan(store: Store, job_id: int, candidate_id: int, start: str | None = None,
         warnings.append("Not placed: " + ", ".join(unplaced) + ".")
     result = {"job": job, "candidate": cand, "hours": [h0, h1], "sessions": sessions, "warnings": warnings,
               "unavailable": out_of, "candidate_tz": cz}
+    zone, why = zone_line(store)
+    result["zone"], result["zone_note"] = zone, f"Times are in {zone} ({why})."
     result["invites"] = invites(result)
     result["candidate_invite"] = candidate_invite(result)
     return result
@@ -560,6 +597,8 @@ def plan_text(p: dict[str, Any]) -> str:
             lines.append(f"- {s['name']}: no slot found")
         lines += [f"  Warning: {w}" for w in s["warnings"]]
     lines += [f"Warning: {w}" for w in p["warnings"]]
+    if p.get("zone_note"):
+        lines.append(p["zone_note"] + " Say so if that is not where you are, and change it in Settings.")
     return "\n".join(lines)
 
 

@@ -17,6 +17,6 @@
     </td></tr>{% endif %}
 {% endfor %}
 {% if page_no < pages %}
-    {% set next_q = dict(keep, q=q, sort=sort, dir=dir, page_no=page_no + 1) %}
+    {% set next_q = dict(keep, q=q, sort=sort, dir=dir, page_no=page_no + 1, qsort=qsort, qdir=qdir) %}
     <tr class="more"><td colspan="10"><a class="btn" href="/candidates?{{ next_q | urlencode }}" hx-get="/candidates?{{ dict(next_q, more=1) | urlencode }}" hx-target="closest tr" hx-swap="outerHTML">Show more</a> <span class="fine">Showing {{ shown }} of {{ total }}</span></td></tr>
 {% endif %}

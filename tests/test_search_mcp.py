@@ -51,7 +51,7 @@ def test_stopwords_aliases_and_closest_matches(store):
     ids = lambda q: {h.candidate["id"] for h in store.search_candidates(q).hits}  # noqa: E731
     assert fts_query("the people who") is not None  # all filler: still searches something
     assert "engineer" in fts_query("engineer")  # engineer is not a stopword
-    assert store.search_candidates("people with react in the sf area").closest  # "area" is in nobody's profile
+    assert ids("people with react in the sf area") == {a["id"]}  # "area" is a place word, not a skill
     assert ids("someone who knows react in sf") == {a["id"]}
     assert ids("frontend") == {a["id"]} and ids("front end") == {a["id"]}
     assert ids("js") == {a["id"]} and ids("kubernetes") == {b["id"]}
@@ -159,7 +159,7 @@ def test_job_pipeline_text_reads_like_a_status_update(store, pst):
     store.log(maya, "interview", "Onsite", at=when, job_id=job["id"])
     res = call(server, "job_pipeline", job_id=job["id"])
     out = res.content[0].text  # the paste-ready update is the first block, the same text as the app's
-    assert out == actions.job_status_text(store, job["id"])
+    assert out.split("\nOpen in Talent Search:")[0] == actions.job_status_text(store, job["id"])
     assert out.splitlines()[0] == "Payments Lead, Acme Pay · Remote"
     assert "1 candidate in process, none hired yet. 1 out." in out
     local = when.astimezone()

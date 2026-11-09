@@ -79,7 +79,7 @@ def test_ai_sets_outcomes_only_on_stages_it_adds(store):
     before = store.job_stages(jid)
     for kw in ({"outcomes": {"Screening": "lost"}}, {"outcomes": {"Rejected": "open"}},
                {"outcomes": {"Sourced": "hired"}}, {"rename": {"Offer": {"name": "Offer", "outcome": "hired"}}}):
-        with pytest.raises(Exception, match=r"No change made\. Ask the recruiter to change what \w+ counts as in "
+        with pytest.raises(Exception, match=r"No change made\. Ask the user to change what \w+ counts as in "
                                             r"the app\."):
             call(server, "edit_job_stages", job_id=jid, **kw)
     assert store.job_stages(jid) == before
