@@ -10,7 +10,7 @@ All notable changes to Talent Search. Newest first.
 - After a save that reloads the page (Pin, Check again on Import, Settings), the keyboard lands on the notice so it is read out.
 - Time zone boxes take any zone (type a city or zone name) and show its offset. Interview forms name their session. "All day" interviews can be logged on the web form, and the interview note has a 500 character limit.
 - Input borders reach 3:1 in every theme, and forced colors and high contrast settings are handled. Esc closes a menu without closing the tour. No autofocus on Today or the add forms.
-- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish has one box for its saved searches.
+- The time zone bar shows only when it matters. Welcome, tour and Settings wording is shorter and plainer, Settings has a Jump to list, and the tour finish says in one line what happens to its saved searches.
 - A bad email on the add or edit form is refused next to the field. Pasting a note that names someone fills the name.
 
 ### Search
@@ -55,6 +55,14 @@ All notable changes to Talent Search. Newest first.
 - Interview replies say which time zone was used and name any clash. An interview needs a start time.
 - Held-for-review replies say exactly what went through and what waits.
 - `talent install-skills` asks first (or takes `--yes`), and reinstalls say which files are new, updated or unchanged.
+- Talent Search's own notes in a reply (time zone, clash, who isn't listed) are no longer mistaken for text that gives an AI orders, so logging an interview without a zone no longer holds later changes for review.
+- An all-day interview says "all day" in the reply, not a made-up time.
+- Interviews can carry a length (`duration` in minutes), used by the clash check and calendar files. Common other names for a setting are accepted (`note` for `summary`, a list of people for `add_to_pipeline`), and a wrong name gets "Did you mean".
+- The loop planner keeps to the candidate's and each interviewer's daytime hours when their zones are known.
+- Feedback from someone not listed on that session is saved, and the reply says they weren't listed.
+- A move to Hired and a job close wait on Review even for Trusted apps. A Settings switch lets trusted apps do them.
+- The Review page intro is a short list, held lines read as proper sentences, a saved search shows as "Saved search" on Changes, and saving a search is held like other changes in a session that read suspicious text.
+- A calendar file for an unchanged interview is identical each time you download it, so calendar apps don't see a change.
 
 ### Keyboard and screen readers
 - A skip link, current-page marks, named calendar days, table captions and sort state.
