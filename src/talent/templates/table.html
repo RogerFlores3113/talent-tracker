@@ -60,13 +60,20 @@
 </form>
 {% include "_search_tips.html" %}
 {% if from_chat %}<p class="panel ids-banner" role="status"><strong>{{ from_chat }} {{ 'person' if from_chat == 1 else 'people' }} from your chat.</strong> <a href="/candidates">Show everyone</a></p>{% endif %}
-{% if q or keep %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
+{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
 {% if range_note %}<p class="suggest">{{ range_note }}</p>{% endif %}
 {% if active_chips %}<p class="filter-chips" role="group" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
+{% if hl_bar %}<div class="hlbar" role="group" aria-label="Highlighted skills">
+  <span class="fine">Highlighted skills:</span>
+  {% for h in hl_bar %}<a class="chip hl removable" data-hl="{{ h.color }}" href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ h.skill }}">{{ h.skill }} <span aria-hidden="true">×</span></a>{% endfor %}
+  <a class="small" href="{{ hl_href(dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir), hl, clear=True) }}">Clear highlights</a>
+  <span class="fine">People with these skills are sorted to the top in this order. Nobody is hidden.</span>
+</div>{% endif %}
 <div class="savedbar" id="saved-searches">
+  {% if not saved %}<span class="fine">Saved searches: none yet.{% if not save_params %} Run a search or pick a filter, then you can save it here.{% endif %}</span>{% endif %}
   {% if saved %}<span class="fine">Saved searches:</span>
   {% for sv in saved %}<a class="chip saved-link" href="/saved-searches/{{ sv.id }}" title="{{ sv.summary }}" aria-label="{{ sv.name }}{% if sv.count is not none %}: {{ sv.count }} {{ 'person' if sv.count == 1 else 'people' }}{% endif %}{% if sv.new %}, {{ sv.new }} new since you looked{% endif %}{% if sv.pinned %}, pinned{% endif %}">{% if sv.pinned %}<span class="badge">Pinned</span> {% endif %}{{ sv.name }}{% if sv.count is not none %} <span class="fine">{{ sv.count }}</span>{% endif %}{% if sv.new %} <span class="badge new">+{{ sv.new }} new</span>{% endif %}</a>{% endfor %}{% endif %}
   {% if save_params %}<details class="save-search">
@@ -101,7 +108,7 @@
   <button type="submit" form="tablebar-form" name="color_pick" value="none" class="cchip{{ ' on' if color == 'none' }}" aria-pressed="{{ 'true' if color == 'none' else 'false' }}" title="{{ 'Show everyone' if color == 'none' else 'Show only people with no color' }}"><span class="cbub small" data-color="" aria-hidden="true"></span> None <span class="n" data-color-count="none">{{ color_counts['none'] }}</span></button>
   {% if color %}<a href="/candidates?{{ dict(keep, color='') | urlencode }}" class="small">Show all colors</a>{% endif %}
 </div>
-<p class="fine">{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Color to group by color again.{% endif %}</p>
+<p class="fine">{% if hl %}Highlighted skills first ({{ hl | join(', then ') }}). Inside each group the usual order applies. {% endif %}{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Color to group by color again.{% endif %}</p>
 {% if total %}<form id="bulk-form" class="bulkbar panel" method="post" action="/candidates/bulk" aria-label="Do something for the people you tick">
   {% for k, v in keep.items() %}<input type="hidden" name="f_{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="f_q" value="{{ q }}">{% endif %}
   <p class="fine"><strong>For the people you tick:</strong> tick rows in the table (the box in the header ticks everyone on this page).{% if total > rows | length %}

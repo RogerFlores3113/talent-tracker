@@ -4,6 +4,17 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Candidates
+- Click a skill chip to highlight it in a rainbow color (red, orange, yellow, green, blue, purple, in the order you click) and move people who have it to the top. Nobody is hidden any more. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+
+### Tour
+- The Saved searches step lights up a real line now. With nothing saved yet it reads "Saved searches: none yet" and says how to save one, instead of an empty bar.
+- A candidate's page step frames the whole summary at the top of the page (name, skills, contact line, about and details), not just the name.
+- Steps whose area is taller than the window (Skills, Interviews, Today) open at the top of that area, so you see its heading and first button. The Interviews step now includes the Month and Week switch.
+
+### Today
+- The Add a to-do row wraps on narrower windows instead of pushing its button out of the panel.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

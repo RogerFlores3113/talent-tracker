@@ -549,7 +549,8 @@ def years_of_experience(roles: list[tuple[str | None, str | None]], today: date 
 # The names the Candidates form, saved searches and the AI's tools share. Existing names are unchanged.
 PARAM_KEYS = ("q", "tag", "location", "source", "job", "client", "stage", "title", "company", "skills", "skill_mode",
               "remote", "exp_min", "exp_max", "contacted", "contacted_days", "added_days", "has_email", "has_linkedin",
-              "color")
+              "color", "hl")
+HL_MAX = 6  # skills a person can highlight at once (one rainbow color each)
 CONTACTED_CHOICES = ("never", "older", "within")
 COLOR_CHOICES = ("red", "orange", "yellow", "green", "blue", "purple")
 MORE_KEYS = ("title", "company", "skills", "remote", "exp_min", "exp_max", "contacted", "added_days", "has_email",
@@ -571,6 +572,16 @@ def split_skills(value: Any) -> list[str]:
         if p and p.lower() not in {x.lower() for x in out}:
             out.append(p[:60])
     return out[:12]
+
+
+def split_hl(value: Any) -> list[str]:
+    """'Python, go,python' -> ['python', 'go'] (lower case, no repeats, at most HL_MAX): skills to highlight, in click order."""
+    out: list[str] = []
+    for part in str(value or "").split(","):
+        p = " ".join(part.split())[:60].lower()
+        if p and p not in out:
+            out.append(p)
+    return out[:HL_MAX]
 
 
 def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
@@ -603,6 +614,10 @@ def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
         elif k == "color":
             s = s.lower()
             if s not in (*COLOR_CHOICES, "none"):
+                continue
+        elif k == "hl":
+            s = ",".join(split_hl(s))
+            if not s:
                 continue
         elif k == "skill_mode":
             if s.lower() != "all":
@@ -669,6 +684,8 @@ def describe(params: Mapping[str, Any]) -> str:
         bits.append(f"last contacted over {p['contacted_days']} days ago")
     elif c == "within":
         bits.append(f"contacted in the last {p['contacted_days']} days")
+    if "hl" in p:
+        bits.append("highlighting " + ", ".join(p["hl"].split(",")))
     if "added_days" in p:
         bits.append(f"added in the last {p['added_days']} days")
     if "has_email" in p:

@@ -6,6 +6,7 @@
 {% if merged %}<p class="flash">{{ c.name }} was already saved, so we added the new details to their profile.</p>{% endif %}
 {{ injection_box(inject_warnings) }}
 <article class="profile">
+<div class="profile-summary">
   <div class="head">
     <div>
       <div class="namerow">{{ color_bubble(c, True) }}<h1>{{ c.name }}</h1></div>
@@ -41,6 +42,7 @@
     <dt>Profile updated</dt><dd>{{ c.updated_at | date }} ({{ c.updated_at | ago }})</dd>
     <dt>Added</dt><dd>{{ c.created_at | date }}</dd>
   </dl>
+</div>
 
   {% if c.work_history %}
   <h2>Work history</h2>
