@@ -237,7 +237,7 @@ def empty_rows(people: list[dict[str, Any]]) -> list[str]:
 
     checks = {
         "title": lambda p: p["title"] or p["company"], "location": lambda p: p["location"],
-        "years": lambda p: p["years"] is not None, "skills": lambda p: p["tags"], "jobs": lambda p: p["jobs"],
+        "years": lambda p: p["years"] is not None, "skills": lambda p: p["tags"], "jobs": lambda p: p["jobs"] or p.get("not_in_play"),
         "source": lambda p: p["source"].strip(), "contacted": lambda p: p["last_contacted_at"],
         "links": lambda p: p["links"], "about": lambda p: p["about"],
     }
@@ -254,10 +254,30 @@ def hl_counts(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
     return {p["id"]: sum(1 for h in hl if h in {t.lower() for t in p["tags"]}) for p in people}
 
 
+NOT_IN_PLAY = "Not in play"
+
+
 def active_jobs(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The hiring manager view: each person's jobs where they are still in play. A stage that ended (Rejected,
-    Withdrawn, or a win that is not theirs to announce) is not shown at all."""
-    return [{**p, "jobs": [j for j in p["jobs"] if j.get("outcome") == "open"]} for p in people]
+    Withdrawn, or a win that is not theirs to announce) is never named, nor the job it was in. A person with jobs
+    but none in play is marked not_in_play, so the page can say "Not in play" instead of leaving a blank cell."""
+    out = []
+    for p in people:
+        live = [j for j in p["jobs"] if j.get("outcome") == "open"]
+        ended = [j for j in p["jobs"] if j.get("outcome") != "open"]
+        out.append({**p, "jobs": live, "not_in_play": bool(ended) and not live,
+                    "ended_job_ids": sorted({j["job_id"] for j in ended}) if not live else []})
+    return out
+
+
+def left_out_note(people: list[dict[str, Any]]) -> str:
+    """For the hiring manager view: a line naming how many people are not in play anywhere they are listed, or ""
+    when everyone still is. People come from active_jobs."""
+    out = [p for p in people if p.get("not_in_play")]
+    if not out:
+        return ""
+    where = {i for p in out for i in p["ended_job_ids"]}
+    return f"{len(out)} {'person' if len(out) == 1 else 'people'} left out: not in play in {'this job' if len(where) == 1 else 'their jobs'}."
 
 
 def public_links(links: list[dict[str, str]]) -> list[dict[str, str]]:

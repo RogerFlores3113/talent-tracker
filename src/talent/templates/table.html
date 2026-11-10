@@ -6,7 +6,8 @@
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
-  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" id="export-csv" href="/candidates/export.csv?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as a CSV file">Export CSV</a> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file">Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a>{% if total > bulk_max() %} <span class="fine" id="export-cap">Exports hold the first {{ "{:,}".format(bulk_max()) }} of {{ "{:,}".format(total) }} people.</span>{% endif %}</div>
+  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" id="export-csv" href="/candidates/export.csv?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as a CSV file. Private notes and the timeline are left out unless you tick Include notes." data-download>Export CSV</a> <label class="check inline-label" id="export-notes-label"><input type="checkbox" id="export-csv-notes"> <span>Include notes <span class="fine">(your private notes and the timeline)</span></span></label> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file" data-download>Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a>{% if total > bulk_max() %} <span class="fine" id="export-cap">Exports hold the first {{ "{:,}".format(bulk_max()) }} of {{ "{:,}".format(total) }} people.</span>{% endif %}</div>
+  <p class="fine export-status" id="export-status" role="status" aria-live="polite"></p>
 </div>
 <form class="tablebar" id="tablebar-form" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search: python OR go, &quot;machine learning&quot;, title:engineer" aria-label="Search candidates">
@@ -113,9 +114,10 @@
 <p class="fine">{% if hl and not q and sort == 'color' %}Sorted by highlighted skills first, then by label color. Click a bubble to change someone's label color. Pick another column to sort by it instead.{% else %}{% if hl %}People with more of the highlighted skills come first. Inside each group the usual order applies. {% endif %}{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by label color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's label color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Label color to group by label color again.{% endif %}{% endif %}</p>
 {% if total %}<form id="bulk-form" class="bulkbar panel" method="post" action="/candidates/bulk" aria-label="Do something for the people you tick">
   {% for k, v in keep.items() %}<input type="hidden" name="f_{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="f_q" value="{{ q }}">{% endif %}<input type="hidden" name="f_sort" value="{{ sort }}"><input type="hidden" name="f_dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="f_qsort" value="{{ qsort }}"><input type="hidden" name="f_qdir" value="{{ qdir }}">{% endif %}
+  <p class="bulk-count" id="bulk-count" role="status" aria-live="polite" data-total="{{ total }}">0 people ticked</p>
   <p class="fine"><strong>For the people you tick:</strong> tick rows in the table (the box in the header ticks everyone on this page).{% if total > rows | length %}
     <label class="check"><input type="checkbox" name="select_all" value="1"> <span>Use all {{ total }} {{ 'person' if total == 1 else 'people' }} in these results, not only the ticked rows{% if total > 5000 %} (the first 5000){% endif %}</span></label>{% endif %}</p>
-  <div class="bulk-actions">
+  <div class="bulk-actions" id="bulk-panel" data-needs-ticks>
     <label>Color <select name="color"><option value="">No color</option>{% for name in COLORS %}<option value="{{ name }}">{{ name | capitalize }}</option>{% endfor %}</select></label>
     <button class="btn" type="submit" name="action" value="color" data-confirm="Set this color for the ticked people? Their old colors are replaced.">Set color</button>
     <label>Job <select name="job_id"><option value="">Pick a job</option>{% for j in job_choices or [] %}<option value="{{ j.id }}">{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></label>
@@ -129,9 +131,11 @@
   <div class="bulk-actions bulk-send" role="group" aria-label="Send out">
     <span class="fine"><strong>Send out:</strong></span>
     <button class="btn" type="submit" name="action" value="compare" title="Put two to six ticked people side by side">Compare</button>
-    <button class="btn" type="submit" name="action" value="export">Export as CSV</button>
-    <button class="btn" type="submit" name="action" value="export_xlsx">Export as xlsx</button>
+    <button class="btn" type="submit" name="action" value="export" data-download>Export as CSV</button>
+    <label class="check inline-label"><input type="checkbox" name="include_notes" value="1"> <span>Include notes</span></label>
+    <button class="btn" type="submit" name="action" value="export_xlsx" data-download>Export as xlsx</button>
     <button class="btn" id="share-xlsx" type="submit" name="action" value="share" title="Pick what goes in a spreadsheet for a hiring manager">Share as xlsx</button>
+    <p class="bulk-msg" id="bulk-msg" role="alert" tabindex="-1" hidden></p>
   </div>
 </form>{% endif %}
 <div class="table-wrap">

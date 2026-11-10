@@ -69,7 +69,6 @@
     {% else %}<p class="fine drop-hint">Drop here</p>
     {% endfor %}
     {% if cards %}</div>{% endif %}
-    {% if cards %}</div>{% endif %}
     {% if n > cards | length %}<a class="fine show-more" href="/jobs/{{ job.id }}?view=board&amp;show={{ g.name | urlencode }}#pipeline">Show {{ n - cards | length }} more</a>{% endif %}
     {% if n and g.outcome != 'open' %}</details>{% endif %}
   </section>

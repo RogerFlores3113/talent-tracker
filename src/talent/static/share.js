@@ -33,13 +33,39 @@
   function update() {
     var opt = job && job.options[job.selectedIndex];
     var title = opt ? opt.getAttribute("data-title") || "" : "";
-    var name = slug(title);  // only the job: the note at the top is free text and never goes in a file name
-    if (file) file.textContent = "shortlist-" + (name ? name + "-" : "") + today + ".xlsx";
+    var company = opt ? opt.getAttribute("data-company") || "" : "";
+    var parts = [];
+    if (opt && opt.value && slug(company)) parts.push(slug(company));
+    var jobSlug = slug(title).replace(/^shortlist(-for)?(-|$)/, "");  // "Shortlist for X" would say shortlist twice
+    if (jobSlug) parts.push(jobSlug);
+    // only the company and the job: the note at the top is free text and never goes in a file name
+    if (file) file.textContent = "shortlist-" + (parts.length ? parts.join("-") + "-" : "") + today + ".xlsx";
     if (note) note.placeholder = title ? "Shortlist for " + title : "A line for the top of the file";
     var hasJob = !!(job && job.value);
     var n = notesChoice();
     var pick = (jobs[hasJob ? job.value : ""] || {})[hasJob && rejBox && rejBox.checked ? "in" : "out"] ||
-      {names: data.names || [], count: total, stage: false};
+      {names: data.names || [], count: total, stage: false, people: null};
+    var left = {};
+    var boxes = form.querySelectorAll("input[name=leave_out]");
+    for (var b = 0; b < boxes.length; b++) if (boxes[b].checked) left[boxes[b].value] = true;
+    if (pick.people) {  // who is in the file: the kept people minus the ones ticked "Leave this person out"
+      var kept = pick.people.filter(function (p) { return !left[p.id]; });
+      pick = {names: kept.slice(0, 3).map(function (p) { return p.name; }), count: kept.length, stage: pick.stage,
+              kept: pick.people.length, ids: pick.people};
+    }
+    var rows = form.querySelectorAll("#pv-people li");
+    var inJob = {};
+    if (pick.ids) pick.ids.forEach(function (p) { inJob[p.id] = true; });
+    for (var r = 0; r < rows.length; r++) {
+      rows[r].hidden = pick.ids ? !inJob[rows[r].getAttribute("data-id")] : false;
+      var nb = rows[r].querySelector("[data-notes]");
+      if (nb) {
+        nb.hidden = n === "none";
+        var la = nb.querySelector("[data-latest]"), al = nb.querySelector("[data-all]");
+        if (la) la.hidden = n !== "latest";
+        if (al) al.hidden = n !== "all";
+      }
+    }
     var shown = [];
     cols.forEach(function (c) {
       if (c.kind === "base" || (c.kind === "stage" && pick.stage) || (c.kind === "contact" && contact && contact.checked) ||
@@ -47,7 +73,9 @@
     });
     if (colsOut) colsOut.textContent = shown.join(", ");
     if (namesOut) namesOut.textContent = pick.count ? pick.names.join(", ") + (pick.count > 3 ? " and " + (pick.count - 3) + " more" : "") : "Nobody";
-    if (countOut) countOut.textContent = pick.count + (pick.count !== total ? " of " + total + " (rejected people are left out)" : "");
+    var keptAll = pick.kept !== undefined ? pick.kept : pick.count;
+    if (countOut) countOut.textContent = pick.count + (pick.count !== total ? " of " + total : "") +
+      (keptAll !== total ? " (rejected people are left out)" : "");
     if (warn) warn.hidden = n === "none";
     if (rejected) rejected.hidden = !hasJob;
   }

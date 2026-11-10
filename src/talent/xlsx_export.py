@@ -134,22 +134,45 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
         about.append(("Note", f"This file has the first {len(rows):,} of {total:,} people"
                               + (f" (the most one file holds is {cap:,})" if cap else "")
                               + ". Narrow the search to export the rest."))
-    about.append(("Not in this file", "Notes and the timeline. The CSV export has them."))
+    about.append(("Not in this file", "Notes and the timeline. The CSV export has them when you tick Include notes."))
     return build_workbook([Sheet("Candidates", headers, body, widths=widths),
                            _about_sheet(about, "About this export")], title="Talent Search candidates", created=made)
 
 
-def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = ()) -> bytes:
+_CSV_DATE_COLS = ("Last contacted", "Added", "Last updated")
+
+
+def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (), include_notes: bool = False) -> bytes:
     """The importer's CSV for these people, in the order of `ids` (the CSV export itself lists people by id).
-    Cells that look like formulas keep their leading apostrophe. With `hl`, a "Matched skills" column follows
+    Dates are plain yyyy-mm-dd. The private notes and the timeline are left out unless `include_notes`. (The full
+    backup in Settings keeps everything: it does not come through here.) Cells that look like formulas keep their
+    leading apostrophe. With `hl`, a "Matched skills" column follows
     Name, with the same words as the xlsx ("python, sql (2 of 2)"); the importer skips a column it doesn't know."""
     wanted = list(dict.fromkeys(ids))
     hl = list(hl)
     raw = importers.export_csv(store, wanted)
     parsed = list(csv.reader(io.StringIO(raw)))
     head, body = parsed[0], parsed[1:]
+    date_at = [i for i, h in enumerate(head) if h in _CSV_DATE_COLS]
+    stage_at = head.index("Stage changed") if "Stage changed" in head else -1
+    notes_at = head.index("Notes") if "Notes" in head else -1
+
+    def tidy(row: list[str]) -> list[str]:
+        row = list(row)
+        for i in date_at:
+            if i < len(row):
+                row[i] = row[i][:10] if _day(row[i]) else row[i]
+        if 0 <= stage_at < len(row):
+            row[stage_at] = "; ".join((_day(v) and v.strip()[:10]) or v.strip() for v in row[stage_at].split(";"))
+        return row
+
+    if not include_notes and notes_at >= 0:
+        head = head[:notes_at] + head[notes_at + 1:]
     asked = set(wanted)
     mine = [c for c in store.all_candidates() if c["id"] in asked]  # the order the rows came out in
+    body = [tidy(r) for r in body]
+    if not include_notes and notes_at >= 0:
+        body = [r[:notes_at] + r[notes_at + 1:] for r in body]
     by_id = dict(zip((c["id"] for c in mine), body))
     tags = {c["id"]: c.get("tags") or [] for c in mine}
     out = io.StringIO()
@@ -197,11 +220,14 @@ def history_text(entries: list[dict[str, Any]], limit: int = 8) -> str:
 
 
 def share_filename(job: dict[str, Any] | None = None, now: datetime | None = None, note: str = "") -> str:
-    """shortlist-<job title>-YYYY-MM-DD.xlsx, or shortlist-YYYY-MM-DD.xlsx with no job. The note at the top is free
-    text (it may say anything), so it is never part of a file name; `note` is only kept so older callers still work."""
+    """shortlist-<company>-<job title>-YYYY-MM-DD.xlsx when a job is picked (no company part when it has none), or
+    shortlist-YYYY-MM-DD.xlsx with no job. The note at the top is free text (it may say anything), so it is never
+    part of a file name; `note` is only kept so older callers still work."""
     name = slug((job or {}).get("title") or "")
     name = re.sub(r"^shortlist(-for)?(-|$)", "", name)  # "Shortlist for X" would say shortlist twice
-    return f"shortlist-{name + '-' if name else ''}{stamp(now)}.xlsx"
+    company = slug((job or {}).get("company") or "") if job else ""
+    parts = [p for p in (company, name) if p]
+    return f"shortlist-{'-'.join(parts) + '-' if parts else ''}{stamp(now)}.xlsx"
 
 
 def _latest_note(store: Store, candidate_id: int) -> str:
@@ -245,12 +271,14 @@ def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any]
 
 def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",
                 job_id: int | None = None, hl: Iterable[tuple[str, str]] = (), include_rejected: bool = False,
-                ) -> dict[str, Any]:
-    """What the hiring manager's sheet holds: headers, rows, widths, and how many people were left out as rejected."""
+                leave_out: Iterable[int] = (), skip_notes: Iterable[int] = ()) -> dict[str, Any]:
+    """What the hiring manager's sheet holds: headers, rows, widths, and how many people were left out as rejected.
+    `leave_out` names people who stay out of the file; `skip_notes` names people whose note stays out of it."""
     job = store.get_job(job_id) if job_id else None
     hl = list(hl)
+    out_ids, no_notes = set(leave_out), set(skip_notes)
     people = []
-    for cid in dict.fromkeys(ids):
+    for cid in dict.fromkeys(i for i in ids if i not in out_ids):
         try:
             people.append(store.get_candidate(cid))
         except Exception:  # someone removed since the page was shown: skip them
@@ -269,7 +297,9 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
                "About": c.get("about") or "", "Work history": history_text(hist)}
         if include_contact:
             rec["Email"], rec["Phone"] = c.get("email") or "", c.get("phone") or ""
-        if notes == "all":
+        if c["id"] in no_notes:
+            rec["Notes"] = ""
+        elif notes == "all":
             rec["Notes"] = importers._notes_text(store, c["id"])
         elif notes == "latest":
             rec["Notes"] = _latest_note(store, c["id"])
@@ -284,14 +314,15 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
 
 def share_workbook(store: Store, ids: list[int], *, include_contact: bool = False, include_notes: bool = False,
                    notes: str = "", job_id: int | None = None, note: str = "", hl: Iterable[tuple[str, str]] = (),
-                   include_rejected: bool = False, now: datetime | None = None) -> tuple[bytes, str, int]:
+                   include_rejected: bool = False, now: datetime | None = None, leave_out: Iterable[int] = (),
+                   skip_notes: Iterable[int] = ()) -> tuple[bytes, str, int]:
     """(file bytes, file name, number of people). Left out unless asked for: email, phone, notes and the timeline.
     Never in it: colors, AI review fields, sample badges, internal ids and this app's own addresses. `notes` is
     "none", "latest" (the newest note only) or "all" (notes and the timeline); include_notes=True means "all"."""
     notes = notes if notes in NOTES_MODES else ("all" if include_notes else "none")
     made = now or datetime.now()
     t = share_table(store, ids, include_contact=include_contact, notes=notes, job_id=job_id, hl=hl,
-                    include_rejected=include_rejected)
+                    include_rejected=include_rejected, leave_out=leave_out, skip_notes=skip_notes)
     job, headers, body = t["job"], t["headers"], t["rows"]
     left_out = []
     if not include_contact:
@@ -313,7 +344,8 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
     about.append(("Copied as written", "About, work history" + (", notes" if notes != "none" else "")
                   + ". Read them before you forward the file."))
     note = " ".join((note or "").split())[:300]
-    sheet = Sheet("Candidates", headers, body, preamble=[note] if note else [], widths=t["widths"], big_preamble=True)
+    title = f"{note}, as of {stamp(made)}" if note else ""  # the title row is the note: no note, no title row
+    sheet = Sheet("Candidates", headers, body, preamble=[title] if title else [], widths=t["widths"], big_preamble=True)
     data = build_workbook([sheet, _about_sheet(about)], title="Candidates", created=made)
     return data, share_filename(job, made, note), len(body)
 
@@ -341,6 +373,7 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
     def view(job: dict[str, Any] | None, rejected: bool) -> dict[str, Any]:
         kept, stage_of, _ = _pick_people(store, people, job, rejected)
         return {"names": [c["name"] for c in kept[:3]], "count": len(kept),
+                "people": [{"id": c["id"], "name": c["name"]} for c in kept],
                 "stage": bool(job and any(c["id"] in stage_of for c in kept))}
 
     plain = view(None, True)
@@ -355,6 +388,39 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
         job = store.get_job(j["id"])
         jobs[str(j["id"])] = {"out": view(job, False), "in": view(job, True)}
     return {"cols": cols, "names": plain["names"], "jobs": jobs}
+
+
+def _cut(text: str, limit: int = 80) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def note_preview(store: Store, ids: Iterable[int], limit: int = 80) -> dict[int, dict[str, str]]:
+    """For the Share page: for each person the first `limit` characters of the note text that would go in the file,
+    for "latest" (the newest note) and "all" (notes and the timeline), exactly as they would be written."""
+    out: dict[int, dict[str, str]] = {}
+    for cid in dict.fromkeys(ids):
+        try:
+            store.get_candidate(cid)
+        except Exception:
+            continue
+        out[cid] = {"latest": _cut(_latest_note(store, cid), limit), "all": _cut(importers._notes_text(store, cid), limit)}
+    return out
+
+
+def nobody_matches(store: Store, ids: Iterable[int], hl: Iterable[tuple[str, str]]) -> bool:
+    """True when skills are highlighted but nobody in `ids` has any of them (the Matched skills column would be empty)."""
+    hl = list(hl)
+    if not hl:
+        return False
+    for cid in dict.fromkeys(ids):
+        try:
+            tags = store.get_candidate(cid).get("tags") or []
+        except Exception:
+            continue
+        if not _blank(matched_skills(tags, hl)):
+            return False
+    return True
 
 
 # --------------------------------------------------------------- a client's pipeline
