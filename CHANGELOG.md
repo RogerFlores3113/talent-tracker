@@ -15,6 +15,11 @@ All notable changes to Talent Search. Newest first.
 ### Today
 - The Add a to-do row wraps on narrower windows instead of pushing its button out of the panel.
 
+### Spreadsheets
+- Export xlsx next to Export CSV on the Candidates table: an Excel file with exactly the people the table shows, in the same order (your search, filters, color and highlighted skills), with email, phone, links, all skills and years of experience. Also in the bulk bar for the people you tick, in Settings for everyone, and on a client's page for the pipeline. The CSV downloads stay.
+- Share as xlsx: tick people, press Share as xlsx and pick what goes in a spreadsheet for a hiring manager. Email, phone and your private notes are off unless you tick them. You can add the job (it adds each person's stage) and a one-line note at the top. The file never has colors, review marks or links to this app.
+- In a chat, the People table has an Export xlsx button, and Claude can make the same shortlist file in your Downloads folder with no email, phone or notes. If it needs those, it gives you a link to the Share page instead.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

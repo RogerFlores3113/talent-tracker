@@ -5,7 +5,7 @@
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
-  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" href="/export.csv">Export CSV</a> <a class="btn primary" href="/candidates/new">Add</a></div>
+  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" href="/export.csv">Export CSV</a> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file">Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a></div>
 </div>
 <form class="tablebar" id="tablebar-form" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search: python OR go, &quot;machine learning&quot;, title:engineer" aria-label="Search candidates">
@@ -124,6 +124,8 @@
     <label>Tag <input type="text" name="tag" placeholder="e.g. python" maxlength="60" autocomplete="off"></label>
     <button class="btn" type="submit" name="action" value="tag">Add tag</button>
     <button class="btn" type="submit" name="action" value="export">Export as CSV</button>
+    <button class="btn" type="submit" name="action" value="export_xlsx">Export as xlsx</button>
+    <button class="btn" id="share-xlsx" type="submit" name="action" value="share" title="Pick what goes in a spreadsheet for a hiring manager">Share as xlsx</button>
   </div>
 </form>{% endif %}
 <div class="table-wrap">

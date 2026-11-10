@@ -33,7 +33,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, desk, duplicates, opsreview
 from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, trust
-from . import injection, mcp_guard, outreach, plan, wording
+from . import injection, mcp_guard, outreach, plan, wording, xlsx_export
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, stage_outcome
 from .mcp_views import MIME, RESOURCE_META, URIS, tool_meta, view_html
@@ -2945,6 +2945,52 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if ignored:
             data["ignored_fields"] = ignored[:20]
         return _with_view_key(_plain("\n".join(lines), data), job_id, [a["id"] for a in added])
+
+    @mcp.tool(annotations=WRITE)
+    def export_candidates_xlsx(candidate_ids: list[int], for_hiring_manager: bool = True, include_contact: bool = False,
+                               include_notes: bool = False, job_id: int | None = None) -> CallToolResult:
+        """Make an Excel file (.xlsx) of these people in the recruiter's Downloads folder, for them to forward to a
+        hiring manager. candidate_ids are the people (ids from search_candidates); job_id (optional) adds each
+        person's stage in that job. By default the file has no email, phone or notes: the recruiter's private
+        notes stay private. The file is made on this computer and nothing is sent anywhere. It never changes the
+        database. If you ask for email, phone or notes, or Cautious mode is on, no file is made: the reply is a
+        link to the Share page in the app, where the recruiter picks what goes in and makes the file. Tell the
+        recruiter the path (or the link). for_hiring_manager=False means a copy for the recruiter's own use, which they
+        make on the Share page too. Up to 200 people."""
+        ids = list(dict.fromkeys(int(i) for i in candidate_ids or []))
+        if not ids:
+            raise ValueError("No file made. Say which people, as candidate_ids (ids from search_candidates).")
+        if len(ids) > 200:
+            raise ValueError("No file made. Up to 200 people at a time: send fewer, or use Share as xlsx in the app.")
+        job = store.get_job(job_id) if job_id else None
+        found = []
+        for i in ids:
+            try:
+                found.append(store.get_candidate(i)["id"])
+            except NotFound:
+                continue
+        missing = [i for i in ids if i not in found]
+        if not found:
+            raise ValueError("No file made. None of those ids is a saved person (search_candidates shows ids).")
+        query = {"ids": ",".join(map(str, found)), **({"job": job_id} if job_id else {}),
+                 **({"contact": 1} if include_contact else {}), **({"notes": 1} if include_notes else {})}
+        share_url = app_url("/candidates/share?" + urlencode(query))
+        asked_private = include_contact or include_notes
+        if asked_private or review.cautious(store) or not for_hiring_manager:
+            why = ("Email, phone and notes are the recruiter's to include, so they choose on the Share page"
+                   if asked_private else "The recruiter has to make this file themselves")
+            return _plain(f"No file made. {why}. They open this page, pick what goes in the file and press Make the "
+                          f"spreadsheet: {share_url}", {"written": False, "people": len(found), "share_url": share_url,
+                                                        "app_url": share_url})
+        data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id)
+        path = xlsx_export.save_to_downloads(data, name)
+        line = (f"Made {name} with {n} {'person' if n == 1 else 'people'}, saved in {path.parent} on the recruiter's "
+                "computer. It has no email, phone or notes. Nothing was sent: the recruiter forwards the file themselves."
+                + (f" Not found and left out: {', '.join(map(str, missing))}." if missing else "")
+                + f" To change what is in it: {share_url}")
+        return _plain(line, {"written": True, "path": str(path), "file": path.name, "people": n,
+                             "job": _slim({k: job.get(k) for k in ("id", "title", "company")}) if job else None,
+                             "left_out": ["email", "phone", "notes"], "share_url": share_url, "app_url": share_url})
 
     @mcp.tool(annotations=READ, meta=tool_meta("shortlist"))
     def list_prospects(job_id: int, status: str = "proposed") -> CallToolResult:

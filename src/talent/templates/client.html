@@ -47,6 +47,7 @@
   <div class="actions-inline no-print">
     <button type="button" class="btn small" data-print>Print or save as PDF</button>
     <a class="btn small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as CSV</a>
+    <a class="btn small" href="/clients/{{ c.slug }}/pipeline.xlsx?{{ {'since': since, 'until': until} | urlencode }}">Download the pipeline as xlsx</a>
     <a class="small" href="/clients/{{ c.slug }}/pipeline.csv?{{ {'since': since, 'until': until, 'out': '1'} | urlencode }}" title="The CSV leaves out people who are out, like Not a Fit or Withdrew">CSV with people who are out</a>
     <form method="post" action="/clients/{{ c.slug }}/sent" class="inline" data-confirm="{% if early %}Not due until {{ early }}. {% endif %}Mark {{ 'all these updates' if sections | length > 1 else 'this update' }} as sent{{ ' anyway' if early }}? A copy is kept, and the next update covers what happens from now.{% if ai_moves %} {{ ai_moves | length }} move{{ 's' if ai_moves | length != 1 }} your AI app made {{ 'are' if ai_moves | length != 1 else 'is' }} in it and not reviewed yet: {% for m in ai_moves[:3] %}{{ m.name }} to {{ m.stage }}{{ ', ' if not loop.last }}{% endfor %}{% if ai_moves | length > 3 %} and {{ ai_moves | length - 3 }} more{% endif %}.{% endif %}">
       <input type="hidden" name="since" value="{{ since }}"><input type="hidden" name="until" value="{{ until }}"><input type="hidden" name="ai_seen" value="{{ ai_moves | map(attribute='action_id') | join(',') }}">

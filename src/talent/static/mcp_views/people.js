@@ -120,13 +120,29 @@ function tableMode(d){
  wrap.append(header({title:S.d.query?"Search: "+S.d.query:"Candidates",count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search"}));
  for(const n of leadLines(d))wrap.append(n);
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
- wrap.append(el("div",{class:"tbar"},back));
+ const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},"Export xlsx");
+ const xlOut=el("span",{class:"small",role:"status","aria-live":"polite"});
+ wrap.append(el("div",{class:"tbar"},back,canCall()?xl:null,xlOut));
  const t=peopleTable(S.people,S,{skills:true,origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,
   onOpen:p=>{S.idx=S.people.indexOf(p);S.fromTable=true;S.scroll={x:t.scroller.scrollLeft,y:(document.scrollingElement||document.documentElement).scrollTop,id:p.id};setView("card")}});
  SHOWN=t;wrap.append(t.node);
  onKeys(wrap,{Escape:e=>{if(e.target&&e.target.tagName==="INPUT"&&e.target.type==="search"&&e.target.value)return;S.fromTable=false;setView("card")}});
  return wrap}
 
+/* Export xlsx: the ticked people, or everyone shown. Makes a file in Downloads (no email, phone or notes) or, when the
+   recruiter has to choose, gives a link to the Share page. Candidate text only ever goes in with textContent. */
+function exportXlsx(btn,out){
+ const chosen=S.sel.size?S.people.filter(p=>S.sel.has(p.id)):S.people.slice();
+ const ids=chosen.slice(0,200).map(p=>p.id);
+ if(!ids.length){out.textContent="There is nobody to export yet.";return}
+ btn.disabled=true;out.textContent="Making the file...";
+ callTool("export_candidates_xlsx",{candidate_ids:ids,for_hiring_manager:true}).then(r=>{btn.disabled=false;
+  const d=r&&r.structuredContent;
+  if(!d||(r&&r.isError)){out.textContent=said(r)||"Couldn't make the file.";return}
+  const more=chosen.length>ids.length?" The first 200 of "+chosen.length+" are in it.":"";
+  if(d.written){out.replaceChildren("Saved "+d.file+" in "+d.path.slice(0,Math.max(0,d.path.length-d.file.length-1))+". It has no email, phone or notes."+more+" ",appLink(d.share_url,"Open in Talent Search"))}
+  else out.replaceChildren("The file waits for you. ",appLink(d.share_url,"Open in Talent Search"));
+  announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
 function draw(focus){const m=document.getElementById("main");const d=S.d;
  const n=S.mode==="table"?tableMode(d):cardMode(d);m.replaceChildren(n);
  if(focus==="table"&&SHOWN){const sc=S.scroll;S.scroll=null;
