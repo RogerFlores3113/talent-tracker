@@ -5,7 +5,10 @@ All notable changes to Talent Search. Newest first.
 ## [Unreleased]
 
 ### Candidates
-- Click a skill chip to highlight it in a rainbow color (red, orange, yellow, green, blue, purple, in the order you click) and move people who have it to the top. Nobody is hidden any more. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+- Click a skill chip to light it up in its own color (first pick red, then yellow, green, blue, purple, orange; a color stays with its skill) on every row where it shows, and move people who have it to the top. People with more of your picked skills come first, and when it's a tie the skill you picked first wins. Nobody is hidden. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+- Skill highlights are easier to follow: keyboard focus stays on the chip you picked, a status line says what changed, the highlighted skills bar shows each pick's number, color and how many people have it, and every row shows "2 of 2" matches. The color columns are now called Label and Label color so they are not mixed up with highlight colors.
+- "Use all N people in these results" now follows the order on screen for Compare, exports and Share, so Compare takes the top six you see. The bulk bar groups Compare, Export and Share under "Send out", and Compare says "Tick two to six people to compare."
+- Importing keeps names and titles that start with = + - or @ as plain text, trims emoji from the end of skills, and leaves out skills with no letters (listed in the import warnings).
 
 ### Tour
 - The Saved searches step lights up a real line now. With nothing saved yet it reads "Saved searches: none yet" and says how to save one, instead of an empty bar.
@@ -14,6 +17,47 @@ All notable changes to Talent Search. Newest first.
 
 ### Today
 - The Add a to-do row wraps on narrower windows instead of pushing its button out of the panel.
+
+### Spreadsheets
+- Export xlsx next to Export CSV on the Candidates table: an Excel file with exactly the people the table shows, in the same order (your search, filters, color and highlighted skills), with email, phone, links, all skills and years of experience. Also in the bulk bar for the people you tick, in Settings for everyone, and on a client's page for the pipeline. The CSV downloads stay.
+- Share as xlsx: tick people, press Share as xlsx and pick what goes in a spreadsheet for a hiring manager. Email, phone and your private notes are off unless you tick them. You can add the job (it adds each person's stage) and a one-line note at the top. The file never has colors, review marks or links to this app.
+- In a chat, the People table has an Export xlsx button, and Claude can make the same shortlist file in your Downloads folder with no email, phone or notes. If it needs those, it gives you a link to the Share page instead.
+
+### Compare people
+- Tick two to six people on Candidates and press Compare to see them side by side: title, location, years of experience, skills, jobs and stages, source, last contacted, links and about. An "At a glance" list says in plain words what they share and where they differ ("Only Maya has rust and payments", "Noah has the most experience"). Skills everyone has are marked shared, skills only one person has are marked only them, and highlighted skills keep their colors. Remove anyone from the comparison, or go back to the list with the same people ticked.
+- In Claude, the People table has a Compare button for two to six selected people, and Claude can compare people for you (it only reads).
+
+### Spreadsheets, ready to forward
+- Every xlsx prints on landscape pages one page wide, repeats its header row on each page, and has narrow margins. Skills and About wrap in wide columns.
+- The file for a hiring manager leaves out columns nobody has anything in, keeps people in the order you picked them (or furthest along first when you pick a job), and opens with your note in bold across the top. With a job picked, people not in it have no stage, and people marked rejected stay out unless you tick "Include people marked rejected".
+- Highlighted skills come with you: Export xlsx and Share add a Matched skills column after Name ("python, data engineer (2 of 2)"), filled in the color of the first skill that matches. The About sheet lists filters in words ("Location: Boston", "Highlighted skills: python (red)").
+- Dates are real dates (yyyy-mm-dd), years of experience are rounded to half years, and the empty Color column is now Label color and only appears when someone has one.
+- The Share page has three notes choices (No notes, Latest note only, All notes and timeline), reminds you that About and work history go out as written, and previews the file name, columns and first names. It says when the file is downloading. Files are named shortlist-<job or note>-date.xlsx.
+- Exports and bulk exports that hit the 5,000 cap say "first 5,000 of N" on the About sheet and beside the Export buttons. Settings says "Export all N people as xlsx".
+- Export CSV on the Candidates table now follows your filters and order, like Export xlsx. The whole-list CSV stays in Settings.
+- A client's pipeline xlsx has a title line ("Acme pipeline, as of 2026-11-10"), real dates, and the next interview as a real date and time with its time zone named in the header.
+
+### Compare and export polish
+- Compare now sorts skills three ways per person: Shared (everyone), Some of them (with a count, like "python, 3 of 6") and Only them. At a glance says who has the partly shared skills ("Emily, Rafael and Priya have python"), with full names when two people share a first name. Claude's compare reply says the same.
+- With five or six people, names and skill chips no longer break in the middle of a word: each column is at least 12rem wide and the table scrolls sideways, with the name row staying put. Remove is a small x button with a clear label. The same goes for the in-chat compare view.
+- Rows nobody has anything for (years, links, about, found via) are left out. When only some people have work dates, the others say "No work dates saved" and a note says how to add them.
+- Highlighted skills name their colors for screen readers and show their number, and each column says "Has 2 of 2 highlighted skills".
+- A Hiring manager view (link on the compare page, also what Print gives) shows names, title, company, location, years, skills, stage in a job, public links and About, and leaves out your own notes on contact, source, dates, labels and app links.
+- In Claude, compare takes the first six people if you give more and says who was left out, ends with a link to Open in Talent Search, and the view has Share as xlsx, Export xlsx and a Remove button for each person. The People table says "Export 12 shown" or "Export 2 ticked", reports what it saved, and has Share as xlsx beside Compare.
+- The messages Claude gets back from the xlsx export are plain and clear, a Read only app is given the Share page link, and people not found are listed first.
+- Candidates table: Compare, Share and both exports keep the order of the people you ticked, and Export as CSV lists the same people in the same order as the xlsx, with a "Matched skills" column when skills are highlighted.
+- Candidates table: the highlight message says "1 person has it" and, after a second pick, how the order works. Removing a pick moves focus to the next pick, there is a "Skip to highlighted skills" link, and the table caption names the highlight order.
+- Candidates xlsx exports leave out columns that are empty for everyone, like the Share file. Importing skips skills that start with @ = + - and lists them in the warnings.
+
+### In-chat compare and export
+- Compare in chat now reads "Skills: Shared: sql. Some of them: python (3 of 6 have it). Only them: django." and the Compare view says "python, 3 of 6 have it". Comparing one person says "Compare takes two to six people. Name or tick at least two."
+- When an AI app is set to read only, the export refusal now speaks plainly to you and links the Share page. Exporting the People table makes candidates-DATE.xlsx instead of a shortlist file, and a new Load all and export button gets everyone found (up to 200) first. People table initials use letters only.
+
+### Hiring manager view and share form
+- The Hiring manager view is safer to send: it shows only stages still in play (nothing for Rejected or Withdrawn), says plainly what it hides and that About text is shown as written, and has a Hide About button that stays in its links. It also has a Side by side heading.
+- The Share form warns when you include notes ("may hold pay, other interviews or private remarks"), and its preview now matches the file exactly: the people and count with rejected people left out (or added back when you tick the box) and the Stage column only when someone is in the job. The note box no longer suggests a job name when no job is picked.
+- The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
+- Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
 
 ## [0.1.2] - 2026-11-09
 

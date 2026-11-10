@@ -12,10 +12,11 @@ import re
 import secrets
 import tempfile
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -34,8 +35,8 @@ from . import ai_caps, site_guard, trust
 from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, desk, duplicates, opsreview, tour
-from . import searchquery
+from . import chase, compare, desk, duplicates, opsreview, tour
+from . import searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -52,11 +53,13 @@ MAX_UPLOAD = 10 * 1024 * 1024
 ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
+COMPARE_TICK = "Tick two to six people to compare."
 BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
+DOWNLOADS = {"/backup", "/export.csv", "/export.xlsx", "/candidates/export.xlsx",
+             "/candidates/export.csv"}  # whole-database downloads: never for another site's page
 OPEN_PATHS = {"/launch", "/api/health"}  # everything else needs the app window's key
 KEY_HEADER = "x-talent-key"
 KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
@@ -80,7 +83,7 @@ UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"
 CHANGES_SHOWN = 300
 # The colour bubble's words: one letter in the bubble too, so colour is never the only clue.
 COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue": "B", "purple": "P"}
-# Rainbow order as SQL: red first, then orange... purple, then people with no colour.
+# Color order as SQL: red first, then orange... purple, then people with no colour.
 COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
                   + f" ELSE {len(COLORS)} END")
 # Sorting a search by a column (qsort): its key, and whether the first click goes high to low. Without one the
@@ -616,58 +619,110 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
 
     def hl_order_sql(hl_list: list[str]) -> tuple[str, list[str]]:
-        """ORDER BY terms that put people with the highlighted skills first, in click order (everyone stays)."""
-        sql = "".join("EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE) DESC, "
-                      for _ in hl_list)
-        return sql, list(hl_list)
+        """ORDER BY terms for the highlighted skills: most of them first, then the earlier pick wins (everyone stays)."""
+        has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
+        if not hl_list:
+            return "", []
+        count = "(" + " + ".join(has for _ in hl_list) + ") DESC, "
+        return count + "".join(has + " DESC, " for _ in hl_list), [*hl_list, *hl_list]
 
     def hl_rank_hits(hits: list[Any], hl_list: list[str]) -> list[Any]:
         """A stable sort, so the order we already had (best match, colour, column) holds inside each highlight group."""
         if not hl_list:
             return hits
 
-        def key(h: Any) -> tuple[bool, ...]:
+        def key(h: Any) -> tuple[int, ...]:
             have = {str(t).lower() for t in (h.candidate.get("tags") or [])}
-            return tuple(x not in have for x in hl_list)
+            flags = [x in have for x in hl_list]
+            return (-sum(flags), *(not f for f in flags))
         return sorted(hits, key=key)
 
-    def hl_href(base: dict[str, Any], hl_list: list[str], skill: str | None = None, clear: bool = False) -> str:
-        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept."""
-        cur = [h.lower() for h in hl_list]
+    def hl_slug(skill: str) -> str:
+        """A short, safe id piece for a skill: 'c++' and 'c#' stay apart."""
+        low = " ".join(str(skill).split()).lower()
+        return re.sub(r"[^a-z0-9]+", "-", low).strip("-") + "-" + format(zlib.crc32(low.encode()) & 0xFFFF, "04x")
+
+    def hl_href(base: dict[str, Any], hl_map: Any, skill: str | None = None, clear: bool = False,
+                rid: Any = None) -> str:
+        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept.
+        A skill keeps its color while it is picked; a new pick takes the first free color. The #fragment names the
+        chip to put keyboard focus on after the page reloads (see app.js): the same chip in the same row, else the
+        chip in the highlight bar."""
+        cur = dict(hl_map or {})
+        frag = ""
         if skill is not None:
             k = " ".join(str(skill).split()).lower()
-            cur = [h for h in cur if h != k] if k in cur else [*cur, k]
+            if k in cur:
+                keys = list(cur)
+                at = keys.index(k)
+                del cur[k]
+                left = list(cur)  # after a remove from the bar, focus goes to the next chip, else the one before it
+                near = left[at] if at < len(left) else left[at - 1] if left else ""
+                frag = (f"#chip-{rid}-{hl_slug(k)}" if rid is not None else
+                        "#removed-" + quote(k, safe="") + (quote("@hlbar-" + hl_slug(near), safe="@") if near else ""))
+            elif len(cur) < searchquery.HL_MAX:
+                cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
+                frag = f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
         if clear:
-            cur = []
+            cur = {}
+            frag = "#hlcleared"
         rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more")}
         if cur:
-            rest["hl"] = ",".join(searchquery.split_hl(",".join(cur)))
-        return "/candidates?" + urlencode(rest) if rest else "/candidates"
+            rest["hl"] = searchquery.join_hl(cur.items())
+        return ("/candidates?" + urlencode(rest) if rest else "/candidates") + frag
 
-    def hl_first(tags: list[str], hl_list: list[str]) -> list[str]:
+    def hl_first(tags: list[str], hl_map: Any) -> list[str]:
         """A person's skills with the highlighted ones first, in click order."""
         mine = {t.lower(): t for t in tags}
-        first = [mine[h] for h in hl_list if h in mine]
+        first = [mine[h] for h in hl_map if h in mine]
         return first + [t for t in tags if t not in first]
 
-    def hl_bar(hl_list: list[str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, str]]:
+    def hl_shown(tags: list[str], hl_map: Any) -> int:
+        """How many chips a row shows: four, or every highlighted skill it has if that is more."""
+        low = {t.lower() for t in tags}
+        return max(4, sum(1 for h in hl_map if h in low))
+
+    def hl_edge(tags: list[str], hl_map: Any) -> str:
+        """The color of the first (highest priority) highlighted skill this person has, or ''."""
+        low = {t.lower() for t in tags}
+        return next((c for h, c in hl_map.items() if h in low), "")
+
+    def hl_top(tags: list[str], hl_map: Any) -> tuple[str, str]:
+        """(skill, color) of the first highlighted skill this person has, or ('', '')."""
+        low = {t.lower() for t in tags}
+        return next(((h, c) for h, c in hl_map.items() if h in low), ("", ""))
+
+    def hl_have(tags: list[str], hl_map: Any) -> int:
+        """How many of the highlighted skills this person has."""
+        low = {t.lower() for t in tags}
+        return sum(1 for h in hl_map if h in low)
+
+    def hl_bar(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str,
+               counts: dict[str, int] | None = None) -> list[dict[str, Any]]:
         base = {**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}
-        return [{"skill": h, "color": COLORS[i], "href": hl_href(base, hl_list, h)} for i, h in enumerate(hl_list)]
+        return [{"skill": h, "color": c, "href": hl_href(base, hl_map, h), "n": i, "id": "hlbar-" + hl_slug(h),
+                 "count": (counts or {}).get(h)} for i, (h, c) in enumerate(hl_map.items(), start=1)]
 
     env.globals["hl_href"] = hl_href
     env.globals["hl_first"] = hl_first
+    env.globals["hl_shown"] = hl_shown
+    env.globals["hl_edge"] = hl_edge
+    env.globals["hl_top"] = hl_top
+    env.globals["hl_have"] = hl_have
+    env.globals["hl_slug"] = hl_slug
+    env.globals["bulk_max"] = lambda: BULK_MAX  # read when a page is drawn, so the Candidates page and the export agree
 
-    @app.get("/candidates", response_class=HTMLResponse)
-    def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
+    def _table_build(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
               client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
-        per = 100
-        hl_list = searchquery.split_hl(hl)  # skills to highlight and sort by, in click order (never filters)
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", per: int = 100, rows_only: bool = False):
+        pool = COLORED_FIRST_POOL if per <= 100 else max(COLORED_FIRST_POOL, per)  # the export ranks everyone it keeps
+        hl_map = dict(searchquery.parse_hl(hl))  # skill -> color, in click order (sorts and colors, never filters)
+        hl_list = list(hl_map)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
         new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
@@ -693,6 +748,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         sql_sort = TABLE_SORTS[sort]
         direction = "ASC" if dir == "asc" else "DESC"
         suggestion = None
+        count_where: tuple[str, tuple[Any, ...]] | None = None  # the filter set, for the highlight counts
+        count_hits: list[Any] | None = None
         if id_list:
             marks = ",".join("?" * len(id_list))
             rows = [store._hydrate(r) for r in store._rows(
@@ -704,7 +761,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             member["color"] = color or None
             if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
                                                             if h.candidate.get("color") in COLORS else len(COLORS)))
                 ranked = hl_rank_hits(ranked, hl_list)
@@ -712,7 +769,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows = [h.candidate for h in ranked[start:start + per]]
             elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 _attach_jobs([h.candidate for h in result.hits])
                 key, desc_first = QSORTS[qsort]
                 reverse = (qdir != "asc") if desc_first else (qdir == "desc")
@@ -721,7 +778,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows = [h.candidate for h in ranked[start:start + per]]
             elif hl_list:  # best match first inside each highlight group, so rank a pool of the best matches
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 ranked = hl_rank_hits(list(result.hits), hl_list)
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
@@ -731,12 +788,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows = [h.candidate for h in result.hits]
             total = result.total
             suggestion = result.suggestion
+            if hl_list:
+                count_hits = list(result.hits)
+                if len(count_hits) < total:  # the ranked pool was smaller than the results: read all of them
+                    count_hits = list(search.search(q, tag=tag or None, location=location or None,
+                                                    source=source or None, limit=BULK_MAX, offset=0, **member).hits)
         else:
             conds, params, _ = store.candidate_filters(tag=tag or None, location=location or None,
                                                        source=source or None, color=color or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
-            if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
+            count_where = (where, tuple(params))
+            if sort == "color":  # color order, newest first inside each colour (desc: untagged first, purple back to red)
                 order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
             elif sort in EMPTY_LAST:
                 order = f"({sql_sort} = '') ASC, {sql_sort} {direction}, c.id DESC"
@@ -747,6 +810,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 f"SELECT c.* FROM candidates c {where} ORDER BY {hl_sql}{order} LIMIT ? OFFSET ?",
                 (*params, *hl_params, per, (page_no - 1) * per))]
         _attach_jobs(rows)
+        if rows_only:  # the export: exactly these rows, in this order
+            return rows, total
+        hl_counts: dict[str, int] = {}  # skill -> people with it in the current results (one query for all picks)
+        if hl_list:
+            if count_where is not None:
+                has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
+                got = store._row("SELECT " + ", ".join(f"coalesce(sum({has}), 0) AS n{i}" for i in range(len(hl_list)))
+                                 + f" FROM candidates c {count_where[0]}", (*hl_list, *count_where[1]))
+                hl_counts = {h: int(got[f"n{i}"]) for i, h in enumerate(hl_list)}
+            else:
+                pool_rows = [h.candidate for h in count_hits] if count_hits is not None else rows
+                lows = [{str(t).lower() for t in (r.get("tags") or [])} for r in pool_rows]
+                hl_counts = {h: sum(1 for low in lows if h in low) for h in hl_list}
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -756,9 +832,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
-                                      ids=",".join(map(str, id_list)), hl=",".join(hl_list),
+                                      ids=",".join(map(str, id_list)), hl=searchquery.join_hl(hl_map.items()),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, hl=hl_list, hl_bar=hl_bar(hl_list, keep, q, sort, dir, qsort, qdir), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir, hl_counts), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
@@ -778,34 +854,27 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
 
-    def _matching_ids(raw: dict[str, str]) -> list[int]:
-        """Everyone the Candidates table shows for these filters (the same ones its address carries), not only the
-        page on screen, so "all of the results" in the bulk bar means all of them. At most BULK_MAX people."""
-        def get(key: str) -> str:
-            return str(raw.get(key) or "")
+    @app.get("/candidates", response_class=HTMLResponse)
+    def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
+              sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
+              color_pick: str = "", cf: str = "",
+              title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
+              exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
+        names = table.__code__.co_varnames[1:table.__code__.co_argcount]
+        values = locals()
+        return _table_build(request, **{k: values[k] for k in names})
 
-        q = get("q").strip()
-        color = get("color").strip().lower()
-        color = color if color in (*COLORS, "none") else ""
-        job = get("job").strip()
-        pipe = get("pipe") if get("pipe") in opsreview.PIPES else ""
-        days = get("days").strip()
-        more_params = searchquery.clean_params({k: get(k) for k in (
-            "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max", "contacted", "contacted_days",
-            "added_days", "has_email", "has_linkedin")})
-        member = dict(job_id=int(job) if job.isdigit() else None, client=get("client") or None,
-                      stage=get("stage") or None, pipe=pipe or None, days=int(days) if days.isdigit() else None,
-                      **searchquery.search_kwargs(more_params))
-        if q:
-            member["color"] = color or None
-            result = search.search(q, tag=get("tag") or None, location=get("location") or None,
-                                   source=get("source") or None, limit=BULK_MAX, offset=0, **member)
-            return [h.candidate["id"] for h in result.hits]
-        conds, params, _ = store.candidate_filters(tag=get("tag") or None, location=get("location") or None,
-                                                   source=get("source") or None, color=color or None, **member)
-        where = ("WHERE " + " AND ".join(conds)) if conds else ""
-        return [r["id"] for r in store._rows(f"SELECT c.id FROM candidates c {where} ORDER BY c.id LIMIT ?",
-                                             (*params, BULK_MAX))]
+    def _matching_ids(request: Request, raw: dict[str, str], count: bool = False) -> Any:
+        """Everyone the Candidates table shows for these filters (the same ones its address carries), not only the
+        page on screen, in the order the screen shows them, so "all of the results" in the bulk bar means all of
+        them and Compare takes the top six shown. At most BULK_MAX people; with count, also how many matched."""
+        args = {k: v for k, v in raw.items() if k in TABLE_QUERY and k != "color_pick"}
+        rows, total = _table_build(request, per=BULK_MAX, rows_only=True, **args)
+        found = [r["id"] for r in rows]
+        return (found, total) if count else found
 
     @app.post("/candidates/bulk")
     async def candidates_bulk(request: Request):
@@ -814,18 +883,39 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         no tool for any of this."""
         form = await request.form()
         action = str(form.get("action") or "")
+        matched_total = None  # how many people "all of the results" matched (more than the ids when that is cut off)
         if str(form.get("select_all") or "") == "1":
-            ids = _matching_ids({k[2:]: str(v) for k, v in form.items() if k.startswith("f_")})
+            ids, matched_total = _matching_ids(request, {k[2:]: str(v) for k, v in form.items() if k.startswith("f_")},
+                                               count=True)
         else:
             ids = list(dict.fromkeys(int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()))
+        hl_pairs = searchquery.parse_hl(str(form.get("f_hl") or ""))
         if not ids:
-            return back(request, "/candidates", error="Tick at least one person first.")
+            return back(request, "/candidates", error=COMPARE_TICK if action == "compare" else "Tick at least one person first.")
         n = len(ids)
         who = f"{n} {'person' if n == 1 else 'people'}"
+        if action == "compare":
+            if n < compare.MIN_PEOPLE:
+                return back(request, "/candidates", error=COMPARE_TICK)
+            q = [("ids", ",".join(map(str, ids[:compare.MAX_PEOPLE])))]
+            if n > compare.MAX_PEOPLE:
+                q.append(("of", str(n)))
+            hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("f_hl") or "")))
+            if hl:
+                q.append(("hl", hl))
+            return RedirectResponse("/candidates/compare?" + urlencode(q), status_code=303)
         if action == "export":
             stamp = datetime.now().strftime("%Y-%m-%d")
-            return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
+            # the order the boxes came in (the screen's order), the same people and order as the xlsx
+            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs), media_type="text/csv; charset=utf-8",
                             headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
+        if action == "export_xlsx":
+            rows = people_rows(ids)
+            return xlsx_response(xlsx_export.table_workbook(store, rows, max(matched_total or 0, len(rows)), cap=BULK_MAX,
+                                                            hl=hl_pairs, drop_empty=True),
+                                 f"talent-search-selected-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+        if action == "share":
+            return share_page(request, ids, hl=searchquery.join_hl(hl_pairs))
         if action == "color":
             try:
                 shade = clean_color(str(form.get("color") or ""))
@@ -1016,6 +1106,202 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That saved search isn't there any more.")
         return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
     # ------------------------------------------------------- duplicates
+    # ------------------------------------------------------------- spreadsheets (.xlsx)
+    TABLE_QUERY = ("q", "tag", "location", "source", "sort", "dir", "job", "client", "stage", "pipe", "days", "color",
+                   "color_pick", "cf", "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max",
+                   "contacted", "contacted_days", "added_days", "has_email", "has_linkedin", "new_after", "ids",
+                   "qsort", "qdir", "hl")
+
+    def xlsx_response(data: bytes, name: str) -> Response:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name) or "talent-search.xlsx"
+        return Response(data, media_type=xlsx.MIME, headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+
+    def people_rows(ids: list[int]) -> list[dict[str, Any]]:
+        """These people as table rows (with their main job), in the order given."""
+        ids = list(dict.fromkeys(ids))[:BULK_MAX]
+        found: dict[int, dict[str, Any]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in store._rows(f"SELECT c.* FROM candidates c WHERE c.id IN ({marks})", tuple(chunk)):
+                found[r["id"]] = store._hydrate(r)
+        rows = [found[i] for i in ids if i in found]
+        _attach_jobs(rows)
+        return rows
+
+    def parse_ids(raw: str) -> list[int]:
+        return list(dict.fromkeys(int(x) for x in (raw or "").replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
+
+    FILTER_WORDS = (("q", "Search"), ("tag", "Skill"), ("location", "Location"), ("source", "Source"),
+                    ("client", "Client"), ("stage", "Stage"), ("color", "Label color"), ("title", "Title"),
+                    ("company", "Company"), ("skills", "Skills"), ("remote", "Remote"), ("exp_min", "Years of experience, at least"),
+                    ("exp_max", "Years of experience, at most"), ("contacted_days", "Last contacted, days"),
+                    ("added_days", "Added in the last days"))
+
+    def filter_lines(args: dict[str, str]) -> list[tuple[str, str]]:
+        """The Candidates filters in words for an About sheet: ('Location', 'Boston'). Highlights are listed apart."""
+        out = [(label, " ".join(str(args[k]).split())) for k, label in FILTER_WORDS if args.get(k, "").strip()]
+        job = str(args.get("job") or "").strip()
+        if job.isdigit():
+            try:
+                j = store.get_job(int(job))
+                out.append(("Job", j["title"] + (f" ({j['company']})" if j.get("company") else "")))
+            except NotFound:
+                pass
+        if args.get("has_email") == "1":
+            out.append(("Email", "has one"))
+        if args.get("has_linkedin") == "1":
+            out.append(("LinkedIn", "has one"))
+        if args.get("ids", "").strip():
+            out.append(("People", "only the ones picked in the chat"))
+        return out
+
+    def table_export_rows(request: Request) -> tuple[list[dict[str, Any]], int, dict[str, str]]:
+        args = {k: request.query_params[k] for k in TABLE_QUERY if k in request.query_params}
+        rows, total = _table_build(request, per=BULK_MAX, rows_only=True, **args)
+        return rows, total, args
+
+    @app.get("/candidates/export.xlsx")
+    def candidates_export_xlsx(request: Request):
+        """The Candidates table as a spreadsheet: the same address parameters as /candidates, every page of it."""
+        rows, total, args = table_export_rows(request)
+        data = xlsx_export.table_workbook(store, rows, total, filters=filter_lines(args), cap=BULK_MAX,
+                                          hl=searchquery.parse_hl(args.get("hl", "")), drop_empty=True)
+        return xlsx_response(data, f"talent-search-candidates-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+    @app.get("/candidates/export.csv")
+    def candidates_export_csv(request: Request):
+        """The same people in the same order as export.xlsx, as the CSV this app can import again."""
+        rows, _, args = table_export_rows(request)
+        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", ""))),
+                        media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="talent-search-candidates-{datetime.now().strftime("%Y-%m-%d")}.csv"'})
+
+    @app.get("/export.xlsx")
+    def export_xlsx_all():
+        rows, total = _table_build_all()
+        return xlsx_response(xlsx_export.table_workbook(store, rows, total),
+                             f"talent-search-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+    def _table_build_all() -> tuple[list[dict[str, Any]], int]:
+        everyone = [r["id"] for r in store._rows("SELECT id FROM candidates ORDER BY lower(name), id")]
+        rows: list[dict[str, Any]] = []
+        for i in range(0, len(everyone), 5000):
+            rows += people_rows(everyone[i:i + 5000])
+        return rows, len(rows)
+
+    def notes_choice(value: str, legacy: bool = False) -> str:
+        return value if value in xlsx_export.NOTES_MODES else ("all" if legacy else "none")
+
+    def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: str = "none",
+                   note: str = "", error: str = "", hl: str = "", rejected: bool = False) -> HTMLResponse:
+        rows = people_rows(ids)
+        hl_pairs = searchquery.parse_hl(hl)
+        job_id = int(job) if str(job).isdigit() else None
+        try:
+            preview = xlsx_export.share_preview(store, [r["id"] for r in rows], hl=hl_pairs)
+        except Exception:  # the preview is a nicety: the form still works without it
+            preview = {"cols": [], "names": [], "jobs": {}}
+        chosen = None
+        if job_id:
+            try:
+                chosen = store.get_job(job_id)
+            except NotFound:
+                chosen = None
+        return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
+                    count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
+                    notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
+                    rejected=rejected, preview=preview, today=xlsx_export.stamp(),
+                    file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
+                    pv=(preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
+                    or {"names": preview.get("names", []), "count": len(rows), "stage": False})
+
+    @app.get("/candidates/share", response_class=HTMLResponse)
+    def candidates_share(request: Request, ids: str = "", job: str = "", hl: str = "", contact: str = "",
+                         notes: str = "", rejected: str = ""):
+        """The options for the spreadsheet a recruiter forwards to a hiring manager. /candidates/share?ids=1,2,3"""
+        return share_page(request, parse_ids(ids), job=job.strip(), hl=hl, contact=contact == "1",
+                          notes=notes_choice(notes, legacy=notes == "1"), rejected=rejected == "1")
+
+    @app.post("/candidates/share")
+    async def candidates_share_file(request: Request):
+        form = await request.form()
+        ids = parse_ids(str(form.get("ids") or ""))
+        if not ids:
+            return back(request, "/candidates", error="Tick at least one person first.")
+        raw_job = str(form.get("job_id") or "").strip()
+        job_id = int(raw_job) if raw_job.isdigit() else None
+        contact = form.get("include_contact") == "1"
+        notes = notes_choice(str(form.get("notes") or ""), legacy=form.get("include_notes") == "1")
+        note = str(form.get("note") or "")
+        hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("hl") or "")))
+        rejected = form.get("include_rejected") == "1"
+        try:
+            job = store.get_job(job_id) if job_id else None
+        except NotFound:
+            return share_page(request, ids, contact=contact, notes=notes, note=note, hl=hl, rejected=rejected,
+                              error="That job isn't there any more. Pick another or leave it empty.")
+        if job and not note.strip():
+            note = f"Shortlist for {job['title']}"
+        data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
+                                                    note=note, hl=searchquery.parse_hl(hl), include_rejected=rejected)
+        return xlsx_response(data, name)
+
+    @app.get("/candidates/compare", response_class=HTMLResponse)
+    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = "",
+                           about: str = ""):
+        """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
+        hiring manager view: nothing about the recruiter's own work, no app links, only stages still in play, ready
+        to print. about=0 leaves the About row out of it."""
+        hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
+        hl_list = [h for h, _ in hl_pairs]
+        hl_colors = dict(hl_pairs)
+        hm = view == "hm"
+        no_about = hm and about == "0"
+        asked = compare.parse_ids(ids)
+        try:
+            d = compare.build(store, asked)
+        except ValueError as exc:
+            return page(request, "compare.html", d=None, message=str(exc), hl=hl_list, hl_colors=hl_colors,
+                        back_href="/candidates", hm=False, hide_chrome=False)
+        people = d["people"]
+        total = int(of) if of.isdigit() and int(of) > len(people) else d["asked"]
+        ids_now = [p["id"] for p in people]
+
+        def href(path: str, ids_: list[int], **extra: str) -> str:
+            q = [("ids", ",".join(map(str, ids_)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
+            return path + "?" + urlencode(q + list(extra.items()))
+        removes: dict[int, str] = {}
+        if len(people) > compare.MIN_PEOPLE and not hm:
+            for p in people:
+                left = [i for i in ids_now if i != p["id"]]
+                if len(left) > compare.MIN_PEOPLE:  # the next Remove button, or the one before it for the last person
+                    at = ids_now.index(p["id"])
+                    near = ids_now[at + 1] if at + 1 < len(ids_now) else ids_now[at - 1]
+                    frag = f"#rm-{near}"
+                else:
+                    frag = "#compare-region"  # no Remove buttons left: focus the table
+                removes[p["id"]] = href("/candidates/compare", left) + frag
+        hidden = set(d["empty"]) | (set(compare.HM_HIDDEN) if hm else set())
+        if no_about:
+            hidden.add("about")
+        if hm:
+            people = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            d = {**d, "people": people, "glance": d["glance_hm"], "differs": compare.differs(people)}
+            hidden |= set(compare.empty_rows(people))
+        rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
+        share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
+        return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
+                    capped=total > len(people), share_href="/candidates/share?" + urlencode(share_q),
+                    removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
+                    rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
+                    no_about=no_about,
+                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
+                    hm_href=href("/candidates/compare", ids_now, view="hm"),
+                    about_href=href("/candidates/compare", ids_now, view="hm", **({} if no_about else {"about": "0"})),
+                    full_href=href("/candidates/compare", ids_now))
+
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
     def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
         shown = max(50, min(shown, 2000))
@@ -2701,6 +2987,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return Response(reports.pipeline_csv(rep, with_out=out == "1"), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
 
+    @app.get("/clients/{slug}/pipeline.xlsx")
+    def client_xlsx(slug: str, since: str = "", until: str = "", out: str = ""):
+        c = client_or_404(slug)
+        rep, _ = client_report_or_error(c, since, until)
+        head, rows = reports.pipeline_table(rep, with_out=out == "1", typed=True)
+        name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
+        return xlsx_response(xlsx_export.pipeline_workbook(head, rows, client=c["name"]),
+                             f"{name}-pipeline-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
     # ------------------------------------------------------- dashboard acts
     @app.post("/actions/interviews/out")
     async def exit_interviews_form(request: Request):
@@ -3515,7 +3810,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "settings.html", status_code=status_code, s=s or store.settings(), flags=actions.FLAGS,
                     thresholds=actions.THRESHOLDS, saved=saved, errors=errors or {},
                     chase_import=chase.from_import_day(store), sample_people=len(people),
-                    sample_jobs=len(jobs), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
+                    sample_jobs=len(jobs), candidate_count=store.count_candidates(), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
                     new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN)

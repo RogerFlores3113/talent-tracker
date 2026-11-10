@@ -732,3 +732,65 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startTour);
   else startTour();
 })();
+
+// Candidates table, skill highlights: after a pick or a remove the page reloads, so put keyboard focus back on the
+// chip the #fragment names (the same chip, else the highlight bar) and say in words what changed. After a remove
+// from the bar the fragment is #removed-<skill>@<id of the chip to focus>: the next chip, else the one before it,
+// else (nothing left) the table.
+(function () {
+  function say(text) { const s = document.getElementById("hl-status"); if (s) s.textContent = text; return s; }
+  function has(n) {
+    n = Number(n) || 0;
+    return n === 0 ? "Nobody has it." : n === 1 ? "1 person has it." : n.toLocaleString("en-US") + " people have it.";
+  }
+  function start() {
+    const status = document.getElementById("hl-status");
+    if (!status) return;
+    const hash = decodeURIComponent((location.hash || "").slice(1));
+    if (!hash || hash === "hl-bar" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
+    const bar = document.getElementById("hl-bar");
+    const table = document.getElementById("cand-table");
+    const fallback = bar || table || status;
+    let target = null, text = "";
+    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = status; }
+    else if (hash.indexOf("removed-") === 0) {
+      const rest = hash.slice(8), at = rest.lastIndexOf("@");
+      text = "Removed the " + (at < 0 ? rest : rest.slice(0, at)) + " highlight.";
+      target = at < 0 ? null : document.getElementById(rest.slice(at + 1));
+      if (!target) target = table || fallback;
+    }
+    else {
+      target = document.getElementById(hash);
+      const skill = target && target.getAttribute("data-skill");
+      if (skill) {
+        const chips = bar ? Array.prototype.slice.call(bar.querySelectorAll("[data-skill]")) : [];
+        const lit = chips.find(el => el.getAttribute("data-skill") === skill);
+        if (lit) {
+          text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
+          if (chips.length > 1) text += " People with more of your picks come first.";
+          else text += " They are shown first.";
+        }
+        else text = "Removed the " + skill + " highlight.";
+      } else { target = fallback; }
+    }
+    if (!target) target = fallback;
+    if (text) window.setTimeout(() => say(text), 50);  // after load, so the live region speaks it
+    target.focus();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+// Compare, after Remove (x): the page reloads, so put keyboard focus on the Remove button the #fragment names (the
+// next person's), or on the table region when no Remove buttons are left.
+(function () {
+  function start() {
+    const hash = decodeURIComponent((location.hash || "").slice(1));
+    if (!/^(rm-\d+|compare-region)$/.test(hash)) return;
+    const t = document.getElementById(hash) || document.getElementById("compare-region");
+    if (!t) return;
+    try { t.focus({preventScroll: false}); } catch (e) { t.focus(); }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();

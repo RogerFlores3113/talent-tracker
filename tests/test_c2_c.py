@@ -182,9 +182,8 @@ def test_relative_dates_formulas_and_dated_notes(store):
             "Bo,bo@x.com,3/5/2026,liked the role,Dev\n")
     r = _run(store, text)
     assert "Row 2: left Last Spoke blank, 'yesterday' depends on when the sheet was written." in " ".join(r["warnings"])
-    assert any("looks like a spreadsheet formula" in w for w in r["warnings"])
     ana, bo = store.find_duplicate("ana@x.com"), store.find_duplicate("bo@x.com")
-    assert ana["last_contacted_at"] is None and ana["current_title"] is None
+    assert ana["last_contacted_at"] is None and ana["current_title"] == '=HYPERLINK("x")'  # text is kept as written (cycle 13)
     note = [t for t in store.timeline(bo["id"]) if t["kind"] == "note"][0]
     assert note["at"] == bo["last_contacted_at"]
 

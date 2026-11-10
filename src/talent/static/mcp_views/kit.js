@@ -114,6 +114,22 @@ function openLink(url,label){const x=safeUrl(url);if(!x)return Promise.resolve(f
 const openApp=openLink;
 function linkBtn(url,text,aria,cls){return el("button",{class:cls||"link",type:"button","aria-label":aria||null,onclick:()=>openLink(url,text)},text)}
 function appLink(url,label){return url?el("button",{class:"link small",type:"button",onclick:()=>openLink(url,label||"Talent Search")},label||"Open in Talent Search"):null}
+/* Export xlsx for these people (shared by the People table and the Compare view): export_candidates_xlsx makes a file in
+   Downloads (no email, phone or notes) or, when you have to choose, gives the Share page link. Text only, no HTML. */
+function exportIds(ids,btn,out,notLoaded,kind){
+ if(!ids.length){out.textContent="There is nobody to export yet.";return}
+ const sent=ids.slice(0,200);
+ btn.disabled=true;out.textContent="Making the file...";
+ callTool("export_candidates_xlsx",{candidate_ids:sent,for_hiring_manager:true,kind:kind||"shortlist"}).then(r=>{btn.disabled=false;
+  const d=r&&r.structuredContent;
+  if(!d||(r&&r.isError)){out.textContent=said(r)||"Couldn't make the file.";return}
+  const cut=ids.length>sent.length?" The first 200 of "+ids.length+" are in it.":"";
+  const more=notLoaded>0?" ("+notLoaded+" more not loaded; open in Talent Search to export all)":"";
+  const nf=d.not_found&&d.not_found.length?" Not found and left out: "+d.not_found.join(", ")+".":"";
+  if(d.written){const dir=d.path.slice(0,Math.max(0,d.path.length-d.file.length-1));
+   out.replaceChildren("Saved "+d.file+" with "+d.people+(d.people===1?" person":" people")+" in "+dir+". It has no email, phone or notes."+cut+nf+more+" ",appLink(d.share_url,"Open in Talent Search"))}
+  else out.replaceChildren("No file made yet. Pick what goes in on the Share page. ",appLink(d.share_url,"Open the Share page"));
+  announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
 function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const li=/(^|\.)linkedin\.com$/i.test(x.hostname);
  const text=li?"LinkedIn":(fallback||"Profile");
  return linkBtn(x.href,text,who?(li?"LinkedIn profile of "+who:text+" of "+who):null)}
@@ -164,7 +180,8 @@ function onKeys(node,map){node.addEventListener("keydown",e=>{const t=e.target;i
 
 /* ---- people: avatar, links, card */
 const COLORS=["red","orange","yellow","green","blue","purple"];
-function initials(n){const p=String(n||"?").trim().split(/\s+/).filter(Boolean);return((p[0]||"?")[0]+(p.length>1?p[p.length-1][0]:"")).toUpperCase()}
+function initials(n){const p=String(n||"").split(/\s+/).map(w=>w.replace(/[^\p{L}]/gu,"")).filter(Boolean);
+ if(!p.length)return"?";return(Array.from(p[0])[0]+(p.length>1?Array.from(p[p.length-1])[0]:"")).toUpperCase()}
 function colorCls(c){return COLORS.includes(c)?" c-"+c:""}
 function avatar(c,small){return el("span",{class:"avatar"+(small?" sm":"")+colorCls(c&&c.color),"aria-hidden":"true"},initials(c&&c.name))}
 function firstName(n){return String(n||"").trim().split(/\s+/)[0]||"them"}
@@ -279,7 +296,7 @@ function openCard(cls,url,...kids){const m=/\/candidates\/(\d+)/.exec(String(url
 
 function setNotice(t){const n=document.getElementById("notice");if(n)n.textContent=t||""}
 /* ---- refresh and results */
-const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists","list_jobs","list_saved_searches","list_interviews","status_digest","client_report","list_feedback_owed","find_duplicates","list_followups"];
+const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists","compare_candidates","list_jobs","list_saved_searches","list_interviews","status_digest","client_report","list_feedback_owed","find_duplicates","list_followups"];
 function canRefresh(){return canCall()&&TOOL&&ARGS&&READ_TOOLS.includes(TOOL)}
 function refresh(btn){if(btn)btn.disabled=true;announce("Refreshing.");
  callTool(TOOL,ARGS).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}showResult(d,r._meta)})}
@@ -340,7 +357,21 @@ const TCOLS=[
  {k:"contacted",l:"Last contacted",v:p=>p.last_contacted_at,date:1},
  {k:"added",l:"Added",v:p=>p.created_at,date:1,wide:1},
  {k:"updated",l:"Updated",v:p=>p.updated_at,date:1,wide:1},
- {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i},wide:1}];
+ {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i},wide:1},
+ {k:"skills",l:"Skills",nosort:1,v:p=>(p.tags||[]).length}];
+/* skill highlights: a fixed color per pick (first pick red, then yellow, green, blue, purple, orange), kept while it stays picked.
+   People with more picked skills come first; on a tie the earlier pick wins. Nobody is hidden. Same rules as the Candidates page. */
+const HL_PALETTE=["red","yellow","green","blue","purple","orange"];
+function hlList(st){return st.hl||(st.hl=[])}
+function hlToggle(st,skill){const k=String(skill).trim().toLowerCase(),l=hlList(st);const i=l.findIndex(x=>x.skill===k);
+ if(i>=0){l.splice(i,1);return false}
+ if(l.length>=HL_PALETTE.length)return null;
+ l.push({skill:k,color:HL_PALETTE.find(c=>!l.some(x=>x.color===c))});return true}
+function hlFlags(p,l){const have=new Set((p.tags||[]).map(t=>String(t).toLowerCase()));return l.map(h=>have.has(h.skill))}
+function hlOrder(rows,st){const l=hlList(st);if(!l.length)return rows;
+ const idx=new Map(rows.map((p,i)=>[p,i]));const key=new Map(rows.map(p=>{const f=hlFlags(p,l);return[p,[-f.filter(Boolean).length,...f.map(x=>x?0:1)]]}));
+ return rows.slice().sort((a,b)=>{const x=key.get(a),y=key.get(b);for(let i=0;i<x.length;i++)if(x[i]!==y[i])return x[i]-y[i];return idx.get(a)-idx.get(b)})}
+function hlEdge(p,l){const f=hlFlags(p,l);const i=f.indexOf(true);return i<0?null:l[i].color}
 function cmpVals(a,b,date){if(date){a=parseD(a);b=parseD(b);a=a?+a:null;b=b?+b:null}
  if(typeof a==="string")a=a.toLowerCase();if(typeof b==="string")b=b.toLowerCase();
  return a<b?-1:a>b?1:0}
@@ -353,7 +384,7 @@ function sortedRows(rows,st){const idx=new Map(rows.map((p,i)=>[p.id,i]));let ou
   out.sort((x,y)=>{const a=col.v(x),b=col.v(y),ea=a==null||a==="",eb=b==null||b==="";
    if(ea&&eb)return idx.get(x.id)-idx.get(y.id);if(ea)return 1;if(eb)return-1;
    const c=cmpVals(a,b,col.date);return c?c*sign:idx.get(x.id)-idx.get(y.id)})}
- return out}
+ return hlOrder(out,st)}
 function selNames(rows,st){return rows.filter(p=>st.sel.has(p.id))}
 function peopleLabel(ps,noId){return ps.map(p=>noId?p.name:p.name+" (id "+p.id+")").join(", ")}
 function peopleTable(rows,st,h){
@@ -371,11 +402,12 @@ function peopleTable(rows,st,h){
  const stat2=el("span",{class:"small muted",role:"status"});
  let shown=[],last=-1;
  const relBtn=el("button",{class:"btn",type:"button",onclick:()=>{st.sort=null;st.dir="asc";fill();heads();announce("Sorted by relevance, the order the search gave.")}},"Relevance");
- const ths=TCOLS.map(c=>{const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
+ const ths=TCOLS.map(c=>{if(c.nosort)return{c,b:null,th:el("th",{scope:"col",class:"k-"+c.k},c.l)};
+  const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
    if(st.sort===c.k)st.dir=st.dir==="asc"?"desc":"asc";else{st.sort=c.k;st.dir="asc"}
    fill();heads();announce("Sorted by "+colLabel(c)+", "+(st.dir==="asc"?"ascending":"descending"))});
   return{c,b,th:el("th",{scope:"col",class:"k-"+c.k+(c.wide?" wide":"")},b)}});
- function heads(){for(const{c,b,th}of ths){const on=st.sort===c.k;
+ function heads(){for(const{c,b,th}of ths){if(!b)continue;const on=st.sort===c.k;
    th.setAttribute("aria-sort",on?(st.dir==="asc"?"ascending":"descending"):"none");
    b.replaceChildren(colLabel(c),el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
    b.setAttribute("aria-label","Sort by "+colLabel(c)+(on?", sorted "+(st.dir==="asc"?"ascending":"descending"):""))}
@@ -413,27 +445,48 @@ function peopleTable(rows,st,h){
     if(ev.shiftKey&&last>=0){const[a,b]=[Math.min(last,i),Math.max(last,i)];for(let j=a;j<=b;j++)setSel(shown[j],on)}else setSel(p,on);
     last=i;changed()});
    const open=el("button",{class:"link",type:"button","aria-label":"Show card for "+p.name,onclick:()=>h.onOpen(p)},p.name);
-   const j=firstJob(p);
+   const j=firstJob(p);const hl=hlList(st);
+   const mine=(p.tags||[]).map(String);const low=t=>t.toLowerCase();
+   const lit=mine.filter(t=>hl.some(x=>x.skill===low(t))).sort((a,b)=>hl.findIndex(x=>x.skill===low(a))-hl.findIndex(x=>x.skill===low(b)));
+   const rest=mine.filter(t=>!lit.includes(t));const cut=Math.max(4,lit.length);const vis=[...lit,...rest].slice(0,cut);
+   const skillCell=el("td",{class:"k-skills","data-label":mine.length?"Skills":null},mine.length?el("ul",{class:"chips skillchips","aria-label":"Skills of "+p.name},
+    vis.map(t=>{const h=hl.find(x=>x.skill===low(t));
+     return el("li",{},el("button",{type:"button",class:"chip skillbtn"+(h?" hl":""),"data-skill":low(t),"data-hl":h?h.color:null,"aria-pressed":h?"true":"false",
+      title:h?"Remove the highlight":"Highlight this skill and move people who have it to the top",onclick:()=>pickSkill(t,"row")},t))}),
+    mine.length>vis.length?el("li",{class:"small muted"},"+"+(mine.length-vis.length)):null):null);
    const td=(k,label,...kids)=>el("td",{class:"k-"+k+(["added","updated","color"].includes(k)?" wide":""),"data-label":label},...kids);
    const txt=(k,label,v)=>el("td",{class:"k-"+k,"data-label":v?label:null,title:v||null},v||"");
    const mt=el("td",{class:"match k-match","data-label":plainMatch(p)?(h.matchLabel||"Match"):null,title:plainMatch(p)||null},el("div",{class:"clamp"},p.match?marked(p.match):(p.reason||"")));
    const em=el("td",{class:"k-email","data-label":hasEmail(p)?"Email":null},hasEmail(p)?el("span",{class:"chk",title:p.email||"Has an email","aria-label":"Has an email"},"✓"):null,
     p.email?el("a",{class:"addr",href:"mailto:"+p.email,"aria-label":"Email "+p.name},p.email):null);
    const li=el("td",{class:"k-linkedin","data-label":p.linkedin_url?"LinkedIn":null},p.linkedin_url&&safeUrl(p.linkedin_url)?linkBtn(p.linkedin_url,"LinkedIn","LinkedIn profile of "+p.name):null);
-   tbody.append(el("tr",{},el("td",{class:"pickcell"},pick),el("th",{scope:"row",class:"k-name"},open),
+   const edge=hlEdge(p,hl);
+   tbody.append(el("tr",{class:edge?"hlrow":null,"data-edge":edge},el("td",{class:"pickcell"},pick),el("th",{scope:"row",class:"k-name"},open),
     txt("title","Title",p.current_title),txt("company","Company",p.current_company),txt("location","Location",p.location),
     el("td",{class:"k-job","data-label":j?"Job":null,title:(p.jobs||[]).map(x=>x.job||x.job_title).join("; ")||null},jobText(p)),
     el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:"k-stage"+(j&&(j.state==="lost"||j.state==="hired")?" out":"")},j?j.stage:""),
     em,li,mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),
-    el("td",{class:"wide k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
-  if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"14"},"Nobody matches that filter.")));
+    el("td",{class:"wide k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):""),skillCell))});
+  if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"15"},"Nobody matches that filter.")));
   selUI();edges()}
  filter.addEventListener("input",()=>{st.filter=filter.value;fill()});
  emailTog.addEventListener("click",()=>{st.hasEmail=!st.hasEmail;emailTog.setAttribute("aria-pressed",st.hasEmail?"true":"false");fill();announce(st.hasEmail?"Showing only people with an email. "+shown.length+" shown.":"Showing everyone. "+shown.length+" shown.")});
  allBox.addEventListener("click",()=>{for(const p of shown)setSel(p,allBox.checked);changed()});
  const none=el("button",{class:"btn",type:"button",onclick:()=>{st.sel.clear();changed()}},"Select none");
  const all=el("button",{class:"btn",type:"button",onclick:()=>{for(const p of shown)st.sel.add(p.id);changed()}},"Select all shown");
- const hidden=[...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"])];  // no Color column when nobody has one
+ const hlBar=el("div",{class:"hlbar",role:"group","aria-label":"Highlighted skills",hidden:true});
+ function drawBar(){const l=hlList(st);hlBar.hidden=!l.length;hlBar.replaceChildren();if(!l.length)return;
+  hlBar.append(el("strong",{class:"small"},"Highlighted skills:"),...l.map(x=>el("button",{type:"button",class:"chip hl removable","data-hl":x.color,"data-skill":x.skill,"aria-label":"Remove highlight: "+x.skill,title:"Remove this highlight",onclick:()=>pickSkill(x.skill,"bar")},x.skill+" ",el("span",{"aria-hidden":"true"},"×"))),
+   el("button",{type:"button",class:"btn",onclick:()=>{st.hl=[];refresh();announce("Highlights cleared. The usual order is back.");caption.focus()}},"Clear"),
+   el("span",{class:"small muted"},"People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden."))}
+ function refresh(){drawBar();fill()}
+ function pickSkill(t,from){const r=hlToggle(st,t);
+  if(r===null){announce("You can highlight up to "+HL_PALETTE.length+" skills at once. Remove one first.");return}
+  const k=String(t).toLowerCase();refresh();
+  const n=rows.filter(p=>(p.tags||[]).some(x=>String(x).toLowerCase()===k)).length;
+  if(r){announce("Highlighting "+k+" in "+hlList(st).find(x=>x.skill===k).color+". "+n+(n===1?" person has it":" people have it")+", shown first.");const b=hlBar.querySelector('button[data-skill="'+CSS.escape(k)+'"]');if(b)b.focus()}
+  else{announce("Removed the highlight on "+k+".");const nb=hlBar.querySelector("button.removable");(nb||caption).focus()}}
+ const hidden=[...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"]),...(h.skills&&rows.some(p=>(p.tags||[]).length)?[]:["skills"])];  // no Color column when nobody has one
  const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")+hidden.map(k=>" hide-"+k).join("")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
  const tools=el("div",{class:"tbar"},filter,emailTog,relBtn,all,none,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
  const scroller=el("div",{class:"tablewrap",tabindex:"-1"},table);
@@ -443,6 +496,6 @@ function peopleTable(rows,st,h){
   eL.classList.toggle("on",x>2);eR.classList.toggle("on",max>2&&x<max-2);hint.hidden=!(max>2&&x<max-2)}
  scroller.addEventListener("scroll",edges,{passive:true});
  if(window.ResizeObserver)new ResizeObserver(edges).observe(scroller);
- wrap.append(tools,bulk,askRow,stat2,hint,el("div",{class:"tablebox"},scroller,eL,eR));
- heads();fill();
+ wrap.append(tools,bulk,askRow,stat2,hint,hlBar,el("div",{class:"tablebox"},scroller,eL,eR));
+ heads();drawBar();fill();
  return{node:wrap,focusCaption:()=>caption.focus(),scroller,edges}}

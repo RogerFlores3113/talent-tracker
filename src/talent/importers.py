@@ -417,6 +417,33 @@ def tidy_name(name: str | None) -> str:
     return " ".join(_WORD_PART.sub(lambda m: m.group(1) + m.group(2).upper(), w) for w in s.lower().split(" "))
 
 
+# Cells that hold plain words. A value that starts with = + - @ is kept as written here (names like "-Ana" or a
+# title like "=cmd()"); the CSV and xlsx writers guard it on the way out. Dates, emails and links still refuse a formula.
+_TEXT_TARGETS = frozenset({"name", "first_name", "last_name", "current_title", "current_company", "location",
+                           "source", "about", "note", "notes", "tag_column", "job_title", "job_company", "stage"})
+_SKILL_TAIL = {"So", "Sk", "Cf", "Mn", "Me", "Zs"}  # emoji, modifiers, joiners and spaces on the end of a skill
+
+
+def _clean_skills(skills: list[str], col_name: str, warnings: list[str]) -> list[str]:
+    """A skill with emoji or symbols on its end loses them ("python 🚀" is "python"). A skill with no letters at all
+    ("-2+3", "+1+1", "🚀") is left out and said so; so is one that starts with = + - or @ ("@cmd"), which a
+    spreadsheet could run as a formula."""
+    out: list[str] = []
+    for t in skills:
+        c = t
+        while c and (unicodedata.category(c[-1]) in _SKILL_TAIL or c[-1] in "\u200d\ufe0f"):
+            c = c[:-1]
+        c = c.strip()
+        if not any(ch.isalpha() for ch in c):
+            warnings.append(f"left {t[:30]!r} out of {col_name}, a skill needs some letters")
+            continue
+        if c[0] in "=+-@":
+            warnings.append(f"left {t[:30]!r} out of {col_name}, a skill can't start with = + - or @")
+            continue
+        out.append(c)
+    return out
+
+
 def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -> Iterable[dict[str, Any]]:
     """Each row as {"rows": [row number], "data": candidate fields, "notes", "note_at", "jobs", "warnings"}.
 
@@ -447,7 +474,7 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             v = _cell(r[col])
             if not v:
                 continue
-            if raw.startswith("=") and len(raw) > 1:
+            if raw.startswith("=") and len(raw) > 1 and target not in _TEXT_TARGETS:
                 warnings.append(f"left {col_name} blank, {raw[:40]!r} looks like a spreadsheet formula, not a value")
                 continue
             if target == "first_name":
@@ -455,7 +482,7 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
             elif target == "last_name":
                 last = v
             elif target == "tags":
-                data["tags"] = split_tags((data.get("tags") or []) + split_tags(v))  # , ; | (never / as in ci/cd)
+                data["tags"] = split_tags((data.get("tags") or []) + _clean_skills(split_tags(v), col_name, warnings))  # , ; | (never / as in ci/cd)
             elif target == "tag_column":
                 data["tags"] = split_tags((data.get("tags") or []) + [f"{col_name}: {v}"])
             elif target == "color":  # red, orange, yellow, green, blue, purple; anything else is skipped with a note
