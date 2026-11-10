@@ -8,6 +8,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -1269,11 +1270,18 @@ def save_omit(store: Store, job_id: int, names: list[str]) -> list[str]:
     return names
 
 
+# When set, a status text that was given no choice of its own leaves out what the job page leaves out (see
+# page_omit): the internal stages and the ones that ended badly. The in-chat status text turns it on.
+ENDED_LEFT_OUT: ContextVar[bool] = ContextVar("ended_left_out", default=False)
+
+
 def _omitted(store: Store, job_id: int, omit_stages: list[str] | None) -> set[str]:
     """Stage keys to leave out: omit_stages, or the job's remembered choice when None. Names may be partial
     ('rej'); ones the job doesn't have are ignored."""
     out = set()
-    for name in saved_omit(store, job_id) if omit_stages is None else omit_stages:
+    if omit_stages is None:
+        omit_stages = page_omit(store, job_id) if ENDED_LEFT_OUT.get() else saved_omit(store, job_id)
+    for name in omit_stages:
         try:
             out.add(_stage_key(store.resolve_stage(job_id, name)["name"]))
         except ValueError:

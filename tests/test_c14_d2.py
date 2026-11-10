@@ -70,7 +70,7 @@ def test_search_highlight_tiers_and_echoes(store):
     assert names[0] == "Ana Ruiz"  # python and the title: both picks
     assert names.index("Di Eze") < names.index("Cy Dunn") or names.index("Ben Cho") < names.index("Cy Dunn")
     assert d["hl"] == "python:red,title:data engineer:yellow"
-    assert d["highlight"][1] == {"name": "data engineer", "color": "yellow", "kind": "title"}
+    assert d["highlight"][1] == {"name": "data engineer", "color": "yellow", "kind": "title", "label": "title: Data Engineer"}
     assert "hl=python%3Ared" in d["app_url"] and "Highlighted: python (red), title: data engineer (yellow)" in text(res)
     assert "highlight" not in data(call(s, "search_candidates", query=""))  # nothing echoed when nothing is picked
 
@@ -94,7 +94,7 @@ def test_compare_highlight_links_and_order(store):
     d = data(res)
     assert [p["id"] for p in d["people"]] == [di, ana, cy]  # the order given, as the web keeps it
     assert d["hl"] == "python:red" and "view=hm" in d["hm_url"] and "hl=python:red" in d["hm_url"]
-    assert "contact=1" in d["for_me_url"] and "notes=1" in d["for_me_url"]
+    assert "contact=1" in d["for_me_url"] and "notes=latest" in d["for_me_url"]
     # the web page lists the same people in the same order
     c = local_client(store)
     html = c.get(f"/candidates/compare?ids={di},{ana},{cy}&hl=python:red").text
@@ -129,7 +129,7 @@ def test_export_with_only_a_job_exports_that_jobs_people(store, downloads):
     d = data(res)
     assert d["written"] and d["people"] == 2 and Path(d["path"]).exists()
     assert d["path"] in text(res)  # the full path, not only the folder
-    assert "contact=1" in d["for_me_url"] and "notes=1" in d["for_me_url"]
+    assert "contact=1" in d["for_me_url"] and "notes=latest" in d["for_me_url"]
     with pytest.raises((ValueError, ToolError)) as e:
         call(s, "export_candidates_xlsx")
     assert "candidate_ids" in str(e.value) and "job_id" in str(e.value)
@@ -146,15 +146,15 @@ def test_people_view_has_columns_picks_and_exports():
         assert f'{{k:"{k}"' in kit and "opt:1" in kit.split(f'{{k:"{k}"')[1].split("}")[0] + "}"
     assert '"Columns"' in kit and "st.cols" in kit
     # screen reader names
-    assert '", highlighted "+h.color+", pick "+(i+1)+" (remove)"' in kit
-    assert '"Remove highlight: "+hlText(x)+" ("+x.color+")"' in kit
-    assert '"title: "+titleCase(' in kit and "Top match: " in kit and "in the top tier" in kit
+    assert '", highlighted "+h.color+", pick "+(i+1)+(as?", counts as "+as:"")+" (remove)"' in kit
+    assert '"Remove highlight: "+hlText(x)+" ("+x.color+", pick "+(i+1)+")"' in kit
+    assert '"title: "+displayWords(' in kit and "Top match: " in kit and "in the top tier" in kit
     # no forced fullscreen; chips in cards; picks kept in the tool arguments
     people = (VIEWS / "people.js").read_text()
     assert 'setMode("fullscreen")' not in people
     assert "onSkill:cardPick" in people and "ARGS=a" in people and "a.highlight=h" in people
     assert "Export for hiring manager" in people and "Export for me" in people
-    assert "contact=1&notes=1" in people
+    assert "contact=1&notes=latest" in people
     assert "position:sticky" in view_html("people").split(".hlbar{")[1].split("}")[0]
     assert "innerHTML" not in kit and "innerHTML" not in people
     assert "tr.sel>th[scope=row]" in html

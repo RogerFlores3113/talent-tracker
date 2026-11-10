@@ -205,7 +205,7 @@ def test_read_only_refusal_for_the_export_carries_the_share_link(store, download
     with pytest.raises(ToolError) as e:
         call(s, "export_candidates_xlsx", candidate_ids=[a], include_notes=True)
     msg = str(e.value)
-    assert "read only" in msg and f"/candidates/share?ids={a}" in msg and "notes=1" in msg
+    assert "read only" in msg and f"/candidates/share?ids={a}" in msg and "notes=latest" in msg
     with pytest.raises(ToolError) as e2:  # every other write keeps the plain refusal
         call(s, "save_candidate", name="Zed")
     assert "Share page" not in str(e2.value)

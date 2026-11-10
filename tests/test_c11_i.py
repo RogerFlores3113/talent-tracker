@@ -101,11 +101,11 @@ def test_find_duplicates_gives_each_person_enough_for_a_card(store):
     b = store.add_candidate(name="Dana Cho", email="d.cho@home.com", current_company="Acme")["id"]
     res = call(build_server(store), "find_duplicates")
     d = data(res)
-    pair = d["pairs"][0]
-    assert pair["reasons"] and pair["compare_and_merge_url"].endswith(f"/merge/{pair['people'][1]['id']}")
-    person = next(p for p in pair["people"] if p["id"] == a)
-    assert person["source"] == "LinkedIn" and person["created_at"] and person["app_url"].endswith(f"/candidates/{a}")
-    assert b in {p["id"] for p in pair["people"]} and d["app_url"].endswith("/candidates/duplicates")
+    group = d["groups"][0]
+    assert group["reasons"] and group["title"] == "Dana Cho, 2 profiles" and "/merge/" in group["compare_and_merge_url"]
+    person = next(p for p in group["people"] if p["id"] == a)
+    assert person["created_at"] and person["app_url"].endswith(f"/candidates/{a}") and person["current_title"] == "Engineer"
+    assert b in {p["id"] for p in group["people"]} and d["app_url"].endswith("/candidates/duplicates")
 
 
 def test_a_wrong_interview_id_says_how_to_find_the_right_one(store):
@@ -134,6 +134,6 @@ def test_the_views_use_real_controls_and_ask_claude_instead_of_writing():
     owed = view_html("owed")
     assert "Copy nudge" in owed and "Log feedback" in owed and "Mark chased" in owed and "could you add your feedback on" in owed
     dup = view_html("duplicates")
-    assert "Compare and merge in Talent Search" in dup and "Not the same person" in dup
+    assert "Compare and merge in Talent Search" in dup and "Not the same people" in dup
     for h in (js, owed, dup):
         assert 'callTool("add_' not in h and 'callTool("update_' not in h  # views never write directly

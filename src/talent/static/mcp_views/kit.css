@@ -143,3 +143,13 @@ button.chip:hover{border-color:var(--accent)}
 .chip[data-hl=blue]{--bub:#2563c9;--bub-ink:#fff}.chip[data-hl=purple]{--bub:#7b3fc4;--bub-ink:#fff}.chip[data-hl=orange]{--bub:#f59a23;--bub-ink:#1a1a1a}
 .chip.hl.removable{cursor:pointer}
 @media (forced-colors:active){.chip.hl{border:2px solid Highlight}}
+
+/* cycle 14 F2: the person's own summary (two lines, then More), a lit skill word in a Match takes its pick's color */
+.summarybox{margin:8px 0 0}
+.summary{margin:0;white-space:pre-line;overflow-wrap:anywhere}
+.summary.clamp2{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.summarybox button.link{margin-top:2px}
+.pcard .sub button.titlebtn{font:inherit;font-size:inherit}
+mark[data-hl]{background:var(--bub);color:var(--bub-ink);padding:0 2px}
+mark[data-hl=red]{--bub:#c62828;--bub-ink:#fff}mark[data-hl=yellow]{--bub:#f6d53d;--bub-ink:#1a1a1a}mark[data-hl=green]{--bub:#1f7a3d;--bub-ink:#fff}
+mark[data-hl=blue]{--bub:#2563c9;--bub-ink:#fff}mark[data-hl=purple]{--bub:#7b3fc4;--bub-ink:#fff}mark[data-hl=orange]{--bub:#f59a23;--bub-ink:#1a1a1a}

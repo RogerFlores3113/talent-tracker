@@ -1,5 +1,6 @@
 """Cycle 14 D2 in a real browser (the view host). Skipped without Playwright."""
 import json
+import re
 import os
 import socket
 import subprocess
@@ -72,8 +73,8 @@ def test_e2e_opens_tiered_table_with_names_and_no_fullscreen(browser, host):
     fr.get_by_role("button", name="Show as table").click()
     fr.locator("table.ptable").wait_for()
     assert page.locator("#chat.full").count() == 0  # Show as table does not force full screen
-    assert fr.locator('.hlbar button[aria-label="Remove highlight: python (red)"]').count() == 1
-    assert fr.locator('.hlbar button[aria-label="Remove highlight: title: Data Engineer (yellow)"]').count() == 1
+    assert fr.locator('.hlbar button[aria-label="Remove highlight: python (red, pick 1)"]').count() == 1
+    assert fr.locator('.hlbar button[aria-label="Remove highlight: title: Data Engineer (yellow, pick 2)"]').count() == 1
     chip = fr.locator('tbody button.skillbtn[data-skill="python"]').first
     assert chip.get_attribute("aria-label") == "python, highlighted red, pick 1 (remove)"
     heads = [h.strip() for h in fr.locator("table.ptable thead th:visible").all_inner_texts()]
@@ -122,7 +123,7 @@ def test_e2e_export_status_does_not_move_the_table(browser, host):
     fr.locator("table.ptable").wait_for()
     top = fr.locator("table.ptable").evaluate("e => e.getBoundingClientRect().top")
     assert fr.get_by_role("button", name="Export for me").count() == 1
-    fr.get_by_role("button", name="Export for hiring manager").click()
+    fr.get_by_role("button", name=re.compile(r"Export .*for hiring manager")).click()
     page.wait_for_timeout(1500)
     assert fr.locator(".xlstatus code.path").count() == 1  # the full path is shown
     assert abs(fr.locator("table.ptable").evaluate("e => e.getBoundingClientRect().top") - top) < 3

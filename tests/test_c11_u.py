@@ -118,7 +118,8 @@ def test_pipeline_cards_carry_verdicts_owed_and_next_interview(store):
     assert "verdicts" not in cards["Zed Poe"] and "feedback_owed" not in cards["Zed Poe"]
     # the header line the view shows is the text's own count line, and the stage counts match the board
     t = text(res)
-    assert d["headline"] in t
+    assert "2 candidates in process, none hired yet." in t  # the pasted text keeps its own count line
+    assert d["headline"].startswith("3 in the pipeline. 2 count in the status update (Sourced is left out).")
     for st in d["stages"]:
         assert len(st["candidates"]) == sum(1 for c in cards.values() if c in st["candidates"])
     # the verdicts and what is owed are in the text too, for the recruiter only, never in the pasted update

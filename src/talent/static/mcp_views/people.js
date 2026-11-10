@@ -41,13 +41,31 @@ function reorder(){const keep=S.people[S.idx];S.people=hlOrder(S.base,S);const i
 /* the picks go into the tool's arguments, so Refresh and Back to the list open with them again */
 function syncArgs(){if(!ARGS)return;const a=Object.assign({},ARGS);for(const k of["highlight","highlight_skills","highlights","highlighted","hl"])delete a[k];
  const h=hlArgs(S);if(h.length)a.highlight=h;ARGS=a}
-function onPicked(){reorder();syncArgs();tellState()}
+function onPicked(){reorder();syncArgs();tellState();reloadForPicks()}
+/* The server puts the people with the most picks first across the WHOLE result. When only part of it is loaded and the
+   picks change, ask again so the loaded people (and Load next) follow the new order, and the tier counts are the server's. */
+let reloadTimer=null,reloadSeq=0;
+function keepFocus(fn){const a=document.activeElement;let sel=null;
+ if(a&&a.matches&&a.matches(".hlbar button[data-skill]"))sel='.hlbar button[data-skill="'+CSS.escape(a.dataset.skill)+'"]';else if(a&&a.matches&&a.matches("h2.name"))sel="h2.name";
+ fn();if(sel){const n=document.querySelector(sel);if(n)n.focus({preventScroll:true})}}
+function whichTool(a){return TOOL||(a&&a.name_or_id!=null?"run_saved_search":"search_candidates")}
+function reloadForPicks(){clearTimeout(reloadTimer);if(!canCall()||!ARGS||S.total<=S.base.length||!S.d||!Array.isArray(S.d.results))return;
+ const seq=++reloadSeq;
+ reloadTimer=setTimeout(()=>{const n=Math.min(100,Math.max(50,S.base.length));
+  callTool(whichTool(ARGS),Object.assign({},ARGS,{limit:n,offset:0})).then(r=>{const d=r&&r.structuredContent;
+   if(seq!==reloadSeq||(r&&r.isError)||!d||!Array.isArray(d.results))return;
+   S.base.splice(0,S.base.length,...d.results);S.total=d.total!=null?d.total:S.total;
+   S.tiers=Array.isArray(d.pick_tiers)?d.pick_tiers:null;S.tiersFor=S.tiers?hlArgs(S).join("|"):null;
+   keepFocus(()=>{reorder();if(S.mode==="table"&&SHOWN)SHOWN.redraw();else draw(false)})})},300)}
+/* Refresh asks for as many people as are loaded (up to 100), so ticks on later rows survive it */
+window.refreshArgs=a=>{if(!a||a.candidate_ids||!S.d||!Array.isArray(S.d.results)||!/^(search_candidates|run_saved_search)$/.test(whichTool(a)))return a;
+ const asked=Number(a.limit)||10,lim=Math.min(100,Math.max(S.base.length,asked));return lim>asked?Object.assign({},a,{limit:lim}):a};
 function leadLines(d){
  const out=[];const exact=d.exact_total!=null?d.exact_total:d.total;
  if(d.corrected&&d.suggestion)out.push(el("p",{class:"small"},"Showing results for ",el("b",{},d.suggestion)));
  if(d.no_one_named)out.push(el("div",{class:"card small"},"No one named ",el("b",{},d.no_one_named)," is saved."+(d.results.length?" These people share some of the words, under other names.":"")));
  const head=d.closest?"No exact matches. Closest matches:":d.exact?"Exact match":exact+(exact===1?" match":" matches");
- out.push(el("p",{class:"small muted",style:"margin:0 0 6px"},head));
+ out.push(el("p",{class:"small muted",style:"margin:0 0 6px"},head+(d.limit_capped?" Showing "+(d.page_size||100)+" at a time.":"")));
  return out}
 function countLine(){const n=S.people.length,t=Math.max(S.total,n);return t>n?n+" of "+t+" people":(t===1?"1 person":t+" people")}
 function active(){return S.people[S.idx]}
@@ -74,12 +92,13 @@ function distinct(p){const same=S.people.filter(x=>x.name===p.name).length>1;if(
  const extra=role(p.current_title,p.current_company)||p.email||("id "+p.id);return p.name+" ("+extra+")"}
 
 /* card mode */
+function viewTitle(){const d=S.d||{};return d.saved_search?"Saved search: "+d.saved_search:d.query?"Search: "+d.query:"Candidates"}
 function cardMode(d){
  const wrap=el("div",{});
- wrap.append(header({title:S.d.query?"Search: "+S.d.query:"Candidates",count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:S.people.length>0}));
+ wrap.append(header({title:viewTitle(),count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search",fullscreen:S.people.length>0}));
  for(const n of leadLines(d))wrap.append(n);
  if(!S.people.length){wrap.append(emptyState("No saved candidates match. Try fewer or different words."));return wrap}
- const pickBar=hlBarNode(S,(n,ti,from)=>cardPick(n,ti,from),()=>{S.hl=[];onPicked();draw(false);announce("Highlights cleared. The usual order is back.");const h2=document.querySelector("h2.name");if(h2)h2.focus({preventScroll:true})});
+ const pickBar=hlBarNode(S,(n,ti,from)=>cardPick(n,ti,from),()=>{S.hl=[];onPicked();draw(false);announce("Highlights cleared. The usual order is back.");const h2=document.querySelector("h2.name");if(h2)h2.focus({preventScroll:true})},()=>S.base);
  pickBar.draw();wrap.append(pickBar.node);
  const cardPick=(name,isTitle,from)=>{const r=hlApply(S,name,isTitle,S.people);announce(r.text);if(!r.ok)return;onPicked();draw(false);
   const k=hlKey(name,isTitle);const root=document.getElementById("main");
@@ -129,10 +148,10 @@ function cardMode(d){
 /* table mode */
 function tableMode(d){
  const wrap=el("div",{});
- wrap.append(header({title:S.d.query?"Search: "+S.d.query:"Candidates",count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search"}));
+ wrap.append(header({title:viewTitle(),count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search"}));
  for(const n of leadLines(d))wrap.append(n);
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
- const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},"Export for hiring manager");XL=xl;
+ const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},"Export for hiring manager");XL=xl;XL.dataset.x="1";
  const forMe=el("button",{class:"btn",type:"button",title:"Opens the Share page with email, phone and notes ticked, for your own copy",onclick:()=>exportForMe()},"Export for me");
  const xlOut=el("div",{class:"xlstatus small",role:"status","aria-live":"polite"});
  const who=el("span",{class:"small muted xlwho"});XLWHO=who;
@@ -150,12 +169,16 @@ function tableMode(d){
 let XL=null,XLWHO=null;
 function xlWho(){const ticked=SHOWN&&S.mode==="table"?SHOWN.chosen():S.people.filter(p=>S.sel.has(p.id));
  return ticked.length?{people:ticked,label:ticked.length+" ticked"}:{people:(SHOWN&&S.mode==="table"?SHOWN.shown():S.people).slice(),label:"all "+S.people.length+" shown"}}
-function refreshXl(){const w=xlWho();if(XL&&XL.isConnected)XL.setAttribute("aria-label","Export "+w.label+" for hiring manager. The file has no email, phone or notes.");
+function refreshXl(){const w=xlWho();
+ if(XL){const part=!S.sel.size&&S.total>S.people.length;  // not everyone is loaded: say what the file will hold
+  XL.textContent=S.sel.size?"Export "+S.sel.size+" ticked for hiring manager":part?"Export "+S.people.length+" loaded of "+S.total+" for hiring manager":"Export for hiring manager";
+  XL.setAttribute("aria-label",XL.textContent+". The file has no email, phone or notes.");
+  XL.title=part?"Only the "+S.people.length+" people loaded are in the file. Use Load all and export for more, up to 200.":""}
  if(XLWHO&&XLWHO.isConnected)XLWHO.textContent=w.label.charAt(0).toUpperCase()+w.label.slice(1)}
 function exportXlsx(btn,out){
  const w=xlWho();const notLoaded=S.sel.size?0:Math.max(0,S.total-S.people.length);
  exportIds(w.people.map(p=>p.id),btn,out,notLoaded,"list")}
-function exportForMe(){const w=xlWho();const url=S.origin?S.origin+"/candidates/share?ids="+w.people.slice(0,200).map(p=>p.id).join(",")+"&contact=1&notes=1"+hlQuery():"";
+function exportForMe(){const w=xlWho();const url=S.origin?S.origin+"/candidates/share?ids="+w.people.slice(0,200).map(p=>p.id).join(",")+"&contact=1&notes=latest"+hlQuery():"";
  if(!url||!w.people.length)return;announce("Opening the Share page for "+w.people.length+(w.people.length===1?" person":" people")+", with email, phone and notes ticked.");openLink(url,"the Share page")}
 function hlQuery(){const h=hlList(S).map(x=>x.skill+":"+x.color).join(",");return h?"&hl="+encodeURIComponent(h):""}
 /* Load the rest of the found people (up to the 200 a file can hold), then make the same plain list file. */
@@ -195,17 +218,23 @@ function showCompare(ids,btn){
 function shareBtn(chosen){const url=S.origin?S.origin+"/candidates/share?ids="+chosen.slice(0,200).map(p=>p.id).join(",")+hlQuery():"";
  if(!url||!chosen.length)return null;
  return el("button",{class:"btn",type:"button",onclick:()=>{announce("Opening the Share page for "+chosen.length+(chosen.length===1?" person":" people")+".");openLink(url,"the Share page")}},"Share as xlsx")}
-function compareBtn(chosen){const n=chosen.length;const share=shareBtn(chosen);if(n<2)return share?[share]:[];
- if(n>6)return[el("button",{class:"btn",type:"button",disabled:"true"},"Compare "+n),share,el("span",{class:"small muted"},"Compare takes 2 to 6 people. Select fewer.")].filter(Boolean);
+function compareBtn(chosen){const n=chosen.length;const share=shareBtn(chosen);
+ if(n<2||n>6)return[el("button",{class:"btn",type:"button",disabled:"true","aria-disabled":"true",title:"Compare takes 2 to 6"},"Compare "+n),share,el("span",{class:"small muted"},"Compare takes 2 to 6"+(n>6?": select fewer.":": select one more."))].filter(Boolean);
  return[el("button",{class:"btn",type:"button",onclick:ev=>showCompare(chosen.map(p=>p.id),ev.currentTarget)},"Compare "+n),share].filter(Boolean)}
 
 function render(c){
  if(Array.isArray(c.at_a_glance))return renderCompare(c);  // a Refresh of the compare view shown inside this one
  if(Array.isArray(c.results)){
-  S.d=c;S.base=c.results.slice();S.total=c.total!=null?c.total:S.base.length;S.idx=0;S.mode="card";S.sort=null;S.dir="asc";S.filter="";S.hasEmail=false;hlSeed(S,c);S.fromTable=false;S.origin=appOrigin(c.app_url);
-  S.people=hlOrder(S.base,S);syncArgs();
+  const keep=REFRESHING&&S.d&&Array.isArray(S.d.results);  // a Refresh keeps table mode, sort, filter, ticks and picks
+  const was={mode:S.mode,sort:S.sort,dir:S.dir,filter:S.filter,hasEmail:S.hasEmail,idx:S.idx,fromTable:S.fromTable};
+  S.d=c;S.base=c.results.slice();S.total=c.total!=null?c.total:S.base.length;S.idx=0;S.mode="card";S.sort=null;S.dir="asc";S.filter="";S.hasEmail=false;
+  if(keep)Object.assign(S,was);
+  hlSeed(S,c);
+  S.fromTable=keep?was.fromTable:false;S.origin=appOrigin(c.app_url);
+  S.people=hlOrder(S.base,S);S.idx=Math.min(S.idx,Math.max(0,S.people.length-1));syncArgs();
   const ids=new Set(S.people.map(p=>p.id));for(const i of Array.from(S.sel))if(!ids.has(i))S.sel.delete(i);
-  const m=cardMode(c);fetchCards(S.people.slice(0,3).map(p=>p.id));return m}
+  fetchCards(S.people.slice(0,3).map(p=>p.id));
+  return keep&&S.mode==="table"?tableMode(c):cardMode(c)}
  if(!c.name&&!c.candidate&&(c.conflict||c.needs_confirmation))return notSaved(c);
  if(!c.name&&c.candidate)c=Object.assign({},c.candidate,{saved_status:c.saved_status,app_url:c.app_url||c.candidate.app_url});
  if(!c.name)return emptyState("Nothing to show.");

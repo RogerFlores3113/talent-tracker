@@ -16,6 +16,7 @@ Rules the tools enforce (from the product decisions):
 from __future__ import annotations
 
 import difflib
+import functools
 import json
 import re
 import secrets
@@ -702,8 +703,77 @@ def _share_page_url(ids: list[int], job_id: Any = None, contact: bool = False, n
                     hl: str = "") -> str:
     """The Share page in the app for these people, with what was asked for already filled in."""
     query = {"ids": ",".join(map(str, ids)), **({"job": job_id} if job_id else {}),
-             **({"contact": 1} if contact else {}), **({"notes": 1} if notes else {}), **({"hl": hl} if hl else {})}
+             **({"contact": 1} if contact else {}), **({"notes": "latest"} if notes else {}), **({"hl": hl} if hl else {})}
     return app_url("/candidates/share?" + urlencode(query))
+
+
+PAGE_MAX = 100  # people per search page
+TIER_CAP = 20000  # the most people sorted by picks in one search
+
+
+def _ended_out(fn: Any) -> Any:
+    """The status text a tool writes leaves out the stages the job page leaves out when nobody chose otherwise:
+    internal stages and the ones that ended badly (Rejected, Withdrawn), so a pasted update never names them."""
+    @functools.wraps(fn)
+    def inner(*a: Any, **k: Any) -> Any:
+        token = actions.ENDED_LEFT_OUT.set(True)
+        try:
+            return fn(*a, **k)
+        finally:
+            actions.ENDED_LEFT_OUT.reset(token)
+    return inner
+
+
+def _pipeline_headline(shown: dict[str, Any], nums: dict[str, Any], by_stage: list[dict[str, Any]],
+                       left_out: list[str], status: str) -> str:
+    """The job's one-line summary. When the status update leaves stages out, say both numbers plainly:
+    "149 in the pipeline. 1 counts in the status update (Sourced and Contacted are left out). ..."."""
+    line = actions.headline(shown, status)
+    if shown["active"] == nums["active"]:
+        return line
+    named = [s["name"] for s in by_stage if s["name"] in left_out and s["candidates"]] or list(left_out)
+    who = (" and ".join(named) if len(named) < 3 else ", ".join(named[:-1]) + " and " + named[-1])
+    rest = re.sub(r"^(\d+ candidates? in process|No one in process),? ?", "", line)
+    return (f"{nums['active']} in the pipeline. {shown['active']} count{'s' if shown['active'] == 1 else ''} in the "
+            f"status update ({who} {'is' if len(named) == 1 else 'are'} left out)." + (f" {rest[:1].upper()}{rest[1:]}" if rest else ""))
+
+
+def _tier_words(tiers: list[dict[str, int]], n: int) -> str:
+    """'12 have both, 40 have one, 300 have none': how many people sit in each group of highlighted picks."""
+    out = []
+    for t in tiers:
+        k, c = t["matched"], t["count"]
+        what = ("none" if k == 0 else "one" if k == 1 else "both" if n == 2 and k == 2
+                else f"all {n}" if k == n else f"{k} of them")
+        out.append(f"{c} {'has' if c == 1 else 'have'} {what}")
+    return ", ".join(out)
+
+
+_MARK = re.compile(r"\*\*([^*]+?)\*\*([.\-_/])\*\*([^*]+?)\*\*")
+_ATTACHED = re.compile(r"\w[.\-_/]$")
+
+
+def _tidy_marks(text: str | None) -> str | None:
+    """A search excerpt with the **marks** tidied: "react" and "js" next to each other count as one word
+    ("react.js"), and a mark glued to the end of another word ("Node.js", "express-js") is not lit for a query
+    about a different word. If that would leave nothing lit, the excerpt stays as it was."""
+    if not text or "**" not in text:
+        return text
+    merged = text
+    while True:
+        nxt = _MARK.sub(lambda m: "**" + m.group(1) + m.group(2) + m.group(3) + "**", merged)
+        if nxt == merged:
+            break
+        merged = nxt
+    parts = merged.split("**")  # odd parts are lit
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 and i > 0 and _ATTACHED.search("".join(parts[:i]).replace("**", "")[-2:]) and not parts[i - 1].endswith(" "):
+            out.append(part)
+        else:
+            out.append(("**" + part + "**") if i % 2 else part)
+    tidy = "".join(out)
+    return tidy if "**" in tidy else merged
 
 
 def _highlight_picks(highlight: Any, aliases: dict[str, str] | None = None) -> list[dict[str, str]]:
@@ -723,7 +793,7 @@ def _highlight_picks(highlight: Any, aliases: dict[str, str] | None = None) -> l
     for name, color in pickmod.canon_pairs(searchquery.parse_hl(",".join(parts)), aliases):  # merged skills count as one
         title = name.startswith("title:")
         out.append({"name": name[len("title:"):].strip() if title else name, "color": color,
-                    "kind": "title" if title else "skill"})
+                    "kind": "title" if title else "skill", "label": pickmod.label(name)})
     return [p for p in out if p["name"]]
 
 
@@ -1135,13 +1205,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         contacted is "never", "older" (last contact more than contacted_days ago) or "within" (in the last
         contacted_days); added_days is saved in the last N days; has_email / has_linkedin are true to require one.
         With no query this lists them, most recently updated first.
-        limit is at most 50; offset skips that many (offset 50 with limit 50 is the next page).
+        limit is at most 100 (more is shown 100 at a time); offset skips that many (offset 100 with limit 100 is the next page).
         highlight is a list of skills to light up in the view, in the order the recruiter cares about them (a job
-        title is "title:Data Engineer"). People with more of them come first, each pick has its own color, and
-        nobody is left out. It sorts and colors; it never filters.
+        title is "title:Data Engineer"). People with more of them come first across the whole result, not only the page
+        you load, each pick has its own color, and nobody is left out. It sorts and colors; it never filters.
         """
         q = (query or "").strip()
-        limit = max(1, min(limit, 50))
+        asked = limit
+        limit = max(1, min(limit, PAGE_MAX))
         offset = max(0, int(offset or 0))
         picks = _highlight_picks(highlight, store.skill_alias_map())
         member = {"job_id": job_id, "client": client, "stage": stage}
@@ -1156,18 +1227,57 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                contacted_days=contacted_days, added_days=added_days, has_email=has_email,
                                has_linkedin=has_linkedin)
         return _search_reply(q, {"location": location, "title": title, "tag": tag, "source": source,
-                                 **member, **more}, limit, offset=offset, picks=picks)
+                                 **member, **more}, limit, offset=offset, picks=picks, asked=asked)
+
+    def _everyone(q: str, kw: dict[str, Any], first: Any) -> Any:
+        """The whole result set (not only a page), so picks can decide who comes first. The first page is kept
+        when it already holds everyone."""
+        total = first.total
+        if total <= len(first.hits):
+            return first
+        cap = min(total, TIER_CAP)
+        if search.engine == "typesense":  # its pages hold at most 250
+            hits: list[Any] = []
+            res = first
+            for start in range(0, cap, 250):
+                res = search.search(q, limit=250, offset=start, **kw)
+                hits += res.hits
+                if not res.hits:
+                    break
+            res.hits = hits
+            return res
+        return search.search(q, limit=cap, offset=0, **kw)
 
     def _search_reply(q: str, kw: dict[str, Any], limit: int, heading: str | None = None,
                       app_path: str | None = None, offset: int = 0,
-                      picks: list[dict[str, str]] | None = None) -> CallToolResult:
+                      picks: list[dict[str, str]] | None = None, asked: int | None = None,
+                      saved_name: str | None = None) -> CallToolResult:
         """The reply search_candidates and run_saved_search share: the people found, as text and structured."""
         is_id, _ = store.lookup_exact(q)
         res = (store.search_candidates(q, limit=limit) if is_id
                else search.search(q, limit=limit, offset=offset, **kw))
+        aliases = store.skill_alias_map()
+        tiers: list[dict[str, int]] = []
+        page_hits = res.hits
+        if picks and not is_id and res.hits:
+            # Picks decide who loads: sort the whole result set (most picks first, then the earlier pick wins, the
+            # search order inside a tier), count the tiers, and only then cut the page.
+            res = _everyone(q, kw, res) if (offset or res.total > len(res.hits)) else res
+            keys = [("title:" + p["name"]) if p["kind"] == "title" else p["name"] for p in picks]
+
+            def tier_of(h: Any) -> tuple[int, ...]:
+                flags = pickmod.person_hits(h.candidate.get("tags") or [], h.candidate.get("current_title"),
+                                            keys, aliases)
+                return (-sum(flags), *(not f for f in flags))
+            ranked = sorted(((tier_of(h), h) for h in res.hits), key=lambda x: x[0])
+            counts: dict[int, int] = {}
+            for t, _h in ranked:
+                counts[-t[0]] = counts.get(-t[0], 0) + 1
+            tiers = [{"matched": k, "count": counts[k]} for k in sorted(counts, reverse=True)]
+            page_hits = [h for _t, h in ranked][offset:offset + limit]
         results = []
         ranks: dict[int, list[dict[str, Any]]] = {}
-        for h in res.hits:
+        for h in page_hits:
             c = {k: h.candidate.get(k) for k in ("id", "name", "current_title", "current_company", "location",
                                                  "tags", "email", "linkedin_url", "website", "source",
                                                  "last_contacted_at", "updated_at", "created_at", "color")}
@@ -1182,19 +1292,13 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 c["stage_rank"] = c["jobs"][0]["stage_rank"]
             c["has_email"] = bool(c.get("email"))
             if h.snippet:
-                c["match"] = snippet_text(h.snippet)
+                c["match"] = _tidy_marks(snippet_text(h.snippet))
             if h.reason:
                 c["reason"] = h.reason
             if h.closest:
                 c["closest"] = True
             c["app_url"] = app_url(f"/candidates/{c['id']}")
             results.append(_slim(c))
-        aliases = store.skill_alias_map()
-        if picks:  # most picks first, then the earlier pick wins; the order we had holds inside each group (stable)
-            def tier(c: dict[str, Any]) -> tuple[int, ...]:
-                flags = _person_picks(c, picks, aliases)
-                return (-sum(flags), *(not f for f in flags))
-            results = sorted(results, key=tier)
         what = "email" if "@" in q else "LinkedIn URL"
         named = not is_id and looks_like_name(q)  # a name: say plainly who isn't saved, never "1 match" for Maya
         if named:
@@ -1260,7 +1364,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             lines.append(f"Did you mean {res.suggestion}?")
         lines.extend(f"Note: {n}" for n in res.notes)
         if picks and results:
-            lines.append(f"Highlighted: {_pick_words(picks)}. People with more of these come first; nobody is left out.")
+            lines.append(f"Highlighted: {_pick_words(picks)}. People with more of these come first, across all "
+                         f"{listed_total}, not only the ones shown; nobody is left out."
+                         + (f" {_tier_words(tiers, len(picks))}." if tiers else ""))
+        if asked is not None and asked > PAGE_MAX and results:
+            lines.append(f"You asked for {asked}; this shows {PAGE_MAX} at a time. Ask for the next {PAGE_MAX} "
+                         f"(offset {offset + shown_n}).")
         if heading:
             lines.insert(0, heading)
         hl_data = ({"hl": _hl_string(picks), "highlight": picks} if picks else {}) | (
@@ -1270,7 +1379,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if page_path.startswith("/?q="):
                 page_path = "/candidates?q=" + page_path[len("/?q="):]
             page_path += ("&" if "?" in page_path else "?") + urlencode({"hl": _hl_string(picks)})
-        return _result("\n".join(lines), {**hl_data, 
+        return _result("\n".join(lines), {**hl_data, **({"pick_tiers": tiers} if tiers else {}),
+            **({"limit_capped": True, "page_size": PAGE_MAX} if asked is not None and asked > PAGE_MAX else {}),
+            **({"saved_search": saved_name} if saved_name else {}),
             "total": res.total, "exact_total": exact_total, "results": untag(results), "closest": res.closest,
             "exact": res.exact, "understood": getattr(res, "understood", None),
             **({"message": res.message} if getattr(res, "message", None) else {}),
@@ -1333,14 +1444,16 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         `id` work too) and show the
         people who match now, like search_candidates. Running it does not mark it as looked at in the app.
         highlight works as it does for search_candidates."""
-        limit = max(1, min(limit, 50))
+        asked = limit
+        limit = max(1, min(limit, PAGE_MAX))
         offset = max(0, int(offset or 0))
         # text is looked up as a name first (even a number like "2"), then as an id; a JSON number is an id
         row = store.get_saved_search(name_or_id if isinstance(name_or_id, int) else str(name_or_id))
         q, kw = store._saved_kwargs(row)
         return _search_reply(q, kw, limit, heading=f"Saved search {quoted(row['name'])} "
                              f"({searchquery.describe(row['params'])}):", app_path=f"/saved-searches/{row['id']}", offset=offset,
-                             picks=_highlight_picks(highlight, store.skill_alias_map()))
+                             picks=_highlight_picks(highlight, store.skill_alias_map()), asked=asked,
+                             saved_name=row["name"])
 
     @mcp.tool(annotations=WRITE)
     def save_search(name: str, query: str = "", location: str | None = None, title: str | None = None,
@@ -1438,34 +1551,42 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ, meta=tool_meta("duplicates"))
     def find_duplicates(limit: int = 20) -> CallToolResult:
-        """People who may be saved twice, across the whole database: the same email, LinkedIn, name and phone,
-        name and company, or a similar name at the same company. Strongest matches first, each with the reason and
-        a link to the page where the recruiter compares and merges them. Pairs the recruiter already said are
-        different people are left out. Tell the recruiter what you found; there is no tool to merge or delete:
-        only the recruiter merges, in the app window."""
+        """People who may be saved twice, across the whole database, grouped like the app's Duplicates page: one
+        group for each person who may be saved more than once ("Dana Dup, 3 profiles"), with why they look alike
+        (the same email, LinkedIn, name and phone, name and company, or a similar name at the same company).
+        Strongest groups first. Groups the recruiter already said are different people are left out. Tell the
+        recruiter what you found; there is no tool to merge or delete: only the recruiter merges, in the app window.
+        limit is how many groups to list (at most 50)."""
         limit = max(1, min(int(limit), 50))
-        pairs = duplicates.find_pairs(store)
+        found = duplicates.clusters(store)
+        cards = duplicates.cluster_cards(store, found[:limit])
         out = []
-        for p in pairs[:limit]:
-            people = []
-            for k in ("keep", "other"):
-                c = store.get_candidate(p[k])
-                people.append({**brief(c), **_slim({"source": c.get("source"), "created_at": c.get("created_at"),
-                                                    "phone": c.get("phone"),
-                                                    "app_url": app_url(f"/candidates/{c['id']}")})})
-            out.append({"reasons": p["reasons"], "people": people,
-                        "compare_and_merge_url": app_url(f"/candidates/{p['keep']}/merge/{p['other']}")})
-        data = {"data_note": DATA_NOTE, "total": len(pairs), "shown": len(out), "pairs": untag(out),
+        for g in cards:
+            people = [_slim({"id": r["id"], "name": r["name"], "email": r.get("email"), "phone": r.get("phone"),
+                             "linkedin_url": r.get("linkedin_url"), "current_title": r.get("current_title"),
+                             "current_company": r.get("current_company"), "location": r.get("location"),
+                             "created_at": r.get("created_at"), "app_url": app_url(f"/candidates/{r['id']}"),
+                             "keep": True if r["id"] == g["keep"] else None,
+                             "maybe_different": True if r.get("differs") else None}) for r in g["members"]]
+            others = [r["id"] for r in g["members"] if r["id"] != g["keep"]]
+            out.append(_slim({"title": g["title"], "name": g["name"], "count": g["count"], "reasons": g["reasons"],
+                              "maybe_different": True if g["maybe_different"] else None, "people": people,
+                              "compare_and_merge_url": (app_url(f"/candidates/{g['keep']}/merge/{others[0]}")
+                                                        if len(others) == 1 else None)}))
+        data = {"data_note": DATA_NOTE, "total": len(found), "shown": len(out), "groups": untag(out),
                 "app_url": app_url("/candidates/duplicates")}
-        if not pairs:
+        if not found:
             return _plain("No likely duplicates right now.", data)
-        head = (f"{len(pairs)} possible duplicate pair{'' if len(pairs) == 1 else 's'}"
-                + (f", showing the first {len(out)}" if len(out) < len(pairs) else "")
+        head = (f"{len(found)} possible duplicate group{'' if len(found) == 1 else 's'}"
+                + (f", showing the first {len(out)}" if len(out) < len(found) else "")
                 + ". Only the recruiter can merge them, in the app window.")
         rows = []
         for o in out:
-            who = " and ".join(f"{x.get('name')} (id {x['id']})" for x in o["people"])
-            rows.append(f"- {who}: {', '.join(o['reasons'])}. Compare: {o['compare_and_merge_url']}")
+            who = ", ".join(f"{x.get('name')} (id {x['id']})" for x in o["people"])
+            rows.append(f"- {o['title']}: {who}. Why: {', '.join(o['reasons'])}."
+                        + (" Same name, maybe different people." if o.get("maybe_different") else "")
+                        + (f" Compare: {o['compare_and_merge_url']}" if o.get("compare_and_merge_url") else ""))
+        rows.append(f"The recruiter compares and merges in the app: {data['app_url']}")
         return _result("\n".join([head, *fenced(rows)]), data)
 
     @mcp.tool(annotations=WRITE, meta=tool_meta("people"))
@@ -2506,8 +2627,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         hm_url = app_url("/candidates/compare?" + urlencode({"ids": shown_ids, **hl_q, "view": "hm"}, safe=",:"))
         share_url = _share_page_url([p["id"] for p in d["people"]], hl=hl)
         me_url = _share_page_url([p["id"] for p in d["people"]], contact=True, notes=True, hl=hl)
+        kept_names = {g["kept"].lower(): g["kept"] for g in store.skill_alias_groups()} if aliases else {}
+
+        def saved_as(pid: int) -> dict[str, list[str]] | None:
+            """Merged skills shown under the name the recruiter kept: the spelling this person has saved."""
+            if not aliases:
+                return None
+            raw = store.get_candidate(pid).get("tags") or []
+            out: dict[str, list[str]] = {}
+            for t in (raw if isinstance(raw, list) else split_tags(raw)):
+                k = aliases.get(str(t).lower())
+                name = kept_names.get(k, k) if k else None
+                if name and name.lower() != str(t).lower() and str(t) not in out.setdefault(name, []):
+                    out[name].append(str(t))
+            return out or None
         data = {"data_note": DATA_NOTE, "people": [_slim({
-            **p, "app_url": app_url(f"/candidates/{p['id']}"),
+            **p, "app_url": app_url(f"/candidates/{p['id']}"), "saved_as": saved_as(p["id"]),
             "years": None if p["years"] is None else round(p["years"], 1),
             "only_them": d["only"][p["id"]],
             "some_of_them": [{"skill": t, "count": d["counts"][t.lower()], "of": n} for t in d["rest"][p["id"]]],
@@ -2976,13 +3111,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 st["total"] = len(st["candidates"])
                 st["candidates"] = st["candidates"][:cap]
         data = {"job": _job_out(_slim(job)), "stages": stages, "counts": {k: nums[k] for k in ("active", "hired", "out")},
-                "openings": nums["openings"], "filled": nums["filled"], "headline": actions.headline(shown, job["status"]),
+                "openings": nums["openings"], "filled": nums["filled"],
+                "headline": _pipeline_headline(shown, nums, by_stage, left_out, job["status"]),
                 "left_out": left_out, "app_url": app_url(f"/jobs/{job_id}")}
         if booked:
             data["interviews_left_out"] = booked["people"]
         return CallToolResult(content=content, structuredContent=data)
 
     @mcp.tool(annotations=READ, meta=tool_meta("digest"))
+    @_ended_out
     def status_digest(company: str | None = None, omit_stages: list[str] | None = None,
                       hiring_manager: str | None = None) -> CallToolResult:
         """One paste-ready status update for every open job, or only one company's (a client or team) or one
