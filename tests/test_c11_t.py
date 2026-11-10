@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 import anyio
@@ -244,11 +245,15 @@ def test_plan_loop_uses_the_saved_zone_and_an_offset_start(store):
     from talent import reports
     srv, jid, cid = _loop_world(store)
     reports.save_user_zone(store, "America/Los_Angeles")
-    res = call(srv, "plan_loop", job_id=jid, candidate_id=cid, start="2026-11-10T10:00:00-08:00")
+    day = date.today() + timedelta(days=2)  # a future weekday, so the planner never skips a start that has passed
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    res = call(srv, "plan_loop", job_id=jid, candidate_id=cid, start=f"{day.isoformat()}T10:00:00-08:00")
     out = text(res)
     assert "Times are in America/Los_Angeles (the time zone saved in Settings)" in out
     assert data(res)["time_zone"] == "America/Los_Angeles"
-    assert re.search(r"Tue Nov 10, (1[0-9]|[1-9]):\d\d [AP]M P[SD]T", out), out  # not before 10 AM Pacific, on Nov 10
+    label = f"{day:%a} {day:%b} {day.day}"
+    assert re.search(rf"{label}, (1[0-9]|[1-9]):\d\d [AP]M P[SD]T", out), out  # not before 10 AM Pacific, on that day
 
 
 def test_start_with_an_offset_is_read_on_the_recruiters_clock(store):
