@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import recipe_buttons, chips, sub, color_bubble, injection_box, zone_list %}
+{% from "_macros.html" import recipe_buttons, chips, sub, sub_rest, title_cell, color_bubble, injection_box, zone_list %}
 {% block title %}{{ c.name }} · Talent Search{% endblock %}
 {% block body %}
 {% set qp = request.query_params %}
@@ -10,8 +10,8 @@
   <div class="head">
     <div>
       <div class="namerow">{{ color_bubble(c, True) }}<h1>{{ c.name }}</h1></div>
-      <p class="sub">{{ sub(c) }}</p>
-      {{ chips(c.tags) }}
+      <p class="sub">{% if c.current_title and title_pick(c) %}{{ title_cell(c, hl, {}, add_only=True) }}{{ sub_rest(c) }}{% else %}{{ sub(c) }}{% endif %}</p>
+      {{ chips(c.tags, hl=hl, base={}, pos_of=hl_pos, add_only=True) }}
     </div>
     <a class="btn" href="/candidates/{{ c.id }}?edit=1">Edit</a>
   </div>

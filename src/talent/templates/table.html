@@ -2,7 +2,7 @@
 {% from "_macros.html" import chips %}
 {% block title %}Candidates · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
-{% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#cand-table' }}">{{ 'Skip to highlighted skills' if hl_bar else 'Skip to the table' }}</a>{% endblock %}
+{% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#hl-add' }}">Skip to skill highlights</a><a class="skip-link" href="#cand-table">Skip to the table</a>{% endblock %}
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
@@ -69,10 +69,24 @@
 {% if active_chips %}<p class="filter-chips" role="group" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 {% if hl_bar %}<div class="hlbar" id="hl-bar" tabindex="-1" role="group" aria-label="Highlighted skills">
   <span class="fine"><strong>Highlighted skills:</strong></span>
-  {% for h in hl_bar %}<a class="chip hl removable" id="{{ h.id }}" data-hl="{{ h.color }}" data-skill="{{ h.skill }}"{% if h.count is not none %} data-count="{{ h.count }}"{% endif %} href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ h.skill }} ({{ h.color }})"><span class="hl-n" aria-hidden="true">{{ h.n }}</span> {{ h.skill }}{% if h.count is not none %} <span class="hl-count" aria-hidden="true">({{ '{:,}'.format(h.count) }})</span>{% endif %} <span aria-hidden="true">×</span></a>{% endfor %}
-  <a class="small" href="{{ hl_href(dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir), hl, clear=True) }}">Clear</a>
-  <span class="fine">People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden. The number in brackets is how many people in these results have the skill.</span>
-</div>{% endif %}
+  {% for h in hl_bar %}<a class="chip hl removable{{ ' title-chip' if h.title }}" id="{{ h.id }}" data-hl="{{ h.color }}" data-skill="{{ h.skill }}" data-label="{{ h.label }}"{% if h.count is not none %} data-count="{{ h.count }}"{% endif %} href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ h.label }} ({{ h.color }})"><span class="hl-n" aria-hidden="true">{{ h.n }}</span> {{ h.label }}{% if h.count is not none %} <span class="hl-count" aria-hidden="true">({{ '{:,}'.format(h.count) }}{% if h.variants and h.variants > 1 %}, {{ h.variants }} variants{% endif %})</span>{% endif %} <span aria-hidden="true">×</span></a>{% endfor %}
+  <a class="small" href="{{ hl_href(dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir), hl, clear=True) }}">Clear all {{ hl_bar | length }} highlight{{ '' if hl_bar | length == 1 else 's' }}</a>
+  <span class="fine">People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden. The number in brackets is how many people in these results have the skill. A title pick (title: ...) works the same way on each person's current job title, at any level.</span>
+</div>
+{% for hint in hl_hints %}<form class="hl-hint fine" method="post" action="/settings/skill-names/merge">
+  <input type="hidden" name="alias" value="{{ hint.alias }}"><input type="hidden" name="kept" value="{{ hint.keep }}"><input type="hidden" name="next" value="{{ hint.next }}">
+  <span>Also {{ '{:,}'.format(hint.extra) }} {{ 'person' if hint.extra == 1 else 'people' }} with {{ hint.other }}. Treat as the same skill?</span>
+  <button class="btn small" type="submit" aria-label="Treat {{ hint.alias }} and {{ hint.keep }} as one skill">Treat as one</button>
+  <button class="btn small" type="submit" formaction="/settings/skill-names/reject" aria-label="{{ hint.alias }} and {{ hint.keep }} are not the same skill">Not the same</button>
+</form>{% endfor %}{% endif %}
+<form class="hl-add" id="hl-add-form" method="get" action="/candidates" role="search" aria-label="Highlight a skill or job title">
+  {% for k, v in keep.items() if k != 'hl' %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="qsort" value="{{ qsort }}"><input type="hidden" name="qdir" value="{{ qdir }}">{% endif %}{% if hl %}<input type="hidden" name="hl" value="{{ keep.get('hl', '') }}">{% endif %}
+  <label for="hl-add">Highlight a skill</label>
+  <input type="text" id="hl-add" name="hl_add" list="hl-list" autocomplete="off" maxlength="70" placeholder="python, or title: data engineer" aria-describedby="hl-add-help">
+  <button class="btn small" type="submit">Highlight</button>
+  <span class="fine" id="hl-add-help">Type a skill, or "title: " and a job title, then press Enter. Up to {{ 6 }} at once.</span>
+  <datalist id="hl-list">{% for t in hl_titles %}<option value="{{ t.label }}">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</option>{% endfor %}{% for t in hl_skills %}<option value="{{ t.tag }}">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</option>{% endfor %}</datalist>
+</form>
 <p class="fine hl-status" id="hl-status" role="status" aria-live="polite" tabindex="-1"></p>
 <div class="savedbar" id="saved-searches">
   {% if not saved %}<span class="fine">Saved searches: none yet.{% if not save_params %} Run a search or pick a filter, then you can save it here.{% endif %}</span>{% endif %}

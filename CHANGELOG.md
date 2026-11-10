@@ -59,6 +59,12 @@ All notable changes to Talent Search. Newest first.
 - The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
 - Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
 
+### Job-title highlights, skill names and the keyboard path
+- A job title is now a button-like chip in the Candidates table and under the name on a profile. Click it to highlight everyone with that current title, at any level (Sr. Data Engineer and Data Engineer II match a Data Engineer pick). It counts as one pick, like a skill, in the order, in "2 of 2", in Compare and in the Matched picks column of the spreadsheets.
+- Settings has a new Skill names section. Look-alike names (react and react.js, engineer and engineering, js and javascript) are suggested with how many people have each and how many have both. You choose Treat as one (and which name to keep) or Not the same; Split undoes it. Nothing is merged for you and saved skills on profiles never change. Search, the skill filter, highlights, Compare and spreadsheets then count the names as one. When you pick a skill that has a look-alike, a line under the highlight bar offers the same choice, and a CSV import tells you when new look-alikes came in.
+- Your AI app can list look-alike skill names (list_skill_lookalikes) but cannot merge them.
+- Keyboard: a Skip to skill highlights link at the top of Candidates, and a Highlight a skill box where you type a skill or "title: ..." and press Enter. Clear now reads "Clear all 3 highlights" and puts focus in that box. Skill chips on a profile add to the highlights you came with. The skill list is sorted ignoring case and shows each skill once.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

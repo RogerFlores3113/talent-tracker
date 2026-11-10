@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Mapping
 
+from . import picks
+
 # field prefix -> the filter it sets
 FIELD_ALIASES = {"title": "title", "company": "company", "location": "location", "skill": "skill", "skills": "skill",
                  "tag": "skill", "tags": "skill", "source": "source"}
@@ -578,6 +580,7 @@ def split_skills(value: Any) -> list[str]:
 
 def parse_hl(value: Any) -> list[tuple[str, str]]:
     """'python:red,go' -> [('python', 'red'), ('go', 'yellow')]: skills to highlight, in click order, each with its color.
+    A job-title pick is written 'title:data engineer:yellow' (the color is after the LAST colon); see picks.py.
 
     A color written as 'skill:color' stays with that skill; a skill with none (old links: 'python,go') takes the first
     free color in HL_PALETTE order. Lower case, no repeats, at most HL_MAX."""
@@ -585,9 +588,9 @@ def parse_hl(value: Any) -> list[tuple[str, str]]:
     seen: set[str] = set()
     for part in str(value or "").split(","):
         name, _, col = part.rpartition(":")
-        if not name or col.strip().lower() not in HL_PALETTE:
+        if not name or name.strip().lower() == "title" or col.strip().lower() not in HL_PALETTE:
             name, col = part, ""
-        p = " ".join(name.split())[:60].lower()
+        p = picks.normalize_pick(name)
         if p and p not in seen:
             seen.add(p)
             entries.append((p, col.strip().lower() or None))
@@ -720,7 +723,7 @@ def describe(params: Mapping[str, Any]) -> str:
     elif c == "within":
         bits.append(f"contacted in the last {p['contacted_days']} days")
     if "hl" in p:
-        bits.append("highlighting " + ", ".join(split_hl(p["hl"])))
+        bits.append("highlighting " + ", ".join(picks.label(x) for x in split_hl(p["hl"])))
     if "added_days" in p:
         bits.append(f"added in the last {p['added_days']} days")
     if "has_email" in p:

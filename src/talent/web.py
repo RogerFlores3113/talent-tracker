@@ -16,7 +16,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -36,7 +36,7 @@ from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import chase, compare, desk, duplicates, opsreview, tour
-from . import searchquery, xlsx, xlsx_export
+from . import picks, searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -618,22 +618,38 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 r["main_job"] = mine[0]["title"] + (f" ({mine[0]['company']})" if mine[0]["company"] else "")
                 r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
 
+    def _amap() -> dict[str, str]:
+        return store.skill_alias_map()
+
+    def hl_pairs_of(value: Any) -> list[tuple[str, str]]:
+        """The hl parameter as (pick, color) pairs: look-alike skill names the person merged count as one pick."""
+        return picks.canon_pairs(searchquery.parse_hl(value), _amap())
+
+    def pick_sql(pick: str) -> tuple[str, list[str]]:
+        """SQL (on candidates c) that is true when the person matches this pick, and its parameters."""
+        if picks.is_title(pick):
+            return "(pick_title(c.current_title) = ?)", [picks.title_key(pick)]
+        names = store.skill_group_names(pick)
+        return ("EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag IN ("
+                + ", ".join("?" for _ in names) + ") COLLATE NOCASE)"), names
+
     def hl_order_sql(hl_list: list[str]) -> tuple[str, list[str]]:
-        """ORDER BY terms for the highlighted skills: most of them first, then the earlier pick wins (everyone stays)."""
-        has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
+        """ORDER BY terms for the picks: most of them first, then the earlier pick wins (everyone stays)."""
         if not hl_list:
             return "", []
-        count = "(" + " + ".join(has for _ in hl_list) + ") DESC, "
-        return count + "".join(has + " DESC, " for _ in hl_list), [*hl_list, *hl_list]
+        parts = [pick_sql(h) for h in hl_list]
+        count = "(" + " + ".join(sql for sql, _ in parts) + ") DESC, "
+        params = [x for _, ps in parts for x in ps]
+        return count + "".join(sql + " DESC, " for sql, _ in parts), [*params, *params]
 
     def hl_rank_hits(hits: list[Any], hl_list: list[str]) -> list[Any]:
         """A stable sort, so the order we already had (best match, colour, column) holds inside each highlight group."""
         if not hl_list:
             return hits
+        am = _amap()
 
         def key(h: Any) -> tuple[int, ...]:
-            have = {str(t).lower() for t in (h.candidate.get("tags") or [])}
-            flags = [x in have for x in hl_list]
+            flags = picks.person_hits(h.candidate.get("tags") or [], h.candidate.get("current_title"), hl_list, am)
             return (-sum(flags), *(not f for f in flags))
         return sorted(hits, key=key)
 
@@ -643,16 +659,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return re.sub(r"[^a-z0-9]+", "-", low).strip("-") + "-" + format(zlib.crc32(low.encode()) & 0xFFFF, "04x")
 
     def hl_href(base: dict[str, Any], hl_map: Any, skill: str | None = None, clear: bool = False,
-                rid: Any = None) -> str:
-        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept.
-        A skill keeps its color while it is picked; a new pick takes the first free color. The #fragment names the
-        chip to put keyboard focus on after the page reloads (see app.js): the same chip in the same row, else the
-        chip in the highlight bar."""
+                rid: Any = None, add_only: bool = False) -> str:
+        """/candidates link with a pick (a skill, or "title:..." for a job title) toggled in (or out of) the highlight
+        list; every other parameter kept. A pick keeps its color while it is picked; a new pick takes the first free
+        color. add_only: never remove (a profile's chips). The #fragment names the chip to put keyboard focus on after
+        the page reloads (see app.js): the same chip in the same row, else the chip in the highlight bar."""
         cur = dict(hl_map or {})
         frag = ""
         if skill is not None:
-            k = " ".join(str(skill).split()).lower()
-            if k in cur:
+            k = picks.normalize_pick(skill)
+            if k and not picks.is_title(k):
+                k = picks.canon(k, _amap())
+            if k in cur and not add_only:
                 keys = list(cur)
                 at = keys.index(k)
                 del cur[k]
@@ -660,50 +678,120 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 near = left[at] if at < len(left) else left[at - 1] if left else ""
                 frag = (f"#chip-{rid}-{hl_slug(k)}" if rid is not None else
                         "#removed-" + quote(k, safe="") + (quote("@hlbar-" + hl_slug(near), safe="@") if near else ""))
-            elif len(cur) < searchquery.HL_MAX:
-                cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
-                frag = f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
+            elif k and k not in cur and len(cur) < searchquery.HL_MAX:
+                if add_only:  # a profile: the picks so far keep their colors, the new one takes the first free color
+                    cur[k] = ""
+                else:
+                    cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
+                frag = "" if add_only else f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
         if clear:
             cur = {}
             frag = "#hlcleared"
-        rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more")}
+        rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more", "hl_add")}
         if cur:
-            rest["hl"] = searchquery.join_hl(cur.items())
+            rest["hl"] = ",".join(f"{n}:{c}" if c else n for n, c in cur.items())
         return ("/candidates?" + urlencode(rest) if rest else "/candidates") + frag
+
+    def hl_pos_of(tags: list[str], hl_map: Any) -> dict[str, dict[str, str]]:
+        """tag (lower case) -> {key, color} for each of a person's skills that is a highlighted pick or merged into one."""
+        am = _amap()
+        marked = {k: c for k, c in (hl_map or {}).items() if not picks.is_title(k)}
+        return {t.lower(): {"key": picks.canon(t, am), "color": marked[picks.canon(t, am)]}
+                for t in tags if picks.canon(t, am) in marked}
 
     def hl_first(tags: list[str], hl_map: Any) -> list[str]:
         """A person's skills with the highlighted ones first, in click order."""
-        mine = {t.lower(): t for t in tags}
-        first = [mine[h] for h in hl_map if h in mine]
+        am = _amap()
+        first: list[str] = []
+        for h in (hl_map or {}):
+            if picks.is_title(h):
+                continue
+            first += [t for t in tags if picks.canon(t, am) == h and t not in first]
         return first + [t for t in tags if t not in first]
 
     def hl_shown(tags: list[str], hl_map: Any) -> int:
         """How many chips a row shows: four, or every highlighted skill it has if that is more."""
-        low = {t.lower() for t in tags}
-        return max(4, sum(1 for h in hl_map if h in low))
+        am = _amap()
+        marked = {h for h in (hl_map or {}) if not picks.is_title(h)}
+        return max(4, sum(1 for t in tags if picks.canon(t, am) in marked))
 
-    def hl_edge(tags: list[str], hl_map: Any) -> str:
-        """The color of the first (highest priority) highlighted skill this person has, or ''."""
-        low = {t.lower() for t in tags}
-        return next((c for h, c in hl_map.items() if h in low), "")
+    def _hits(c: dict[str, Any], hl_map: Any) -> list[bool]:
+        return picks.person_hits(c.get("tags") or [], c.get("current_title"), list(hl_map or {}), _amap())
 
-    def hl_top(tags: list[str], hl_map: Any) -> tuple[str, str]:
-        """(skill, color) of the first highlighted skill this person has, or ('', '')."""
-        low = {t.lower() for t in tags}
-        return next(((h, c) for h, c in hl_map.items() if h in low), ("", ""))
+    def hl_edge(c: dict[str, Any], hl_map: Any) -> str:
+        """The color of the first (highest priority) pick this person matches, or ''."""
+        return next((col for hit, col in zip(_hits(c, hl_map), (hl_map or {}).values()) if hit), "")
 
-    def hl_have(tags: list[str], hl_map: Any) -> int:
-        """How many of the highlighted skills this person has."""
-        low = {t.lower() for t in tags}
-        return sum(1 for h in hl_map if h in low)
+    def hl_top(c: dict[str, Any], hl_map: Any) -> tuple[str, str]:
+        """(pick label, color) of the first pick this person matches, or ('', '')."""
+        return next(((picks.label(k), col) for hit, (k, col) in zip(_hits(c, hl_map), (hl_map or {}).items()) if hit), ("", ""))
+
+    def hl_have(c: dict[str, Any], hl_map: Any) -> int:
+        """How many of the picks this person matches (titles included)."""
+        return sum(_hits(c, hl_map))
+
+    def title_pick(c: dict[str, Any]) -> str:
+        return picks.make_title_pick(c.get("current_title"))
+
+    def pick_counts(hl_map: dict[str, str], where: str, params: tuple[Any, ...], rows: list[dict[str, Any]] | None
+                    ) -> dict[str, dict[str, int]]:
+        """pick -> {count, variants}: how many people in the current results match it (and, for a title, how many
+        different exact titles that is). From the filter's SQL when we have it, else from the rows we read."""
+        out: dict[str, dict[str, int]] = {}
+        if not hl_map:
+            return out
+        picks_ = list(hl_map)
+        if rows is None:
+            parts = [pick_sql(h) for h in picks_]
+            got = store._row("SELECT " + ", ".join(f"coalesce(sum({sql}), 0) AS n{i}" for i, (sql, _) in enumerate(parts))
+                             + f" FROM candidates c {where}", (*[x for _, ps in parts for x in ps], *params))
+            for i, h in enumerate(picks_):
+                out[h] = {"count": int(got[f"n{i}"]), "variants": 0}
+                if picks.is_title(h) and out[h]["count"]:
+                    sql, ps = pick_sql(h)
+                    extra = (" AND " if where else " WHERE ") + sql
+                    vs = store._rows(f"SELECT lower(trim(c.current_title)) AS t FROM candidates c {where}{extra} GROUP BY t", (*params, *ps))
+                    out[h]["variants"] = len(vs)
+            return out
+        am = _amap()
+        for h in picks_:
+            hit = [r for r in rows if picks.person_hits(r.get("tags") or [], r.get("current_title"), [h], am)[0]]
+            out[h] = {"count": len(hit), "variants": len({" ".join(str(r.get("current_title") or "").lower().split()) for r in hit}) if picks.is_title(h) else 0}
+        return out
 
     def hl_bar(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str,
-               counts: dict[str, int] | None = None) -> list[dict[str, Any]]:
+               counts: dict[str, dict[str, int]] | None = None) -> list[dict[str, Any]]:
         base = {**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}
-        return [{"skill": h, "color": c, "href": hl_href(base, hl_map, h), "n": i, "id": "hlbar-" + hl_slug(h),
-                 "count": (counts or {}).get(h)} for i, (h, c) in enumerate(hl_map.items(), start=1)]
+        return [{"skill": h, "label": picks.label(h), "title": picks.is_title(h), "color": c, "href": hl_href(base, hl_map, h),
+                 "n": i, "id": "hlbar-" + hl_slug(h), "count": (counts or {}).get(h, {}).get("count"),
+                 "variants": (counts or {}).get(h, {}).get("variants", 0)}
+                for i, (h, c) in enumerate(hl_map.items(), start=1)]
+
+    def hl_hints(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, Any]]:
+        """'Also 6 people with react.js. Treat as the same skill?' for picked skills that have a look-alike name that is
+        not merged yet (at most two lines)."""
+        out: list[dict[str, Any]] = []
+        for h in hl_map:
+            if picks.is_title(h) or len(out) >= 2:
+                continue
+            for pair in store.skill_lookalikes(limit=3, only=h):
+                other = pair["b"] if pair["a"].lower() == h else pair["a"]
+                other_count = pair["b_count"] if pair["a"].lower() == h else pair["a_count"]
+                extra = other_count - pair["both"]
+                if extra <= 0:
+                    continue
+                mine = pair["a"] if pair["a"].lower() == h else pair["b"]
+                keep_name = pair["keep"]
+                nxt = hl_href({**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}, hl_map)
+                out.append({"pick": h, "other": other, "extra": extra, "mine": mine, "keep": keep_name,
+                            "alias": pair["other"], "next": nxt})
+                break
+        return out
 
     env.globals["hl_href"] = hl_href
+    env.globals["hl_pos_of"] = hl_pos_of
+    env.globals["hl_label"] = picks.label
+    env.globals["title_pick"] = title_pick
     env.globals["hl_first"] = hl_first
     env.globals["hl_shown"] = hl_shown
     env.globals["hl_edge"] = hl_edge
@@ -721,7 +809,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
               ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", per: int = 100, rows_only: bool = False):
         pool = COLORED_FIRST_POOL if per <= 100 else max(COLORED_FIRST_POOL, per)  # the export ranks everyone it keeps
-        hl_map = dict(searchquery.parse_hl(hl))  # skill -> color, in click order (sorts and colors, never filters)
+        hl_map = dict(hl_pairs_of(hl))  # pick -> color, in click order (sorts and colors, never filters); a pick is a skill or title:...
         hl_list = list(hl_map)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
@@ -812,17 +900,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         _attach_jobs(rows)
         if rows_only:  # the export: exactly these rows, in this order
             return rows, total
-        hl_counts: dict[str, int] = {}  # skill -> people with it in the current results (one query for all picks)
+        hl_counts: dict[str, dict[str, int]] = {}  # pick -> people with it in the current results (+ title variants)
         if hl_list:
             if count_where is not None:
-                has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
-                got = store._row("SELECT " + ", ".join(f"coalesce(sum({has}), 0) AS n{i}" for i in range(len(hl_list)))
-                                 + f" FROM candidates c {count_where[0]}", (*hl_list, *count_where[1]))
-                hl_counts = {h: int(got[f"n{i}"]) for i, h in enumerate(hl_list)}
+                hl_counts = pick_counts(hl_map, count_where[0], count_where[1], None)
             else:
-                pool_rows = [h.candidate for h in count_hits] if count_hits is not None else rows
-                lows = [{str(t).lower() for t in (r.get("tags") or [])} for r in pool_rows]
-                hl_counts = {h: sum(1 for low in lows if h in low) for h in hl_list}
+                hl_counts = pick_counts(hl_map, "", (), [h.candidate for h in count_hits] if count_hits is not None else rows)
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -834,7 +917,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       days="" if not pipe or day_n is None else day_n,
                                       ids=",".join(map(str, id_list)), hl=searchquery.join_hl(hl_map.items()),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir, hl_counts), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir, hl_counts), hl_hints=hl_hints(hl_map, keep, q, sort, dir, qsort, qdir), hl_titles=store.title_choices(60), hl_skills=store.skill_names_sorted(300), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
@@ -850,9 +933,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
+        return page(request, "table.html", **ctx, tags=store.skill_names_sorted(5000), sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    def hl_add_redirect(request: Request, typed: str) -> RedirectResponse:
+        """The "Highlight a skill" box: a skill, or "title: Data Engineer", added as the next pick (the same color rules as a
+        chip click). Comes back to the same table with the focus fragment app.js turns into a status line."""
+        rest = {k: v for k, v in request.query_params.items() if k not in ("hl_add", "hl", "page_no", "more") and v != ""}
+        cur = dict(hl_pairs_of(request.query_params.get("hl", "")))
+        m = re.match(r"\s*titles?\s*:\s*(.*)$", typed, re.I)
+        pick = picks.make_title_pick(m.group(1)) if m else picks.normalize_pick(typed)
+        if m and not pick:
+            frag = "#hlempty"
+        elif not pick:
+            frag = "#hlempty"
+        else:
+            if not picks.is_title(pick):
+                pick = picks.canon(pick, _amap())
+            if pick in cur:
+                frag = f"#hlbar-{hl_slug(pick)}"
+            elif len(cur) >= searchquery.HL_MAX:
+                frag = "#hlfull"
+            else:
+                cur[pick] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
+                frag = f"#hlbar-{hl_slug(pick)}"
+        if cur:
+            rest["hl"] = searchquery.join_hl(cur.items())
+        return RedirectResponse(("/candidates?" + urlencode(rest) if rest else "/candidates") + frag, status_code=303)
 
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
@@ -863,6 +971,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
               ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
+        typed = (request.query_params.get("hl_add") or "").strip()
+        if "hl_add" in request.query_params:
+            return hl_add_redirect(request, typed)
         names = table.__code__.co_varnames[1:table.__code__.co_argcount]
         values = locals()
         return _table_build(request, **{k: values[k] for k in names})
@@ -889,7 +1000,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                count=True)
         else:
             ids = list(dict.fromkeys(int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()))
-        hl_pairs = searchquery.parse_hl(str(form.get("f_hl") or ""))
+        hl_pairs = hl_pairs_of(str(form.get("f_hl") or ""))
         if not ids:
             return back(request, "/candidates", error=COMPARE_TICK if action == "compare" else "Tick at least one person first.")
         n = len(ids)
@@ -900,7 +1011,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             q = [("ids", ",".join(map(str, ids[:compare.MAX_PEOPLE])))]
             if n > compare.MAX_PEOPLE:
                 q.append(("of", str(n)))
-            hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("f_hl") or "")))
+            hl = searchquery.join_hl(hl_pairs_of(str(form.get("f_hl") or "")))
             if hl:
                 q.append(("hl", hl))
             return RedirectResponse("/candidates/compare?" + urlencode(q), status_code=303)
@@ -1166,14 +1277,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The Candidates table as a spreadsheet: the same address parameters as /candidates, every page of it."""
         rows, total, args = table_export_rows(request)
         data = xlsx_export.table_workbook(store, rows, total, filters=filter_lines(args), cap=BULK_MAX,
-                                          hl=searchquery.parse_hl(args.get("hl", "")), drop_empty=True)
+                                          hl=hl_pairs_of(args.get("hl", "")), drop_empty=True)
         return xlsx_response(data, f"talent-search-candidates-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
     @app.get("/candidates/export.csv")
     def candidates_export_csv(request: Request):
         """The same people in the same order as export.xlsx, as the CSV this app can import again."""
         rows, _, args = table_export_rows(request)
-        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", ""))),
+        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], hl_pairs_of(args.get("hl", ""))),
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition":
                                  f'attachment; filename="talent-search-candidates-{datetime.now().strftime("%Y-%m-%d")}.csv"'})
@@ -1197,7 +1308,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: str = "none",
                    note: str = "", error: str = "", hl: str = "", rejected: bool = False) -> HTMLResponse:
         rows = people_rows(ids)
-        hl_pairs = searchquery.parse_hl(hl)
+        hl_pairs = hl_pairs_of(hl)
         job_id = int(job) if str(job).isdigit() else None
         try:
             preview = xlsx_export.share_preview(store, [r["id"] for r in rows], hl=hl_pairs)
@@ -1235,7 +1346,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         contact = form.get("include_contact") == "1"
         notes = notes_choice(str(form.get("notes") or ""), legacy=form.get("include_notes") == "1")
         note = str(form.get("note") or "")
-        hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("hl") or "")))
+        hl = searchquery.join_hl(hl_pairs_of(str(form.get("hl") or "")))
         rejected = form.get("include_rejected") == "1"
         try:
             job = store.get_job(job_id) if job_id else None
@@ -1245,7 +1356,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
-                                                    note=note, hl=searchquery.parse_hl(hl), include_rejected=rejected)
+                                                    note=note, hl=hl_pairs_of(hl), include_rejected=rejected)
         return xlsx_response(data, name)
 
     @app.get("/candidates/compare", response_class=HTMLResponse)
@@ -1254,7 +1365,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
         hiring manager view: nothing about the recruiter's own work, no app links, only stages still in play, ready
         to print. about=0 leaves the About row out of it."""
-        hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
+        hl_pairs = hl_pairs_of(hl)  # pick -> color in click order; a color stays with its pick (skill or title:...)
         hl_list = [h for h, _ in hl_pairs]
         hl_colors = dict(hl_pairs)
         hm = view == "hm"
@@ -1297,7 +1408,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
                     rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
                     no_about=no_about,
-                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
+                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {}, title_hit=compare.title_hits(people, hl_list) if hl_list else {},
                     hm_href=href("/candidates/compare", ids_now, view="hm"),
                     about_href=href("/candidates/compare", ids_now, view="hm", **({} if no_about else {"about": "0"})),
                     full_href=href("/candidates/compare", ids_now))
@@ -1510,9 +1621,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(dest, status_code=303)
 
     @app.get("/candidates/{candidate_id}", response_class=HTMLResponse)
-    def candidate_detail(request: Request, candidate_id: int, edit: bool = False, merged: bool = False):
+    def candidate_detail(request: Request, candidate_id: int, edit: bool = False, merged: bool = False, hl: str = ""):
         cand_or_404(candidate_id)
         c = store.candidate_detail(candidate_id)
+        if not hl:  # came from the Candidates table: carry its picks, so a skill chip here adds to them
+            try:
+                ref = urlsplit(request.headers.get("referer") or "")
+                if ref.path == "/candidates" and (ref.netloc or "").lower() == (request.headers.get("host") or "").lower():
+                    hl = (parse_qs(ref.query).get("hl") or [""])[0]
+            except ValueError:
+                hl = ""
         if edit:
             return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
                         error=None, job_id=None)
@@ -1522,6 +1640,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, summary_limit=interviews.SUMMARY_LIMIT, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
+                    hl=dict(hl_pairs_of(hl)), hl_pos=hl_pos_of(c.get("tags") or [], dict(hl_pairs_of(hl))),
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
@@ -1988,6 +2107,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
                             replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
+        pairs_before = {tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
@@ -2011,7 +2131,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
-                    closed_lines=importers.closed_job_lines(result))
+                    closed_lines=importers.closed_job_lines(result),
+                    new_skill_pairs=len({tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)} - pairs_before))
 
     @app.get("/import/openings", response_class=HTMLResponse)
     def import_openings_page(request: Request):
@@ -3783,6 +3904,53 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                   else " Hired and closing a job wait on Review."))
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
 
+    # ---------------------------------------------------------- skill names that mean the same skill
+    def _skill_next(raw: str, fallback: str) -> str:
+        """Where to go back to after a skill-name change: a Candidates or Settings page of this server, else Settings."""
+        nxt = str(raw or "")
+        return nxt if re.match(r"^/(candidates|settings)(\?|#|$)", nxt) and not nxt.startswith("//") and "\\" not in nxt else fallback
+
+    @app.post("/settings/skill-names/merge")
+    async def skill_names_merge(request: Request):
+        """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed."""
+        form = await request.form()
+        alias, kept = str(form.get("alias") or ""), str(form.get("kept") or "")
+        if form.get("a") and form.get("b"):  # Settings: the two names and the one to keep
+            a, b = str(form.get("a")), str(form.get("b"))
+            kept = kept if kept in (a, b) else a
+            alias = b if kept == a else a
+        nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
+        try:
+            store.add_skill_alias(alias, kept)
+        except ValueError as exc:
+            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#skill-names", status_code=303)
+        if nxt.startswith("/candidates"):
+            return RedirectResponse(nxt.split("#")[0] + "#hlmerged", status_code=303)
+        msg = f"Now {alias} counts as {kept}. Nobody's saved skills changed. Split undoes it."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+
+    @app.post("/settings/skill-names/reject")
+    async def skill_names_reject(request: Request):
+        """'Not the same': remembered, never suggested again."""
+        form = await request.form()
+        alias = str(form.get("alias") or form.get("a") or "")
+        kept = str((form.get("kept") if form.get("alias") else form.get("b")) or "")
+        nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
+        store.reject_skill_pair(alias, kept)
+        if nxt.startswith("/candidates"):
+            return RedirectResponse(nxt.split("#")[0] + "#hlrejected", status_code=303)
+        msg = f"Okay. We won't suggest {alias} and {kept} as the same skill again."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+
+    @app.post("/settings/skill-names/split")
+    async def skill_names_split(request: Request):
+        """Split: undo a 'Treat as one' (one name, or the whole group when it is the kept name)."""
+        form = await request.form()
+        name = str(form.get("name") or "")
+        n = store.split_skill_alias(name)
+        msg = (f"Split {name}: the names count as separate skills again." if n else f"{name} was not treated as another skill.")
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+
     @app.post("/settings/time-zone")
     async def set_time_zone(request: Request):
         """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
@@ -3813,7 +3981,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     sample_jobs=len(jobs), candidate_count=store.count_candidates(), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
-                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN)
+                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN,
+                    skill_pairs=store.skill_lookalikes(30), skill_groups=store.skill_alias_groups())
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]

@@ -747,30 +747,40 @@
     const status = document.getElementById("hl-status");
     if (!status) return;
     const hash = decodeURIComponent((location.hash || "").slice(1));
-    if (!hash || hash === "hl-bar" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
+    if (!hash || hash === "hl-bar" || hash === "hl-add" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
     const bar = document.getElementById("hl-bar");
     const table = document.getElementById("cand-table");
-    const fallback = bar || table || status;
+    const box = document.getElementById("hl-add");
+    const fallback = bar || box || table || status;
     let target = null, text = "";
-    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = status; }
+    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = box || status; }
+    else if (hash === "hlempty") { text = "Type a skill, or title: and a job title, then press Enter."; target = box || status; }
+    else if (hash === "hlfull") { text = "You can highlight up to 6 at once. Remove one first."; target = box || status; }
+    else if (hash === "hlmerged") { text = "Treated as one skill. The counts now include both names. Settings, Skill names, can split them again."; target = bar || box || status; }
+    else if (hash === "hlrejected") { text = "Okay. We won't suggest those two as the same skill again."; target = bar || box || status; }
     else if (hash.indexOf("removed-") === 0) {
       const rest = hash.slice(8), at = rest.lastIndexOf("@");
-      text = "Removed the " + (at < 0 ? rest : rest.slice(0, at)) + " highlight.";
+      let gone = at < 0 ? rest : rest.slice(0, at);
+      if (gone.indexOf("title:") === 0) gone = "title: " + gone.slice(6).replace(/\b\w/g, c => c.toUpperCase());
+      text = "Removed the " + gone + " highlight.";
       target = at < 0 ? null : document.getElementById(rest.slice(at + 1));
       if (!target) target = table || fallback;
     }
     else {
       target = document.getElementById(hash);
       const skill = target && target.getAttribute("data-skill");
+      const pretty = function (k) { return k && k.indexOf("title:") === 0 ? "title: " + k.slice(6).replace(/\b\w/g, c => c.toUpperCase()) : k; };
+      let shown = pretty(skill);
       if (skill) {
         const chips = bar ? Array.prototype.slice.call(bar.querySelectorAll("[data-skill]")) : [];
         const lit = chips.find(el => el.getAttribute("data-skill") === skill);
         if (lit) {
-          text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
+          shown = lit.getAttribute("data-label") || shown;
+          text = shown + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
           if (chips.length > 1) text += " People with more of your picks come first.";
           else text += " They are shown first.";
         }
-        else text = "Removed the " + skill + " highlight.";
+        else text = "Removed the " + shown + " highlight.";
       } else { target = fallback; }
     }
     if (!target) target = fallback;

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
+from . import picks as _picks
 from . import places
 from .links import clean_links, link_key, merge_links, stored_links
 from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
@@ -797,6 +798,21 @@ _MIGRATIONS: tuple[Any, ...] = (
     ("SELECT 1;", _migrate_v10w3_data),
     # v11l: other links on a person (GitHub, portfolio, Scholar...), a JSON list of web addresses.
     "ALTER TABLE candidates ADD COLUMN links TEXT;",
+    # c14-d1: skill names a person chose to treat as one skill (alias -> kept name, never automatic, undone with Split),
+    # and look-alike pairs they said are not the same (never suggested again). Stored tags are never rewritten.
+    """
+    CREATE TABLE IF NOT EXISTS skill_aliases (
+        alias      TEXT PRIMARY KEY,
+        kept       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS skill_alias_rejects (
+        a          TEXT NOT NULL,
+        b          TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (a, b)
+    );
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -2228,6 +2244,7 @@ class Store:
         self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
         self._conn.create_function("tt_sym", 1, sym_text, deterministic=True)
+        self._conn.create_function("pick_title", 1, _picks.fold_title, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -3886,6 +3903,174 @@ class Store:
             yield from (self._hydrate(r) for r in batch)
             last = batch[-1]["id"]
 
+    # ---------------------------------------------------------- skill aliases (c14-d1)
+    def skill_alias_map(self) -> dict[str, str]:
+        """alias (lower case) -> the name it is kept as (lower case). Empty when nobody merged anything."""
+        return {r["alias"]: r["kept"].lower() for r in self._rows("SELECT alias, kept FROM skill_aliases")}
+
+    def skill_group_names(self, name: str) -> list[str]:
+        """The skill and every name merged into it (or the group it was merged into), for matching tags."""
+        low = " ".join(str(name).split()).lower()
+        rows = self._rows("SELECT alias, kept FROM skill_aliases")
+        kept = next((r["kept"].lower() for r in rows if r["alias"] == low), low)
+        group = [kept] + [r["alias"] for r in rows if r["kept"].lower() == kept]
+        return list(dict.fromkeys(group))
+
+    def expand_skills(self, names: Iterable[str]) -> list[str]:
+        out: list[str] = []
+        for n in names:
+            out += self.skill_group_names(n)
+        return list(dict.fromkeys(out))
+
+    def skill_alias_groups(self) -> list[dict[str, Any]]:
+        """[{kept, kept_count, aliases: [{name, count}], people}] for Settings, biggest first."""
+        rows = self._rows("SELECT alias, kept, created_at FROM skill_aliases ORDER BY kept COLLATE NOCASE, alias")
+        counts = {t["tag"].lower(): t["count"] for t in self.list_tags(100000)}
+        by: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            g = by.setdefault(r["kept"].lower(), {"kept": r["kept"], "aliases": []})
+            g["aliases"].append({"name": r["alias"], "count": counts.get(r["alias"], 0), "at": r["created_at"]})
+        out = []
+        for k, g in by.items():
+            names = [k] + [a["name"] for a in g["aliases"]]
+            marks = ", ".join("?" for _ in names)
+            people = self._row(f"SELECT count(DISTINCT candidate_id) AS n FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE", names)["n"]
+            out.append({**g, "kept_count": counts.get(k, 0), "people": people})
+        return out
+
+    def add_skill_alias(self, alias: str, kept: str) -> dict[str, Any]:
+        """Treat `alias` as the same skill as `kept`. Raises ValueError for nonsense. Stored tags are not rewritten."""
+        a, k = " ".join(str(alias).split()), " ".join(str(kept).split())
+        if not a or not k:
+            raise ValueError("Pick two skill names.")
+        if a.lower() == k.lower():
+            raise ValueError("Those are already the same name.")
+        al, kl = a.lower(), k.lower()
+        with self._write():
+            kl = self.skill_alias_map().get(kl, kl)  # kept is itself merged into another name: use that one
+            if al == kl:
+                raise ValueError("Those are already treated as one skill.")
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            display = k if kl == k.lower() else kl
+            self._conn.execute("UPDATE skill_aliases SET kept = ? WHERE lower(kept) = ?", (display, al))  # its group follows
+            self._conn.execute("INSERT INTO skill_aliases(alias, kept, created_at) VALUES (?, ?, ?)"
+                               " ON CONFLICT(alias) DO UPDATE SET kept = excluded.kept", (al, display, now))
+            self._conn.execute("DELETE FROM skill_alias_rejects WHERE (a = ? AND b = ?) OR (a = ? AND b = ?)", (al, kl, kl, al))
+        return {"alias": al, "kept": display}
+
+    def split_skill_alias(self, name: str) -> int:
+        """Undo: take `name` out of its group (an alias), or break up the whole group when it is the kept name.
+        Returns how many names were split off."""
+        low = " ".join(str(name).split()).lower()
+        with self._write():
+            n = self._conn.execute("DELETE FROM skill_aliases WHERE alias = ?", (low,)).rowcount
+            if not n:
+                n = self._conn.execute("DELETE FROM skill_aliases WHERE lower(kept) = ?", (low,)).rowcount
+        return n
+
+    def reject_skill_pair(self, a: str, b: str) -> None:
+        """'Not the same': never suggest this pair again."""
+        x, y = sorted((" ".join(str(a).split()).lower(), " ".join(str(b).split()).lower()))
+        if not x or not y or x == y:
+            return
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with self._write():
+            self._conn.execute("INSERT OR IGNORE INTO skill_alias_rejects(a, b, created_at) VALUES (?, ?, ?)", (x, y, now))
+
+    def skill_lookalikes(self, limit: int = 50, only: str | None = None) -> list[dict[str, Any]]:
+        """Pairs of skill names that look like one skill, with how many people have each and how many have both.
+        Pairs already merged or answered 'Not the same' are left out. `only`: just pairs that include this skill.
+        Each: {a, b, a_count, b_count, both, keep (the more used name), other, reason, people}."""
+        from .picks import look_alike
+        tags = [t for t in self.list_tags(100000) if t["tag"]]
+        amap = self.skill_alias_map()
+        rejected = {(r["a"], r["b"]) for r in self._rows("SELECT a, b FROM skill_alias_rejects")}
+        names = [(t["tag"], t["count"]) for t in tags]
+        want = " ".join(str(only).split()).lower() if only else ""
+        # candidates by a cheap key so we do not compare every pair of a big list
+        buckets: dict[str, list[tuple[str, int]]] = {}
+        for n, c in names:
+            low = n.lower()
+            if _picks._has_symbol(low):
+                continue
+            s = _picks._squash(low)
+            for key in {s, _picks._singular(s), s[:4]}:
+                if key:
+                    buckets.setdefault(key, []).append((n, c))
+        seen: set[tuple[str, str]] = set()
+        out: list[dict[str, Any]] = []
+        byname = {n.lower(): (n, c) for n, c in names}
+        pairs: list[tuple[str, str]] = []
+        for members in buckets.values():
+            for i, (x, _) in enumerate(members):
+                for y, _ in members[i + 1:]:
+                    pairs.append((x, y))
+        for p, q in _picks._SHORT:
+            if p in byname and q in byname:
+                pairs.append((byname[p][0], byname[q][0]))
+        for x, y in pairs:
+            lx, ly = x.lower(), y.lower()
+            key = tuple(sorted((lx, ly)))
+            if key in seen or key in rejected or lx == ly:
+                continue
+            seen.add(key)
+            if amap.get(lx, lx) == amap.get(ly, ly):
+                continue  # already one skill
+            if want and want not in (lx, ly) and amap.get(want, want) not in (lx, ly):
+                continue
+            why = look_alike(x, y)
+            if not why:
+                continue
+            (xn, xc), (yn, yc) = byname[lx], byname[ly]
+            both = self._row("SELECT count(*) AS n FROM (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE"
+                             " INTERSECT SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)", (xn, yn))["n"]
+            keep, other = ((xn, yn) if (xc, -len(xn)) >= (yc, -len(yn)) else (yn, xn))
+            kc, oc = (xc, yc) if keep == xn else (yc, xc)
+            people = self._row("SELECT count(DISTINCT candidate_id) AS n FROM candidate_tags WHERE tag IN (?, ?) COLLATE NOCASE", (xn, yn))["n"]
+            out.append({"a": xn, "b": yn, "a_count": xc, "b_count": yc, "both": both, "keep": keep, "other": other,
+                        "keep_count": kc, "other_count": oc, "reason": why, "people": people})
+        out.sort(key=lambda r: (-r["people"], r["keep"].lower(), r["other"].lower()))
+        return out[:limit]
+
+    def title_choices(self, limit: int = 60) -> list[dict[str, Any]]:
+        """Current job titles for a pick list: each title once after folding level words, most people first.
+        [{pick: 'title:data engineer', label: 'title: Data Engineer', count, variants}]"""
+        groups: dict[str, dict[str, Any]] = {}
+        for r in self._rows("SELECT lower(trim(current_title)) AS t, count(*) AS n FROM candidates"
+                            " WHERE current_title IS NOT NULL AND trim(current_title) <> '' GROUP BY t"):
+            key = _picks.fold_title(r["t"])
+            if not key:
+                continue
+            g = groups.setdefault(key, {"pick": _picks.TITLE_PREFIX + key, "label": _picks.label(_picks.TITLE_PREFIX + key),
+                                        "count": 0, "variants": 0})
+            g["count"] += r["n"]
+            g["variants"] += 1
+        return sorted(groups.values(), key=lambda g: (-g["count"], g["label"].lower()))[:limit]
+
+    def skill_names_sorted(self, limit: int = 5000) -> list[dict[str, Any]]:
+        """Skills for a pick list: case-insensitive order, each alias group once (under its kept name, with everyone
+        who has any of its names)."""
+        tags = self.list_tags(100000)
+        amap = self.skill_alias_map()
+        groups: dict[str, dict[str, Any]] = {}
+        for t in tags:
+            k = amap.get(t["tag"].lower(), t["tag"].lower())
+            g = groups.setdefault(k, {"tag": t["tag"] if k == t["tag"].lower() else k, "count": 0, "_names": []})
+            g["_names"].append(t["tag"])
+            if k == t["tag"].lower():
+                g["tag"] = t["tag"]
+        out = []
+        for k, g in groups.items():
+            names = g.pop("_names")
+            if len(names) > 1:
+                marks = ", ".join("?" for _ in names)
+                g["count"] = self._row(f"SELECT count(DISTINCT candidate_id) AS n FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE", names)["n"]
+            else:
+                g["count"] = next(t["count"] for t in tags if t["tag"] == names[0])
+            out.append(g)
+        out.sort(key=lambda g: g["tag"].lower())
+        return out[:limit]
+
     def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._rows(
             "SELECT (SELECT t2.tag FROM candidate_tags t2 WHERE t2.tag = t.tag COLLATE NOCASE GROUP BY t2.tag"
@@ -4276,8 +4461,9 @@ class Store:
                     params += [f, int(len(f) <= 3)]
                 filters[{"current_title": "title", "current_company": "company"}.get(col, col)] = value
         if tag and tag.strip():
-            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
-            params.append(tag.strip())
+            names = self.skill_group_names(tag)
+            where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in names)}) COLLATE NOCASE)")
+            params += names
             filters["tag"] = tag
         if source and source.strip():
             where.append("lower(trim(c.source)) = lower(?)")
@@ -4342,6 +4528,7 @@ class Store:
                 if fld == "skill":
                     if not negate:
                         continue  # skills that must be there go through the `skills` filter
+                    vals = self.expand_skills(vals)
                     marks = ", ".join("?" for _ in vals)
                     where.append(f"c.id NOT IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
                     params += vals
@@ -4371,14 +4558,15 @@ class Store:
         has email / LinkedIn, and words to leave out."""
         names = [x.strip() for x in (skills or []) if x and x.strip()]
         if names:
-            marks = ", ".join("?" for _ in names)
-            if skill_mode == "all":
-                where.append(f"(SELECT count(DISTINCT lower(tag)) FROM candidate_tags WHERE candidate_id = c.id"
-                             f" AND tag IN ({marks}) COLLATE NOCASE) = ?")
-                params += [*names, len({x.lower() for x in names})]
+            if skill_mode == "all":  # every skill asked for, each one counting its look-alike names too
+                for n in dict.fromkeys(x.lower() for x in names):
+                    group = self.skill_group_names(n)
+                    where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in group)}) COLLATE NOCASE)")
+                    params += group
             else:
-                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
-                params += names
+                every = self.expand_skills(names)
+                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in every)}) COLLATE NOCASE)")
+                params += every
             filters["skills"] = (" and " if skill_mode == "all" else " or ").join(names)
         if remote:
             where.append("(tt_has(c.location, 'remote', 1) OR c.id IN (SELECT candidate_id FROM candidate_tags"

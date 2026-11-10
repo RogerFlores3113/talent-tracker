@@ -1240,6 +1240,32 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   + f". Open it: {i['app_url']}" for i in items]
         return _result("\n".join(lines), {"saved_searches": items, "app_url": app_url("/candidates")})
 
+    @mcp.tool(annotations=READ)
+    def list_skill_lookalikes(limit: int = 20) -> CallToolResult:
+        """List pairs of skill names that look like one skill (react and react.js, engineer and engineering, js and
+        javascript), each with how many people have each name and how many have both, plus the names the recruiter
+        already treats as one. Read only: you can't merge or split them. Tell the recruiter, who decides in the app
+        under Settings, Skill names."""
+        n = max(1, min(int(limit or 20), 50))
+        pairs = store.skill_lookalikes(n)
+        groups = store.skill_alias_groups()
+        where = app_url("/settings#skill-names")
+        items = [{"keep": p["keep"], "other": p["other"], "keep_people": p["keep_count"], "other_people": p["other_count"],
+                  "both": p["both"], "why": p["reason"]} for p in pairs]
+        merged = [{"kept": g["kept"], "also_counts": [a["name"] for a in g["aliases"]], "people": g["people"]} for g in groups]
+        lines = []
+        if items:
+            lines.append(f"{len(items)} pair{'' if len(items) == 1 else 's'} of skill names look the same:")
+            lines += [f"- {quoted(i['keep'])} / {quoted(i['other'])}: {i['keep_people']} + {i['other_people']} people, "
+                      f"{i['both']} {'has' if i['both'] == 1 else 'have'} both" for i in items]
+        else:
+            lines.append("No skill names look the same right now.")
+        if merged:
+            lines.append("Already treated as one: " + "; ".join(
+                f"{quoted(g['kept'])} also counts " + ", ".join(quoted(a) for a in g["also_counts"]) for g in merged) + ".")
+        lines.append(f"The recruiter decides in the app: {where}")
+        return _result("\n".join(lines), {"pairs": items, "treated_as_one": merged, "app_url": where})
+
     @mcp.tool(annotations=READ, meta=tool_meta("people"))
     def run_saved_search(name_or_id: str | int, limit: int = 10, offset: int = 0) -> CallToolResult:
         """Run one of the recruiter's saved searches (by its name or its id from list_saved_searches; `name` and

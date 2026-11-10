@@ -75,7 +75,7 @@ def test_row_chips_have_ids_and_links_carry_a_fragment(store):
     assert re.search(r'href="[^"]*hl=python[^"]*data\+engineer[^"]*#chip-%s-data-engineer-[0-9a-f]{4}"' % ids["Zed Both"], row)
     bar_remove = re.search(r'id="hlbar-python[^"]*"[^>]*href="([^"]+)"', html).group(1)
     assert bar_remove == "/candidates?sort=color&amp;dir=asc#removed-python"
-    clear = re.search(r'href="([^"]+)">Clear</a>', html[html.index('id="hl-bar"'):]).group(1)
+    clear = re.search(r'href="([^"]+)">Clear all \d+ highlights?</a>', html[html.index('id="hl-bar"'):]).group(1)
     assert clear.endswith("#hlcleared")
 
 
