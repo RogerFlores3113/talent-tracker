@@ -1,12 +1,13 @@
 {% extends "base.html" %}
-{% from "_macros.html" import chips %}
+{% from "_macros.html" import chips, cur %}
 {% block title %}Candidates · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
-{% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#cand-table' }}">{{ 'Skip to highlighted skills' if hl_bar else 'Skip to the table' }}</a>{% endblock %}
+{% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#hl-add' }}">Skip to skill highlights</a><a class="skip-link" href="#cand-table">Skip to the table</a>{% endblock %}
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
-  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" id="export-csv" href="/candidates/export.csv?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as a CSV file">Export CSV</a> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file">Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a>{% if total > bulk_max() %} <span class="fine" id="export-cap">Exports hold the first {{ "{:,}".format(bulk_max()) }} of {{ "{:,}".format(total) }} people.</span>{% endif %}</div>
+  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" id="export-csv" href="/candidates/export.csv?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as a CSV file. Private notes and the timeline are left out unless you tick Include notes." data-download>Export CSV</a> <label class="check inline-label" id="export-notes-label"><input type="checkbox" id="export-csv-notes"> <span>Include notes <span class="fine">(your private notes and the timeline)</span></span></label> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file" data-download>Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a>{% if total > bulk_max() %} <span class="fine" id="export-cap">Exports hold the first {{ "{:,}".format(bulk_max()) }} of {{ "{:,}".format(total) }} people.</span>{% endif %}</div>
+  <p class="fine export-status" id="export-status" role="status" aria-live="polite"></p>
 </div>
 <form class="tablebar" id="tablebar-form" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search: python OR go, &quot;machine learning&quot;, title:engineer" aria-label="Search candidates">
@@ -61,7 +62,7 @@
 </form>
 {% include "_search_tips.html" %}
 {% if from_chat %}<p class="panel ids-banner" role="status"><strong>{{ from_chat }} {{ 'person' if from_chat == 1 else 'people' }} from your chat.</strong> <a href="/candidates">Show everyone</a></p>{% endif %}
-{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
+{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" id="results-count" tabindex="-1" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% elif total > 100 %}<p class="fine" id="results-count" tabindex="-1"><strong>{{ "{:,}".format(total) }} people</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
@@ -69,10 +70,24 @@
 {% if active_chips %}<p class="filter-chips" role="group" aria-label="Filters that are on">{% for c in active_chips %}<a class="chip removable" href="{{ c.href }}" title="Remove this filter" aria-label="Remove filter: {{ c.label }}">{{ c.label }} <span aria-hidden="true">×</span></a>{% endfor %}</p>{% endif %}
 {% if hl_bar %}<div class="hlbar" id="hl-bar" tabindex="-1" role="group" aria-label="Highlighted skills">
   <span class="fine"><strong>Highlighted skills:</strong></span>
-  {% for h in hl_bar %}<a class="chip hl removable" id="{{ h.id }}" data-hl="{{ h.color }}" data-skill="{{ h.skill }}"{% if h.count is not none %} data-count="{{ h.count }}"{% endif %} href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ h.skill }} ({{ h.color }})"><span class="hl-n" aria-hidden="true">{{ h.n }}</span> {{ h.skill }}{% if h.count is not none %} <span class="hl-count" aria-hidden="true">({{ '{:,}'.format(h.count) }})</span>{% endif %} <span aria-hidden="true">×</span></a>{% endfor %}
-  <a class="small" href="{{ hl_href(dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir), hl, clear=True) }}">Clear</a>
-  <span class="fine">People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden. The number in brackets is how many people in these results have the skill.</span>
-</div>{% endif %}
+  {% for h in hl_bar %}<a class="chip hl removable{{ ' title-chip' if h.title }}" id="{{ h.id }}" data-hl="{{ h.color }}" data-skill="{{ h.skill }}" data-label="{{ h.label }}"{% if h.count is not none %} data-count="{{ h.count }}"{% endif %} href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ h.label }} ({{ h.color }})"><span class="hl-n" aria-hidden="true">{{ h.n }}</span> {{ h.label }}{% if h.count is not none %} <span class="hl-count" aria-hidden="true">({{ '{:,}'.format(h.count) }}{% if h.variants and h.variants > 1 %}, {{ h.variants }} variants{% endif %})</span>{% endif %} <span aria-hidden="true">×</span></a>{% endfor %}
+  <a class="small" href="{{ hl_href(dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir), hl, clear=True) }}">Clear all {{ hl_bar | length }} highlight{{ '' if hl_bar | length == 1 else 's' }}</a>
+  <span class="fine">People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden. The number in brackets is how many people in these results have the skill. A title pick (title: ...) works the same way on each person's current job title, at any level.</span>
+</div>
+{% for hint in hl_hints %}<form class="hl-hint fine" method="post" action="/settings/skill-names/merge">
+  <input type="hidden" name="alias" value="{{ hint.alias }}"><input type="hidden" name="kept" value="{{ hint.keep }}"><input type="hidden" name="next" value="{{ hint.next }}">
+  <span>Also {{ '{:,}'.format(hint.extra) }} {{ 'person' if hint.extra == 1 else 'people' }} with {{ hint.other }}. Treat as the same skill?</span>
+  <button class="btn small" type="submit" aria-label="Treat {{ hint.alias }} and {{ hint.keep }} as one skill">Treat as one</button>
+  <button class="btn small" type="submit" formaction="/settings/skill-names/reject" aria-label="{{ hint.alias }} and {{ hint.keep }} are not the same skill">Not the same</button>
+</form>{% endfor %}{% endif %}
+<form class="hl-add" id="hl-add-form" method="get" action="/candidates" role="search" aria-label="Highlight a skill or job title">
+  {% for k, v in keep.items() if k != 'hl' %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="qsort" value="{{ qsort }}"><input type="hidden" name="qdir" value="{{ qdir }}">{% endif %}{% if hl %}<input type="hidden" name="hl" value="{{ keep.get('hl', '') }}">{% endif %}
+  <label for="hl-add">Highlight a skill or title</label>
+  <input type="text" id="hl-add" name="hl_add" list="hl-list" autocomplete="off" maxlength="70" placeholder="python, or title: data engineer" aria-describedby="hl-add-help">
+  <button class="btn small" type="submit">Highlight</button>
+  <span class="fine" id="hl-add-help">Type a skill, or "title: " and a job title, then press Enter. Up to {{ 6 }} at once.</span>
+  <datalist id="hl-list">{% for t in hl_titles %}<option value="{{ t.label }}">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</option>{% endfor %}{% for t in hl_skills %}<option value="{{ t.tag }}">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</option>{% endfor %}</datalist>
+</form>
 <p class="fine hl-status" id="hl-status" role="status" aria-live="polite" tabindex="-1"></p>
 <div class="savedbar" id="saved-searches">
   {% if not saved %}<span class="fine">Saved searches: none yet.{% if not save_params %} Run a search or pick a filter, then you can save it here.{% endif %}</span>{% endif %}
@@ -111,11 +126,16 @@
   {% if color %}<a href="/candidates?{{ dict(keep, color='') | urlencode }}" class="small">Show all labels</a>{% endif %}
 </div>
 <p class="fine">{% if hl and not q and sort == 'color' %}Sorted by highlighted skills first, then by label color. Click a bubble to change someone's label color. Pick another column to sort by it instead.{% else %}{% if hl %}People with more of the highlighted skills come first. Inside each group the usual order applies. {% endif %}{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by label color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's label color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Label color to group by label color again.{% endif %}{% endif %}</p>
+{% if total > 100 %}<nav class="pagesize" id="page-size" aria-label="How many people to show at a time"><span class="fine pagesize-label" aria-hidden="true">Show</span>
+  <span class="seg">{% for n, label in [('100', '100'), ('250', '250'), ('all', 'All')] %}<a href="/candidates?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir, size='' if n == '100' else n) | urlencode }}#results-count" class="{{ 'on' if size == n }}"{{ cur(size == n) }}>{{ label }}<span class="sr-only"> people at a time</span></a>{% endfor %}</span>
+  {% if size == 'all' and total > bulk_max() %}<span class="fine" id="page-size-cap">All stops at {{ "{:,}".format(bulk_max()) }}, the same limit as exports. Narrow the filters to reach the rest.</span>{% elif size == 'all' %}<span class="fine">Showing all {{ total }}.</span>{% endif %}
+</nav>{% endif %}
 {% if total %}<form id="bulk-form" class="bulkbar panel" method="post" action="/candidates/bulk" aria-label="Do something for the people you tick">
   {% for k, v in keep.items() %}<input type="hidden" name="f_{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="f_q" value="{{ q }}">{% endif %}<input type="hidden" name="f_sort" value="{{ sort }}"><input type="hidden" name="f_dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="f_qsort" value="{{ qsort }}"><input type="hidden" name="f_qdir" value="{{ qdir }}">{% endif %}
+  <p class="bulk-count" id="bulk-count" role="status" aria-live="polite" data-total="{{ total }}">0 people ticked</p>
   <p class="fine"><strong>For the people you tick:</strong> tick rows in the table (the box in the header ticks everyone on this page).{% if total > rows | length %}
     <label class="check"><input type="checkbox" name="select_all" value="1"> <span>Use all {{ total }} {{ 'person' if total == 1 else 'people' }} in these results, not only the ticked rows{% if total > 5000 %} (the first 5000){% endif %}</span></label>{% endif %}</p>
-  <div class="bulk-actions">
+  <div class="bulk-actions" id="bulk-panel" data-needs-ticks>
     <label>Color <select name="color"><option value="">No color</option>{% for name in COLORS %}<option value="{{ name }}">{{ name | capitalize }}</option>{% endfor %}</select></label>
     <button class="btn" type="submit" name="action" value="color" data-confirm="Set this color for the ticked people? Their old colors are replaced.">Set color</button>
     <label>Job <select name="job_id"><option value="">Pick a job</option>{% for j in job_choices or [] %}<option value="{{ j.id }}">{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></label>
@@ -129,14 +149,17 @@
   <div class="bulk-actions bulk-send" role="group" aria-label="Send out">
     <span class="fine"><strong>Send out:</strong></span>
     <button class="btn" type="submit" name="action" value="compare" title="Put two to six ticked people side by side">Compare</button>
-    <button class="btn" type="submit" name="action" value="export">Export as CSV</button>
-    <button class="btn" type="submit" name="action" value="export_xlsx">Export as xlsx</button>
+    <button class="btn" type="submit" name="action" value="export" data-download>Export as CSV</button>
+    <label class="check inline-label"><input type="checkbox" name="include_notes" value="1"> <span>Include notes</span></label>
+    <button class="btn" type="submit" name="action" value="export_xlsx" data-download>Export as xlsx</button>
     <button class="btn" id="share-xlsx" type="submit" name="action" value="share" title="Pick what goes in a spreadsheet for a hiring manager">Share as xlsx</button>
+    <p class="bulk-msg" id="bulk-msg" role="alert" tabindex="-1" hidden></p>
   </div>
 </form>{% endif %}
 <div class="table-wrap">
 <table class="dense" id="cand-table" tabindex="-1">
-  <caption class="sr-only">Candidates{% if hl %}, sorted by highlighted skills first, then {% if q %}best match first{% elif sort == 'color' %}by label color{% else %}by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}{% elif q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
+  {% set n_colored = namespace(v=0) %}{% for c in COLORS %}{% set n_colored.v = n_colored.v + (color_counts[c] or 0) %}{% endfor %}
+  <caption class="sr-only">Candidates{% if sort == 'color' and not q and not hl and not n_colored.v %}, newest first (nobody has a label color yet){% elif hl %}, sorted by highlighted skills first, then {% if q %}best match first{% elif sort == 'color' %}by label color{% else %}by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}{% elif q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
   <thead><tr>
     {% if total %}<th scope="col" class="pickcell"><input type="checkbox" form="bulk-form" data-check-all data-check-name="candidate_ids" aria-label="Tick everyone on this page"></th>{% endif %}
     {% set color_on = not q and sort == 'color' and not hl %}

@@ -10,6 +10,7 @@
   <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> {{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs.</p>
   <ul class="plain" id="skill-list">{% for k in skill_info %}<li><strong>{{ k.title }}</strong>: {{ k.line }} <code>{{ k.folder }}</code></li>{% endfor %}</ul>
 
+  <p id="where-cards-show"><strong>Where the cards show:</strong> Cards and tables show in the Claude desktop app and the ChatGPT desktop app. Claude asks once to display them: choose Always allow. Claude Code, the Codex command line and claude.ai in a browser show the same answers as text. After you update Talent Search, quit and reopen the app so it picks up the new views.</p>
   <h3 id="claude-plugin">Claude app (desktop or claude.ai): the plugin</h3>
   <p><strong>This is the one for most people.</strong> The plugin adds the {{ skill_names|length }} skills above to the Claude app. It adds the skills only: the Claude app still needs the Talent Search connection, which you make in the Claude Desktop section <a href="#claude-panel">further down this page</a>.</p>
   {% if plugin_saved %}<p class="ok">Already saved: {{ plugin_file }} is in {{ plugin_where }}. Upload it in Claude if you haven't yet.</p>{% endif %}
@@ -149,7 +150,17 @@
   <span class="checking" id="lmstudio-busy">Checking...</span>
   <div id="lmstudio-result" aria-live="polite"></div>
   <h3>Other AI apps</h3>
-  <p class="fine">Using a different app (Cursor, Windsurf, Jan)? See “Details for technical users” at the bottom of this page. ChatGPT itself can't connect to apps on this computer yet.</p>
+  <p class="fine">Using a different app (Cursor, Windsurf, Jan)? See “Details for technical users” at the bottom of this page.</p>
+  <h3 id="chatgpt-desktop">ChatGPT desktop app</h3>
+  <p id="chatgpt-copy">Connect Codex on this page also connects the ChatGPT desktop app, because the two share one settings file. Or, in ChatGPT, open Settings &gt; MCP servers &gt; Add server &gt; STDIO and enter this command and these arguments:</p>
+  <p class="fine">Command:</p>
+  <pre class="code" id="chatgpt-cmd">{{ stdio_command }}</pre>
+  <button class="btn" type="button" data-copy-from="chatgpt-cmd" aria-label="Copy ChatGPT command">Copy</button>
+  <p class="fine">Arguments:</p>
+  <pre class="code" id="chatgpt-args">{{ stdio_args }}</pre>
+  <button class="btn" type="button" data-copy-from="chatgpt-args" aria-label="Copy ChatGPT arguments">Copy</button>
+  <p class="fine">Environment variable: <code>TALENT_DATA_DIR</code> = <code>{{ stdio_data_dir }}</code></p>
+  <p class="fine">The ChatGPT website and the ChatGPT phone app can't reach apps on this computer.</p>
 </section>
 
 <section class="panel">

@@ -1,8 +1,10 @@
-{% from "_macros.html" import sample_badge %}
+{% from "_macros.html" import sample_badge, job_chips, job_title_chip %}
 {% set sample_people = sample_ids()[0] %}
 {% set next_iv = next_iv or {} %}
 {% set elsewhere = elsewhere_badges(job.id) %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if status %}<div class="flash bulk-status" role="status" id="move-status" tabindex="-1">{{ status }}
+  {% if batch_id %}<form method="post" action="/jobs/{{ job.id }}/move-many/{{ batch_id }}/undo" hx-post="/jobs/{{ job.id }}/move-many/{{ batch_id }}/undo" hx-target="#pipeline" class="inline"><input type="hidden" name="hl" value="{{ hl_param }}"><button class="btn small" type="submit">Undo</button></form>{% endif %}</div>{% endif %}
 {% if resubmit %}<p class="flash warn" role="status">{{ resubmit }}</p>{% endif %}
 {% if ask %}<div class="flash warn ask-cancel" role="status">
   <form method="post" action="/jobs/{{ job.id }}/cancel-interviews" class="inline">
@@ -17,21 +19,30 @@
 <div class="empty"><h2>No one in this pipeline yet</h2><p>Search above to add people you already have, or source new ones with AI.</p></div>
 {% elif view == 'table' %}
 <form method="post" action="/jobs/{{ job.id }}/move" hx-post="/jobs/{{ job.id }}/move" hx-target="#pipeline" hx-trigger="submit" class="stage-form tbl-move" id="tbl-move">
-  <input type="hidden" name="candidate_id" value=""><input type="hidden" name="view" value="{{ view }}"><input type="hidden" name="stage" value="">
+  <input type="hidden" name="candidate_id" value=""><input type="hidden" name="view" value="{{ view }}"><input type="hidden" name="stage" value=""><input type="hidden" name="hl" value="{{ hl_param }}">
   <span class="reason" hidden><span class="tbl-who"></span> <select name="notes" aria-label="Reason"><option value="">Pick a reason</option>{% for r, like in move_reasons() %}<option value="Reason: {{ r }}" data-like="{{ like }}">{{ r }}</option>{% endfor %}</select><button class="btn small" type="submit">Move without a reason</button></span>
   <noscript><button class="btn small" type="submit">Move</button></noscript>
 </form>
+<form method="post" action="/jobs/{{ job.id }}/move-many" hx-post="/jobs/{{ job.id }}/move-many" hx-target="#pipeline" hx-trigger="submit" class="bulkbar panel" id="bulk-move" data-bulk-move aria-label="Move the people you tick to another stage">
+  <input type="hidden" name="hl" value="{{ hl_param }}">
+  <label>Move ticked people to <select name="stage" required><option value="">Pick a stage</option>{% for s in stages %}<option>{{ s.name }}</option>{% endfor %}</select></label>
+  <button class="btn primary" type="submit" data-bulk-move-btn disabled>Move ticked</button>
+  <span class="fine" data-bulk-move-count aria-live="polite">Nobody ticked yet. Tick the boxes below, or the one in the header for everyone.</span>
+</form>
 <h2 class="sr-only">Pipeline table</h2>
-<div class="table-wrap"><table class="dense">
-  <caption class="sr-only">People in this job, grouped by stage</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col">Title</th><th scope="col">Stage</th><th scope="col">In stage since</th><th scope="col">Last contacted</th><th scope="col">Next interview</th></tr></thead>
+<div class="table-wrap"><table class="dense" id="cand-table" tabindex="-1">
+  <caption class="sr-only">People in this job, grouped by stage{% if hl %}, with the highlighted skills first in each stage{% endif %}</caption>
+  <thead><tr><th scope="col" class="pickcell"><input type="checkbox" form="bulk-move" data-check-all data-check-name="candidate_ids" aria-label="Tick everyone in this job"></th><th scope="col">Name</th><th scope="col">Title</th><th scope="col">Skills</th><th scope="col">Stage</th><th scope="col">In stage since</th><th scope="col">Last contacted</th><th scope="col">Next interview</th></tr></thead>
   {% for g in groups if g.candidates %}
   <tbody class="group o-{{ g.outcome }}">
-    <tr class="group-head"><th colspan="6" scope="rowgroup">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
+    <tr class="group-head"><th colspan="8" scope="rowgroup">{{ g.name }} <span class="muted">{{ g.candidates | length }}</span></th></tr>
     {% for a in g.candidates %}
-    <tr>
-      <th scope="row" class="rowhead"><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}</td>
-      <td>{{ a.current_title or '' }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
+    {% set edge = hl_edge({'tags': a.tags, 'current_title': a.current_title}, hl) if hl else '' %}
+    <tr{% if edge %} class="hlrow" data-edge="{{ edge }}"{% endif %}>
+      <td class="pickcell"><input type="checkbox" form="bulk-move" name="candidate_ids" value="{{ a.candidate_id }}" aria-label="Tick {{ a.candidate_name }}"></td>
+      <th scope="row" class="rowhead"><a href="/candidates/{{ a.candidate_id }}">{{ a.candidate_name }}</a> {{ sample_badge(a.candidate_id in sample_people) }}{% if a.candidate_id in elsewhere %} <span class="badge warn" title="{{ elsewhere[a.candidate_id][1] }}">{{ elsewhere[a.candidate_id][0] }}</span>{% endif %}{% if hl %} <span class="fine matchcount" title="Has {{ hl_have({'tags': a.tags, 'current_title': a.current_title}, hl) }} of the {{ hl | length }} highlighted skills">{{ hl_have({'tags': a.tags, 'current_title': a.current_title}, hl) }} of {{ hl | length }}</span>{% endif %}</th>
+      <td>{{ job_title_chip(a, job.id, hl) }}{% if a.current_company %} at {{ a.current_company }}{% endif %}</td>
+      <td>{{ job_chips(a.tags, job.id, hl, a.candidate_id) }}</td>
       <td><select aria-label="Stage for {{ a.candidate_name }}" data-table-stage data-cid="{{ a.candidate_id }}" data-who="{{ a.candidate_name }}">{% for s in stages %}<option {{ 'selected' if s.name | lower == a.stage | lower }}{{ ' data-out=1' if s.outcome == 'lost' and s.name | lower != a.stage | lower }}>{{ s.name }}</option>{% endfor %}</select></td>
       <td class="nowrap">{{ a.stage_changed_at | ago }}</td>
       <td class="nowrap">{{ a.last_contacted_at | ago if a.last_contacted_at else 'never' }}</td>
@@ -68,7 +79,6 @@
     </div>
     {% else %}<p class="fine drop-hint">Drop here</p>
     {% endfor %}
-    {% if cards %}</div>{% endif %}
     {% if cards %}</div>{% endif %}
     {% if n > cards | length %}<a class="fine show-more" href="/jobs/{{ job.id }}?view=board&amp;show={{ g.name | urlencode }}#pipeline">Show {{ n - cards | length }} more</a>{% endif %}
     {% if n and g.outcome != 'open' %}</details>{% endif %}

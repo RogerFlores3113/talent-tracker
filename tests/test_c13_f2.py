@@ -70,11 +70,11 @@ def test_share_with_highlights_adds_matched_skills_in_color(store):
     p = parts(res.content)
     book = read_xlsx(res.content)
     head, rows = table(book)
-    assert head[:2] == ["Name", "Matched skills"]
-    assert rows[0]["Matched skills"] == "python (1 of 2)" and rows[1]["Matched skills"] == "python, go (2 of 2)"
+    assert head[:2] == ["Name", "Matched picks"]
+    assert rows[0]["Matched picks"] == "python (1 of 2)" and rows[1]["Matched picks"] == "python, go (2 of 2)"
     assert "FFC62828" in p["xl/styles.xml"] and "FFF6D53D" in p["xl/styles.xml"]  # the app's red and yellow
     about = {r[0]: r[1] for r in book["About this file"]["rows"][1:]}
-    assert about["Highlighted skills"] == "python (red), go (yellow)"
+    assert about["Highlighted picks"] == "python (red), go (yellow)"
     assert "hl:" not in str(about)
 
 
@@ -84,13 +84,13 @@ def test_table_export_highlights_and_filters_in_words(store):
     res = client.get("/candidates/export.xlsx", params={"tag": "python", "location": "Austin", "hl": "python:red,go:yellow"})
     book = read_xlsx(res.content)
     head, rows = table(book)
-    assert head[1] == "Matched skills" and rows[0]["Matched skills"] == "python, go (2 of 2)"
+    assert head[1] == "Matched picks" and rows[0]["Matched picks"] == "python, go (2 of 2)"
     about = {r[0]: r[1] for r in book["About this export"]["rows"][1:]}
-    assert about["Highlighted skills"] == "python (red), go (yellow)"
+    assert about["Highlighted picks"] == "python (red), go (yellow)"
     assert about["Location"] == "Austin" and about["Skill"] == "python"
     assert "Notes" in about["Not in this file"] and "hl" not in about
     plain = read_xlsx(client.get("/candidates/export.xlsx").content)
-    assert "Matched skills" not in table(plain)[0]
+    assert "Matched picks" not in table(plain)[0]
 
 
 # ---------------------------------------------------------------- 5. dates, years, label color
@@ -164,13 +164,13 @@ def test_share_form_wording_radios_preview_and_live_line(store):
     assert "All notes and timeline" in html and "No notes" in html and "Notes go out word for word and may hold pay" in html
     assert 'name="hl" value="python:red"' in html and 'name="include_rejected"' in html
     assert re.search(r'id="pv-file">shortlist-\d{4}-\d{2}-\d{2}\.xlsx<', html)
-    assert "Ana Ruiz, Ben Cho" in html and "Matched skills" in html
+    assert "Ana Ruiz, Ben Cho" in html and "Matched picks" in html
     assert 'id="share-live"' in html and 'aria-live="polite"' in html
     js = local_client(store).get("/static/share.js").text
     assert "Your spreadsheet is downloading. Look in your Downloads folder." in js
     assert "fetch(" not in js and "XMLHttpRequest" not in js and "innerHTML" not in js
     job_html = local_client(store).get(f"/candidates/share?ids={ana['id']}&job={job['id']}").text
-    assert "shortlist-senior-backend-engineer-" in job_html
+    assert "shortlist-acme-senior-backend-engineer-" in job_html
 
 
 def test_share_filename_rules():

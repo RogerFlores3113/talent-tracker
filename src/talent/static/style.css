@@ -681,6 +681,17 @@ tr.hlrow[data-edge="orange"] { --bub: var(--tag-orange); }
 .chip.hl .hl-n { display: inline-block; min-width: 1.2em; text-align: center; font-weight: 700; border-right: 1px solid currentColor; padding-right: 0.3em; margin-right: 0.15em; }
 .chip.hl .hl-count { font-weight: 400; }
 .matchcount { white-space: nowrap; margin-left: var(--space-2); }
+/* Job-title picks: the same chip, with square corners and a dashed edge so a title reads as a different kind of pick. */
+.chip.title-chip { display: inline-block; line-height: 1.35; border-radius: 3px; border-style: dashed; cursor: pointer; }
+.chip.title-chip.hl { border-style: solid; }
+.chip.title-chip:hover { border-color: var(--accent); }
+.hl-add { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
+.hl-add label { font-weight: 600; }
+.hl-add input[type="text"] { min-width: 14rem; }
+.hl-hint { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-2); }
+.skill-pairs li form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.skill-pairs fieldset.keep-pick { border: 0; margin: 0; padding: 0; display: flex; gap: var(--space-3); align-items: center; }
+.skill-pairs fieldset.keep-pick legend { float: left; margin-right: var(--space-2); padding: 0; }
 .chip, tr { scroll-margin: 6rem 0; }
 .bulk-send { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); align-items: center; }
 
@@ -743,3 +754,31 @@ body.compare-full main { max-width: none; }
   table.compare .rowlabel { width: 6.5rem; padding: var(--space-2) var(--space-2); }
   table.compare th, table.compare td { padding: var(--space-2); }
 }
+
+/* Cycle 14: hiring manager view headings and landmarks, share form, bulk bar messages, jobs switch */
+table.compare .person-h { margin: 0; font: inherit; flex: 1 1 auto; min-width: 0; }
+.hm-head { justify-content: flex-start; }
+.hm-foot p { margin: 0; }
+.hm-about-tick { margin: 0; padding: 0; font-size: var(--fs-xs, 13px); }
+.bulk-msg { margin: 0; padding: var(--space-1, 4px) var(--space-2, 8px); font-weight: 600; border-left: 3px solid var(--bad); color: var(--bad); }
+.bulk-count { margin: 0 0 var(--space-2, 8px); font-weight: 600; }
+.export-status { margin: var(--space-1, 4px) 0 0; }
+form.wording { margin-top: var(--space-5, 24px); padding-top: var(--space-3, 12px); border-top: 1px solid var(--line, currentColor); }
+/* Duplicate groups: one card per group of profiles, with Keep this one and a Merge in box for each profile */
+.dup-title { font-size: 1.05rem; margin: 0 0 0.25rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.dup-members { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.5rem; }
+.dup-member { display: grid; grid-template-columns: auto auto 1fr; gap: 0.5rem 1rem; align-items: start; padding: 0.4rem 0; border-top: 1px solid var(--line); }
+.dup-member .check { white-space: nowrap; }
+.dup-cluster.maybe { border-left: 4px solid var(--warn); }
+@media (max-width: 40rem) { .dup-member { grid-template-columns: 1fr 1fr; } .dup-member .dup-person { grid-column: 1 / -1; } }
+.skill-pairs .keep-opt { display: inline-flex; gap: var(--space-2); align-items: center; }
+.skill-pairs .keep-label { cursor: pointer; padding: var(--space-1) var(--space-2); }
+.skill-result { font-size: var(--fs-md, 1rem); margin: var(--space-2) 0; }
+/* Candidates "Show 100 / 250 / All": the caption sits beside the buttons, never under them */
+.pagesize { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
+.pagesize .seg { flex: none; }
+/* The board scrolls inside its own box: its hidden labels are positioned against it, so they never widen the page */
+.board { position: relative; max-width: 100%; }
+#pipeline { min-width: 0; max-width: 100%; }
+/* The job table's "Move N ticked" bar stays in view while people are ticked */
+#bulk-move { position: sticky; top: 0; z-index: 5; background: var(--surface); }

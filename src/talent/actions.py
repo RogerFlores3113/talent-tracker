@@ -8,6 +8,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -1219,6 +1220,28 @@ def default_omit(store: Store, job_id: int) -> list[str]:
     return name_hidden(store, job_id)
 
 
+def page_omit(store: Store, job_id: int) -> list[str]:
+    """What the job page's status update leaves out until the recruiter chooses: the default_omit stages and the
+    stages that ended badly (Rejected, Withdrawn, Client passed: outcome lost), so the text a recruiter copies does
+    not name someone who was turned down. Once they save their own choice, that choice is used as saved."""
+    if has_saved_omit(store, job_id):
+        return saved_omit(store, job_id)
+    out = default_omit(store, job_id)
+    return out + [s["name"] for s in store.job_stages(job_id) if s["outcome"] == "lost" and s["name"] not in out]
+
+
+def status_names(store: Store, job_id: int, text: str) -> list[str]:
+    """The people in this job's pipeline whose names are in `text` (the status update), in pipeline order: exactly
+    who a pasted copy of it would name."""
+    seen: list[str] = []
+    for g in store.pipeline_by_stage(job_id):
+        for a in g["candidates"]:
+            n = a["candidate_name"]
+            if n and n in text and n not in seen:
+                seen.append(n)
+    return seen
+
+
 def has_saved_omit(store: Store, job_id: int) -> bool:
     return bool(store.setting(_omit_key(job_id)))
 
@@ -1247,11 +1270,18 @@ def save_omit(store: Store, job_id: int, names: list[str]) -> list[str]:
     return names
 
 
+# When set, a status text that was given no choice of its own leaves out what the job page leaves out (see
+# page_omit): the internal stages and the ones that ended badly. The in-chat status text turns it on.
+ENDED_LEFT_OUT: ContextVar[bool] = ContextVar("ended_left_out", default=False)
+
+
 def _omitted(store: Store, job_id: int, omit_stages: list[str] | None) -> set[str]:
     """Stage keys to leave out: omit_stages, or the job's remembered choice when None. Names may be partial
     ('rej'); ones the job doesn't have are ignored."""
     out = set()
-    for name in saved_omit(store, job_id) if omit_stages is None else omit_stages:
+    if omit_stages is None:
+        omit_stages = page_omit(store, job_id) if ENDED_LEFT_OUT.get() else saved_omit(store, job_id)
+    for name in omit_stages:
         try:
             out.add(_stage_key(store.resolve_stage(job_id, name)["name"]))
         except ValueError:

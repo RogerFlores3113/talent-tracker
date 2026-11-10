@@ -23,12 +23,23 @@
 
 {# Skill chips. With base (the table's current parameters) a click toggles the skill in the highlight list; without it,
    a click starts a highlight on the Candidates table. hl maps each highlighted skill to its color, in click order. #}
-{% macro chips(tags, link=True, hl=None, base=None, rid=None) -%}
-{% if tags %}{% set marked = hl or {} %}<span class="chips">{% for t in tags %}{% if link %}{% set pos = marked[t | lower] if (t | lower) in marked else '' %}<a class="chip{{ ' hl' if pos }}"{% if rid is not none %} id="chip-{{ rid }}-{{ hl_slug(t) }}"{% endif %} data-skill="{{ t | lower }}"{% if pos %} data-hl="{{ pos }}"{% endif %} href="{{ hl_href(base, marked, t, rid=rid) if base is not none else '/candidates?hl=' ~ (t | urlencode) }}" aria-label="{{ (t ~ ', highlighted ' ~ pos ~ ' (remove)') if pos else ('Highlight ' ~ t) }}" title="{{ 'Remove the highlight' if pos else 'Highlight this skill and sort people who have it to the top' }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
+{% macro chips(tags, link=True, hl=None, base=None, rid=None, pos_of=None, add_only=False) -%}
+{% if tags %}{% set marked = hl or {} %}<span class="chips">{% for t in tags %}{% if link %}{% set info = (pos_of or {}).get(t | lower) %}{% set pos = info.color if info else (marked[t | lower] if (t | lower) in marked else '') %}{% set key = info.key if info else (t | lower) %}<a class="chip{{ ' hl' if pos }}"{% if rid is not none %} id="chip-{{ rid }}-{{ hl_slug(key) }}"{% endif %} data-skill="{{ key }}"{% if pos %} data-hl="{{ pos }}"{% endif %} href="{{ hl_href(base, marked, t, rid=rid, add_only=add_only) if base is not none else '/candidates?hl=' ~ (t | urlencode) }}" aria-label="{{ (t ~ ', highlighted ' ~ pos ~ (' (remove)' if not add_only else '')) if pos else ('Highlight ' ~ t) }}" title="{{ ('Remove the highlight' if not add_only else 'Already highlighted') if pos else 'Highlight this skill and sort people who have it to the top' }}">{{ t }}</a>{% else %}<span class="chip">{{ t }}</span>{% endif %}{% endfor %}</span>{% endif %}
+{%- endmacro %}
+
+{#- A job title as a button-like chip (square corners, so it reads as a different kind of pick than a skill): a click
+    adds title:<title> to the highlights, another removes it. Shows the exact title; matching folds level words. -#}
+{% macro title_cell(c, hl=None, base=None, add_only=False) -%}
+{% set tp = title_pick(c) %}{% if c.current_title and tp %}{% set on = (hl or {}).get(tp, '') %}<a class="chip title-chip{{ ' hl' if on }}" id="chip-{{ c.id }}-{{ hl_slug(tp) }}" data-skill="{{ tp }}"{% if on %} data-hl="{{ on }}"{% endif %} href="{{ hl_href(base or {}, hl or {}, tp, rid=c.id, add_only=add_only) }}" aria-label="{{ ('Highlighted ' ~ on ~ ', title: ' ~ c.current_title ~ (' (remove)' if not add_only else '')) if on else ('Highlight title: ' ~ c.current_title) }}" title="{{ ('Remove the title highlight' if not add_only else 'Already highlighted') if on else 'Highlight this job title: matches the same title at any level (Senior, II, Lead) and sorts those people to the top' }}">{{ c.current_title }}</a>{% else %}{{ c.current_title or '' }}{% endif %}
 {%- endmacro %}
 
 {% macro sub(c) -%}
 {{ c.current_title or '' }}{% if c.current_company %}{{ ' at ' if c.current_title else '' }}{{ c.current_company }}{% endif %}{% if c.location %}{{ ' · ' if c.current_title or c.current_company }}{{ c.location }}{% endif %}
+{%- endmacro %}
+
+{#- What sub() prints after the title (the title itself is a button on a profile): " at Company · Location". -#}
+{% macro sub_rest(c) -%}
+{% if c.current_company %}{{ ' at ' }}{{ c.current_company }}{% endif %}{% if c.location %} · {{ c.location }}{% endif %}
 {%- endmacro %}
 
 {% macro sample_badge(is_sample) -%}
@@ -53,4 +64,15 @@
   <p class="actions-inline"><button class="btn{{ ' primary' if answered and inhouse() }}" type="submit" name="inhouse" value="1"{% if answered %} aria-pressed="{{ 'true' if inhouse() else 'false' }}"{% endif %}>My own company</button>
     <button class="btn{{ ' primary' if answered and not inhouse() }}" type="submit" name="inhouse" value="0"{% if answered %} aria-pressed="{{ 'false' if inhouse() else 'true' }}"{% endif %}>Clients</button></p>
 </form>
+{%- endmacro %}
+
+{#- The title chip for the job table: the same as title_cell, but a pick reloads /jobs/<id>?view=table. -#}
+{% macro job_title_chip(a, job_id, hl) -%}
+{% set tp = title_pick({'current_title': a.current_title}) %}{% if a.current_title and tp %}{% set on = (hl or {}).get(tp, '') %}<a class="chip title-chip{{ ' hl' if on }}" id="chip-{{ a.candidate_id }}-{{ hl_slug(tp) }}" data-skill="{{ tp }}"{% if on %} data-hl="{{ on }}"{% endif %} href="{{ job_hl_href(job_id, hl or {}, tp, rid=a.candidate_id) }}" aria-label="{{ ('Highlighted ' ~ on ~ ', title: ' ~ a.current_title ~ ' (remove)') if on else ('Highlight title: ' ~ a.current_title) }}" title="{{ 'Remove the title highlight' if on else 'Highlight this job title: matches the same title at any level and sorts those people to the top' }}">{{ a.current_title }}</a>{% else %}{{ a.current_title or '' }}{% endif %}
+{%- endmacro %}
+
+{% macro job_chips(tags, job_id, hl, rid) -%}
+{#- The same clickable highlight chips as the Candidates table, for the job table: a pick reloads /jobs/<id>?view=table. -#}
+{% set mine = hl_first(tags, hl) %}{% set shown_n = hl_shown(tags, hl) %}
+{% if mine %}<span class="chips">{% for t in mine[:shown_n] %}{% set pos = hl[t | lower] if (t | lower) in hl else '' %}<a class="chip{{ ' hl' if pos }}" id="chip-{{ rid }}-{{ hl_slug(t) }}" data-skill="{{ t | lower }}"{% if pos %} data-hl="{{ pos }}"{% endif %} href="{{ job_hl_href(job_id, hl, t, rid=rid) }}" aria-label="{{ (t ~ ', highlighted ' ~ pos ~ ' (remove)') if pos else ('Highlight ' ~ t) }}" title="{{ 'Remove the highlight' if pos else 'Highlight this skill and sort people who have it to the top' }}">{{ t }}</a>{% endfor %}</span>{% if mine | length > shown_n %} <span class="fine">+{{ mine | length - shown_n }}</span>{% endif %}{% endif %}
 {%- endmacro %}

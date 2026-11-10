@@ -344,7 +344,7 @@ def test_connect_keeps_the_first_backup(tmp_path):
 def test_connect_page_names_other_ai_apps(store):
     page = local_client(store).get("/connect").text
     assert "Other AI apps" in page and "ChatGPT and others" not in page
-    assert "ChatGPT itself can't connect to apps on this computer yet." in page
+    assert "ChatGPT itself can't connect to apps on this computer yet." not in page and "ChatGPT desktop app" in page
 
 
 def test_my_pages_have_no_dashes(store):

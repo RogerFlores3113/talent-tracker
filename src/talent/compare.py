@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import picks
 from .links import link_label, stored_links
 from .searchquery import years_of_experience
 from .store import stage_outcome
@@ -57,8 +58,28 @@ def _web(u: Any) -> str | None:
     return u if u.lower().startswith(("http://", "https://")) else None
 
 
-def _person(store: Any, cid: int, today: date | None) -> dict[str, Any]:
+def _merge_names(tags: list[str], aliases: dict[str, str], kept_names: dict[str, str]) -> list[str]:
+    """A person's skills with every name the person merged shown as the name they kept, once."""
+    out: list[str] = []
+    for t in tags:
+        k = aliases.get(t.lower())
+        name = kept_names.get(k, k) if k else t
+        if name.lower() not in {x.lower() for x in out}:
+            out.append(name)
+    return out
+
+
+def _person(store: Any, cid: int, today: date | None, aliases: dict[str, str] | None = None,
+            kept_names: dict[str, str] | None = None) -> dict[str, Any]:
     c = store.candidate_detail(cid, timeline_limit=5)
+    saved_as: dict[str, list[str]] = {}  # kept name (lower case) -> the spellings this person has saved under it
+    if aliases:
+        for t in c.get("tags") or []:
+            k = aliases.get(t.lower())
+            shown = (kept_names or {}).get(k, k) if k else t
+            if k and shown.lower() != t.lower() and t not in saved_as.setdefault(shown.lower(), []):
+                saved_as[shown.lower()].append(t)
+        c = {**c, "tags": _merge_names(list(c.get("tags") or []), aliases, kept_names or {})}
     roles = [(w.get("start"), w.get("end")) for w in c.get("work_history") or []]
     years = years_of_experience(roles, today)
     links = []
@@ -84,7 +105,7 @@ def _person(store: Any, cid: int, today: date | None) -> dict[str, Any]:
         "years_text": years_text(years), "tags": list(c.get("tags") or []), "source": c.get("source") or "",
         "last_contacted_at": c.get("last_contacted_at") or "", "created_at": c.get("created_at") or "",
         "about": (c.get("about") or "").strip(), "links": links,
-        "jobs": jobs,
+        "jobs": jobs, "saved_as": saved_as,
     }
 
 
@@ -237,7 +258,7 @@ def empty_rows(people: list[dict[str, Any]]) -> list[str]:
 
     checks = {
         "title": lambda p: p["title"] or p["company"], "location": lambda p: p["location"],
-        "years": lambda p: p["years"] is not None, "skills": lambda p: p["tags"], "jobs": lambda p: p["jobs"],
+        "years": lambda p: p["years"] is not None, "skills": lambda p: p["tags"], "jobs": lambda p: p["jobs"] or p.get("not_in_play"),
         "source": lambda p: p["source"].strip(), "contacted": lambda p: p["last_contacted_at"],
         "links": lambda p: p["links"], "about": lambda p: p["about"],
     }
@@ -250,14 +271,57 @@ def years_gap(people: list[dict[str, Any]]) -> bool:
 
 
 def hl_counts(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
-    """How many of the highlighted skills each person has."""
-    return {p["id"]: sum(1 for h in hl if h in {t.lower() for t in p["tags"]}) for p in people}
+    """How many of the highlighted picks (skills and "title:..." job titles) each person has. Skill names the person
+    merged are already one name here (see build)."""
+    return {p["id"]: sum(picks.person_hits(p["tags"], p["title"], hl)) for p in people}
+
+
+def title_hits(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
+    """For each person, the position in `hl` of the first title pick their current title matches (absent: none)."""
+    out: dict[int, int] = {}
+    for p in people:
+        for i, h in enumerate(hl):
+            if picks.is_title(h) and picks.person_hits([], p["title"], [h])[0]:
+                out[p["id"]] = i
+                break
+    return out
+
+
+NOT_IN_PLAY = "Not in play"
 
 
 def active_jobs(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The hiring manager view: each person's jobs where they are still in play. A stage that ended (Rejected,
-    Withdrawn, or a win that is not theirs to announce) is not shown at all."""
-    return [{**p, "jobs": [j for j in p["jobs"] if j.get("outcome") == "open"]} for p in people]
+    Withdrawn, or a win that is not theirs to announce) is never named, nor the job it was in. A person with jobs
+    but none in play is marked not_in_play, so the page can say "Not in play" instead of leaving a blank cell."""
+    out = []
+    for p in people:
+        live = [j for j in p["jobs"] if j.get("outcome") == "open"]
+        ended = [j for j in p["jobs"] if j.get("outcome") != "open"]
+        out.append({**p, "jobs": live, "not_in_play": bool(ended) and not live,
+                    "ended_job_ids": sorted({j["job_id"] for j in ended}) if not live else []})
+    return out
+
+
+def left_out_note(people: list[dict[str, Any]]) -> str:
+    """For the hiring manager view: a line naming the people not in play anywhere they are listed, or "" when
+    everyone still is. People come from active_jobs (all of them, before the left-out ones are dropped)."""
+    out = [p for p in people if p.get("not_in_play")]
+    if not out:
+        return ""
+    where = {i for p in out for i in p["ended_job_ids"]}
+    names = _join([p["name"] for p in out])
+    return (f"{len(out)} {'person' if len(out) == 1 else 'people'} left out of this view: {names} "
+            f"{'is' if len(out) == 1 else 'are'} not in play in {'this job' if len(where) == 1 else 'their jobs'}.")
+
+
+def rebuild_for(d: dict[str, Any], people: list[dict[str, Any]]) -> dict[str, Any]:
+    """The comparison data again for a smaller set of people (the hiring manager view drops people not in play)."""
+    shared, only, rest = split_skills(people)
+    return {**d, "people": people, "shared": shared, "only": only, "rest": rest, "counts": skill_counts(people),
+            "glance": glance(people, shared, only, contact=False), "glance_hm": glance(people, shared, only, contact=False),
+            "differs": differs(people), "empty": empty_rows(people), "years_gap": years_gap(people),
+            "missing": [], "left_out": [], "capped": False, "asked": len(people)}
 
 
 def public_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -275,6 +339,8 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
     """The comparison for these people (the first MAX_PEOPLE that exist). Raises ValueError with a friendly line when
     fewer than MIN_PEOPLE are left. "left_out" names the people past the limit."""
     asked = list(dict.fromkeys(int(i) for i in ids))
+    aliases = store.skill_alias_map() if hasattr(store, "skill_alias_map") else {}
+    kept_names = {g["kept"].lower(): g["kept"] for g in store.skill_alias_groups()} if aliases else {}
     people, missing, left_out = [], [], []
     for cid in asked:
         if len(people) >= MAX_PEOPLE:
@@ -284,7 +350,7 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
                 missing.append(cid)
             continue
         try:
-            people.append(_person(store, cid, today))
+            people.append(_person(store, cid, today, aliases, kept_names))
         except (KeyError, LookupError):
             missing.append(cid)
     if len(people) < MIN_PEOPLE:
@@ -300,7 +366,11 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
 
 def text_lines(d: dict[str, Any]) -> list[str]:
     """The comparison as plain lines for the AI (candidate text, so the caller fences it)."""
-    out = list(d["glance"])
+    out = []
+    if d.get("left_out"):  # said first, so nobody misses that the comparison is of the first six
+        out.append("Left out, because compare takes 6 at a time: "
+                   + ", ".join(f"{x['name']} (id {x['id']})" for x in d["left_out"]) + ".")
+    out += list(d["glance"])
     n = len(d["people"])
     for p in d["people"]:
         bits = [p["name"]]
@@ -329,9 +399,6 @@ def text_lines(d: dict[str, Any]) -> list[str]:
             bits.append("jobs: " + "; ".join(f"{j['job']}: {j['stage']}" for j in p["jobs"]))
         bits.append("last contacted " + (_day(p["last_contacted_at"]) if p["last_contacted_at"] else "none logged"))
         out.append("- " + " | ".join(bits))
-    if d.get("left_out"):
-        out.append("Left out, because compare takes 6 at a time: "
-                   + ", ".join(f"{x['name']} (id {x['id']})" for x in d["left_out"]) + ".")
     return out
 
 
@@ -359,6 +426,7 @@ def skill_groups(d: dict[str, Any], hl: list[str] | None = None) -> dict[int, li
             if skills:
                 groups.append({"key": key, "label": label, "skills": [
                     {"name": t, "pos": hl.index(t.lower()) if t.lower() in hl else -1,
+                     "saved": ", ".join(p.get("saved_as", {}).get(t.lower(), [])),
                      "count": d["counts"][t.lower()] if key == "some" else 0, "of": n}
                     for t in _hl_first(skills, hl)]})
         out[p["id"]] = groups

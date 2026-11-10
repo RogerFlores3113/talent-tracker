@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 {% from "_macros.html" import color_bubble %}
-{% block title %}Compare people · Talent Search{% endblock %}
+{% block title %}{{ 'Hiring manager comparison' if hm else 'Compare people' }} · Talent Search{% endblock %}
 {% macro skill_chip(s) -%}
-<span class="chip{{ ' hl' if s.pos >= 0 }}"{% if s.pos >= 0 %} data-hl="{{ hl_colors[hl[s.pos]] }}"{% endif %}>{{ s.name }}{% if s.count %}<span class="sk-n">, {{ s.count }} of {{ s.of }}</span>{% endif %}{% if s.pos >= 0 %}<span class="sr-only"> (highlighted {{ hl_colors[hl[s.pos]] }})</span>{% endif %}</span>
+<span class="chip{{ ' hl' if s.pos >= 0 }}"{% if s.pos >= 0 %} data-hl="{{ hl_colors[hl[s.pos]] }}"{% endif %}{% if s.saved %} title="Saved as {{ s.saved }}"{% endif %}>{{ s.name }}{% if s.saved %}<span class="sr-only"> (saved as {{ s.saved }})</span>{% endif %}{% if s.count %}<span class="sk-n">, {{ s.count }} of {{ s.of }}</span>{% endif %}{% if s.pos >= 0 %}<span class="sr-only"> (highlighted {{ hl_colors[hl[s.pos]] }})</span>{% endif %}</span>
 {%- endmacro %}
 {% macro differs_mark(key) -%}
 {% if d.differs.get(key) %}<span class="diffmark" title="This is not the same for everyone">differs</span>{% endif %}
 {%- endmacro %}
 {% block bodyclass %}{{ 'compare-full' if d and d.people | length >= 4 }}{% endblock %}
 {% block body %}
-<h1>{{ 'Comparison' if hm else 'Compare people' }}</h1>
+<h1 id="compare-h1" tabindex="-1" data-focus-here>{{ 'Hiring manager comparison' if hm else 'Compare people' }}</h1>
 {% if not d %}
 <section class="panel" id="compare-empty">
   <p>{{ message }}</p>
@@ -22,7 +22,9 @@
 
 {% if hm %}
 <p class="fine no-print" id="hm-note">Hiring manager view. Hides your notes, contact dates, labels and links back to this app. About text is shown as written: read it before you send this. Only stages still in play are shown. Use your browser's Print to print it.</p>
-<p class="acts no-print" id="hm-actions"><a class="btn" id="hm-about" href="{{ about_href }}">{{ 'Show About' if no_about else 'Hide About' }}</a> <a href="{{ full_href }}">Back to the full comparison</a></p>
+{% if hm_left_out %}<p class="fine" id="hm-left-out" role="status">{{ hm_left_out }}</p>{% endif %}
+<form method="get" action="/candidates/compare" id="hm-about-form" class="no-print"><input type="hidden" name="ids" value="{{ hm_form_ids }}">{% if hm_form_hl %}<input type="hidden" name="hl" value="{{ hm_form_hl }}">{% endif %}<input type="hidden" name="view" value="hm"></form>
+<p class="acts no-print" id="hm-actions"><a class="btn" id="hm-about" href="{{ about_href }}">{{ 'Show About' if no_about else 'Hide About' }}</a>{% if not no_about %} <button class="btn" type="submit" form="hm-about-form" id="hm-about-some">Hide About for the people ticked</button>{% endif %} <a href="{{ full_href }}">Back to the full comparison</a></p>
 {% else %}
 <div id="compare-actions" class="acts compare-actions no-print" role="group" aria-label="What to do with this comparison">
   <a class="btn primary" id="share-xlsx" href="{{ share_href }}">Share as xlsx</a>
@@ -31,7 +33,8 @@
 </div>
 {% endif %}
 
-{% if hl %}<p class="fine compare-hl">Highlighted skills: {% for h in hl %}<span class="chip hl" data-hl="{{ hl_colors[h] }}"><span class="hl-n" aria-hidden="true">{{ loop.index }}</span> {{ h }}<span class="sr-only"> (highlighted {{ hl_colors[h] }}, number {{ loop.index }})</span></span> {% endfor %}</p>{% endif %}
+{% set has_t = namespace(v=false) %}{% for h in hl %}{% if h.startswith('title:') %}{% set has_t.v = true %}{% endif %}{% endfor %}
+{% if hl %}<p class="fine compare-hl">Highlighted {{ 'picks' if has_t.v else 'skills' }}: {% for h in hl %}<span class="chip hl" data-hl="{{ hl_colors[h] }}"><span class="hl-n" aria-hidden="true">{{ loop.index }}</span> {{ hl_label(h) }}<span class="sr-only"> (highlighted {{ hl_colors[h] }}, number {{ loop.index }})</span></span> {% endfor %}</p>{% endif %}
 
 <section class="panel" aria-labelledby="glance-h">
   <h2 id="glance-h">At a glance</h2>
@@ -50,7 +53,8 @@
       {% for p in people %}
       <th scope="col" class="person">
         <div class="namerow">{% if not hm %}<span class="cbub small hm-hide" data-color="{{ p.color }}" aria-hidden="true"></span>{% endif %}
-          {% if hm %}<span class="pname">{{ p.name }}</span>{% else %}<a class="pname" href="/candidates/{{ p.id }}">{{ p.name }}</a>{% endif %}
+          <h2 class="person-h">{% if hm %}<span class="pname">{{ p.name }}</span>{% else %}<a class="pname" href="/candidates/{{ p.id }}">{{ p.name }}</a>{% endif %}</h2>
+          {% if hm and not no_about and 'about' in rows | map(attribute=0) %}<label class="check no-print hm-about-tick"><input type="checkbox" form="hm-about-form" name="noabout" value="{{ p.id }}" {{ 'checked' if p.id in hide_about_ids }}> <span>Hide About <span class="sr-only">for {{ p.name }}</span></span></label>{% endif %}
           {% if removes %}<a class="rm hm-hide" id="rm-{{ p.id }}" href="{{ removes[p.id] }}" aria-label="Remove {{ p.name }} from the comparison" title="Remove {{ p.name }} from the comparison"><span aria-hidden="true">&times;</span></a>{% endif %}</div>
       </th>
       {% endfor %}
@@ -63,18 +67,18 @@
       {% for p in people %}
       <td>
       {%- if key == 'title' -%}
-        {% if p.title or p.company %}{{ p.title }}{% if p.title and p.company %} at {% endif %}{{ p.company }}{% else %}<span class="muted">Not saved</span>{% endif %}
+        {% if p.title or p.company %}{% if p.id in title_hit %}<span class="chip hl title-chip" data-hl="{{ hl_colors[hl[title_hit[p.id]]] }}">{{ p.title }}<span class="sr-only"> (matches {{ hl_label(hl[title_hit[p.id]]) }}, highlighted {{ hl_colors[hl[title_hit[p.id]]] }})</span></span>{% else %}{{ p.title }}{% endif %}{% if p.title and p.company %} at {% endif %}{{ p.company }}{% else %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'location' -%}
         {{ p.location or '' }}{% if not p.location %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'years' -%}
         {% if p.years_text %}{{ p.years_text }}{% else %}<span class="muted">No work dates saved</span>{% endif %}
       {%- elif key == 'skills' -%}
         {% set groups = skill_groups[p.id] %}
-        {% if hl %}<p class="hl-have fine">Has {{ hl_have[p.id] }} of {{ hl | length }} highlighted skill{{ '' if hl | length == 1 else 's' }}</p>{% endif %}
+        {% if hl %}<p class="hl-have fine">Has {{ hl_have[p.id] }} of {{ hl | length }} highlighted {{ 'pick' if has_t.v else 'skill' }}{{ '' if hl | length == 1 else 's' }}</p>{% endif %}
         {% if groups %}{% for g in groups %}<div class="sk-group" data-group="{{ g.key }}">{% if g.label %}<span class="sk-label {{ g.key }}">{{ g.label }}</span>{% endif %}<span class="chips">{% for s in g.skills %}{{ skill_chip(s) }}{% endfor %}</span></div>{% endfor %}
         {% else %}<span class="muted">No skills saved</span>{% endif %}
       {%- elif key == 'jobs' -%}
-        {% if p.jobs %}<ul class="plain">{% for j in p.jobs %}<li>{% if hm %}{{ j.job }}{% else %}<a href="/jobs/{{ j.job_id }}">{{ j.job }}</a>{% endif %}: {{ j.stage }}</li>{% endfor %}</ul>{% elif not hm %}<span class="muted">Not in any job</span>{% endif %}
+        {% if p.jobs %}<ul class="plain">{% for j in p.jobs %}<li>{% if hm %}{{ j.job }}{% else %}<a href="/jobs/{{ j.job_id }}">{{ j.job }}</a>{% endif %}: {{ j.stage }}</li>{% endfor %}</ul>{% elif hm and p.not_in_play %}<span class="muted">Not in play</span>{% elif not hm %}<span class="muted">Not in any job</span>{% endif %}
       {%- elif key == 'source' -%}
         {{ p.source or '' }}{% if not p.source %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'contacted' -%}
@@ -84,7 +88,8 @@
       {%- elif key == 'links' -%}
         {% if p.links %}<ul class="plain">{% for l in p.links %}<li><a href="{{ l.url }}" target="_blank" rel="noopener noreferrer">{{ l.label }}<span class="sr-only"> of {{ p.name }} (opens in a new tab)</span></a></li>{% endfor %}</ul>{% else %}<span class="muted">None saved</span>{% endif %}
       {%- elif key == 'about' -%}
-        {% if p.about | length > 160 and hm %}<p class="about-full">{{ p.about }}</p>
+        {% if p.id in hide_about_ids %}<span class="muted">About hidden</span>
+        {% elif p.about | length > 160 and hm %}<p class="about-full">{{ p.about }}</p>
         {% elif p.about | length > 160 %}<p class="about-full print-only">{{ p.about }}</p><details class="aboutmore"><summary><span class="clip">{{ p.about[:160] }}...</span> <span class="moretxt" data-more="more" data-less="less"></span></summary><p class="about-full">{{ p.about }}</p></details>
         {% elif p.about %}<p class="about-full">{{ p.about }}</p>{% else %}<span class="muted">Nothing saved</span>{% endif %}
       {%- endif -%}

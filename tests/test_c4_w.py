@@ -8,7 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from talent import actions, shortlist
 from talent.mcp_server import build_server
-from talent.mcp_views import URIS, view_html
+from talent.mcp_views import URIS, versioned_uri, view_html
 from talent.store import AI_CLEAR_CAP, linkedin_problem
 
 from conftest import flash_of, local_client, uncaution
@@ -200,7 +200,7 @@ def test_real_profile_links_still_pass():
 # ------------------------------------------------------------- 7. chat card
 def test_save_candidates_has_a_chat_card(store):
     tools = {t.name: t for t in anyio.run(build_server(store).list_tools)}
-    assert tools["save_candidates"].meta["ui"]["resourceUri"] == URIS["saved"]
+    assert tools["save_candidates"].meta["ui"]["resourceUri"] == versioned_uri("saved")
     html = view_html("saved")
     assert "Needs your answer" in html and "innerHTML" not in html and "undo this whole batch" in html
 

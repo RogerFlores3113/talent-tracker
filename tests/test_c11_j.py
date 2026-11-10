@@ -6,7 +6,7 @@ import anyio
 from mcp.types import CallToolResult
 
 from talent.mcp_server import HIDDEN_LEAD, build_server
-from talent.mcp_views import URIS, tool_meta, view_html
+from talent.mcp_views import URIS, tool_meta, versioned_uri, view_html
 
 
 def call(server, tool, **args):
@@ -30,8 +30,8 @@ def test_each_tool_points_at_its_view(store):
     t = tools(build_server(store))
     for name, view in (("list_jobs", "jobs"), ("list_saved_searches", "searches"), ("list_followups", "followups"),
                        ("status_digest", "digest"), ("client_report", "digest")):
-        assert t[name].meta["ui"]["resourceUri"] == URIS[view], name
-        assert tool_meta(view)["ui/resourceUri"] == URIS[view]
+        assert t[name].meta["ui"]["resourceUri"] == versioned_uri(view), name
+        assert tool_meta(view)["ui/resourceUri"] == versioned_uri(view)
 
 
 def test_the_new_views_are_clean_pages():

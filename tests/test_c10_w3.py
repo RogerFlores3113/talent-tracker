@@ -248,13 +248,13 @@ def _pairs(store):
 def test_reason_filter_lists_only_that_reason_and_counts(store):
     _pairs(store)
     c = local_client(store)
-    everything = c.get("/candidates/duplicates").text
+    everything = c.get("/candidates/duplicates?view=pairs").text
     assert "Same name and phone (1)" in everything and "Same name and company, different emails (1)" in everything
-    one = c.get("/candidates/duplicates?reason=name-phone").text
+    one = c.get("/candidates/duplicates?view=pairs&reason=name-phone").text
     assert "dee@a.com" in one and "kim@a.com" not in one
     assert 'aria-current="true">Same name and phone (1)' in one
     assert duplicates.reason_slug("bogus") is None
-    assert c.get("/candidates/duplicates?reason=bogus").status_code == 200
+    assert c.get("/candidates/duplicates?view=pairs&reason=bogus").status_code == 200
 
 
 def test_every_pair_of_a_filter_is_covered_across_pages(store):
@@ -262,7 +262,7 @@ def test_every_pair_of_a_filter_is_covered_across_pages(store):
         store.add_candidate(name=f"Twin {i}", email=f"t{i}@a.com", current_company="Acme")
         store.add_candidate(name=f"Twin {i}", email=f"t{i}@b.com", current_company="Acme")
     c = local_client(store)
-    page = c.get("/candidates/duplicates?reason=name-company-emails").text
+    page = c.get("/candidates/duplicates?view=pairs&reason=name-company-emails").text
     assert "Use all 60 pairs" in page and 'name="all_filtered"' in page
     res = c.post("/candidates/duplicates/merge-review", data={"all_filtered": "1", "reason": "name-company-emails"})
     assert res.status_code == 200 and len(re.findall(r'<input type="checkbox" name="pair"', res.text)) == 60  # not just the 50 on the page
@@ -342,7 +342,7 @@ def test_review_and_single_merge_names_tell_the_two_apart(store):
     assert 'aria-label="Main email for Sam Dup (sam@x.com) and Sam Dup (sam2@y.com)"' in review
     page = c.get(f"/candidates/{a}/merge/{b}").text
     assert "Merge into Sam Dup (sam@x.com)" in page and "Keep Sam Dup (sam2@y.com) instead" in page
-    lst = c.get("/candidates/duplicates").text
+    lst = c.get("/candidates/duplicates?view=pairs").text
     assert 'aria-label="Pick the pair Sam Dup (sam@x.com) and Sam Dup (sam2@y.com)"' in lst
     assert 'aria-label="Compare and merge Sam Dup (sam@x.com) and Sam Dup (sam2@y.com)"' in lst
 

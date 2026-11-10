@@ -103,6 +103,14 @@ report** copies a report you can paste into a bug report.
 **Codex and LM Studio:** press **Connect Codex** or **Connect LM Studio** on the same
 page, then quit and reopen that app.
 
+### Where the cards show
+
+Cards and tables show in the Claude desktop app and the ChatGPT desktop app. Claude asks once to display them: choose Always allow. Claude Code, the Codex command line and claude.ai in a browser show the same answers as text. After you update Talent Search, quit and reopen the app so it picks up the new views (in Claude, Developer > Reload MCP Configuration also works).
+
+**ChatGPT desktop app:** pressing **Connect Codex** on the Connect AI page also connects the ChatGPT desktop app, because
+both read the same settings file. Or, in ChatGPT, go to Settings > MCP servers > Add server > STDIO and enter the command
+and arguments shown on that page. The ChatGPT website and the ChatGPT phone app can't reach apps on this computer.
+
 ## Skills for your AI app
 
 Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline

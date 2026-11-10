@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sub %}
+{% block title %}Possible duplicates · Talent Search{% endblock %}
+{% block body %}
+<div class="sec-head">
+  <h1>Possible duplicates</h1>
+  <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a> <a class="btn" href="/candidates/duplicates?view=pairs">Show as pairs</a></div>
+</div>
+<p class="lead" id="dup-count">{% if total %}{{ people }} profiles in {{ total }} group{{ '' if total == 1 else 's' }} found.{% else %}None found right now.{% endif %}</p>
+<p class="fine">Profiles that may be the same person, grouped. Tick the groups you want to merge. In each one, pick which profile to keep and untick anyone who is a different person. The rest are merged into the kept one. Only groups where everyone shares an email or LinkedIn address start ticked. Nothing changes until you press Merge, and a backup is saved first.</p>
+{% if not total %}
+<p class="panel">No likely duplicates right now.</p>
+{% else %}
+<form method="post" action="/candidates/duplicates/merge-clusters" id="clusters-form" class="stack"
+      data-confirm="Merge the ticked groups? In each one, the profiles you left ticked are merged into the one you keep, and the others are deleted. A backup is saved first.">
+  <div class="actions-inline dup-bulk">
+    {% if exact_count %}<a class="btn" href="/candidates/duplicates/merge-exact">Merge all exact email or LinkedIn matches ({{ exact_count }})</a>{% endif %}
+    <label class="check"><input type="checkbox" data-check-all data-check-name="cluster" aria-label="Tick every group shown"> <span class="fine">Tick every group shown</span></label>
+    <button class="btn primary" type="submit" id="merge-ticked" data-merge-btn>Merge {{ merge_groups }} group{{ '' if merge_groups == 1 else 's' }}, {{ merge_profiles }} profile{{ '' if merge_profiles == 1 else 's' }}</button>
+  </div>
+  <ul class="items dup-list" id="cluster-list">
+    {% for c in cards %}{% set k = c.key %}
+    <li class="panel dup-cluster{{ ' maybe' if c.maybe_different }}" id="cluster-{{ k }}">
+      <h2 class="dup-title"><label class="check"><input type="checkbox" name="cluster" value="{{ k }}"{{ ' checked' if c.preticked else '' }} aria-label="Merge this group: {{ c.title }}"> {{ c.title }}</label>
+        {% if c.maybe_different %}<span class="badge warn">{{ maybe_label }}</span>{% endif %}</h2>
+      <p class="fine">{% set why = c.reasons | join(', ') %}{{ why[:1] | upper }}{{ why[1:] }}.{% if c.maybe_different %} Their city, title and phone don't match, so they may be different people.{% elif c.mixed_titles %} They have different titles, so they may be different people.{% endif %}{% if not c.preticked %} This group is not ticked: tick it when you are sure.{% endif %}</p>
+      <ul class="dup-members">
+        {% for m in c.members %}
+        <li class="dup-member">
+          <label class="check"><input type="radio" name="keep_{{ k }}" value="{{ m.id }}"{{ ' checked' if m.id == c.keep }} aria-label="Keep this one: {{ m.name }}{{ ', ' ~ m.email if m.email else (', id ' ~ m.id) }}"> <span class="fine">Keep this one</span></label>
+          {% set is_keep = m.id == c.keep %}
+          <span class="kept-tag fine" data-kept-tag{{ '' if is_keep else ' hidden' }}><strong>Kept</strong></span>
+          <label class="check merge-in"{{ ' hidden' if is_keep }}><input type="checkbox" name="m_{{ k }}" value="{{ m.id }}" data-def="{{ 1 if m.ticked else 0 }}"{{ ' checked' if m.ticked and not is_keep }}{{ ' disabled' if is_keep }} aria-label="Merge {{ m.name }}{{ ', ' ~ m.email if m.email else (', id ' ~ m.id) }} into the kept one"> <span class="fine">Merge in</span></label>
+          <div class="dup-person"><a href="/candidates/{{ m.id }}"><strong>{{ m.name }}</strong></a>
+            <span class="muted">{{ sub(m) }}</span>
+            <span class="fine">{{ [m.email, m.phone, m.linkedin_url] | select | join(' · ') or ('id ' ~ m.id) }}</span>
+            {% if not m.ticked and m.id != c.keep %}<span class="fine">{% if m.differs %}Different city, title and phone from the kept one{% elif m.safe is false %}A different first name or title from the kept one{% endif %}, so it is not ticked.</span>{% endif %}</div>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="actions-inline">
+        <button class="btn primary" type="submit" name="only" value="{{ k }}" aria-label="Merge only this group: {{ c.title }}">Merge this group</button>
+        <button class="btn" type="submit" formaction="/candidates/duplicates/dismiss-cluster" name="only" value="{{ k }}" formnovalidate aria-label="Keep all {{ c.count }} as separate people: {{ c.title }}" title="Says these are different people. This group won't show up again.">Keep all as separate people</button>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</form>
+{% if total > cards | length %}<p class="pager"><a href="/candidates/duplicates?shown={{ shown + 50 }}">Show more ({{ total - cards | length }} groups left)</a> <span class="fine">Showing {{ cards | length }} of {{ total }} groups.</span></p>{% endif %}
+{% endif %}
+{% if dismissed %}
+<form method="post" action="/candidates/duplicates/reset" class="inline" data-confirm="Show the {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} you said are different people again?">
+  <p class="fine">You marked {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} as different people. <button class="btn small" type="submit">Show them again</button></p>
+</form>
+{% endif %}
+{% endblock %}

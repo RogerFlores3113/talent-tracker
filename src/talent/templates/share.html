@@ -9,9 +9,15 @@
   .share-form .share-preview dt { font-weight: 600; margin-top: var(--space-2, 8px); }
   .share-form .share-preview dd { margin: 0; }
   .share-form .share-warn { margin: var(--space-2, 8px) 0 0; font-weight: 600; }
+  .share-form .share-red { margin: var(--space-2, 8px) 0 0; font-weight: 600; color: var(--bad); }
+  .share-form .pv-people { list-style: none; margin: var(--space-2, 8px) 0 0; padding: 0; display: grid; gap: var(--space-2, 8px); }
+  .share-form .pv-people li { padding: var(--space-2, 8px); border: 1px solid var(--border, var(--line, currentColor)); border-radius: var(--radius-sm, 6px); }
+  .share-form .pv-people .pv-note { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
-<h1>Share candidates as a spreadsheet</h1>
-<p class="lead">Make an Excel file you can forward to a hiring manager. You choose what goes in it. The file is made on this computer and goes nowhere until you send it.</p>
+{% if for_me %}<h1>A spreadsheet for you</h1>
+<p class="lead" id="for-me-note"><strong>This file is for you, not one to forward.</strong> It has email, phone and notes in it. To send something to a hiring manager, untick those below or use Share as xlsx from the Candidates table. The file is made on this computer.</p>
+{% else %}<h1>Share candidates as a spreadsheet</h1>
+<p class="lead">Make an Excel file you can forward to a hiring manager. You choose what goes in it. The file is made on this computer and goes nowhere until you send it.</p>{% endif %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if not count %}
 <p class="none">Nobody to share yet. Tick people in the <a href="/candidates">Candidates table</a> first.</p>
@@ -21,7 +27,7 @@
   <input type="hidden" name="hl" value="{{ hl }}">
   <p><strong>{{ count }} {{ 'person' if count == 1 else 'people' }}:</strong>
     {% for p in people[:8] %}{{ p.name }}{{ ', ' if not loop.last }}{% endfor %}{% if count > 8 %} and {{ count - 8 }} more{% endif %}.</p>
-  {% if hl_words %}<p class="fine">Highlighted skills go in as a Matched skills column: {{ hl_words }}.</p>{% endif %}
+  {% if hl_words %}{% if no_match %}<p class="fine" id="no-match">Nobody here has the highlighted picks, so that column is left out.</p>{% else %}<p class="fine">Highlighted picks go in as a Matched picks column: {{ hl_words }}.</p>{% endif %}{% endif %}
   <fieldset>
     <legend>What goes in the file</legend>
     <p class="fine">Always in: name, title, company, location, years of experience, skills, links, summary and work history. Columns nobody has anything in are left out. Never in: colors, review marks or links to this app.</p>
@@ -33,10 +39,11 @@
     <label class="check"><input type="radio" name="notes" value="none" {{ 'checked' if notes not in ('latest', 'all') }}> <span>No notes</span></label>
     <label class="check"><input type="radio" name="notes" value="latest" {{ 'checked' if notes == 'latest' }}> <span>Latest note only</span></label>
     <label class="check"><input type="radio" name="notes" value="all" {{ 'checked' if notes == 'all' }}> <span>All notes and timeline <span class="fine">(your private notes, calls and messages)</span></span></label>
+    <p class="share-red" id="notes-red">Notes can hold pay talk and private remarks. They go into the file as written.</p>
     <div aria-live="polite"><p class="share-warn" id="notes-warn" {{ 'hidden' if notes not in ('latest', 'all') }}>Notes go out word for word and may hold pay, other interviews or private remarks. Read them first.</p></div>
   </fieldset>
   <p><label for="share-job">Job this is for <span class="fine">(optional, adds each person's stage in it, furthest along first)</span></label><br>
-    <select id="share-job" name="job_id"><option value="" data-title="">No job</option>{% for j in jobs %}<option value="{{ j.id }}" data-title="{{ j.title }}" {{ 'selected' if job | string == j.id | string }}>{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></p>
+    <select id="share-job" name="job_id"><option value="" data-title="" data-company="">No job</option>{% for j in jobs %}<option value="{{ j.id }}" data-title="{{ j.title }}" data-company="{{ j.company or '' }}" {{ 'selected' if job | string == j.id | string }}>{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></p>
   <div id="rejected-row" {{ 'hidden' if not job }}>
     <label class="check"><input type="checkbox" name="include_rejected" value="1" {{ 'checked' if rejected }}> <span>Include people marked rejected <span class="fine">(left out unless you tick this)</span></span></label>
   </div>
@@ -47,9 +54,28 @@
     <dl>
       <dt>File name</dt><dd id="pv-file">{{ file_name }}</dd>
       <dt>Columns</dt><dd id="pv-cols">{% for c in preview.cols if c.kind == 'base' or (c.kind == 'stage' and pv.stage) or (c.kind == 'contact' and contact) or (c.kind == 'notes' and notes in ('latest', 'all')) %}{{ c.name }}{{ ', ' if not loop.last }}{% endfor %}</dd>
-      <dt>First names</dt><dd id="pv-names">{% if pv.count %}{{ pv.names | join(', ') }}{% if pv.count > 3 %} and {{ pv.count - 3 }} more{% endif %}{% else %}Nobody{% endif %}</dd>
-      <dt>People</dt><dd id="pv-count">{{ pv.count }}{% if pv.count != count %} of {{ count }} <span class="fine">(rejected people are left out)</span>{% endif %}</dd>
+      <dt>People</dt><dd id="pv-names">{% if pv.count %}{{ pv.names | join(', ') }}{% if pv.count > 3 %} and {{ pv.count - 3 }} more{% endif %}{% else %}Nobody{% endif %}</dd>
+      <dt>How many</dt><dd id="pv-count">{{ pv.count }}{% if pv.count != count %} of {{ count }} <span class="fine">(rejected people are left out)</span>{% endif %}</dd>
     </dl>
+    <p class="fine" id="pv-people-note">Each person below, as they will appear. Tick "Leave this person out" to keep someone out of the file.</p>
+    <ul class="pv-people" id="pv-people" aria-label="People in the file">
+      {% for p in people %}{% set seen = notes_seen.get(p.id, {}) %}
+      <li data-id="{{ p.id }}"{% if p.id not in kept_ids %} hidden{% endif %}>
+        <strong>{{ p.name }}</strong>
+        <label class="check"><input type="checkbox" name="leave_out" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_out }}> <span>Leave this person out <span class="sr-only">({{ p.name }})</span></span></label>
+        {% if p.id in rej_in %}<div class="pv-rej" data-rej{{ ' hidden' if job }}>
+          <p class="share-warn">{{ p.name }} is marked rejected in {{ rej_in[p.id] | join(', ') }}.</p>
+          <label class="check"><input type="checkbox" name="leave_rej" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_rej }}{{ ' disabled' if job }}> <span>Leave {{ p.name }} out because they are rejected</span></label>
+        </div>{% endif %}
+        <div class="pv-notes" data-notes {{ 'hidden' if notes not in ('latest', 'all') }}>
+          <p class="fine">Note as it will appear:</p>
+          <p class="pv-note" data-latest {{ 'hidden' if notes != 'latest' }}>{{ seen.get('latest') or 'No note' }}</p>
+          <p class="pv-note" data-all {{ 'hidden' if notes != 'all' }}>{{ seen.get('all') or 'No notes' }}</p>
+          <label class="check"><input type="checkbox" name="leave_note" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_note }}{{ ' disabled' if notes not in ('latest', 'all') }}> <span>Leave this note out <span class="sr-only">({{ p.name }})</span></span></label>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
   </div>
   <p class="actions-inline"><button class="btn primary" type="submit">Make the spreadsheet</button> <a href="/candidates">Back to Candidates</a></p>
   <p class="fine" id="share-live" role="status" aria-live="polite"></p>

@@ -747,30 +747,45 @@
     const status = document.getElementById("hl-status");
     if (!status) return;
     const hash = decodeURIComponent((location.hash || "").slice(1));
-    if (!hash || hash === "hl-bar" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
+    if (hash === "results-count") {  // after Show 100 / 250 / All: the count, so the new size is heard and Tab starts at the table
+      const rc = document.getElementById("results-count");
+      if (rc) rc.focus();
+      return;
+    }
+    if (!hash || hash === "hl-bar" || hash === "hl-add" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
     const bar = document.getElementById("hl-bar");
     const table = document.getElementById("cand-table");
-    const fallback = bar || table || status;
+    const box = document.getElementById("hl-add");
+    const fallback = bar || box || table || status;
     let target = null, text = "";
-    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = status; }
+    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = box || status; }
+    else if (hash === "hlempty") { text = "Type a skill, or title: and a job title, then press Enter."; target = box || status; }
+    else if (hash === "hlfull") { text = "You can highlight up to 6 at once. Remove one first."; target = box || status; }
+    else if (hash === "hlmerged") { text = "Treated as one skill. The counts now include both names. Settings, Skill names, can split them again."; target = bar || box || status; }
+    else if (hash === "hlrejected") { text = "Okay. We won't suggest those two as the same skill again."; target = bar || box || status; }
     else if (hash.indexOf("removed-") === 0) {
       const rest = hash.slice(8), at = rest.lastIndexOf("@");
-      text = "Removed the " + (at < 0 ? rest : rest.slice(0, at)) + " highlight.";
+      let gone = at < 0 ? rest : rest.slice(0, at);
+      if (gone.indexOf("title:") === 0) gone = "title: " + gone.slice(6).replace(/\b\w/g, c => c.toUpperCase());
+      text = "Removed the " + gone + " highlight.";
       target = at < 0 ? null : document.getElementById(rest.slice(at + 1));
       if (!target) target = table || fallback;
     }
     else {
       target = document.getElementById(hash);
       const skill = target && target.getAttribute("data-skill");
+      const pretty = function (k) { return k && k.indexOf("title:") === 0 ? "title: " + k.slice(6).replace(/\b\w/g, c => c.toUpperCase()) : k; };
+      let shown = pretty(skill);
       if (skill) {
         const chips = bar ? Array.prototype.slice.call(bar.querySelectorAll("[data-skill]")) : [];
         const lit = chips.find(el => el.getAttribute("data-skill") === skill);
         if (lit) {
-          text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
+          shown = lit.getAttribute("data-label") || shown;
+          text = shown + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
           if (chips.length > 1) text += " People with more of your picks come first.";
           else text += " They are shown first.";
         }
-        else text = "Removed the " + skill + " highlight.";
+        else text = "Removed the " + shown + " highlight.";
       } else { target = fallback; }
     }
     if (!target) target = fallback;
@@ -791,6 +806,156 @@
     if (!t) return;
     try { t.focus({preventScroll: false}); } catch (e) { t.focus(); }
   }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+// Candidates table, cycle 14: a live "3 people ticked" count by the bulk bar, the bulk panel stays folded until
+// someone is ticked, Compare / Export / Share with nothing ticked says so beside the buttons (no reload, no jump to
+// the top, focus on the message), and a download says "Your spreadsheet is downloading" and keeps focus put.
+(function () {
+  function start() {
+    const form = document.getElementById("bulk-form");
+    const count = document.getElementById("bulk-count");
+    const panel = document.getElementById("bulk-panel");
+    const msg = document.getElementById("bulk-msg");
+    const status = document.getElementById("export-status");
+    function ticked() {
+      if (!form) return 0;
+      const all = form.querySelector("input[name=select_all]");
+      if (all && all.checked) return parseInt(count && count.dataset.total || "0", 10) || 1;
+      return document.querySelectorAll("input[type=checkbox][name='candidate_ids']:checked").length;
+    }
+    function refresh() {
+      const n = ticked();
+      if (count) count.textContent = n + (n === 1 ? " person" : " people") + " ticked";
+      if (panel) panel.hidden = n === 0;
+      if (msg && n > 0 && !msg.hidden) msg.hidden = true;
+    }
+    function later() { window.setTimeout(refresh, 0); }
+    document.addEventListener("change", later);
+    document.addEventListener("click", e => { if (e.target.closest && e.target.closest("input[name='candidate_ids']")) later(); });
+    refresh();
+    if (form) {
+      form.addEventListener("submit", e => {
+        const act = e.submitter && e.submitter.value;
+        // Every row on the page is ticked and the page holds all the matches: send the search, not thousands of ids.
+        const rows = document.querySelectorAll("input[type=checkbox][name='candidate_ids']");
+        const total = parseInt(count && count.dataset.total || "0", 10) || 0;
+        if (rows.length > 50 && rows.length >= Math.min(total, 5000) &&
+            Array.prototype.every.call(rows, b => b.checked)) {
+          let sa = form.querySelector("input[name=select_all]");
+          if (sa && sa.type === "checkbox") sa.checked = true;
+          else if (!sa) { sa = document.createElement("input"); sa.type = "hidden"; sa.name = "select_all"; sa.value = "1"; form.appendChild(sa); }
+          rows.forEach(b => { b.disabled = true; });
+          window.setTimeout(() => { rows.forEach(b => { b.disabled = false; }); }, 1500);  // a download leaves this page as it was
+        }
+        if (!["compare", "export", "export_xlsx", "share"].includes(act)) return;
+        const n = ticked();
+        const bad = n === 0 ? "Tick at least one person first." : (act === "compare" && n < 2 ? "Tick two to six people to compare." : "");
+        if (bad && msg) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          msg.textContent = bad;
+          msg.hidden = false;
+          try { msg.focus({preventScroll: true}); } catch (err) { msg.focus(); }
+          return;
+        }
+        if (status && (act === "export" || act === "export_xlsx")) {
+          status.textContent = "";
+          window.setTimeout(() => { status.textContent = "Your spreadsheet is downloading. Look in your Downloads folder."; }, 50);
+        }
+      }, true);
+    }
+    // Export links: the file comes down by itself, the page and the focus stay where they are.
+    const notes = document.getElementById("export-csv-notes");
+    const csv = document.getElementById("export-csv");
+    function csvHref() {
+      if (!csv) return;
+      const url = new URL(csv.getAttribute("href"), location.href);
+      if (notes && notes.checked) url.searchParams.set("notes", "1"); else url.searchParams.delete("notes");
+      csv.setAttribute("href", url.pathname + url.search);
+    }
+    if (notes) { notes.addEventListener("change", csvHref); csvHref(); }
+    document.addEventListener("click", e => {
+      const a = e.target.closest && e.target.closest("a[data-download]");
+      if (!a || !status) return;
+      status.textContent = "";
+      window.setTimeout(() => { status.textContent = "Your spreadsheet is downloading. Look in your Downloads folder."; }, 50);
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+
+// Job table: the "Move N ticked to [stage]" bar. The button says how many are ticked and stays off until someone is.
+// (data-bulk-move on the form; its checkboxes sit in the table and point at it with the form attribute)
+(function () {
+  function update(form) {
+    const n = Array.from(document.querySelectorAll("input[type=checkbox][name='candidate_ids']"))
+      .filter(b => b.form === form && b.checked).length;
+    const btn = form.querySelector("[data-bulk-move-btn]");
+    const note = form.querySelector("[data-bulk-move-count]");
+    const sel = form.querySelector("select[name='stage']");
+    const stage = sel && sel.value;
+    if (btn) {
+      btn.disabled = n === 0;
+      btn.textContent = n === 0 ? "Move ticked" : "Move " + n + " ticked" + (stage ? " to " + stage : "");
+    }
+    if (note) note.textContent = n === 0 ? "Nobody ticked yet. Tick the boxes below, or the one in the header for everyone."
+      : n + (n === 1 ? " person" : " people") + " ticked." + (stage ? "" : " Pick a stage to move them to.");
+  }
+  function all() { document.querySelectorAll("form[data-bulk-move]").forEach(update); }
+  document.addEventListener("change", e => {
+    if (e.target.closest && e.target.closest("input[type=checkbox], select[name='stage']")) window.setTimeout(all, 0);
+  });
+  document.addEventListener("htmx:afterSwap", all);
+  document.addEventListener("htmx:afterSettle", e => {  // after a move, say what happened where a screen reader will hear it
+    const st = document.getElementById("move-status");
+    if (st && e.target && e.target.id === "pipeline") st.focus();
+  });
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", all);
+  else all();
+})();
+
+// Duplicate groups: the profile marked "Keep this one" is not also merged into itself: it says "Kept" instead of
+// showing a Merge in box. The Merge button says what it will do ("Merge 3 groups, 7 profiles").
+(function () {
+  function sync(radio) {
+    const card = radio.closest(".dup-cluster");
+    if (!card) return;
+    card.querySelectorAll(".dup-member").forEach(row => {
+      const keep = row.querySelector("input[type=radio]").checked;
+      const label = row.querySelector(".merge-in");
+      const box = label && label.querySelector("input");
+      const tag = row.querySelector("[data-kept-tag]");
+      if (tag) tag.hidden = !keep;
+      if (!box) return;
+      const wasKept = label.hidden;
+      label.hidden = keep;
+      box.disabled = keep;
+      if (keep) box.checked = false;
+      else if (wasKept) box.checked = box.dataset.def === "1";
+    });
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function count() {
+    const btn = document.querySelector("[data-merge-btn]");
+    if (!btn) return;
+    let groups = 0, profiles = 0;
+    document.querySelectorAll(".dup-cluster").forEach(card => {
+      const on = card.querySelector("input[name=cluster]");
+      if (!on || !on.checked) return;
+      const n = card.querySelectorAll(".merge-in input:checked:not(:disabled)").length;
+      if (n) { groups += 1; profiles += n; }
+    });
+    btn.textContent = "Merge " + plural(groups, "group", "groups") + ", " + plural(profiles, "profile", "profiles");
+  }
+  document.addEventListener("change", e => {
+    if (e.target.matches && e.target.matches(".dup-cluster input[type=radio]")) sync(e.target);
+    if (e.target.closest && e.target.closest("#clusters-form")) count();
+  });
+  function start() { document.querySelectorAll(".dup-cluster input[type=radio]:checked").forEach(sync); count(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();

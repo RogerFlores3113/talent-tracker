@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
+from . import picks as _picks
 from . import places
 from .links import clean_links, link_key, merge_links, stored_links
 from .searchquery import fts_token, sym_text, tokens as _search_tokens, unsym_text
@@ -797,6 +798,32 @@ _MIGRATIONS: tuple[Any, ...] = (
     ("SELECT 1;", _migrate_v10w3_data),
     # v11l: other links on a person (GitHub, portfolio, Scholar...), a JSON list of web addresses.
     "ALTER TABLE candidates ADD COLUMN links TEXT;",
+    # c14-d1: skill names a person chose to treat as one skill (alias -> kept name, never automatic, undone with Split),
+    # and look-alike pairs they said are not the same (never suggested again). Stored tags are never rewritten.
+    """
+    CREATE TABLE IF NOT EXISTS skill_aliases (
+        alias      TEXT PRIMARY KEY,
+        kept       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS skill_alias_rejects (
+        a          TEXT NOT NULL,
+        b          TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (a, b)
+    );
+    """,
+    # c14-f1: what was done with skill names (merge, split, not the same), so Changes can list it and undo it.
+    """
+    CREATE TABLE IF NOT EXISTS skill_alias_log (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        at        TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        kept      TEXT NOT NULL,
+        names     TEXT NOT NULL,
+        undone_at TEXT
+    );
+    """,
 )
 # Kinds of AI action and how each is listed on Changes.
 AI_ACTION_KINDS = {
@@ -2201,6 +2228,10 @@ def _ai_keys(r: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
     return (("todo", r.get("target_id")),)
 
 
+def _join_names(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 class Store:
     """Thread-safe wrapper around one SQLite connection."""
 
@@ -2228,6 +2259,7 @@ class Store:
         self._conn.create_function("li_key", 1, normalize_linkedin, deterministic=True)
         self._conn.create_function("tt_has", 3, _has, deterministic=True)
         self._conn.create_function("tt_sym", 1, sym_text, deterministic=True)
+        self._conn.create_function("pick_title", 1, _picks.fold_title, deterministic=True)
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = NORMAL")
@@ -3886,6 +3918,294 @@ class Store:
             yield from (self._hydrate(r) for r in batch)
             last = batch[-1]["id"]
 
+    # ---------------------------------------------------------- skill aliases (c14-d1)
+    def skill_alias_map(self) -> dict[str, str]:
+        """alias (lower case) -> the name it is kept as (lower case). Empty when nobody merged anything."""
+        return {r["alias"]: r["kept"].lower() for r in self._rows("SELECT alias, kept FROM skill_aliases")}
+
+    def skill_group_names(self, name: str) -> list[str]:
+        """The skill and every name merged into it (or the group it was merged into), for matching tags."""
+        low = " ".join(str(name).split()).lower()
+        rows = self._rows("SELECT alias, kept FROM skill_aliases")
+        kept = next((r["kept"].lower() for r in rows if r["alias"] == low), low)
+        group = [kept] + [r["alias"] for r in rows if r["kept"].lower() == kept]
+        return list(dict.fromkeys(group))
+
+    def expand_skills(self, names: Iterable[str]) -> list[str]:
+        out: list[str] = []
+        for n in names:
+            out += self.skill_group_names(n)
+        return list(dict.fromkeys(out))
+
+    def skill_alias_groups(self) -> list[dict[str, Any]]:
+        """[{kept, kept_count, aliases: [{name, count}], people}] for Settings, biggest first."""
+        rows = self._rows("SELECT alias, kept, created_at FROM skill_aliases ORDER BY kept COLLATE NOCASE, alias")
+        counts = {t["tag"].lower(): t["count"] for t in self.list_tags(100000)}
+        by: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            g = by.setdefault(r["kept"].lower(), {"kept": r["kept"], "aliases": []})
+            g["aliases"].append({"name": r["alias"], "count": counts.get(r["alias"], 0), "at": r["created_at"]})
+        out = []
+        for k, g in by.items():
+            names = [k] + [a["name"] for a in g["aliases"]]
+            marks = ", ".join("?" for _ in names)
+            people = self._row(f"SELECT count(DISTINCT candidate_id) AS n FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE", names)["n"]
+            out.append({**g, "kept_count": counts.get(k, 0), "people": people})
+        return out
+
+    def _log_skill(self, kind: str, kept: str, names: list[str]) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self._conn.execute("INSERT INTO skill_alias_log(at, kind, kept, names) VALUES (?, ?, ?, ?)",
+                           (now, kind, kept, json.dumps(names)))
+
+    def skill_alias_log(self, since: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Merges, splits and 'Not the same' answers, newest first: [{id, at, kind, kept, names, undone_at}]."""
+        rows = self._rows("SELECT id, at, kind, kept, names, undone_at FROM skill_alias_log"
+                          + (" WHERE at >= ?" if since else "") + " ORDER BY at DESC, id DESC LIMIT ?",
+                          ((since, limit) if since else (limit,)))
+        return [{**r, "names": json.loads(r["names"])} for r in rows]
+
+    def undo_skill_log(self, log_id: int) -> str:
+        """Undo one entry of the skill-name log and say what happened. A merge is split again, a split is merged
+        again, a 'Not the same' is suggested again. Raises NotFound, or ValueError when it was already undone."""
+        row = self._row("SELECT id, kind, kept, names, undone_at FROM skill_alias_log WHERE id = ?", (log_id,))
+        if not row:
+            raise NotFound("That change is gone. Reload the page.")
+        if row["undone_at"]:
+            raise ValueError("That change was already undone.")
+        names = json.loads(row["names"])
+        kept = row["kept"]
+        if row["kind"] == "merge":
+            for n in names:
+                self.split_skill_alias(n, log=False)
+            msg = f"Undid it: {_join_names(names)} no longer count as {kept}."
+        elif row["kind"] == "split":
+            for n in names:
+                try:
+                    self.add_skill_alias(n, kept, log=False)
+                except ValueError:
+                    continue
+            msg = f"Undid it: {_join_names(names)} count as {kept} again."
+        else:
+            self.unreject_skill_pair(names[0], names[1])
+            msg = f"Undid it: {names[0]} and {names[1]} can be suggested as the same skill again."
+        with self._write():
+            self._conn.execute("UPDATE skill_alias_log SET undone_at = ? WHERE id = ?",
+                               (datetime.now(timezone.utc).replace(microsecond=0).isoformat(), log_id))
+        return msg
+
+    def hidden_skill_pairs(self) -> list[dict[str, Any]]:
+        """Pairs answered 'Not the same': [{a, b, at}], newest first, so they can be suggested again."""
+        return self._rows("SELECT a, b, created_at AS at FROM skill_alias_rejects ORDER BY created_at DESC, a, b")
+
+    def unreject_skill_pair(self, a: str, b: str) -> int:
+        x, y = sorted((" ".join(str(a).split()).lower(), " ".join(str(b).split()).lower()))
+        with self._write():
+            return self._conn.execute("DELETE FROM skill_alias_rejects WHERE a = ? AND b = ?", (x, y)).rowcount
+
+    def add_skill_alias(self, alias: str, kept: str, *, log: bool = True) -> dict[str, Any]:
+        """Treat `alias` as the same skill as `kept`. Raises ValueError for nonsense. Stored tags are not rewritten."""
+        a, k = " ".join(str(alias).split()), " ".join(str(kept).split())
+        if not a or not k:
+            raise ValueError("Pick two skill names.")
+        if a.lower() == k.lower():
+            raise ValueError("Those are already the same name.")
+        al, kl = a.lower(), k.lower()
+        with self._write():
+            kl = self.skill_alias_map().get(kl, kl)  # kept is itself merged into another name: use that one
+            if al == kl:
+                raise ValueError("Those are already treated as one skill.")
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            display = k if kl == k.lower() else kl
+            followers = [r["alias"] for r in self._rows("SELECT alias FROM skill_aliases WHERE lower(kept) = ?", (al,))]
+            self._conn.execute("UPDATE skill_aliases SET kept = ? WHERE lower(kept) = ?", (display, al))  # its group follows
+            self._conn.execute("INSERT INTO skill_aliases(alias, kept, created_at) VALUES (?, ?, ?)"
+                               " ON CONFLICT(alias) DO UPDATE SET kept = excluded.kept", (al, display, now))
+            self._conn.execute("DELETE FROM skill_alias_rejects WHERE (a = ? AND b = ?) OR (a = ? AND b = ?)", (al, kl, kl, al))
+            if log:
+                self._log_skill("merge", display, [al] + followers)
+        return {"alias": al, "kept": display}
+
+    def split_skill_alias(self, name: str, *, log: bool = True) -> int:
+        """Undo: take `name` out of its group (an alias), or break up the whole group when it is the kept name.
+        Returns how many names were split off."""
+        low = " ".join(str(name).split()).lower()
+        with self._write():
+            row = self._row("SELECT kept FROM skill_aliases WHERE alias = ?", (low,))
+            if row:
+                names, kept = [low], row["kept"]
+            else:
+                rows = self._rows("SELECT alias, kept FROM skill_aliases WHERE lower(kept) = ?", (low,))
+                names, kept = [r["alias"] for r in rows], (rows[0]["kept"] if rows else low)
+            n = self._conn.execute("DELETE FROM skill_aliases WHERE alias = ?", (low,)).rowcount
+            if not n:
+                n = self._conn.execute("DELETE FROM skill_aliases WHERE lower(kept) = ?", (low,)).rowcount
+            if n and log:
+                self._log_skill("split", kept, names)
+        return n
+
+    def reject_skill_pair(self, a: str, b: str) -> None:
+        """'Not the same': never suggest this pair again."""
+        x, y = sorted((" ".join(str(a).split()).lower(), " ".join(str(b).split()).lower()))
+        if not x or not y or x == y:
+            return
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with self._write():
+            added = self._conn.execute("INSERT OR IGNORE INTO skill_alias_rejects(a, b, created_at) VALUES (?, ?, ?)", (x, y, now)).rowcount
+            if added:
+                self._log_skill("reject", x, [x, y])
+
+    def _lookalike_edges(self, only: str | None = None) -> tuple[dict[str, dict[str, Any]], list[tuple[str, str, str]]]:
+        """(units, edges). A unit is one skill: a name nobody merged, or a whole 'Treated as one' group. units[key] =
+        {key, display (the kept name, else the most used spelling), members: [(name, count)], count}. An edge is
+        (unit key, unit key, why): some member of one looks like some member of the other and nobody said
+        'Not the same'. `only`: just edges that touch the unit of this skill."""
+        from .picks import look_alike
+        tags = [t for t in self.list_tags(100000) if t["tag"]]
+        amap = self.skill_alias_map()
+        kept_names = {r["kept"].lower(): r["kept"] for r in self._rows("SELECT kept FROM skill_aliases")}
+        rejected = {(r["a"], r["b"]) for r in self._rows("SELECT a, b FROM skill_alias_rejects")}
+        units: dict[str, dict[str, Any]] = {}
+        for t in tags:
+            low = t["tag"].lower()
+            key = amap.get(low, low)
+            u = units.setdefault(key, {"key": key, "members": [], "count": 0})
+            u["members"].append((t["tag"], t["count"]))
+            u["count"] += t["count"]
+        for key, u in units.items():
+            top = max(u["members"], key=lambda m: (m[1], -len(m[0])))[0]
+            u["display"] = kept_names.get(key) or top
+        unit_of = {n.lower(): key for key, u in units.items() for n, _ in u["members"]}
+        buckets: dict[str, list[str]] = {}
+        for t in tags:
+            low = t["tag"].lower()
+            if _picks._has_symbol(low):
+                continue
+            s = _picks._squash(low)
+            for k in {s, _picks._singular(s), s[:4], re.sub(r"\d+$", "", s)}:
+                if k:
+                    buckets.setdefault(k, []).append(t["tag"])
+        pairs: list[tuple[str, str]] = []
+        for members in buckets.values():
+            for i, x in enumerate(members):
+                for y in members[i + 1:]:
+                    pairs.append((x, y))
+        for p, q in _picks._SHORT:
+            if p in unit_of and q in unit_of:
+                pairs.append((p, q))
+        want = unit_of.get(" ".join(str(only).split()).lower()) if only else None
+        edges: dict[tuple[str, str], str] = {}
+        seen: set[tuple[str, str]] = set()
+        for x, y in pairs:
+            lx, ly = x.lower(), y.lower()
+            key = tuple(sorted((lx, ly)))
+            if lx == ly or key in seen or key in rejected:
+                continue
+            seen.add(key)
+            ux, uy = unit_of[lx], unit_of[ly]
+            if ux == uy or (want and want not in (ux, uy)):
+                continue
+            why = look_alike(x, y)
+            if why:
+                edges.setdefault(tuple(sorted((ux, uy))), why)
+        return units, [(a, b, w) for (a, b), w in edges.items()]
+
+    def _unit_people(self, unit: dict[str, Any]) -> set[int]:
+        names = [n for n, _ in unit["members"]]
+        marks = ", ".join("?" for _ in names)
+        return {r["candidate_id"] for r in self._rows(
+            f"SELECT DISTINCT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE", names)}
+
+    def skill_lookalikes(self, limit: int = 50, only: str | None = None) -> list[dict[str, Any]]:
+        """Pairs of skills that look like one skill, with how many people have each and how many have both.
+        A name already merged stands for its whole group (shown under the name kept), so a pair is never shown
+        between two spellings of one group. Pairs answered 'Not the same' are left out. `only`: just pairs that
+        include this skill. Each: {a, b, a_count, b_count, both, keep (the more used), other, reason, people}."""
+        units, edges = self._lookalike_edges(only)
+        out: list[dict[str, Any]] = []
+        for ka, kb, why in edges:
+            ua, ub = units[ka], units[kb]
+            pa, pb = self._unit_people(ua), self._unit_people(ub)
+            xn, yn, xc, yc = ua["display"], ub["display"], len(pa), len(pb)
+            keep, other = ((xn, yn) if (xc, -len(xn)) >= (yc, -len(yn)) else (yn, xn))
+            kc, oc = (xc, yc) if keep == xn else (yc, xc)
+            out.append({"a": xn, "b": yn, "a_count": xc, "b_count": yc, "both": len(pa & pb), "keep": keep, "other": other,
+                        "keep_count": kc, "other_count": oc, "reason": why, "people": len(pa | pb)})
+        out.sort(key=lambda r: (-r["people"], r["keep"].lower(), r["other"].lower()))
+        return out[:limit]
+
+    def skill_lookalike_groups(self, limit: int = 30) -> list[dict[str, Any]]:
+        """The same suggestions as one row per group of look-alikes: react, react.js and reactjs are one row, with
+        one Treat as one. Each: {names: [spellings, the one to keep first], keep, others, counts: {name: people},
+        both (people who have all of them... or 0), people, reason}. A row of two names is a pair."""
+        units, edges = self._lookalike_edges()
+        parent = {k: k for e in edges for k in e[:2]}
+
+        def find(k: str) -> str:
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+        why_of: dict[str, str] = {}
+        for a, b, w in edges:
+            parent[find(a)] = find(b)
+        for a, b, w in edges:
+            why_of.setdefault(find(a), w)
+        comps: dict[str, list[str]] = {}
+        for k in parent:
+            comps.setdefault(find(k), []).append(k)
+        out: list[dict[str, Any]] = []
+        for root, keys in comps.items():
+            people = {k: self._unit_people(units[k]) for k in keys}
+            order = sorted(keys, key=lambda k: (-len(people[k]), len(units[k]["display"]), units[k]["display"].lower()))
+            names = [units[k]["display"] for k in order]
+            allp = set().union(*people.values())
+            common = set.intersection(*people.values()) if people else set()
+            out.append({"names": names, "keep": names[0], "others": names[1:],
+                        "counts": {units[k]["display"]: len(people[k]) for k in keys},
+                        "both": len(common), "people": len(allp), "reason": why_of.get(root, "")})
+        out.sort(key=lambda r: (-r["people"], r["keep"].lower()))
+        return out[:limit]
+
+    def title_choices(self, limit: int = 60) -> list[dict[str, Any]]:
+        """Current job titles for a pick list: each title once after folding level words, most people first.
+        [{pick: 'title:data engineer', label: 'title: Data Engineer', count, variants}]"""
+        groups: dict[str, dict[str, Any]] = {}
+        for r in self._rows("SELECT lower(trim(current_title)) AS t, count(*) AS n FROM candidates"
+                            " WHERE current_title IS NOT NULL AND trim(current_title) <> '' GROUP BY t"):
+            key = _picks.fold_title(r["t"])
+            if not key:
+                continue
+            g = groups.setdefault(key, {"pick": _picks.TITLE_PREFIX + key, "label": _picks.label(_picks.TITLE_PREFIX + key),
+                                        "count": 0, "variants": 0})
+            g["count"] += r["n"]
+            g["variants"] += 1
+        return sorted(groups.values(), key=lambda g: (-g["count"], g["label"].lower()))[:limit]
+
+    def skill_names_sorted(self, limit: int = 5000) -> list[dict[str, Any]]:
+        """Skills for a pick list: case-insensitive order, each alias group once (under its kept name, with everyone
+        who has any of its names)."""
+        tags = self.list_tags(100000)
+        amap = self.skill_alias_map()
+        groups: dict[str, dict[str, Any]] = {}
+        for t in tags:
+            k = amap.get(t["tag"].lower(), t["tag"].lower())
+            g = groups.setdefault(k, {"tag": t["tag"] if k == t["tag"].lower() else k, "count": 0, "_names": []})
+            g["_names"].append(t["tag"])
+            if k == t["tag"].lower():
+                g["tag"] = t["tag"]
+        out = []
+        for k, g in groups.items():
+            names = g.pop("_names")
+            if len(names) > 1:
+                marks = ", ".join("?" for _ in names)
+                g["count"] = self._row(f"SELECT count(DISTINCT candidate_id) AS n FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE", names)["n"]
+            else:
+                g["count"] = next(t["count"] for t in tags if t["tag"] == names[0])
+            out.append(g)
+        out.sort(key=lambda g: g["tag"].lower())
+        return out[:limit]
+
     def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._rows(
             "SELECT (SELECT t2.tag FROM candidate_tags t2 WHERE t2.tag = t.tag COLLATE NOCASE GROUP BY t2.tag"
@@ -4276,8 +4596,9 @@ class Store:
                     params += [f, int(len(f) <= 3)]
                 filters[{"current_title": "title", "current_company": "company"}.get(col, col)] = value
         if tag and tag.strip():
-            where.append("c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag = ? COLLATE NOCASE)")
-            params.append(tag.strip())
+            names = self.skill_group_names(tag)
+            where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in names)}) COLLATE NOCASE)")
+            params += names
             filters["tag"] = tag
         if source and source.strip():
             where.append("lower(trim(c.source)) = lower(?)")
@@ -4342,6 +4663,7 @@ class Store:
                 if fld == "skill":
                     if not negate:
                         continue  # skills that must be there go through the `skills` filter
+                    vals = self.expand_skills(vals)
                     marks = ", ".join("?" for _ in vals)
                     where.append(f"c.id NOT IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
                     params += vals
@@ -4371,14 +4693,15 @@ class Store:
         has email / LinkedIn, and words to leave out."""
         names = [x.strip() for x in (skills or []) if x and x.strip()]
         if names:
-            marks = ", ".join("?" for _ in names)
-            if skill_mode == "all":
-                where.append(f"(SELECT count(DISTINCT lower(tag)) FROM candidate_tags WHERE candidate_id = c.id"
-                             f" AND tag IN ({marks}) COLLATE NOCASE) = ?")
-                params += [*names, len({x.lower() for x in names})]
+            if skill_mode == "all":  # every skill asked for, each one counting its look-alike names too
+                for n in dict.fromkeys(x.lower() for x in names):
+                    group = self.skill_group_names(n)
+                    where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in group)}) COLLATE NOCASE)")
+                    params += group
             else:
-                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
-                params += names
+                every = self.expand_skills(names)
+                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in every)}) COLLATE NOCASE)")
+                params += every
             filters["skills"] = (" and " if skill_mode == "all" else " or ").join(names)
         if remote:
             where.append("(tt_has(c.location, 'remote', 1) OR c.id IN (SELECT candidate_id FROM candidate_tags"

@@ -25,17 +25,17 @@
       {% for href, label, on in nav_items %}<a href="{{ href }}" class="{{ 'on' if on }}"{{ cur(on) }}>{{ label }}</a>
       {% endfor %}
     </nav>
-  </header>{% endif %}
+  </header>{% elif hm_head %}<header class="top hm-head"><p class="brand">{{ hm_head }}</p></header>{% endif %}
   <main id="main" tabindex="-1">
     {% set fq = request.state.flash or {} %}
     {% if fq.get('flash_error') %}<p class="flash warn" role="alert">{{ fq.get('flash_error') }}</p>{% endif %}
-    {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}</p>{% endif %}
+    {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}{% if fq.get('notice_href') and safe_path(fq.get('notice_href')) %} <a href="{{ fq.get('notice_href') }}">{{ fq.get('notice_href_text') or 'Open it' }}</a>{% endif %}</p>{% endif %}
     {% block body %}{% endblock %}
   </main>
   {% if not hide_chrome %}<footer class="foot">
     Everything stays on this computer. Talent Search uses none of your data and has no telemetry.
     <a href="/changes?who=ai">AI changes</a> · <a href="/privacy">Privacy</a> · <a href="/?tour=short">Take a short tour</a> · <a href="/?tour=full">Take the full tour with made-up people</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a> · v{{ version }}
-  </footer>{% endif %}
+  </footer>{% elif hm_head %}<footer class="foot hm-foot"><p>Made with Talent Search.</p></footer>{% endif %}
   {% set tour = tour_payload(request) %}{% if tour %}<div id="tour-data" hidden data-tour="{{ tour | tojson | forceescape }}"></div>{% endif %}
   {% block scripts %}{% endblock %}
 </body>

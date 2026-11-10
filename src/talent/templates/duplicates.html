@@ -4,16 +4,16 @@
 {% block body %}
 <div class="sec-head">
   <h1>Possible duplicates {% if total %}<span class="muted"><span class="sr-only">Pairs found: </span>{{ total }}</span>{% endif %}</h1>
-  <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a></div>
+  <div class="actions-inline"><a class="btn" href="/candidates">Back to candidates</a> <a class="btn" href="/candidates/duplicates">Show as groups</a></div>
 </div>
 <p class="lead">People who may be saved twice: the same email or LinkedIn, the same name and phone or company, or a name that could be the same person at the same company. Nothing changes until you press Compare and merge, and you see both profiles first. A backup is saved before every merge.</p>
 {% if reasons | length > 1 or reason %}<p class="filter-chips" role="group" aria-label="Show pairs by reason">
   <span class="fine">Show:</span>
-  <a class="chip{{ ' on' if not reason }}" href="/candidates/duplicates"{% if not reason %} aria-current="true"{% endif %}>All pairs ({{ all_total }})</a>
-  {% for r in reasons %}<a class="chip{{ ' on' if reason == r.slug }}" href="/candidates/duplicates?reason={{ r.slug }}"{% if reason == r.slug %} aria-current="true"{% endif %}>{{ r.label }} ({{ r.count }})</a>{% endfor %}
+  <a class="chip{{ ' on' if not reason }}" href="/candidates/duplicates?view=pairs"{% if not reason %} aria-current="true"{% endif %}>All pairs ({{ all_total }})</a>
+  {% for r in reasons %}<a class="chip{{ ' on' if reason == r.slug }}" href="/candidates/duplicates?view=pairs&reason={{ r.slug }}"{% if reason == r.slug %} aria-current="true"{% endif %}>{{ r.label }} ({{ r.count }})</a>{% endfor %}
 </p>{% endif %}
 {% if not total %}
-<p class="panel">{% if reason %}No pairs with this reason right now. <a href="/candidates/duplicates">Show all pairs</a>.{% else %}No likely duplicates right now.{% endif %}</p>
+<p class="panel">{% if reason %}No pairs with this reason right now. <a href="/candidates/duplicates?view=pairs">Show all pairs</a>.{% else %}No likely duplicates right now.{% endif %}</p>
 {% else %}
 {% macro person(c) -%}
 <div class="dup-person">
@@ -47,7 +47,7 @@
   </li>
   {% endfor %}
 </ul>
-{% if total > shown %}<p class="pager"><a href="/candidates/duplicates?shown={{ shown + 50 }}{{ '&reason=' ~ reason if reason }}">Show more ({{ total - shown }} left)</a></p>{% endif %}
+{% if total > shown %}<p class="pager"><a href="/candidates/duplicates?view=pairs&shown={{ shown + 50 }}{{ '&reason=' ~ reason if reason }}">Show more ({{ total - shown }} left)</a></p>{% endif %}
 {% endif %}
 {% if dismissed %}
 <form method="post" action="/candidates/duplicates/reset" class="inline" data-confirm="Show the {{ dismissed }} pair{{ '' if dismissed == 1 else 's' }} you said are different people again?">

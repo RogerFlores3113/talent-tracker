@@ -4,7 +4,7 @@
 {% block body %}
 <h1>Settings</h1>
 <nav class="fine" aria-label="Jump to">Jump to:
-  <a href="#look">Look</a> · <a href="#today">Today</a> · <a href="#hiring-for">Who you hire for</a> · <a href="#site-guards">Site guards</a> · <a href="#time-zone">Your time zone</a> · <a href="#backups">Backups</a> · <a href="#cautious">Cautious mode</a> · <a href="#ai-apps">AI apps</a> · <a href="#tour">Tour</a></nav>
+  <a href="#look">Look</a> · <a href="#today">Today</a> · <a href="#hiring-for">Who you hire for</a> · <a href="#site-guards">Site guards</a> · <a href="#time-zone">Your time zone</a> · <a href="#skill-names">Skill names</a> · <a href="#backups">Backups</a> · <a href="#cautious">Cautious mode</a> · <a href="#ai-apps">AI apps</a> · <a href="#tour">Tour</a></nav>
 {% if saved %}<p class="flash" role="status">Saved.</p>{% endif %}
 {% if errors %}<p class="flash warn" role="alert">Nothing was saved. Fix the highlighted number{{ 's' if errors | length > 1 }} and save again.</p>{% endif %}
 <form method="post" action="/settings" class="stack">
@@ -76,6 +76,44 @@
     {{ zone_list() }}
     <button class="btn" type="submit">Save</button>
   </form>
+</section>
+
+<section class="panel" id="skill-names">
+  <h2>Skill names</h2>
+  {% set sk_msg = (request.state.flash or {}).get('skill_notice') %}
+  {% if sk_msg %}<h3 class="flash skill-result" id="skill-result" role="status" tabindex="-1" data-focus-here>{{ sk_msg }}</h3>{% endif %}
+  <p class="fine">Some skills are written more than one way, like react and react.js. Treat them as one and search, the skill filter, highlights, counts, compare and spreadsheets count them together. Nobody's saved skills change, and Split puts them back. Nothing is merged unless you press the button.</p>
+  <h3>Look the same</h3>
+  {% if skill_rows %}<ul class="items skill-pairs">
+  {% for g in skill_rows %}{% set label = g.names | join(' / ') %}{% set gi = loop.index %}<li>
+    <form method="post" action="/settings/skill-names/merge" class="inline-form">
+      <span><strong>{{ label }}</strong>, <span class="fine">{% for n in g.names %}{{ g.counts[n] }}{{ ' + ' if not loop.last }}{% endfor %} people{% if g.names | length == 2 %}, {{ g.both }} {{ 'has' if g.both == 1 else 'have' }} both{% endif %}</span></span>
+      {% for n in g.names %}<input type="hidden" name="names" value="{{ n }}">{% endfor %}
+      <fieldset class="keep-pick"><legend class="fine">Name to keep for {{ label }}</legend>
+        {% for n in g.names %}<span class="keep-opt"><input type="radio" id="keep-{{ gi }}-{{ loop.index }}" name="kept" value="{{ n }}" {{ 'checked' if loop.first }}> <label for="keep-{{ gi }}-{{ loop.index }}" class="keep-label">{{ n }}</label></span>{% endfor %}</fieldset>
+      <button class="btn small" type="submit" aria-label="Treat {{ g.names | join(', ') }} as one skill">Treat as one</button>
+      <button class="btn small" type="submit" formaction="/settings/skill-names/reject" aria-label="{{ g.names | join(', ') }} {{ 'are' if g.names | length > 2 else 'are' }} not the same skill">Not the same</button>
+    </form></li>{% endfor %}
+  </ul>
+  {% else %}<p class="fine">No look-alike names right now. Names like react and react.js, engineer and engineering, python and python3, or js and javascript show up here when you have both.</p>{% endif %}
+  <h3>Merge two names yourself</h3>
+  <form method="post" action="/settings/skill-names/merge" class="inline-form" id="skill-type-form">
+    <label class="inline-label">Name to keep <input type="text" name="kept" required autocomplete="off" placeholder="javascript"></label>
+    <label class="inline-label">Also count as that <input type="text" name="alias" required autocomplete="off" placeholder="js"></label>
+    <button class="btn small" type="submit">Treat as one</button>
+  </form>
+  <h3>Treated as one</h3>
+  {% if skill_groups %}<ul class="items skill-groups">
+  {% for g in skill_groups %}<li><strong>{{ g.kept }}</strong> <span class="fine">also counts: {% for a in g.aliases %}{{ a.name }} ({{ a.count }}){{ ', ' if not loop.last }}{% endfor %}. {{ g.people }} {{ 'person' if g.people == 1 else 'people' }} in all.</span>
+    <form method="post" action="/settings/skill-names/split" class="inline"><input type="hidden" name="name" value="{{ g.kept }}"><button class="btn small" type="submit" aria-label="Split {{ g.kept }} from {{ g.aliases | map(attribute='name') | join(', ') }}">Split</button></form></li>{% endfor %}
+  </ul>
+  {% else %}<p class="fine">Nothing is treated as one yet.</p>{% endif %}
+  <h3 id="skill-hidden-h">Hidden suggestions</h3>
+  {% if skill_hidden %}<ul class="items skill-hidden" aria-labelledby="skill-hidden-h">
+  {% for h in skill_hidden %}<li><strong>{{ h.a }} / {{ h.b }}</strong> <span class="fine">you said these are not the same skill.</span>
+    <form method="post" action="/settings/skill-names/unreject" class="inline"><input type="hidden" name="a" value="{{ h.a }}"><input type="hidden" name="b" value="{{ h.b }}"><button class="btn small" type="submit" aria-label="Suggest {{ h.a }} and {{ h.b }} as the same skill again">Suggest again</button></form></li>{% endfor %}
+  </ul>
+  {% else %}<p class="fine">Nothing hidden. When you press Not the same, the pair waits here and you can bring it back.</p>{% endif %}
 </section>
 
 <section class="panel" id="backups">

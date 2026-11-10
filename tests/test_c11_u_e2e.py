@@ -90,12 +90,13 @@ def _run(browser, port, tool, args, dark=False, width=None):
 
 
 def _sent(page):
-    return page.evaluate("window.HOSTLOG.filter(m=>m.method==='ui/message').map(m=>m.params.content.text)")
+    return page.evaluate("window.HOSTLOG.filter(m=>m.method==='ui/message').map(m=>m.params.content[0].text)")
 
 
 def test_people_table_full_screen_shows_every_column_unclipped(host, browser):
     page, fr = _run(browser, host, "search_candidates", {"query": "", "limit": 10}, dark=True)
-    fr.get_by_role("button", name="Show as table").click()  # the People view goes full screen for the table
+    fr.get_by_role("button", name="Show as table").click()  # c14 D2: the table no longer forces full screen
+    fr.get_by_role("button", name="Full screen").click()  # it is its own button
     page.wait_for_function("document.querySelector('iframe').contentDocument === null || true")
     page.wait_for_timeout(800)
     assert fr.locator("html").get_attribute("data-mode") == "fullscreen"

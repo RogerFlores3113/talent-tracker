@@ -251,7 +251,7 @@ def test_exact_matches_list_and_bulk_merge_with_a_preview_and_checkboxes(store):
     pairs = duplicates.exact_matches(store)
     assert len(pairs) == 1 and set(pairs[0]["reasons"]) & set(duplicates.STRONG)
     c = local_client(store)
-    page = c.get("/candidates/duplicates")
+    page = c.get("/candidates/duplicates?view=pairs")
     assert "Merge all exact email or LinkedIn matches (1)" in page.text and 'form="bulk-dismiss"' in page.text
     prev = c.get("/candidates/duplicates/merge-exact")
     assert prev.status_code == 200 and 'name="pair"' in prev.text and "checked" not in prev.text  # destructive: nothing starts ticked

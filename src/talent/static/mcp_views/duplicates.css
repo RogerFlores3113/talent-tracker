@@ -12,3 +12,6 @@ article.pair h2.ph{font-size:.9375rem;text-transform:none;letter-spacing:0;color
 .pair .hint{font-size:.75rem;color:var(--muted);margin-top:6px}
 html[data-mode=fullscreen] .pairs{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:10px;align-items:start}
 html[data-mode=fullscreen] article.pair{margin-bottom:0}
+.pair .keepnote{color:var(--ok);font-weight:600}
+.pair .chip.maybe{border-style:dashed}
+article.group .sides{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}

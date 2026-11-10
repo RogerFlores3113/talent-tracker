@@ -16,9 +16,9 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -35,8 +35,8 @@ from . import ai_caps, site_guard, trust
 from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, compare, desk, duplicates, opsreview, tour
-from . import searchquery, xlsx, xlsx_export
+from . import bulkmove, chase, compare, desk, duplicates, opsreview, tour
+from . import picks, searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -50,10 +50,12 @@ from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
-ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "saved", "sample", "deleted", "merged"}  # messages, not state
+ONE_SHOT_PARAMS = {"skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
 COMPARE_TICK = "Tick two to six people to compare."
+PAGE_SIZES = ("100", "250", "all")  # the Candidates "Show" choice; All stops at BULK_MAX, the export cap
+FORM_FIELDS_MAX = 12000  # form fields a bulk post may carry (one per ticked person, plus the filters); Starlette stops at 1000
 BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
@@ -69,7 +71,7 @@ LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock th
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
-FLASH_KEYS = ("notice", "flash_error", "error")
+FLASH_KEYS = ("skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
 FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
@@ -501,7 +503,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def is_htmx(request: Request) -> bool:
         return bool(request.headers.get("HX-Request"))
 
-    def back(request: Request, default: str = "/", notice: str = "", error: str = "") -> RedirectResponse:
+    def back(request: Request, default: str = "/", notice: str = "", error: str = "",
+             link: tuple[str, str] | None = None) -> RedirectResponse:
         """Redirect to the page the form was on, with an optional one-line message (shown by base.html)."""
         ref = request.headers.get("referer") or ""
         host = (request.headers.get("host") or "").lower()
@@ -513,6 +516,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         path, query = (target.path, target.query) if ours else (urlsplit(default).path, urlsplit(default).query)
         params = [(k, v) for k, v in parse_qsl(query) if k not in ONE_SHOT_PARAMS]
         params += [(k, v) for k, v in (("notice", notice), ("flash_error", error)) if v]
+        if notice and link and safe_local_path(link[1]):  # "Open Data Lead" beside the confirmation
+            params += [("notice_href_text", link[0]), ("notice_href", link[1])]
         return RedirectResponse(path + ("?" + urlencode(params) if params else ""), status_code=303)
 
     def cand_or_404(candidate_id: int) -> dict[str, Any]:
@@ -618,22 +623,38 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 r["main_job"] = mine[0]["title"] + (f" ({mine[0]['company']})" if mine[0]["company"] else "")
                 r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
 
+    def _amap() -> dict[str, str]:
+        return store.skill_alias_map()
+
+    def hl_pairs_of(value: Any) -> list[tuple[str, str]]:
+        """The hl parameter as (pick, color) pairs: look-alike skill names the person merged count as one pick."""
+        return picks.canon_pairs(searchquery.parse_hl(value), _amap())
+
+    def pick_sql(pick: str) -> tuple[str, list[str]]:
+        """SQL (on candidates c) that is true when the person matches this pick, and its parameters."""
+        if picks.is_title(pick):
+            return "(pick_title(c.current_title) = ?)", [picks.title_key(pick)]
+        names = store.skill_group_names(pick)
+        return ("EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag IN ("
+                + ", ".join("?" for _ in names) + ") COLLATE NOCASE)"), names
+
     def hl_order_sql(hl_list: list[str]) -> tuple[str, list[str]]:
-        """ORDER BY terms for the highlighted skills: most of them first, then the earlier pick wins (everyone stays)."""
-        has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
+        """ORDER BY terms for the picks: most of them first, then the earlier pick wins (everyone stays)."""
         if not hl_list:
             return "", []
-        count = "(" + " + ".join(has for _ in hl_list) + ") DESC, "
-        return count + "".join(has + " DESC, " for _ in hl_list), [*hl_list, *hl_list]
+        parts = [pick_sql(h) for h in hl_list]
+        count = "(" + " + ".join(sql for sql, _ in parts) + ") DESC, "
+        params = [x for _, ps in parts for x in ps]
+        return count + "".join(sql + " DESC, " for sql, _ in parts), [*params, *params]
 
     def hl_rank_hits(hits: list[Any], hl_list: list[str]) -> list[Any]:
         """A stable sort, so the order we already had (best match, colour, column) holds inside each highlight group."""
         if not hl_list:
             return hits
+        am = _amap()
 
         def key(h: Any) -> tuple[int, ...]:
-            have = {str(t).lower() for t in (h.candidate.get("tags") or [])}
-            flags = [x in have for x in hl_list]
+            flags = picks.person_hits(h.candidate.get("tags") or [], h.candidate.get("current_title"), hl_list, am)
             return (-sum(flags), *(not f for f in flags))
         return sorted(hits, key=key)
 
@@ -643,16 +664,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return re.sub(r"[^a-z0-9]+", "-", low).strip("-") + "-" + format(zlib.crc32(low.encode()) & 0xFFFF, "04x")
 
     def hl_href(base: dict[str, Any], hl_map: Any, skill: str | None = None, clear: bool = False,
-                rid: Any = None) -> str:
-        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept.
-        A skill keeps its color while it is picked; a new pick takes the first free color. The #fragment names the
-        chip to put keyboard focus on after the page reloads (see app.js): the same chip in the same row, else the
-        chip in the highlight bar."""
+                rid: Any = None, add_only: bool = False) -> str:
+        """/candidates link with a pick (a skill, or "title:..." for a job title) toggled in (or out of) the highlight
+        list; every other parameter kept. A pick keeps its color while it is picked; a new pick takes the first free
+        color. add_only: never remove (a profile's chips). The #fragment names the chip to put keyboard focus on after
+        the page reloads (see app.js): the same chip in the same row, else the chip in the highlight bar."""
         cur = dict(hl_map or {})
         frag = ""
         if skill is not None:
-            k = " ".join(str(skill).split()).lower()
-            if k in cur:
+            k = picks.normalize_pick(skill)
+            if k and not picks.is_title(k):
+                k = picks.canon(k, _amap())
+            if k in cur and not add_only:
                 keys = list(cur)
                 at = keys.index(k)
                 del cur[k]
@@ -660,56 +683,127 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 near = left[at] if at < len(left) else left[at - 1] if left else ""
                 frag = (f"#chip-{rid}-{hl_slug(k)}" if rid is not None else
                         "#removed-" + quote(k, safe="") + (quote("@hlbar-" + hl_slug(near), safe="@") if near else ""))
-            elif len(cur) < searchquery.HL_MAX:
-                cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
-                frag = f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
+            elif k and k not in cur and len(cur) < searchquery.HL_MAX:
+                if add_only:  # a profile: the picks so far keep their colors, the new one takes the first free color
+                    cur[k] = ""
+                else:
+                    cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
+                frag = "" if add_only else f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
         if clear:
             cur = {}
             frag = "#hlcleared"
-        rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more")}
+        rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more", "hl_add")}
         if cur:
-            rest["hl"] = searchquery.join_hl(cur.items())
+            rest["hl"] = ",".join(f"{n}:{c}" if c else n for n, c in cur.items())
         return ("/candidates?" + urlencode(rest) if rest else "/candidates") + frag
+
+    def hl_pos_of(tags: list[str], hl_map: Any) -> dict[str, dict[str, str]]:
+        """tag (lower case) -> {key, color} for each of a person's skills that is a highlighted pick or merged into one."""
+        am = _amap()
+        marked = {k: c for k, c in (hl_map or {}).items() if not picks.is_title(k)}
+        return {t.lower(): {"key": picks.canon(t, am), "color": marked[picks.canon(t, am)]}
+                for t in tags if picks.canon(t, am) in marked}
 
     def hl_first(tags: list[str], hl_map: Any) -> list[str]:
         """A person's skills with the highlighted ones first, in click order."""
-        mine = {t.lower(): t for t in tags}
-        first = [mine[h] for h in hl_map if h in mine]
+        am = _amap()
+        first: list[str] = []
+        for h in (hl_map or {}):
+            if picks.is_title(h):
+                continue
+            first += [t for t in tags if picks.canon(t, am) == h and t not in first]
         return first + [t for t in tags if t not in first]
 
     def hl_shown(tags: list[str], hl_map: Any) -> int:
         """How many chips a row shows: four, or every highlighted skill it has if that is more."""
-        low = {t.lower() for t in tags}
-        return max(4, sum(1 for h in hl_map if h in low))
+        am = _amap()
+        marked = {h for h in (hl_map or {}) if not picks.is_title(h)}
+        return max(4, sum(1 for t in tags if picks.canon(t, am) in marked))
 
-    def hl_edge(tags: list[str], hl_map: Any) -> str:
-        """The color of the first (highest priority) highlighted skill this person has, or ''."""
-        low = {t.lower() for t in tags}
-        return next((c for h, c in hl_map.items() if h in low), "")
+    def _hits(c: dict[str, Any], hl_map: Any) -> list[bool]:
+        return picks.person_hits(c.get("tags") or [], c.get("current_title"), list(hl_map or {}), _amap())
 
-    def hl_top(tags: list[str], hl_map: Any) -> tuple[str, str]:
-        """(skill, color) of the first highlighted skill this person has, or ('', '')."""
-        low = {t.lower() for t in tags}
-        return next(((h, c) for h, c in hl_map.items() if h in low), ("", ""))
+    def hl_edge(c: dict[str, Any], hl_map: Any) -> str:
+        """The color of the first (highest priority) pick this person matches, or ''."""
+        return next((col for hit, col in zip(_hits(c, hl_map), (hl_map or {}).values()) if hit), "")
 
-    def hl_have(tags: list[str], hl_map: Any) -> int:
-        """How many of the highlighted skills this person has."""
-        low = {t.lower() for t in tags}
-        return sum(1 for h in hl_map if h in low)
+    def hl_top(c: dict[str, Any], hl_map: Any) -> tuple[str, str]:
+        """(pick label, color) of the first pick this person matches, or ('', '')."""
+        return next(((picks.label(k), col) for hit, (k, col) in zip(_hits(c, hl_map), (hl_map or {}).items()) if hit), ("", ""))
+
+    def hl_have(c: dict[str, Any], hl_map: Any) -> int:
+        """How many of the picks this person matches (titles included)."""
+        return sum(_hits(c, hl_map))
+
+    def title_pick(c: dict[str, Any]) -> str:
+        return picks.make_title_pick(c.get("current_title"))
+
+    def pick_counts(hl_map: dict[str, str], where: str, params: tuple[Any, ...], rows: list[dict[str, Any]] | None
+                    ) -> dict[str, dict[str, int]]:
+        """pick -> {count, variants}: how many people in the current results match it (and, for a title, how many
+        different exact titles that is). From the filter's SQL when we have it, else from the rows we read."""
+        out: dict[str, dict[str, int]] = {}
+        if not hl_map:
+            return out
+        picks_ = list(hl_map)
+        if rows is None:
+            parts = [pick_sql(h) for h in picks_]
+            got = store._row("SELECT " + ", ".join(f"coalesce(sum({sql}), 0) AS n{i}" for i, (sql, _) in enumerate(parts))
+                             + f" FROM candidates c {where}", (*[x for _, ps in parts for x in ps], *params))
+            for i, h in enumerate(picks_):
+                out[h] = {"count": int(got[f"n{i}"]), "variants": 0}
+                if picks.is_title(h) and out[h]["count"]:
+                    sql, ps = pick_sql(h)
+                    extra = (" AND " if where else " WHERE ") + sql
+                    vs = store._rows(f"SELECT lower(trim(c.current_title)) AS t FROM candidates c {where}{extra} GROUP BY t", (*params, *ps))
+                    out[h]["variants"] = len(vs)
+            return out
+        am = _amap()
+        for h in picks_:
+            hit = [r for r in rows if picks.person_hits(r.get("tags") or [], r.get("current_title"), [h], am)[0]]
+            out[h] = {"count": len(hit), "variants": len({" ".join(str(r.get("current_title") or "").lower().split()) for r in hit}) if picks.is_title(h) else 0}
+        return out
 
     def hl_bar(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str,
-               counts: dict[str, int] | None = None) -> list[dict[str, Any]]:
+               counts: dict[str, dict[str, int]] | None = None) -> list[dict[str, Any]]:
         base = {**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}
-        return [{"skill": h, "color": c, "href": hl_href(base, hl_map, h), "n": i, "id": "hlbar-" + hl_slug(h),
-                 "count": (counts or {}).get(h)} for i, (h, c) in enumerate(hl_map.items(), start=1)]
+        return [{"skill": h, "label": picks.label(h), "title": picks.is_title(h), "color": c, "href": hl_href(base, hl_map, h),
+                 "n": i, "id": "hlbar-" + hl_slug(h), "count": (counts or {}).get(h, {}).get("count"),
+                 "variants": (counts or {}).get(h, {}).get("variants", 0)}
+                for i, (h, c) in enumerate(hl_map.items(), start=1)]
+
+    def hl_hints(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, Any]]:
+        """'Also 6 people with react.js. Treat as the same skill?' for picked skills that have a look-alike name that is
+        not merged yet (at most two lines)."""
+        out: list[dict[str, Any]] = []
+        for h in hl_map:
+            if picks.is_title(h) or len(out) >= 2:
+                continue
+            for pair in store.skill_lookalikes(limit=3, only=h):
+                other = pair["b"] if pair["a"].lower() == h else pair["a"]
+                other_count = pair["b_count"] if pair["a"].lower() == h else pair["a_count"]
+                extra = other_count - pair["both"]
+                if extra <= 0:
+                    continue
+                mine = pair["a"] if pair["a"].lower() == h else pair["b"]
+                keep_name = pair["keep"]
+                nxt = hl_href({**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}, hl_map)
+                out.append({"pick": h, "other": other, "extra": extra, "mine": mine, "keep": keep_name,
+                            "alias": pair["other"], "next": nxt})
+                break
+        return out
 
     env.globals["hl_href"] = hl_href
+    env.globals["hl_pos_of"] = hl_pos_of
+    env.globals["hl_label"] = picks.label
+    env.globals["title_pick"] = title_pick
     env.globals["hl_first"] = hl_first
     env.globals["hl_shown"] = hl_shown
     env.globals["hl_edge"] = hl_edge
     env.globals["hl_top"] = hl_top
     env.globals["hl_have"] = hl_have
     env.globals["hl_slug"] = hl_slug
+    env.globals["safe_path"] = safe_local_path
     env.globals["bulk_max"] = lambda: BULK_MAX  # read when a page is drawn, so the Candidates page and the export agree
 
     def _table_build(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
@@ -719,9 +813,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", per: int = 100, rows_only: bool = False):
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", size: str = "", per: int = 100,
+              rows_only: bool = False):
+        size = size.strip().lower()
+        size = size if size in PAGE_SIZES else ""
+        if size and not rows_only:  # "Show 100 / 250 / All": the page size is kept in the address
+            per = BULK_MAX if size == "all" else int(size)
         pool = COLORED_FIRST_POOL if per <= 100 else max(COLORED_FIRST_POOL, per)  # the export ranks everyone it keeps
-        hl_map = dict(searchquery.parse_hl(hl))  # skill -> color, in click order (sorts and colors, never filters)
+        hl_map = dict(hl_pairs_of(hl))  # pick -> color, in click order (sorts and colors, never filters); a pick is a skill or title:...
         hl_list = list(hl_map)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
@@ -812,17 +911,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         _attach_jobs(rows)
         if rows_only:  # the export: exactly these rows, in this order
             return rows, total
-        hl_counts: dict[str, int] = {}  # skill -> people with it in the current results (one query for all picks)
+        hl_counts: dict[str, dict[str, int]] = {}  # pick -> people with it in the current results (+ title variants)
         if hl_list:
             if count_where is not None:
-                has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
-                got = store._row("SELECT " + ", ".join(f"coalesce(sum({has}), 0) AS n{i}" for i in range(len(hl_list)))
-                                 + f" FROM candidates c {count_where[0]}", (*hl_list, *count_where[1]))
-                hl_counts = {h: int(got[f"n{i}"]) for i, h in enumerate(hl_list)}
+                hl_counts = pick_counts(hl_map, count_where[0], count_where[1], None)
             else:
-                pool_rows = [h.candidate for h in count_hits] if count_hits is not None else rows
-                lows = [{str(t).lower() for t in (r.get("tags") or [])} for r in pool_rows]
-                hl_counts = {h: sum(1 for low in lows if h in low) for h in hl_list}
+                hl_counts = pick_counts(hl_map, "", (), [h.candidate for h in count_hits] if count_hits is not None else rows)
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -833,14 +927,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
                                       ids=",".join(map(str, id_list)), hl=searchquery.join_hl(hl_map.items()),
-                                      **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir, hl_counts), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+                                      size="" if size in ("", "100") else size, **more_params).items() if v != ""}
+        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir, hl_counts), hl_hints=hl_hints(hl_map, keep, q, sort, dir, qsort, qdir), hl_titles=store.title_choices(60), hl_skills=store.skill_names_sorted(300), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),
                    saved=store.list_saved_searches(counts=True), save_params=searchquery.clean_params({**keep, "q": q}),
                    min_years_note="exp_min" in more_params, how_read=how_read, range_note=range_note,
-                   pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), shown=min(total, page_no * per),
+                   pipe_label=opsreview.pipe_label(pipe, day_n) if pipe else "", page_no=page_no, pages=max(1, (total + per - 1) // per), size=size or "100", shown=min(total, page_no * per),
                    suggestion=suggestion, corrected=bool(suggestion and result.corrected), color=color,
                    new_after=new_after_id, closest=bool(q.strip() and result.closest),
                    saved_notes=list(result.notes) if q.strip() else [],
@@ -850,9 +944,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
+        return page(request, "table.html", **ctx, tags=store.skill_names_sorted(5000), sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    def hl_add_redirect(request: Request, typed: str) -> RedirectResponse:
+        """The "Highlight a skill" box: a skill, or "title: Data Engineer", added as the next pick (the same color rules as a
+        chip click). Comes back to the same table with the focus fragment app.js turns into a status line."""
+        rest = {k: v for k, v in request.query_params.items() if k not in ("hl_add", "hl", "page_no", "more") and v != ""}
+        cur = dict(hl_pairs_of(request.query_params.get("hl", "")))
+        m = re.match(r"\s*titles?\s*:\s*(.*)$", typed, re.I)
+        pick = picks.make_title_pick(m.group(1)) if m else picks.normalize_pick(typed)
+        if m and not pick:
+            frag = "#hlempty"
+        elif not pick:
+            frag = "#hlempty"
+        else:
+            if not picks.is_title(pick):
+                pick = picks.canon(pick, _amap())
+            if pick in cur:
+                frag = f"#hlbar-{hl_slug(pick)}"
+            elif len(cur) >= searchquery.HL_MAX:
+                frag = "#hlfull"
+            else:
+                cur[pick] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
+                frag = f"#hlbar-{hl_slug(pick)}"
+        if cur:
+            rest["hl"] = searchquery.join_hl(cur.items())
+        return RedirectResponse(("/candidates?" + urlencode(rest) if rest else "/candidates") + frag, status_code=303)
 
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
@@ -862,7 +981,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", size: str = ""):
+        typed = (request.query_params.get("hl_add") or "").strip()
+        if "hl_add" in request.query_params:
+            return hl_add_redirect(request, typed)
         names = table.__code__.co_varnames[1:table.__code__.co_argcount]
         values = locals()
         return _table_build(request, **{k: values[k] for k in names})
@@ -881,7 +1003,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """App window only: set a color, add to a job or export, for the people ticked on the Candidates table (or
         every person in the results, when "all of the results" is ticked). There is no bulk delete, and the AI has
         no tool for any of this."""
-        form = await request.form()
+        form = await request.form(max_fields=FORM_FIELDS_MAX)
         action = str(form.get("action") or "")
         matched_total = None  # how many people "all of the results" matched (more than the ids when that is cut off)
         if str(form.get("select_all") or "") == "1":
@@ -889,7 +1011,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                count=True)
         else:
             ids = list(dict.fromkeys(int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()))
-        hl_pairs = searchquery.parse_hl(str(form.get("f_hl") or ""))
+        hl_pairs = hl_pairs_of(str(form.get("f_hl") or ""))
         if not ids:
             return back(request, "/candidates", error=COMPARE_TICK if action == "compare" else "Tick at least one person first.")
         n = len(ids)
@@ -900,14 +1022,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             q = [("ids", ",".join(map(str, ids[:compare.MAX_PEOPLE])))]
             if n > compare.MAX_PEOPLE:
                 q.append(("of", str(n)))
-            hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("f_hl") or "")))
+            hl = searchquery.join_hl(hl_pairs_of(str(form.get("f_hl") or "")))
             if hl:
                 q.append(("hl", hl))
             return RedirectResponse("/candidates/compare?" + urlencode(q), status_code=303)
         if action == "export":
             stamp = datetime.now().strftime("%Y-%m-%d")
             # the order the boxes came in (the screen's order), the same people and order as the xlsx
-            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs), media_type="text/csv; charset=utf-8",
+            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs,
+                                                     include_notes=form.get("include_notes") == "1"),
+                            media_type="text/csv; charset=utf-8",
                             headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
         if action == "export_xlsx":
             rows = people_rows(ids)
@@ -915,7 +1039,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                             hl=hl_pairs, drop_empty=True),
                                  f"talent-search-selected-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
         if action == "share":
-            return share_page(request, ids, hl=searchquery.join_hl(hl_pairs))
+            job_now = str(form.get("f_job") or "").strip()  # the Candidates job filter, when one is on
+            return share_page(request, ids, hl=searchquery.join_hl(hl_pairs), job=job_now if job_now.isdigit() else "")
         if action == "color":
             try:
                 shade = clean_color(str(form.get("color") or ""))
@@ -947,7 +1072,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             notice = f"Added {added} {'person' if added == 1 else 'people'} to {job['title']} at {stage['name']}."
             if already:
                 notice += f" {already} {'was' if already == 1 else 'were'} already in it and stayed where they are."
-            return back(request, "/candidates", notice=notice)
+            return back(request, "/candidates", notice=notice, link=(f"Open {job['title']}", f"/jobs/{job['id']}"))
         if action == "tag":
             new = split_tags(str(form.get("tag") or ""))
             if not new:
@@ -1110,7 +1235,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     TABLE_QUERY = ("q", "tag", "location", "source", "sort", "dir", "job", "client", "stage", "pipe", "days", "color",
                    "color_pick", "cf", "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max",
                    "contacted", "contacted_days", "added_days", "has_email", "has_linkedin", "new_after", "ids",
-                   "qsort", "qdir", "hl")
+                   "qsort", "qdir", "hl", "size")
 
     def xlsx_response(data: bytes, name: str) -> Response:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name) or "talent-search.xlsx"
@@ -1166,14 +1291,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The Candidates table as a spreadsheet: the same address parameters as /candidates, every page of it."""
         rows, total, args = table_export_rows(request)
         data = xlsx_export.table_workbook(store, rows, total, filters=filter_lines(args), cap=BULK_MAX,
-                                          hl=searchquery.parse_hl(args.get("hl", "")), drop_empty=True)
+                                          hl=hl_pairs_of(args.get("hl", "")), drop_empty=True)
         return xlsx_response(data, f"talent-search-candidates-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
     @app.get("/candidates/export.csv")
     def candidates_export_csv(request: Request):
         """The same people in the same order as export.xlsx, as the CSV this app can import again."""
         rows, _, args = table_export_rows(request)
-        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", ""))),
+        with_notes = request.query_params.get("notes") == "1"
+        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], hl_pairs_of(args.get("hl", "")),
+                                                 include_notes=with_notes),
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition":
                                  f'attachment; filename="talent-search-candidates-{datetime.now().strftime("%Y-%m-%d")}.csv"'})
@@ -1195,9 +1322,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return value if value in xlsx_export.NOTES_MODES else ("all" if legacy else "none")
 
     def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: str = "none",
-                   note: str = "", error: str = "", hl: str = "", rejected: bool = False) -> HTMLResponse:
+                   note: str = "", error: str = "", hl: str = "", rejected: bool = False,
+                   leave_out: set[int] | None = None, leave_note: set[int] | None = None,
+                   leave_rej: set[int] | None = None, for_me: bool = False) -> HTMLResponse:
         rows = people_rows(ids)
-        hl_pairs = searchquery.parse_hl(hl)
+        try:
+            rej_in = xlsx_export.rejected_in(store, [r["id"] for r in rows])
+        except Exception:
+            rej_in = {}
+        if leave_rej is None:  # first visit: people rejected in a job are left out unless the recruiter unticks them
+            leave_rej = set(rej_in)
+        hl_pairs = hl_pairs_of(hl)
         job_id = int(job) if str(job).isdigit() else None
         try:
             preview = xlsx_export.share_preview(store, [r["id"] for r in rows], hl=hl_pairs)
@@ -1209,20 +1344,33 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 chosen = store.get_job(job_id)
             except NotFound:
                 chosen = None
+        pv = ((preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
+              or {"names": preview.get("names", []), "count": len(rows), "stage": False,
+                  "people": [{"id": r["id"], "name": r["name"]} for r in rows]})
+        try:
+            notes_seen = xlsx_export.note_preview(store, [r["id"] for r in rows])
+            no_match = xlsx_export.nobody_matches(store, [r["id"] for r in rows], hl_pairs)
+        except Exception:
+            notes_seen, no_match = {}, False
         return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
                     count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
                     notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
                     rejected=rejected, preview=preview, today=xlsx_export.stamp(),
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
-                    pv=(preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
-                    or {"names": preview.get("names", []), "count": len(rows), "stage": False})
+                    pv=pv, notes_seen=notes_seen, no_match=no_match,
+                    leave_out=leave_out or set(), leave_note=leave_note or set(),
+                    rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
+                    kept_ids={p["id"] for p in pv.get("people") or []})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
     def candidates_share(request: Request, ids: str = "", job: str = "", hl: str = "", contact: str = "",
                          notes: str = "", rejected: str = ""):
         """The options for the spreadsheet a recruiter forwards to a hiring manager. /candidates/share?ids=1,2,3"""
+        # contact and notes asked for in the link is "Export for me": a file for the recruiter, not one to forward.
+        # An old notes=1 link now opens on the latest note; notes=all still asks for everything.
+        mine = contact == "1" and notes not in ("", "none", "0")
         return share_page(request, parse_ids(ids), job=job.strip(), hl=hl, contact=contact == "1",
-                          notes=notes_choice(notes, legacy=notes == "1"), rejected=rejected == "1")
+                          notes="latest" if notes == "1" else notes_choice(notes), rejected=rejected == "1", for_me=mine)
 
     @app.post("/candidates/share")
     async def candidates_share_file(request: Request):
@@ -1235,30 +1383,43 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         contact = form.get("include_contact") == "1"
         notes = notes_choice(str(form.get("notes") or ""), legacy=form.get("include_notes") == "1")
         note = str(form.get("note") or "")
-        hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("hl") or "")))
+        hl = searchquery.join_hl(hl_pairs_of(str(form.get("hl") or "")))
         rejected = form.get("include_rejected") == "1"
+        leave_out = {int(v) for v in form.getlist("leave_out") if str(v).isdigit()}
+        leave_note = {int(v) for v in form.getlist("leave_note") if str(v).isdigit()}
+        leave_rej = {int(v) for v in form.getlist("leave_rej") if str(v).isdigit()}
         try:
             job = store.get_job(job_id) if job_id else None
         except NotFound:
             return share_page(request, ids, contact=contact, notes=notes, note=note, hl=hl, rejected=rejected,
+                              leave_out=leave_out, leave_note=leave_note, leave_rej=leave_rej,
                               error="That job isn't there any more. Pick another or leave it empty.")
+        typed_out = set(leave_out)
+        if not job:  # no job picked: people marked rejected in some job stay out when their box is ticked
+            leave_out = leave_out | (leave_rej & set(ids))
+        if not [i for i in ids if i not in leave_out]:
+            return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
+                              rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
+                              error="Everyone is left out. Untick \"Leave this person out\" for at least one person.")
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
-                                                    note=note, hl=searchquery.parse_hl(hl), include_rejected=rejected)
+                                                    note=note, hl=hl_pairs_of(hl), include_rejected=rejected,
+                                                    leave_out=leave_out, skip_notes=leave_note)
         return xlsx_response(data, name)
 
     @app.get("/candidates/compare", response_class=HTMLResponse)
     def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = "",
-                           about: str = ""):
+                           about: str = "", noabout: list[str] = Query(default=[])):
         """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
         hiring manager view: nothing about the recruiter's own work, no app links, only stages still in play, ready
         to print. about=0 leaves the About row out of it."""
-        hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
+        hl_pairs = hl_pairs_of(hl)  # pick -> color in click order; a color stays with its pick (skill or title:...)
         hl_list = [h for h, _ in hl_pairs]
         hl_colors = dict(hl_pairs)
         hm = view == "hm"
         no_about = hm and about == "0"
+        hide_about_ids = {int(x) for v in noabout for x in v.split(",") if x.strip().isdigit()} if hm else set()
         asked = compare.parse_ids(ids)
         try:
             d = compare.build(store, asked)
@@ -1287,23 +1448,36 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if no_about:
             hidden.add("about")
         if hm:
-            people = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
-            d = {**d, "people": people, "glance": d["glance_hm"], "differs": compare.differs(people)}
+            every = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            people = [p for p in every if not p["not_in_play"]]
+            hm_left_out = compare.left_out_note(every)
+            if len(people) < compare.MIN_PEOPLE:
+                return page(request, "compare.html", d=None, hm=True, hide_chrome=True, hl=hl_list, hl_colors=hl_colors,
+                            back_href=href("/candidates", ids_now),
+                            message=(hm_left_out + " " if hm_left_out else "") + "Fewer than two people are still in play, so there is nothing to compare.")
+            d = compare.rebuild_for(d, people)
+            hidden = set(d["empty"]) | set(compare.HM_HIDDEN) | ({"about"} if no_about else set())
             hidden |= set(compare.empty_rows(people))
+        else:
+            hm_left_out = ""
         rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
         share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
         return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
                     capped=total > len(people), share_href="/candidates/share?" + urlencode(share_q),
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
                     rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
-                    no_about=no_about,
-                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
+                    no_about=no_about, hide_about_ids=hide_about_ids, hm_left_out=hm_left_out,
+                    hm_form_ids=",".join(str(p["id"]) for p in people), hm_form_hl=searchquery.join_hl(hl_pairs),
+                    hm_head="Hiring manager comparison" if hm else "",
+                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {}, title_hit=compare.title_hits(people, hl_list) if hl_list else {},
                     hm_href=href("/candidates/compare", ids_now, view="hm"),
                     about_href=href("/candidates/compare", ids_now, view="hm", **({} if no_about else {"about": "0"})),
                     full_href=href("/candidates/compare", ids_now))
 
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
-    def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
+    def duplicates_page(request: Request, shown: int = 50, reason: str = "", view: str = ""):
+        if view != "pairs":
+            return duplicate_clusters_page(request, shown)
         shown = max(50, min(shown, 2000))
         every = duplicates.find_pairs(store)
         want = duplicates.reason_slug(reason)
@@ -1319,6 +1493,77 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                                       if x[0] == reason), ""),
                     reasons=duplicates.reason_counts(every),
                     dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)))
+
+    def duplicate_clusters_page(request: Request, shown: int) -> HTMLResponse:
+        """One card per group of profiles that may be one person ("Kim Haddad, 6 profiles"), 50 groups at a time."""
+        shown = max(duplicates.CLUSTER_PAGE, shown)
+        pairs = duplicates.find_pairs(store)
+        found = duplicates.clusters(store, pairs)
+        cards = duplicates.cluster_cards(store, found[:shown])
+        merge_groups = sum(1 for c in cards if c["preticked"] and c["merge_in"])
+        merge_profiles = sum(c["merge_in"] for c in cards if c["preticked"])
+        return page(request, "duplicates_clusters.html", cards=cards, total=len(found), shown=shown,
+                    merge_groups=merge_groups, merge_profiles=merge_profiles,
+                    pair_total=len(pairs), people=sum(len(c["ids"]) for c in found),
+                    dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)),
+                    maybe_label=duplicates.MAYBE_DIFFERENT)
+
+    @app.post("/candidates/duplicates/merge-clusters")
+    async def duplicates_merge_clusters(request: Request):
+        """App window only. Merges the ticked groups: in each, every ticked profile goes into the Keep this one
+        profile through the ordinary merge. One backup is saved first, and it is the way back. The AI has no merge
+        tool. Only people who are in the same group right now can be merged together."""
+        form = await request.form()
+        only = str(form.get("only") or "")
+        keys = [only] if only.isdigit() else [k for k in form.getlist("cluster") if str(k).isdigit()]
+        current = duplicates.clusters(store)
+        by_key = {c["key"]: c for c in current}
+        chosen: list[tuple[int, list[int]]] = []
+        for k in dict.fromkeys(int(x) for x in keys):
+            c = by_key.get(k)
+            if not c:
+                continue
+            ids = set(c["ids"])
+            keep = str(form.get(f"keep_{k}") or "")
+            keep_id = int(keep) if keep.isdigit() and int(keep) in ids else c["ids"][0]
+            members = [int(v) for v in form.getlist(f"m_{k}") if str(v).isdigit() and int(v) in ids and int(v) != keep_id]
+            if members:
+                chosen.append((keep_id, members))
+        if not chosen:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": (
+                "Nothing to merge. Tick a group and keep at least one other profile ticked in it.")}), status_code=303)
+        try:
+            importers.backup_before_import(store, reason="merge")
+        except ValueError as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        groups = merged = skipped = 0
+        for keep_id, members in chosen:
+            res = duplicates.merge_cluster(store, keep_id, members)
+            groups += 1 if res["merged"] else 0
+            merged += res["merged"]
+            skipped += len(res["skipped"])
+        notice = (f"Merged {merged} profile{'' if merged == 1 else 's'} into {groups} "
+                  f"{'person' if groups == 1 else 'people'}. A backup was saved first, so it can be put back from "
+                  "Settings, Automatic backups.")
+        if skipped:
+            notice += f" {skipped} could not be merged and {'was' if skipped == 1 else 'were'} left alone."
+        return RedirectResponse("/candidates/duplicates?" + urlencode({"notice": notice}), status_code=303)
+
+    @app.post("/candidates/duplicates/dismiss-cluster")
+    async def duplicates_dismiss_cluster(request: Request):
+        """App window only: everyone in this group is a different person. None of those pairs comes back."""
+        form = await request.form()
+        key = str(form.get("only") or "")
+        c = next((c for c in duplicates.clusters(store) if str(c["key"]) == key), None)
+        if not c:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": "That group is gone. Reload the page."}),
+                                    status_code=303)
+        try:
+            n = duplicates.dismiss_group(store, c["ids"])
+        except (NotFound, ValueError) as exc:
+            return RedirectResponse("/candidates/duplicates?" + urlencode({"flash_error": str(exc)}), status_code=303)
+        return RedirectResponse("/candidates/duplicates?" + urlencode(
+            {"notice": f"Got it. These {len(c['ids'])} profiles won't show up as the same person again."}), status_code=303)
 
     def _pair_ids(form: Any) -> list[tuple[int, int]]:
         out = []
@@ -1510,9 +1755,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return RedirectResponse(dest, status_code=303)
 
     @app.get("/candidates/{candidate_id}", response_class=HTMLResponse)
-    def candidate_detail(request: Request, candidate_id: int, edit: bool = False, merged: bool = False):
+    def candidate_detail(request: Request, candidate_id: int, edit: bool = False, merged: bool = False, hl: str = ""):
         cand_or_404(candidate_id)
         c = store.candidate_detail(candidate_id)
+        if not hl:  # came from the Candidates table: carry its picks, so a skill chip here adds to them
+            try:
+                ref = urlsplit(request.headers.get("referer") or "")
+                if ref.path == "/candidates" and (ref.netloc or "").lower() == (request.headers.get("host") or "").lower():
+                    hl = (parse_qs(ref.query).get("hl") or [""])[0]
+            except ValueError:
+                hl = ""
         if edit:
             return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
                         error=None, job_id=None)
@@ -1522,6 +1774,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         other_jobs = [{**j, "hint": hints.get(j["id"])} for j in open_jobs if j["id"] not in in_jobs]
         stages = {p["job_id"]: store.job_stages(p["job_id"]) for p in c["pipelines"]}
         return page(request, "candidate.html", c=c, summary_limit=interviews.SUMMARY_LIMIT, c_zone=store.candidate_zone(candidate_id), other_jobs=other_jobs, stages=stages, merged=merged,
+                    hl=dict(hl_pairs_of(hl)), hl_pos=hl_pos_of(c.get("tags") or [], dict(hl_pairs_of(hl))),
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
@@ -1884,9 +2137,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The uploaded file's own name, without any folder, for Changes and the backup list."""
         return re.split(r"[\\/]", str(name or ""))[-1].strip()[:120]
 
-    def _save_lists(token: str, which: str, result: dict[str, Any]) -> None:
-        """Keep an import's (or a dry run's) detail lists for an hour, for "Download the full list"."""
-        lists = {k: result.get(k) or [] for k, _ in importers.PANELS}
+    def _save_lists(token: str, which: str, result: dict[str, Any], text: str | None = None) -> None:
+        """Keep an import's (or a dry run's) detail lists for an hour, for "Download the full list". With the
+        file's text, also where each row sits in the file, for the skipped and blank-cell rows download."""
+        lists: dict[str, Any] = {k: result.get(k) or [] for k, _ in importers.PANELS}
+        if text is not None and (lists["skipped"] or lists["warnings"]):
+            lists["_spans"] = {str(n): list(v) for n, v in importers.record_lines(text).items()}
         path = imports_dir() / f"{token}.{which}.json"
         try:
             fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
@@ -1922,9 +2178,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                    email_choices=email_choices)
             except Exception:  # a preview that can't be worked out never blocks the import
                 preview = None
+        up_path = imports_dir() / f"{token}.csv"
+        text = importers.decode(up_path.read_bytes()) if up_path.is_file() else None
         if preview:
-            _save_lists(token, "preview", preview)
-        return page(request, "import.html", step="map", token=token, header=header, rows=rows[:5], total=len(rows),
+            _save_lists(token, "preview", preview, text)
+        return page(request, "import.html", step="map", token=token, line_note=importers.line_note(text, len(rows)) if text else "", header=header, rows=rows[:5], total=len(rows),
                     mapping=mapping, targets=importers.IMPORT_TARGETS, labels=importers.TARGET_LABELS,
                     years_cols={i for i, h in enumerate(header) if mapping[i] == "note"
                                 and importers._norm_header(h) in importers._YEARS_HEADERS},
@@ -1973,7 +2231,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if up is None:
             return page(request, "import.html", step="upload", error="That upload expired. Choose the file again.")
         token, path = up
-        header, rows = importers.read_csv(importers.decode(path.read_bytes()))
+        file_text = importers.decode(path.read_bytes())
+        header, rows = importers.read_csv(file_text)
         mapping = _form_mapping(form, header)
         source = str(form.get("source") or "CSV import").strip()[:80] or "CSV import"
         add_stages = form.get("add_stages") == "1"
@@ -1988,6 +2247,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             move_stages=move_stages, client=client, reopen_jobs=reopen_jobs,
                             replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
+        pairs_before = {tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)}
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
@@ -2005,13 +2265,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         backups.record_import(store, result, filename, len(rows))
         if result.get("backup"):
             result["backup_name"] = Path(result["backup"]).name
-        _save_lists(token, "result", result)
+        _save_lists(token, "result", result, file_text)
         ask = set(importers.openings_to_ask(store))
         new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
                     for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
+                    line_note=importers.line_note(file_text, len(rows)),
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
-                    closed_lines=importers.closed_job_lines(result))
+                    closed_lines=importers.closed_job_lines(result),
+                    new_skill_pairs=len({tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)} - pairs_before))
 
     @app.get("/import/openings", response_class=HTMLResponse)
     def import_openings_page(request: Request):
@@ -2045,6 +2307,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """One result panel in full, as a CSV. Kept for an hour after the import or dry run."""
         titles = dict(importers.PANELS)
         path = imports_dir() / f"{token}.{which}.json"
+        if panel == "skipped_blank" and token.isalnum() and which in ("result", "preview") and path.is_file():
+            try:  # the skipped rows and the blank-cell rows together, one line per row with the reason
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                spans = {int(k): (int(v[0]), int(v[1])) for k, v in (saved.get("_spans") or {}).items()}
+                body = importers.skipped_blank_csv([str(x) for x in saved.get("skipped") or []],
+                                                   [str(x) for x in saved.get("warnings") or []], spans)
+            except (OSError, ValueError, AttributeError, TypeError, IndexError):
+                raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.") from None
+            return Response(body, media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="import-skipped-and-blank-rows.csv"'})
         if not token.isalnum() or which not in ("result", "preview") or panel not in titles or not path.is_file():
             raise HTTPException(404, "That list is gone. Lists are kept for an hour after an import.")
         try:
@@ -2298,11 +2570,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': ' '.join(notes)})}", status_code=303)
         return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
 
+    @app.get("/today")
+    def today_redirect():
+        """Today is the front page: /today is only a way people guess at it."""
+        return RedirectResponse("/", status_code=307)
+
+    def job_hl_href(job_id: int, hl_map: dict[str, str], skill: str | None = None, clear: bool = False,
+                    rid: Any = None) -> str:
+        """The same toggle as hl_href, for the job table: it goes back to /jobs/<id>?view=table."""
+        link = hl_href({"view": "table"}, hl_map, skill, clear=clear, rid=rid)
+        return f"/jobs/{job_id}" + link[len("/candidates"):]
+
+    env.globals["job_hl_href"] = job_hl_href
+
+    def pipeline_ctx(job_id: int, hl_raw: str = "", **extra: Any) -> dict[str, Any]:
+        """What _pipeline.html needs: the stage groups with each person's skills, and with highlights picked, the
+        people in each stage sorted by tiers (most picks first, then the earlier pick), the same as Candidates."""
+        hl_map = dict(searchquery.parse_hl(hl_raw))
+        groups = store.pipeline_by_stage(job_id)
+        ids = [a["candidate_id"] for g in groups for a in g["candidates"]]
+        tags: dict[int, list[str]] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            for r in store._rows("SELECT candidate_id, tag FROM candidate_tags WHERE candidate_id IN ("
+                                 + ",".join("?" * len(part)) + ") ORDER BY tag COLLATE NOCASE", tuple(part)):
+                tags.setdefault(r["candidate_id"], []).append(r["tag"])
+        for g in groups:
+            for a in g["candidates"]:
+                a["tags"] = tags.get(a["candidate_id"], [])
+            if hl_map:  # skills and title picks, aliases counted as one, the same tiers as Candidates
+                def key(a: dict[str, Any]) -> tuple[int, ...]:
+                    flags = _hits({"tags": a["tags"], "current_title": a.get("current_title")}, hl_map)
+                    return (-sum(flags), *(not f for f in flags))
+                g["candidates"] = sorted(g["candidates"], key=key)
+        return dict(groups=groups, hl=hl_map, hl_param=searchquery.join_hl(hl_map.items()), hl_clear=job_hl_href(job_id, hl_map, clear=True),
+                    hl_bar=[{"skill": h, "color": c, "n": i, "href": job_hl_href(job_id, hl_map, h),
+                             "title": h.startswith("title:"), "label": h[6:].strip() if h.startswith("title:") else h}
+                            for i, (h, c) in enumerate(hl_map.items(), start=1)], **extra)
+
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-    def job_detail(request: Request, job_id: int, view: str = "", q: str = "", show: str = "", ask_cancel: str = ""):
+    def job_detail(request: Request, job_id: int, view: str = "", q: str = "", show: str = "", ask_cancel: str = "",
+                   hl: str = ""):
         job = job_or_404(job_id)
         # ?omit= previews a choice without saving it; otherwise the job's remembered Leave out choice applies.
-        omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.saved_omit(store, job_id)
+        omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.page_omit(store, job_id)
         if view in ("board", "table"):
             store.set_settings(pipeline_view=view)
         view = view if view in ("board", "table") else store.setting("pipeline_view")
@@ -2310,11 +2621,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if q.strip():
             in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
-        ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
+        status_text = actions.job_status_text(store, job_id, omit_stages=omit)
+        ctx = dict(job=job, **pipeline_ctx(job_id, hl), stages=store.job_stages(job_id), view=view,
+                   status_names=actions.status_names(store, job_id, status_text),
                    inject_warnings=injection.job_warnings(job),
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job, guard=site_guard.enabled(store)),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
-                   status_text=actions.job_status_text(store, job_id, omit_stages=omit),
+                   status_text=status_text,
                    hidden_note=actions.hidden_note(store, job_id, omit),
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
@@ -2469,13 +2782,68 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             error = str(exc)
         if is_htmx(request):
             view = str(form.get("view") or store.setting("pipeline_view"))
-            return page(request, "_pipeline.html", job=job, groups=store.pipeline_by_stage(job_id),
+            return page(request, "_pipeline.html", job=job, **pipeline_ctx(job_id, str(form.get("hl") or "")),
                         stages=store.job_stages(job_id), view=view, error=error, ask=ask, resubmit=resubmit,
                         next_iv=actions.next_interviews(store, job_id))
         if ask:
             q = {"ask_cancel": cid, **({"flash_error": resubmit} if resubmit else {})}
             return RedirectResponse(f"/jobs/{job_id}?{urlencode(q)}#pipeline", status_code=303)
         return back(request, f"/jobs/{job_id}", error=error or resubmit)
+
+    @app.post("/jobs/{job_id}/move-many", response_class=HTMLResponse)
+    async def move_many(request: Request, job_id: int):
+        """The job table's "Move N ticked to [stage]" bar: one action, one status line, one Undo (also on Changes)."""
+        job = job_or_404(job_id)
+        form = await request.form(max_fields=FORM_FIELDS_MAX)
+        ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
+        stage = str(form.get("stage") or "").strip()
+        error, status, batch_id = None, "", None
+        if not ids:
+            error = "Tick at least one person first. Nobody was moved."
+        elif not stage:
+            error = "Pick the stage to move them to. Nobody was moved."
+        else:
+            try:
+                res = bulkmove.move_many(store, job_id, ids, stage, by="app")
+                status, batch_id = bulkmove.summary(res), res["batch_id"]
+            except ValueError as exc:
+                error = f"{exc} Nobody was moved."
+        if is_htmx(request):
+            return page(request, "_pipeline.html", job=job, **pipeline_ctx(job_id, str(form.get("hl") or "")),
+                        stages=store.job_stages(job_id), view="table", error=error, status=status, batch_id=batch_id,
+                        next_iv=actions.next_interviews(store, job_id))
+        if error:
+            return back(request, f"/jobs/{job_id}?view=table", error=error)
+        return back(request, f"/jobs/{job_id}?view=table", notice=status + (" You can undo it under Changes." if batch_id else ""))
+
+    @app.post("/jobs/{job_id}/move-many/{batch_id}/undo", response_class=HTMLResponse)
+    async def move_many_undo(request: Request, job_id: int, batch_id: int):
+        job = job_or_404(job_id)
+        form = await request.form()
+        error, status = None, ""
+        b = bulkmove.batch(store, batch_id)
+        if b is None or b.get("job_id") != job_id:
+            error = "That move is gone. Reload the page."
+        else:
+            try:
+                status = bulkmove.undo(store, batch_id, by="app")
+            except (NotFound, ValueError) as exc:
+                error = str(exc)
+        if is_htmx(request):
+            return page(request, "_pipeline.html", job=job, **pipeline_ctx(job_id, str(form.get("hl") or "")),
+                        stages=store.job_stages(job_id), view="table", error=error, status=status,
+                        next_iv=actions.next_interviews(store, job_id))
+        return back(request, f"/jobs/{job_id}?view=table", notice=status, error=error or "")
+
+    @app.post("/changes/bulk-move/{batch_id}/undo")
+    def undo_bulk_move(request: Request, batch_id: int):
+        try:
+            notice = bulkmove.undo(store, batch_id, by="app")
+        except NotFound:
+            return back(request, "/changes", error="That move is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
 
     @app.get("/jobs/{job_id}/submit/{candidate_id}", response_class=HTMLResponse)
     def submit_page(request: Request, job_id: int, candidate_id: int):
@@ -3432,6 +3800,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}",
                              "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
                              "undo_url": f"/changes/close-out/{b['id']}/undo", "undo_label": "Undo this close-out"})
+        if who in ("", "app"):  # a bulk stage move from the job table: one row, one undo
+            for b in bulkmove.batches(store, since)[:limit]:
+                rows.append({"at": b["at"], "who": "app", "name": b["job_title"], "href": f"/jobs/{b['job_id']}?view=table",
+                             "text": b["text"], "undoable": b["undoable"], "undone": not b["undoable"],
+                             "undo_url": f"/changes/bulk-move/{b['id']}/undo", "undo_label": "Undo this move"})
         if who in ("", "app"):  # a Keep or Keep all on a Shortlist: one row each, with its own undo
             by_card = {r["target_id"] for r in store._rows("SELECT target_id FROM ai_actions WHERE kind = 'card_keep'")}
             for b in shortlist.keep_batches(store, since)[:limit]:
@@ -3451,6 +3824,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "undo_url": f"/changes/decision/{b['id']}/undo", "undo_label": "Undo this decision",
                              "confirm": "Undo this decision? Everyone goes back to the stage they were in, and the "
                                         "interviews it cancelled are put back."})
+        if who in ("", "app"):  # skill names treated as one, split, or answered "not the same"
+            for e in store.skill_alias_log(since, limit):
+                ns = e["names"]
+                text = (f"Treated {_and(ns)} as {e['kept']}" if e["kind"] == "merge" else
+                        f"Split {_and(ns)} from {e['kept']}" if e["kind"] == "split" else
+                        f"Said {_and(ns)} are not the same skill")
+                rows.append({"at": e["at"], "who": "app", "name": "Skill names", "href": "/settings#skill-names",
+                             "text": text, "undoable": not e["undone_at"], "undone": bool(e["undone_at"]),
+                             "undo_url": f"/changes/skill-names/{e['id']}/undo",
+                             "undo_label": "Suggest again" if e["kind"] == "reject" else "Undo"})
         if who in ("", "app"):  # what a stage counts as, changed in the app
             for c in actions.stage_outcome_changes(store, since)[:limit]:
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
@@ -3459,6 +3842,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         rows = tuck_import_rows(rows)
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
+
+    def _and(names: list[str]) -> str:
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
     def import_change_rows(since: str | None) -> list[dict[str, Any]]:
         out = []
@@ -3783,6 +4169,93 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                   else " Hired and closing a job wait on Review."))
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#ai-apps", status_code=303)
 
+    # ---------------------------------------------------------- skill names that mean the same skill
+    def _skill_next(raw: str, fallback: str) -> str:
+        """Where to go back to after a skill-name change: a Candidates or Settings page of this server, else Settings."""
+        nxt = str(raw or "")
+        return nxt if re.match(r"^/(candidates|settings)(\?|#|$)", nxt) and not nxt.startswith("//") and "\\" not in nxt else fallback
+
+    def _skill_back(msg: str, nxt: str = "/settings#skill-names", error: bool = False) -> RedirectResponse:
+        """Back to Settings: the message goes in its own heading inside Skill names, which takes focus on load."""
+        key = "flash_error" if error else "skill_notice"
+        # the #fragment names the message itself: a fragment that names the whole section would make the browser drop focus
+        return RedirectResponse("/settings?" + urlencode({key: msg}) + "#skill-result", status_code=303)
+
+    @app.post("/settings/skill-names/merge")
+    async def skill_names_merge(request: Request):
+        """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed. From
+        Settings: a group of names (names, with the one to keep), a pair (a, b) or two names typed (alias, kept)."""
+        form = await request.form()
+        alias, kept = " ".join(str(form.get("alias") or "").split()), " ".join(str(form.get("kept") or "").split())
+        names = [" ".join(str(n).split()) for n in form.getlist("names") if str(n).strip()]
+        if form.get("a") and form.get("b"):  # Settings: the two names and the one to keep
+            a, b = str(form.get("a")), str(form.get("b"))
+            kept = kept if kept in (a, b) else a
+            alias = b if kept == a else a
+        nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
+        if len(names) >= 2:  # a group of look-alikes: every other spelling counts as the one to keep
+            kept = kept if kept in names else names[0]
+            others = [n for n in names if n != kept]
+        else:
+            others = [alias]
+        done: list[str] = []
+        try:
+            for o in others:
+                store.add_skill_alias(o, kept)
+                done.append(o)
+        except ValueError as exc:
+            if not done:
+                return _skill_back(str(exc), error=True)
+        if nxt.startswith("/candidates"):
+            return RedirectResponse(nxt.split("#")[0] + "#hlmerged", status_code=303)
+        who = (", ".join(done[:-1]) + " and " + done[-1]) if len(done) > 1 else (done[0] if done else alias)
+        return _skill_back(f"Now {who} count{'s' if len(done) == 1 else ''} as {kept}. Nobody's saved skills changed. Split undoes it.")
+
+    @app.post("/settings/skill-names/reject")
+    async def skill_names_reject(request: Request):
+        """'Not the same': remembered, never suggested again (until Suggest again)."""
+        form = await request.form()
+        names = [" ".join(str(n).split()) for n in form.getlist("names") if str(n).strip()]
+        alias = str(form.get("alias") or form.get("a") or "")
+        kept = str((form.get("kept") if form.get("alias") else form.get("b")) or "")
+        nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
+        if len(names) >= 2:
+            for i, x in enumerate(names):
+                for y in names[i + 1:]:
+                    store.reject_skill_pair(x, y)
+            alias, kept = ", ".join(names[:-1]), names[-1]
+        else:
+            store.reject_skill_pair(alias, kept)
+        if nxt.startswith("/candidates"):
+            return RedirectResponse(nxt.split("#")[0] + "#hlrejected", status_code=303)
+        return _skill_back(f"Okay. We won't suggest {alias} and {kept} as the same skill again. They are under Hidden suggestions if you change your mind.")
+
+    @app.post("/settings/skill-names/unreject")
+    async def skill_names_unreject(request: Request):
+        """'Suggest again': take a pair off the Hidden suggestions list."""
+        form = await request.form()
+        a, b = str(form.get("a") or ""), str(form.get("b") or "")
+        n = store.unreject_skill_pair(a, b)
+        return _skill_back(f"Okay. {a} and {b} can be suggested as the same skill again." if n else f"{a} and {b} were not hidden.")
+
+    @app.post("/settings/skill-names/split")
+    async def skill_names_split(request: Request):
+        """Split: undo a 'Treat as one' (one name, or the whole group when it is the kept name)."""
+        form = await request.form()
+        name = str(form.get("name") or "")
+        n = store.split_skill_alias(name)
+        return _skill_back(f"Split {name}: the names count as separate skills again." if n else f"{name} was not treated as another skill.")
+
+    @app.post("/changes/skill-names/{log_id}/undo")
+    def undo_skill_names(request: Request, log_id: int):
+        try:
+            notice = store.undo_skill_log(log_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
+
     @app.post("/settings/time-zone")
     async def set_time_zone(request: Request):
         """The recruiter's own time zone, for when it isn't this computer's (blank: this computer's)."""
@@ -3813,7 +4286,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     sample_jobs=len(jobs), candidate_count=store.count_candidates(), data_folder=str(data_dir().resolve()), db_file=str(db_path().resolve()),
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
-                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN)
+                    new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN,
+                    skill_rows=store.skill_lookalike_groups(30), skill_groups=store.skill_alias_groups(),
+                    skill_hidden=store.hidden_skill_pairs())
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
@@ -3952,6 +4427,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             lmstudio_installed=integrations.lmstudio_config_path().parent.is_dir(),
             json_snippet=integrations.generic_json_snippet(),
             codex_snippet=integrations.codex_snippet(),
+            stdio_command=integrations.mcp_launch_spec().command,
+            stdio_args=" ".join(integrations.mcp_launch_spec().args),
+            stdio_data_dir=integrations.mcp_launch_spec().env.get("TALENT_DATA_DIR", ""),
             claude_code_command=integrations.claude_code_command(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),

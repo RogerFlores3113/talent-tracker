@@ -8,6 +8,14 @@ into a sandboxed iframe the way Claude does it, and the page plays the host's si
 ui/initialize (light or dark, inline or fullscreen), the tool result, tools/call back to the server, and a log of
 everything the view asks for (open a link, send a message, update the model context, change display mode).
 
+By default the host is STRICT: it answers any view message that does not match the MCP Apps spec shapes with error
+-32602 and says why in the log panel (and window.HOSTREJECTS). Pass --lenient for the old, forgiving behavior.
+
+Pass --openai to also give the view frame a window.openai object the way ChatGPT does (toolInput, toolOutput,
+toolResponseMetadata, theme, callTool, sendFollowUpMessage, and an "openai:set_globals" event), next to the normal
+bridge. Pass --openai-only to answer nothing on the postMessage bridge (only size changes), so the view's
+window.openai fallback can be tried.
+
 Nothing here ships in the app. Claude's real frame is about 720 px wide inline; the page uses the same.
 """
 from __future__ import annotations
@@ -93,7 +101,27 @@ textarea{height:160px}button{margin-top:6px}.bubble{background:#fff;border-radiu
 <aside id="log"></aside>
 <script>
 const $=id=>document.getElementById(id);let TOOLS={};const log=(...a)=>{$("log").textContent=a.map(x=>typeof x==="string"?x:JSON.stringify(x)).join(" ")+"\n\n"+$("log").textContent};
-window.HOSTLOG=[];
+window.HOSTLOG=[];window.HOSTREJECTS=[];const STRICT=__STRICT__,OPENAI=__OPENAI__;  // 0 off, 1 beside the bridge, 2 only window.openai
+const isObj=x=>x!==null&&typeof x==="object"&&!Array.isArray(x),isStr=x=>typeof x==="string",isNum=x=>typeof x==="number"&&isFinite(x);
+const okBlocks=a=>Array.isArray(a)&&a.every(b=>isObj(b)&&isStr(b.type)&&(b.type!=="text"||isStr(b.text)));
+/* the shapes the MCP Apps spec (2026-01-26) gives each view-to-host message; returns "" when fine, else the reason */
+function check(m){const p=m.params,hasId=m.id!=null;
+ switch(m.method){
+  case"ui/initialize":if(!hasId)return"ui/initialize must be a request with an id";if(!isObj(p))return"params missing";
+   if(!isObj(p.appInfo)||!isStr(p.appInfo.name)||!isStr(p.appInfo.version))return"appInfo {name, version} is missing";
+   if(!isObj(p.appCapabilities))return"appCapabilities is missing";if(!isStr(p.protocolVersion))return"protocolVersion is missing";return"";
+  case"ui/notifications/initialized":return hasId?"initialized is a notification, it must not have an id":"";
+  case"ui/message":if(!hasId)return"ui/message must be a request";if(!isObj(p)||p.role!=="user")return"role must be \"user\"";
+   return okBlocks(p.content)&&p.content.length?"":"content must be an array of content blocks";
+  case"ui/open-link":if(!hasId)return"ui/open-link must be a request";return isObj(p)&&isStr(p.url)&&p.url?"":"url must be a string";
+  case"ui/request-display-mode":if(!hasId)return"ui/request-display-mode must be a request";return isObj(p)&&["inline","fullscreen","pip"].includes(p.mode)?"":"mode must be inline, fullscreen or pip";
+  case"ui/update-model-context":if(!hasId)return"ui/update-model-context must be a request";if(!isObj(p))return"params missing";
+   if(p.content!==undefined&&!okBlocks(p.content))return"content must be an array of content blocks";
+   if(p.structuredContent!==undefined&&!isObj(p.structuredContent))return"structuredContent must be an object";return"";
+  case"ui/notifications/size-changed":if(hasId)return"size-changed is a notification";if(!isObj(p))return"params missing";
+   if(p.width!==undefined&&!isNum(p.width))return"width must be a number";if(p.height!==undefined&&!isNum(p.height))return"height must be a number";return"";
+  case"tools/call":if(!hasId)return"tools/call must be a request";return isObj(p)&&isStr(p.name)&&p.name&&(p.arguments===undefined||isObj(p.arguments))?"":"tools/call needs name and arguments {}";
+  default:return"";}}
 fetch("/api/tools").then(r=>r.json()).then(ts=>{for(const t of ts){TOOLS[t.name]=t;const ui=t._meta&&t._meta.ui;$("tool").append(new Option((ui&&ui.resourceUri?"◆ ":"")+t.name+(ui&&ui.visibility&&!ui.visibility.includes("model")?" (app only)":""),t.name))}$("tool").onchange()});
 $("tool").onchange=()=>{const t=TOOLS[$("tool").value];$("desc").textContent=t?(t.description||""):""};
 $("dark").onchange=()=>{document.body.classList.toggle("dark",$("dark").checked);for(const f of FRAMES)f.ctx({theme:$("dark").checked?"dark":"light"})};
@@ -106,23 +134,43 @@ $("run").onclick=async()=>{$("err").textContent="";let args;try{args=JSON.parse(
  const text=(res.content||[]).map(c=>c.text||"").join("\n");const b=document.createElement("div");b.className="bubble";b.textContent=name+": "+text.slice(0,600)+(text.length>600?"…":"");$("frames").append(b);
  const uri=t&&t._meta&&t._meta.ui&&t._meta.ui.resourceUri;if(!uri){log("no view for",name);return}
  const html=await (await fetch("/api/resource?uri="+encodeURIComponent(uri))).text();mount(html,args,res,name)};
+/* what ChatGPT puts on window.openai, as a small script placed first in the view's page */
+function openaiShim(g){return "<script>(function(){const G="+JSON.stringify(g).replace(/</g,"\\u003c")+";let n=1;const w={};const o=Object.assign({},G);"+
+ "const ask=(k,p)=>new Promise(r=>{const id=n++;w[id]=r;parent.postMessage({openaiCall:k,id,params:p},'*')});"+
+ "o.callTool=(name,args)=>ask('callTool',{name,arguments:args||{}});o.sendFollowUpMessage=p=>ask('followUp',p);"+
+ "o.openExternal=p=>ask('openExternal',p);o.requestDisplayMode=p=>ask('displayMode',p);"+
+ "addEventListener('message',e=>{const m=e.data;if(!m||m.openaiReply==null)return;if(w[m.openaiReply]){w[m.openaiReply](m.result);delete w[m.openaiReply]}"+
+ "if(m.globals){Object.assign(o,m.globals);dispatchEvent(new CustomEvent('openai:set_globals',{detail:{globals:m.globals}}))}});"+
+ "window.openai=o;})();<\/script>"}
 function mount(html,args,result,toolName){
- const f=document.createElement("iframe");f.setAttribute("sandbox","allow-scripts allow-forms");f.srcdoc=html;f.style.height="60px";f.title="view: "+toolName;$("frames").append(f);
+ const f=document.createElement("iframe");f.setAttribute("sandbox","allow-scripts allow-forms");
+ const globals=()=>({toolInput:args,toolOutput:result.structuredContent||null,toolResponseMetadata:result._meta||{},theme:$("dark").checked?"dark":"light",displayMode:"inline",maxHeight:6000,locale:"en-US"});
+ f.srcdoc=OPENAI?html.replace("<head>","<head>"+openaiShim(globals())):html;f.style.height="60px";f.title="view: "+toolName;$("frames").append(f);
  let mode="inline";const modes=()=>$("nofull").checked?["inline"]:["inline","fullscreen"];
  const send=m=>f.contentWindow.postMessage(m,"*");
  const ctx=p=>send({jsonrpc:"2.0",method:"ui/notifications/host-context-changed",params:p});
  const rec={f,ctx,toolName,onmsg:null};FRAMES.push(rec);
+ if(OPENAI){window.OPENAI_PUSH=g=>send({openaiReply:0,globals:g});  // tests: change window.openai's values and fire openai:set_globals
+  f.addEventListener("load",()=>setTimeout(()=>send({openaiReply:0,globals:globals()}),100))}
  function setMode(m){mode=m;if(m==="fullscreen"){$("chat").classList.add("full");f.style.height="calc(100vh - 80px)"}else{$("chat").classList.remove("full")}
   ctx({displayMode:mode,containerDimensions:m==="fullscreen"?{height:window.innerHeight-80,width:$("chat").clientWidth}:{maxHeight:6000,width:$("chat").clientWidth}})}
  $("close").onclick=()=>{if(mode==="fullscreen")setMode("inline")};
- rec.onmsg=async ev=>{if(ev.source!==f.contentWindow)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+ rec.onmsg=async ev=>{if(ev.source!==f.contentWindow)return;const m=ev.data;
+  if(m&&m.openaiCall){const P=m.params||{},rep=r=>send({openaiReply:m.id,result:r});window.HOSTLOG.push(m);
+   if(m.openaiCall==="callTool"){const t=TOOLS[P.name];rep(t?await call(P.name,P.arguments||{}):{isError:true,content:[{type:"text",text:"Unknown tool"}]})}
+   else if(m.openaiCall==="followUp"){const b=document.createElement("div");b.className="bubble";b.style.background="#dfe8ff";b.textContent="You (from the view, via window.openai): "+JSON.stringify(P.prompt);$("frames").append(b);rep({})}
+   else if(m.openaiCall==="openExternal"){log("OPEN LINK (openai)",P.href);rep({})}else rep({mode:P.mode});return}
+  if(!m||m.jsonrpc!=="2.0")return;
   window.HOSTLOG.push(m);if(m.method!=="ui/notifications/size-changed")log("view →",m);
+  let reject="";if(STRICT){reject=check(m);if(!reject&&m.method!=="ui/initialize"&&m.method!=="ping"&&m.method!=="ui/notifications/initialized"&&!rec.inited)reject="sent before ui/initialize finished"}
+  if(reject){window.HOSTREJECTS.push({method:m.method,reason:reject});log("REJECTED "+m.method+": "+reject);if(m.id!=null)send({jsonrpc:"2.0",id:m.id,error:{code:-32602,message:"Invalid params: "+reject}});return}
   const ok=r=>send({jsonrpc:"2.0",id:m.id,result:r}),bad=(msg)=>send({jsonrpc:"2.0",id:m.id,error:{code:-32000,message:msg}});
+  if(OPENAI===2&&m.method!=="ui/notifications/size-changed"){if(m.method==="ui/initialize")rec.inited=1;return}  // --openai-only: the bridge stays silent
   switch(m.method){
-   case"ui/initialize":ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
+   case"ui/initialize":rec.inited=1;ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
      hostContext:{theme:$("dark").checked?"dark":"light",displayMode:"inline",availableDisplayModes:modes(),platform:"desktop",locale:"en-US",timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,
      containerDimensions:{maxHeight:6000,width:$("chat").clientWidth},toolInfo:{tool:TOOLS[toolName]}}});break;
-   case"ui/notifications/initialized":send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
+   case"ui/notifications/initialized":if(!rec.inited)break;rec.ready=1;send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
      send({jsonrpc:"2.0",method:"ui/notifications/tool-result",params:result});break;
    case"ui/notifications/size-changed":if(mode==="inline")f.style.height=Math.min(m.params.height,6000)+"px";break;
    case"ui/open-link":if($("nolinks").checked)bad("Policy violation");else{log("OPEN LINK",m.params.url);ok({})}break;
@@ -141,12 +189,13 @@ function mount(html,args,result,toolName){
 </script></body></html>"""
 
 
-def build(bridge: Bridge) -> FastAPI:
+def build(bridge: Bridge, strict: bool = True, openai: int = 0) -> FastAPI:
     app = FastAPI()
+    page = PAGE.replace("__STRICT__", "true" if strict else "false").replace("__OPENAI__", str(openai))
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return PAGE
+        return page
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:
@@ -169,6 +218,9 @@ async def main() -> None:
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--data", default=str(Path.cwd() / "view-host-data"), help="TALENT_DATA_DIR for the server")
     ap.add_argument("--sample", action="store_true", help="load the made-up sample candidates first")
+    ap.add_argument("--lenient", action="store_true", help="accept any view message (the old behavior); the default is a strict host that rejects what the MCP Apps spec does not allow")
+    ap.add_argument("--openai", action="store_true", help="also give the view frame a window.openai object (as ChatGPT does), next to the normal bridge")
+    ap.add_argument("--openai-only", action="store_true", help="give the view window.openai only: the postMessage bridge answers nothing (tests the fallback)")
     a = ap.parse_args()
     Path(a.data).mkdir(parents=True, exist_ok=True)
     if a.sample:
@@ -178,7 +230,7 @@ async def main() -> None:
     bridge = Bridge(a.data)
     await bridge.start()
     print(f"View host on http://127.0.0.1:{a.port} (data in {a.data})", flush=True)
-    server = uvicorn.Server(uvicorn.Config(build(bridge), host="127.0.0.1", port=a.port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(build(bridge, strict=not a.lenient, openai=2 if a.openai_only else 1 if a.openai else 0), host="127.0.0.1", port=a.port, log_level="warning"))
     try:
         await server.serve()
     finally:

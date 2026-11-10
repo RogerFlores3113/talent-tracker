@@ -119,7 +119,7 @@ def test_inhouse_wording_reaches_the_ai_and_the_job_page(store):
     server = build_server(store)
     digest = call(server, "status_digest").content[0].text
     assert digest.startswith("Hiring update for all open jobs")
-    assert "Hiring team passed" in digest and "Client passed" not in digest
+    assert "Client passed" not in digest and "Marcus" not in digest  # ended stages are left out of the chat digest
     page = local_client(store).get(f"/jobs/{job['id']}").text
     assert "<summary>Status update</summary>" in page and "for the client" not in page
     actions.set_inhouse(store, False)

@@ -31,6 +31,7 @@
    Helpers: el(tag, attrs, ...kids), marked("a **b**"), safeUrl, copyText(text, nodeToSelect), appOrigin(url), hostLabel(url), onKeys(node, map)
 */
 const V=__VERSION__;let nid=1;const pend={};let HOST={},CTX={},META={},ARGS=null,TOOL=null,DATA=null,FAILED={};
+let OAI=false,GOT=false,INIT=false,HOSTCTX=false,OAI_SHOWN="";  // see the window.openai fallback below
 const PCARDS={};let ZONE=undefined,ZONE_SAID=false,ABS_USED=false;
 /* what the chat app says it can do: a host that lists its abilities and leaves "message" or "updateModelContext" out can't do it */
 function hostCan(what){const k=what==="message"?"message":what==="tell"?"updateModelContext":what;
@@ -39,12 +40,17 @@ function goodZone(z){if(!z||typeof z!=="string")return undefined;try{new Intl.Da
 function zoneShort(){try{const p=new Intl.DateTimeFormat("en-US",{timeZone:ZONE,timeZoneName:"short"}).formatToParts(new Date()).find(x=>x.type==="timeZoneName");return p?p.value:ZONE}catch(e){return ZONE||""}}
 function useZone(d){ZONE=goodZone(d&&(d.time_zone||d.tz))||goodZone(CTX&&CTX.timeZone);ZONE_SAID=!!goodZone(d&&(d.time_zone||d.tz))}
 function post(m){window.parent.postMessage(m,"*")}
-function req(method,params){const id=nid++;return new Promise(r=>{pend[id]=r;post({jsonrpc:"2.0",id,method,params})})}
+function req(method,params){if(OAI)return oaiReq(method,params);const id=nid++;
+ return new Promise(r=>{pend[id]=r;post({jsonrpc:"2.0",id,method,params})}).then(res=>{
+  // the bridge refused a tool call (a protocol error, not a tool's own error) but ChatGPT's own call exists: use it
+  if(method==="tools/call"&&res&&res.bridgeError&&oai()&&typeof oai().callTool==="function")return oaiReq(method,params);return res})}
 function note(method,params){post({jsonrpc:"2.0",method,params:params||{}})}
 function el(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(v==null||v===false)continue;if(k==="needs"){if(!hostCan(v))e.hidden=true;continue}
   if(k==="class")e.className=v;else if(k==="onclick")e.addEventListener("click",v);else e.setAttribute(k,v===true?"":v)}
  for(const k of kids.flat()){if(k==null||k===false)continue;e.append(k instanceof Node?k:document.createTextNode(String(k)))}return e}
-function marked(s){const out=[];String(s||"").split("**").forEach((p,i)=>out.push(i%2?el("mark",{},p):p));return out}
+function marked(s,st){const out=[];String(s||"").split("**").forEach((p,i)=>{if(!(i%2)){out.push(p);return}
+  const l=st?hlList(st):[];const x=l.find(h=>!hlIsTitle(h)&&h.skill===skillKey(p));  // a lit skill word takes its pick's color, as its chip does
+  out.push(el("mark",{"data-hl":x?x.color:null},p))});return out}
 const root=()=>document.getElementById("main");
 function said(r){return((r&&r.content)||[]).filter(c=>c&&c.type==="text").map(c=>c.text).join(" ").replace(/^Error executing tool [\w-]+: /,"")}
 
@@ -126,8 +132,9 @@ function exportIds(ids,btn,out,notLoaded,kind){
   const cut=ids.length>sent.length?" The first 200 of "+ids.length+" are in it.":"";
   const more=notLoaded>0?" ("+notLoaded+" more not loaded; open in Talent Search to export all)":"";
   const nf=d.not_found&&d.not_found.length?" Not found and left out: "+d.not_found.join(", ")+".":"";
-  if(d.written){const dir=d.path.slice(0,Math.max(0,d.path.length-d.file.length-1));
-   out.replaceChildren("Saved "+d.file+" with "+d.people+(d.people===1?" person":" people")+" in "+dir+". It has no email, phone or notes."+cut+nf+more+" ",appLink(d.share_url,"Open in Talent Search"))}
+  if(d.written){const cs=el("span",{class:"small muted",role:"status"});
+   out.replaceChildren("Saved "+d.people+(d.people===1?" person":" people")+" to ",el("code",{class:"path"},d.path),". It has no email, phone or notes."+cut+nf+more+" ",
+    el("button",{class:"link small",type:"button",onclick:()=>copyText(d.path,out,cs,"Path copied.")},"Copy path")," ",cs," ",appLink(d.share_url,"Open in Talent Search"))}
   else out.replaceChildren("No file made yet. Pick what goes in on the Share page. ",appLink(d.share_url,"Open the Share page"));
   announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
 function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const li=/(^|\.)linkedin\.com$/i.test(x.hostname);
@@ -137,7 +144,7 @@ function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const 
 /* ---- messages to Claude */
 function markSent(btn){if(!btn||!btn.isConnected||btn.tagName!=="BUTTON")return;btn.disabled=true;
  if(!btn.nextSibling||!btn.nextSibling.classList||!btn.nextSibling.classList.contains("sentnote"))btn.after(el("span",{class:"sentnote small muted",role:"status"},"Sent to Claude"))}
-function askClaude(text,btn){return req("ui/message",{role:"user",content:{type:"text",text}}).then(r=>{
+function askClaude(text,btn){return req("ui/message",{role:"user",content:[{type:"text",text}]}).then(r=>{
  if(r&&r.isError){if(btn)btn.hidden=true;announce("Your chat app wouldn't send that message. You can type it in the chat yourself.");return false}
  announce("Sent to Claude.");markSent(btn);return true})}
 /* askOrLink: askClaude for a button or select that would change something. Says what happened in the status node;
@@ -216,6 +223,16 @@ function stageChip(j,who){if(!j)return null;const d=daysSince(j.since);const out
  if(url)return linkBtn(url,text,"Open the pipeline: "+text+(who?" ("+who+")":""),"link stagechip"+(out?" out":""));
  return el("span",{class:"stagechip"+(out?" out":"")},text)}
 function isSample(c){return /sample/i.test(String(c.source||""))}
+/* the person's own words about themselves: the first two lines, with More for the rest */
+function aboutBlock(c,nm){const t=String(c.about||c.summary||"").trim();if(!t)return null;
+ const lines=t.split(/\n+/).map(x=>x.trim()).filter(Boolean);const long=lines.length>2||t.length>150;
+ const id="sum-"+(c.id||"x");
+ const p=el("p",{class:"summary"+(long?" clamp2":""),id},t);
+ if(!long)return el("div",{class:"summarybox"},p);
+ const b=el("button",{class:"link small",type:"button","aria-expanded":"false","aria-controls":id,"aria-label":"More about "+nm},"More");
+ b.addEventListener("click",()=>{const open=p.classList.contains("clamp2");p.classList.toggle("clamp2",!open);
+  b.textContent=open?"Less":"More";b.setAttribute("aria-expanded",open?"true":"false");b.setAttribute("aria-label",(open?"Less about ":"More about ")+nm)});
+ return el("div",{class:"summarybox"},p,b)}
 function personCard(c,o){o=o||{};const lvl=o.headingLevel||2;const nm=c.name||"Candidate";
  const card=el("article",{class:"pcard","aria-label":nm});
  const heading=el("h"+lvl,{class:"name",tabindex:"-1"},c.app_url?el("button",{class:"link name-link",type:"button",title:"Open "+nm+" in Talent Search",onclick:()=>openLink(c.app_url,"the profile")},nm):nm);
@@ -225,19 +242,27 @@ function personCard(c,o){o=o||{};const lvl=o.headingLevel||2;const nm=c.name||"C
  if(c.other_name)badges.push(el("span",{class:"badge"},"A different name"));
  if(isSample(c))badges.push(el("span",{class:"badge"},"Sample data"));
  const place=c.location;
+ const subLine=!roleLine(c)?null:(o.onSkill&&c.current_title)?el("div",{class:"sub"},titlePick(c.current_title,o.hl,(n,ti)=>o.onSkill(n,ti)),c.current_company?" at "+c.current_company:null):el("div",{class:"sub"},roleLine(c));
  const who=el("div",{class:"who"},el("div",{class:"row",style:"justify-content:flex-start;align-items:center"},heading,...badges),
-  roleLine(c)?el("div",{class:"sub"},roleLine(c)):null,
+  subLine,
   (place||c.color)?el("div",{class:"meta"},place||null,(place&&c.color)?" · ":null,c.color?el("span",{},el("span",{class:"dot"+colorCls(c.color),"aria-hidden":"true"}),c.color+" tag"):null):null,
   stageChip(stageOf(c),nm));
  card.append(el("div",{class:"top"},avatar(c),who));
- if(c.match||c.reason)card.append(el("div",{class:"why"},c.reason?el("div",{class:"muted"},c.reason):null,c.match?el("div",{},marked(c.match)):null,
+ const about=aboutBlock(c,firstName(nm));if(about)card.append(about);
+ if(c.match||c.reason)card.append(el("div",{class:"why"},c.reason?el("div",{class:"muted"},c.reason):null,c.match?el("div",{},el("span",{class:"small muted"},"Matched in your search: "),marked(c.match,o.hl)):null,
   c.closest?el("div",{class:"small muted"},"Partial match: this person has some of your words but not all of them."):null));
  const contact=el("div",{class:"contact"});
  if(c.email)contact.append(el("a",{href:"mailto:"+c.email,"aria-label":"Email "+nm},c.email));
  if(c.phone)contact.append(el("a",{href:"tel:"+String(c.phone).replace(/[^\d+]/g,""),"aria-label":"Call "+nm},c.phone));
  if(contact.childNodes.length)card.append(contact);
  card.append(linksRow(c));
- if(c.tags&&c.tags.length)card.append(el("ul",{class:"chips","aria-label":"Skills"},c.tags.map(t=>el("li",{class:"chip"},t))));
+ if(o.onSkill){const hl=hlList(o.hl);const sum=hlSummary(c,hl);  // the same picks as the table: "Top match: python, red. 2 of 2"
+  if(sum)card.append(el("div",{class:"small tophint"+(hlTop(c,hl)?"":" muted")},sum))}
+ if(c.tags&&c.tags.length){
+  if(o.onSkill){const hl=hlList(o.hl);
+   const lit=c.tags.filter(t=>hl.some(x=>!hlIsTitle(x)&&x.skill===skillKey(t)));const rest=c.tags.filter(t=>!lit.includes(t));
+   card.append(el("ul",{class:"chips skillchips","aria-label":"Skills of "+nm},[...lit,...rest].map(t=>el("li",{},pickChip(t,o.hl,(n,ti)=>o.onSkill(n,ti))))))}
+  else card.append(el("ul",{class:"chips","aria-label":"Skills"},c.tags.map(t=>el("li",{class:"chip"},t))))}
  const facts=el("dl",{class:"facts"});
  const fact=(k,v)=>{if(v==null||v==="")return;facts.append(el("dt",{},k),el("dd",{},v))};
  fact("Last contacted",c.last_contacted_at?dateEl(c.last_contacted_at):(o.partial?null:"never"));
@@ -247,12 +272,9 @@ function personCard(c,o){o=o||{};const lvl=o.headingLevel||2;const nm=c.name||"C
  if(c.jobs&&c.jobs.length)card.append(el("h"+(lvl+1),{class:"muted small",style:"margin:10px 0 2px"},"Jobs"),el("ul",{class:"plain"},c.jobs.map(j=>el("li",{},jobLink(j,nm),": ",el("b",{},j.stage),j.state==="lost"?" (out)":""))));
  if(c.activity&&c.activity.length)card.append(el("h"+(lvl+1),{class:"muted small",style:"margin:10px 0 2px"},"Recent activity"),el("ul",{class:"plain"},c.activity.map(t=>el("li",{},el("span",{class:"kind"},t.kind)," ",day(t.at)+(t.body?": "+t.body:"")+(t.job_title?" ("+t.job_title+(t.job_company?", "+t.job_company:"")+")":"")+(t.interviewer?", with "+t.interviewer:""),
   t.outcome_note?el("div",{class:"small"},"How it went: "+t.outcome_note):null,(t.feedback||[]).map(f=>el("div",{class:"small"},"Feedback from "+(f.by||"an interviewer")+": "+f.text))))));
- if(c.about){const long=c.about.length>220;
-  if(long)card.append(el("details",{},el("summary",{},"About "+firstName(nm)),el("p",{style:"margin:4px 0"},c.about)));
-  else card.append(el("p",{style:"margin:8px 0 0"},c.about))}
  if(c.work_history&&c.work_history.length)card.append(el("details",{},el("summary",{},"Work history ("+c.work_history.length+")"),el("ul",{},c.work_history.map(w=>el("li",{},[w.title,w.company&&("at "+w.company)].filter(Boolean).join(" ")+((w.start||w.end)?" ("+(w.start||"")+" to "+(w.end||"now")+")":""))))));
  const acts=el("div",{class:"acts"});
- const ask=el("button",{class:"btn",type:"button",needs:"message",onclick:()=>askClaude("Tell me more about "+nm+" (candidate id "+c.id+") and what to do next.",ask)},"Ask Claude about "+firstName(nm));
+ const ask=el("button",{class:"btn",type:"button",needs:"message","aria-label":"Ask Claude about "+nm,onclick:()=>askClaude("Tell me more about "+nm+" (candidate id "+c.id+") and what to do next.",ask)},"Ask Claude about "+firstName(nm));
  acts.append(ask);if(o.extra)acts.append(o.extra);
  card.append(acts);
  return card}
@@ -298,34 +320,77 @@ function setNotice(t){const n=document.getElementById("notice");if(n)n.textConte
 /* ---- refresh and results */
 const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists","compare_candidates","list_jobs","list_saved_searches","list_interviews","status_digest","client_report","list_feedback_owed","find_duplicates","list_followups"];
 function canRefresh(){return canCall()&&TOOL&&ARGS&&READ_TOOLS.includes(TOOL)}
+let REFRESHING=false;  // a Refresh shows the same view again: a view may keep its mode, ticks, sort and picks (see people.js)
 function refresh(btn){if(btn)btn.disabled=true;announce("Refreshing.");
- callTool(TOOL,ARGS).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}showResult(d,r._meta)})}
-function showResult(d,meta){DATA=d;if(meta)META=meta;let n;useZone(d);ABS_USED=false;setNotice("");
+ const args=typeof window.refreshArgs==="function"?window.refreshArgs(ARGS):ARGS;
+ callTool(TOOL,args).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}
+  REFRESHING=true;try{showResult(d,r._meta)}finally{REFRESHING=false}})}
+function showResult(d,meta){DATA=d;if(meta)META=meta;ALIASES=(d&&d.skill_aliases&&typeof d.skill_aliases==="object")?d.skill_aliases:{};let n;useZone(d);ABS_USED=false;setNotice("");
  try{n=render(d)}catch(e){n=errorState("Couldn't show this.")}
  const m=document.getElementById("main");m.replaceChildren(n||emptyState("Nothing to show."));
  if(ABS_USED&&ZONE_SAID&&ZONE){const h=m.querySelector(".vhead");const t=el("p",{class:"small muted zonenote",style:"margin:-4px 0 6px"},"Times in "+zoneShort());if(h)h.after(t);else m.prepend(t)}
- const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}}
+ const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}
+ if(typeof sendSize==="function"){sendSize(true);setTimeout(()=>{try{sendSize(false)}catch(e){}},250)}}
 
 window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
- if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
+ if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,bridgeError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
  const p=m.params||{};
  if(m.method==="ui/notifications/tool-input"){ARGS=p.arguments||{};setNotice("");if(!DATA)document.getElementById("main").replaceChildren(loadingState("Working on it..."))}
  else if(m.method==="ui/notifications/tool-input-partial"){if(!DATA)document.getElementById("main").replaceChildren(loadingState("Working on it..."))}
  else if(m.method==="ui/notifications/tool-cancelled"){
   if(DATA){setNotice("Claude stopped that request. What you see is from before.");announce("Claude stopped that request. What you see is from before.")}
   else document.getElementById("main").replaceChildren(emptyState("That was cancelled, so there is nothing to show."))}
- else if(m.method==="ui/notifications/tool-result"){META=p._meta||{};const d=p.structuredContent||null;
+ else if(m.method==="ui/notifications/tool-result"){GOT=true;if(OAI){OAI=false}  // the bridge delivered after all: it wins from here on
+  META=p._meta||{};const d=p.structuredContent||null;
+  if(d&&OAI_SHOWN&&OAI_SHOWN===JSON.stringify(d)){OAI_SHOWN="";return}  // same result the fallback already drew: not twice
+  OAI_SHOWN="";
   if(d)showResult(d,p._meta);else document.getElementById("main").replaceChildren(p.isError?errorState(said(p)||"That didn't work."):emptyState("Nothing to show."))}
  else if(m.method==="ui/notifications/host-context-changed")mergeCtx(p);
  else if(m.method==="ui/resource-teardown"&&m.id!=null)post({jsonrpc:"2.0",id:m.id,result:{}});
 });
+
+/* ---- window.openai fallback (ChatGPT). ChatGPT renders views through the same MCP Apps bridge above, and that always
+   wins. window.openai is only a backup for when the bridge gives nothing: ui/initialize fails twice, never answers
+   (about 2.5 s), or no tool-result comes about 2 s after initialized. Then the view is drawn from
+   window.openai.toolOutput (the structuredContent), toolResponseMetadata (META) and toolInput (ARGS), and drawn again
+   when "openai:set_globals" says they changed. Actions use window.openai.callTool / sendFollowUpMessage / openExternal /
+   requestDisplayMode where they exist. Nothing here changes a message the bridge sends. */
+function oai(){const o=window.openai;return o&&typeof o==="object"?o:null}
+function oaiBad(t){return{isError:true,content:[{type:"text",text:t}]}}
+function oaiRun(f){const bad=e=>oaiBad(String(e&&e.message||"That didn't work."));
+ try{return Promise.resolve(f()).then(r=>r&&typeof r==="object"?r:{},bad)}catch(e){return Promise.resolve(bad(e))}}
+function oaiReq(method,params){const o=oai();params=params||{};
+ if(o&&method==="tools/call"&&typeof o.callTool==="function")return oaiRun(()=>o.callTool(params.name,params.arguments||{}));
+ if(o&&method==="ui/message"&&typeof o.sendFollowUpMessage==="function")return oaiRun(()=>o.sendFollowUpMessage({prompt:(params.content||[]).map(c=>c&&c.text||"").join("\n")}));
+ if(o&&method==="ui/open-link"&&typeof o.openExternal==="function")return oaiRun(()=>o.openExternal({href:params.url}));
+ if(o&&method==="ui/request-display-mode"&&typeof o.requestDisplayMode==="function")return oaiRun(()=>Promise.resolve(o.requestDisplayMode({mode:params.mode})).then(r=>({mode:(r&&r.mode)||params.mode})));
+ return Promise.resolve(oaiBad("This chat app can't do that from here."))}
+function oaiShow(){const o=oai();if(!o||GOT)return;
+ if(!OAI){OAI=true;HOST={};if(typeof o.callTool==="function")HOST.serverTools={};if(typeof o.sendFollowUpMessage==="function")HOST.message={text:{}};
+  if(typeof o.openExternal==="function")HOST.openLinks={};if(!Object.keys(HOST).length)HOST={none:false}}
+ if(!HOSTCTX){const c={};if(typeof o.theme==="string")c.theme=o.theme;if(typeof o.displayMode==="string")c.displayMode=o.displayMode;
+  c.availableDisplayModes=typeof o.requestDisplayMode==="function"?["inline","fullscreen"]:["inline"];mergeCtx(c)}
+ if(o.toolInput&&typeof o.toolInput==="object")ARGS=o.toolInput;
+ const d=o.toolOutput;if(d&&typeof d==="object"){const key=JSON.stringify(d);if(key!==OAI_SHOWN){OAI_SHOWN=key;showResult(d,o.toolResponseMetadata&&typeof o.toolResponseMetadata==="object"?o.toolResponseMetadata:{})}}}
+window.addEventListener("openai:set_globals",()=>{if(OAI)oaiShow()});
+if(oai())setTimeout(()=>{if(!INIT&&!GOT)oaiShow()},2500);  // ui/initialize never answered
 let lastW=0,lastH=0;
-new ResizeObserver(()=>{const w=document.documentElement.scrollWidth,h=document.documentElement.scrollHeight;
- if(isFull()){if(w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
- if(w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}).observe(document.documentElement);
-req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
- if(r&&r.isError){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));return}
- HOST=(r&&r.hostCapabilities)||{};mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{})});
+/* the height the view needs: whichever is larger, the page or the bottom of the last thing on it, so the last block is never clipped */
+function viewHeight(){const de=document.documentElement,b=document.body;const cs=getComputedStyle(b);
+ const bottom=b.getBoundingClientRect().bottom+(window.scrollY||0)+(parseFloat(cs.paddingBottom)||0)+(parseFloat(cs.marginBottom)||0);
+ return Math.max(1,Math.ceil(Math.max(de.scrollHeight,bottom)))}
+function sendSize(force){const w=Math.max(1,Math.ceil(document.documentElement.scrollWidth)),h=viewHeight();
+ if(isFull()){if(force||w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
+ if(!force&&w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}
+{const ro=new ResizeObserver(()=>sendSize(false));ro.observe(document.documentElement);ro.observe(document.body)}
+function startFailed(){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));sendSize(true)}
+/* The handshake, in the shape the MCP Apps spec (2026-01-26) wants: appInfo, appCapabilities, protocolVersion.
+   clientInfo is kept for older hosts (extra keys are ignored). If a host still refuses, ask once more with only the spec fields. */
+function handshake(r){INIT=true;HOST=(r&&r.hostCapabilities)||{};HOSTCTX=!!(r&&r.hostContext&&Object.keys(r.hostContext).length);mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{});sendSize(true);
+ if(oai())setTimeout(()=>{if(!GOT)oaiShow()},2000)}  // no tool-result within about 2 s of initialized: try window.openai
+req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
+ if(r&&r.isError)return req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r2=>{if(r2&&r2.isError){if(oai())oaiShow();else startFailed()}else handshake(r2)});
+ handshake(r)});
 
 /* ---- people table: peopleTable(rows, st, h)
    rows: lean people (id, name, current_title, current_company, location, jobs[], match, last_contacted_at, created_at, updated_at, color, email, app_url)
@@ -336,6 +401,11 @@ req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-searc
    Returns {node, focusCaption()}. A plain table with a caption, sort buttons inside th, name as th scope=row. */
 function firstJob(p){return(p.jobs||[])[0]||null}
 function plainMatch(p){return String(p.match||p.reason||"").split("**").join("")}
+/* a Match is worth a column when it says something the title and skills don't already: real hit text, or a reason */
+function isRealMatch(p){if(p.reason)return true;const flat=x=>String(x||"").toLowerCase().replace(/[^\p{L}\p{N}+#]+/gu," ").trim();
+ const frags=String(p.match||"").split("**").join("").split(/[\u2026\u00b7]/).map(flat).filter(Boolean);if(!frags.length)return false;
+ const hay=" "+flat([p.name,p.current_title,p.current_company,p.location,(p.tags||[]).join(" ")].join(" "))+" ";
+ return !frags.every(f=>hay.includes(" "+f+" ")||hay.includes(f))}
 /* pipeline order as a number: the server's stage_rank when it sent one, else New, Screening, Interview, Offer, Hired, and exits last */
 const STAGE_ORDER=[/^(new|sourced|applied|lead|prospect)/i,/screen/i,/interview|onsite|panel|assessment/i,/offer/i,/^(hired|placed|started|accepted)/i];
 function stageRank(p){if(typeof p.stage_rank==="number")return p.stage_rank;const j=firstJob(p);if(!j)return null;
@@ -344,34 +414,108 @@ function stageRank(p){if(typeof p.stage_rank==="number")return p.stage_rank;cons
  const i=STAGE_ORDER.findIndex(r=>r.test(j.stage||""));return i<0?50:i}
 function jobText(p){const js=p.jobs||[];if(!js.length)return"";const j=js[0];return(j.job||j.job_title||"")+(js.length>1?" +"+(js.length-1)+" more":"")}
 function hasEmail(p){return!!(p.email||p.has_email)}
+/* The order is what a recruiter reads first: Name, Title, Skills, then the job. opt:1 columns sit behind the Columns button. */
 const TCOLS=[
  {k:"name",l:"Name",v:p=>p.name},
  {k:"title",l:"Title",v:p=>p.current_title},
- {k:"company",l:"Company",v:p=>p.current_company},
- {k:"location",l:"Location",v:p=>p.location},
+ {k:"skills",l:"Skills",nosort:1,v:p=>(p.tags||[]).length},
  {k:"job",l:"Job",v:p=>jobText(p)},
  {k:"stage",l:"Stage",v:p=>stageRank(p)},
  {k:"email",l:"Email",v:p=>p.email||(p.has_email?"~":null)},
  {k:"linkedin",l:"LinkedIn",v:p=>p.linkedin_url?"a":null},
  {k:"match",l:"Match",v:plainMatch},
- {k:"contacted",l:"Last contacted",v:p=>p.last_contacted_at,date:1},
- {k:"added",l:"Added",v:p=>p.created_at,date:1,wide:1},
- {k:"updated",l:"Updated",v:p=>p.updated_at,date:1,wide:1},
- {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i},wide:1},
- {k:"skills",l:"Skills",nosort:1,v:p=>(p.tags||[]).length}];
-/* skill highlights: a fixed color per pick (first pick red, then yellow, green, blue, purple, orange), kept while it stays picked.
-   People with more picked skills come first; on a tie the earlier pick wins. Nobody is hidden. Same rules as the Candidates page. */
+ {k:"contacted",l:"Last contacted",opt:1,full:1,v:p=>p.last_contacted_at,date:1},
+ {k:"company",l:"Company",opt:1,full:1,v:p=>p.current_company},
+ {k:"location",l:"Location",opt:1,full:1,v:p=>p.location},
+ {k:"updated",l:"Updated",opt:1,full:1,v:p=>p.updated_at,date:1},
+ {k:"added",l:"Added",opt:1,full:1,v:p=>p.created_at,date:1},
+ {k:"color",l:"Color",opt:1,full:1,v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i}}];
+/* highlights: a fixed color per pick (first pick red, then yellow, green, blue, purple, orange), kept while it stays picked.
+   A pick is a skill ("python") or a job title ("title:data engineer"). People with more picks come first; on a tie the
+   earlier pick wins. Nobody is hidden. Same rules as the Candidates page. Matching here is by skill tag (any case) and
+   by the person's current title (case and spacing ignored); the server's own match is the one the app uses. */
 const HL_PALETTE=["red","yellow","green","blue","purple","orange"];
 function hlList(st){return st.hl||(st.hl=[])}
-function hlToggle(st,skill){const k=String(skill).trim().toLowerCase(),l=hlList(st);const i=l.findIndex(x=>x.skill===k);
+function normKey(t){return String(t||"").toLowerCase().split(/\s+/).filter(Boolean).join(" ")}
+/* the same rules as picks.py: a title pick matches the current title with seniority and level words and punctuation
+   folded ("Sr. Data Engineer II" is "data engineer"); a skill counts as the name its merged group keeps */
+const LEVEL_WORDS=new Set(["senior","sr","jr","junior","lead","staff","principal","i","ii","iii","iv","1","2","3"]);
+function foldTitle(t){return String(t||"").toLowerCase().replace(/[^\p{L}\p{N}\s]|_/gu," ").split(/\s+/).filter(w=>w&&!LEVEL_WORDS.has(w)).join(" ")}
+let ALIASES={};
+function skillKey(t){const k=normKey(t);return Object.prototype.hasOwnProperty.call(ALIASES,k)?ALIASES[k]:k}
+function hlKey(name,isTitle){return isTitle?"title:"+(foldTitle(name)||normKey(name)):skillKey(name)}
+function hlIsTitle(x){return x.skill.indexOf("title:")===0}
+function hlName(x){return hlIsTitle(x)?x.skill.slice(6):x.skill}
+function titleCase(s){return String(s).replace(/(^|[\s/-])(\p{L})/gu,(m,a,b)=>a+b.toUpperCase())}
+/* picks.display_words: a folded title said in capitals, acronyms and all ("qa" is "QA", "devops" is "DevOps") */
+const ACRONYMS=new Set(["ai","ml","qa","sre","ui","ux","hr","it","vp","cto","ceo","cfo","coo","sdet","bi","seo","sql","api","ios","devops","nlp","etl","gtm","pm","swe","sde"]);
+const SPECIAL_WORDS={devops:"DevOps",ios:"iOS"};
+function displayWords(k){return String(k).split(/\s+/).filter(Boolean).map(w=>SPECIAL_WORDS[w]||(ACRONYMS.has(w)?w.toUpperCase():w.charAt(0).toUpperCase()+w.slice(1))).join(" ")}
+/* what a pick is called on screen and to a screen reader: "python" or "title: Data Engineer" (the server's own label when it sent one) */
+function hlText(x){return x.label||(hlIsTitle(x)?"title: "+displayWords(hlName(x)):x.skill)}
+function hlToggle(st,name,isTitle){const k=hlKey(name,isTitle),l=hlList(st);const i=l.findIndex(x=>x.skill===k);
  if(i>=0){l.splice(i,1);return false}
  if(l.length>=HL_PALETTE.length)return null;
  l.push({skill:k,color:HL_PALETTE.find(c=>!l.some(x=>x.color===c))});return true}
-function hlFlags(p,l){const have=new Set((p.tags||[]).map(t=>String(t).toLowerCase()));return l.map(h=>have.has(h.skill))}
+/* the picks the server echoes ({name,color,kind}) as the view's own list */
+function hlSeed(st,d){st.hl=((d&&d.highlight)||[]).filter(x=>x&&x.name).slice(0,HL_PALETTE.length).map(x=>({skill:hlKey(x.name,x.kind==="title"),color:HL_PALETTE.includes(x.color)?x.color:"red",label:typeof x.label==="string"&&x.label?x.label:undefined}));
+ st.tiers=Array.isArray(d&&d.pick_tiers)?d.pick_tiers:null;st.tiersFor=st.tiers?hlArgs(st).join("|"):null}
+/* the picks as the tool's highlight argument, in click order, each with its color so a color stays with its pick */
+function hlArgs(st){return hlList(st).map(x=>x.skill+":"+x.color)}
+function hlFlags(p,l){const have=new Set((p.tags||[]).map(t=>skillKey(t)));const ti=foldTitle(p.current_title||p.title);
+ return l.map(h=>hlIsTitle(h)?(ti!==""&&ti===hlName(h)):have.has(h.skill))}
+function hlCount(p,l){return hlFlags(p,l).filter(Boolean).length}
+function hlTop(p,l){const f=hlFlags(p,l);const i=f.indexOf(true);return i<0?null:l[i]}
 function hlOrder(rows,st){const l=hlList(st);if(!l.length)return rows;
  const idx=new Map(rows.map((p,i)=>[p,i]));const key=new Map(rows.map(p=>{const f=hlFlags(p,l);return[p,[-f.filter(Boolean).length,...f.map(x=>x?0:1)]]}));
  return rows.slice().sort((a,b)=>{const x=key.get(a),y=key.get(b);for(let i=0;i<x.length;i++)if(x[i]!==y[i])return x[i]-y[i];return idx.get(a)-idx.get(b)})}
-function hlEdge(p,l){const f=hlFlags(p,l);const i=f.indexOf(true);return i<0?null:l[i].color}
+function hlEdge(p,l){const t=hlTop(p,l);return t?t.color:null}
+/* "Top match: python, red. 2 of 2", as on the Candidates page */
+function hlSummary(p,l){if(!l.length)return null;const n=hlCount(p,l),t=hlTop(p,l);
+ return t?"Top match: "+hlText(t)+", "+t.color+". "+n+" of "+l.length:"No highlighted picks. 0 of "+l.length}
+/* how many people are in the top tier: the most picks anyone has */
+function hlTierText(rows,st){const l=hlList(st);if(!l.length)return"The usual order is back.";
+ let best=0,n=0;for(const p of rows){const c=hlCount(p,l);if(c>best){best=c;n=1}else if(c===best&&c>0)n++}
+ return best?n+(n===1?" person is":" people are")+" in the top tier, with "+best+" of "+l.length+".":"Nobody has any of them."}
+/* a pick made (or taken back): toggles it and says what happened. Returns {ok, text} */
+function hlApply(st,name,isTitle,rows){const r=hlToggle(st,name,isTitle);
+ if(r===null)return{ok:false,text:"You can highlight up to "+HL_PALETTE.length+" picks at once. Remove one first."};
+ const k=hlKey(name,isTitle);const x=hlList(st).find(y=>y.skill===k);
+ const label=hlText({skill:k});
+ if(r){const n=rows.filter(p=>hlFlags(p,[x])[0]).length;
+  return{ok:true,added:true,text:"Highlighting "+label+" in "+x.color+". "+n+(n===1?" person has it":" people have it")+", shown first. "+hlTierText(rows,st)}}
+ return{ok:true,added:false,text:"Removed the highlight on "+label+". "+hlTierText(rows,st)}}
+/* a skill chip that is a pick button; the name carries the color and number once picked */
+/* a skill the person merged into another name in Settings: the chip says which name it counts as */
+function countsAs(name){const k=normKey(name),kept=Object.prototype.hasOwnProperty.call(ALIASES,k)?ALIASES[k]:null;return kept&&kept!==k?kept:null}
+function pickChip(name,st,onPick,tag){const k=skillKey(name),l=hlList(st);const i=l.findIndex(x=>!hlIsTitle(x)&&x.skill===k);const h=i>=0?l[i]:null;const as=countsAs(name);
+ const hint=as?"Counts as "+as+" with your merged skill names.":null;
+ return el(tag||"button",{type:"button",class:"chip skillbtn"+(h?" hl":""),"data-skill":k,"data-hl":h?h.color:null,"aria-pressed":h?"true":"false",
+  "aria-label":h?name+", highlighted "+h.color+", pick "+(i+1)+(as?", counts as "+as:"")+" (remove)":null,
+  title:(h?"Remove the highlight":"Highlight this skill and move people who have it to the top")+(hint?". "+hint:""),onclick:()=>onPick(name,false)},name,hint&&!h?el("span",{class:"sr"}," ("+hint+")"):null)}
+/* the person's current title as a pick button, in the person's own case; colored and named once picked ("title: Data Engineer") */
+function titlePick(t,st,onPick){
+ const k=hlKey(t,true),l=hlList(st),i=l.findIndex(x=>x.skill===k),x=i>=0?l[i]:null;
+ return el("button",{type:"button",class:"titlebtn"+(x?" chip hl":""),"data-hl":x?x.color:null,"data-title":normKey(t),"aria-pressed":x?"true":"false",
+  "aria-label":x?hlText(x)+", highlighted "+x.color+", pick "+(i+1)+" (remove)":"Highlight title: "+t,
+  title:x?"Remove the highlight":"Highlight this title and move people who have it to the top",onclick:()=>onPick(t,true,"row")},t)}
+/* the picks in words, for the whole result: "12 have both, 40 have one". The server counts everyone; a result that is all loaded is counted here. */
+function tierWords(tiers,n){return tiers.filter(t=>t.count>0).map(t=>{const k=t.matched,c=t.count;
+  const what=k===0?"none":k===1?"one":(n===2&&k===2)?"both":k===n?"all "+n:k+" of them";return c+(c===1?" has ":" have ")+what}).join(", ")}
+function tiersLine(st,rows){const l=hlList(st);if(!l.length)return"";
+ if(st.tiers&&st.tiersFor===hlArgs(st).join("|"))return tierWords(st.tiers,l.length);
+ if(rows&&(st.total==null||rows.length>=st.total)){const by={};for(const p of rows){const c=hlCount(p,l);by[c]=(by[c]||0)+1}
+  return tierWords(Object.keys(by).map(Number).sort((a,b)=>b-a).map(k=>({matched:k,count:by[k]})),l.length)}
+ return""}
+/* the bar of picks: sticky, one button per pick to remove it, and Clear */
+function hlBarNode(st,onPick,onClear,rowsFn){
+ const bar=el("div",{class:"hlbar",role:"group","aria-label":"Highlighted picks",hidden:true});
+ function draw(){const l=hlList(st);bar.hidden=!l.length;bar.replaceChildren();if(!l.length)return;
+  const tiers=tiersLine(st,rowsFn?rowsFn():null);
+  bar.append(el("strong",{class:"small"},"Highlighted:"),...l.map((x,i)=>el("button",{type:"button",class:"chip hl removable","data-hl":x.color,"data-skill":x.skill,"aria-label":"Remove highlight: "+hlText(x)+" ("+x.color+", pick "+(i+1)+")",title:"Remove this highlight",onclick:()=>onPick(hlName(x),hlIsTitle(x),"bar")},hlText(x)+" ",el("span",{"aria-hidden":"true"},"\u00d7"))),
+   el("button",{type:"button",class:"btn",onclick:onClear},"Clear"),
+   el("span",{class:"small muted"},"People with more of these come first, across the whole search; when it's a tie, the pick you made first wins. Nobody is hidden."+(tiers?" Of everyone found: "+tiers+".":"")))}
+ return{node:bar,draw}}
 function cmpVals(a,b,date){if(date){a=parseD(a);b=parseD(b);a=a?+a:null;b=b?+b:null}
  if(typeof a==="string")a=a.toLowerCase();if(typeof b==="string")b=b.toLowerCase();
  return a<b?-1:a>b?1:0}
@@ -384,8 +528,10 @@ function sortedRows(rows,st){const idx=new Map(rows.map((p,i)=>[p.id,i]));let ou
   out.sort((x,y)=>{const a=col.v(x),b=col.v(y),ea=a==null||a==="",eb=b==null||b==="";
    if(ea&&eb)return idx.get(x.id)-idx.get(y.id);if(ea)return 1;if(eb)return-1;
    const c=cmpVals(a,b,col.date);return c?c*sign:idx.get(x.id)-idx.get(y.id)})}
- return hlOrder(out,st)}
+ return col?out:hlOrder(out,st)}  // a column sort is a real sort of every loaded row: the highlight tiers are set aside until "Back to highlight order"
 function selNames(rows,st){return rows.filter(p=>st.sel.has(p.id))}
+/* the ticked people in the order the screen shows them (the order the web Compare and Export take too), then any the filter hides */
+function selOrdered(shown,rows,st){const seen=new Set(shown.map(p=>p.id));return[...shown.filter(p=>st.sel.has(p.id)),...rows.filter(p=>!seen.has(p.id)&&st.sel.has(p.id))]}
 function peopleLabel(ps,noId){return ps.map(p=>noId?p.name:p.name+" (id "+p.id+")").join(", ")}
 function peopleTable(rows,st,h){
  const wrap=el("div",{});
@@ -401,27 +547,30 @@ function peopleTable(rows,st,h){
  const askMsg=el("span",{class:"small",role:"alert",style:"color:var(--danger)"});
  const stat2=el("span",{class:"small muted",role:"status"});
  let shown=[],last=-1;
- const relBtn=el("button",{class:"btn",type:"button",onclick:()=>{st.sort=null;st.dir="asc";fill();heads();announce("Sorted by relevance, the order the search gave.")}},"Relevance");
+ const relBtn=el("button",{class:"btn",type:"button",onclick:()=>{st.sort=null;st.dir="asc";fill();heads();announce(hlList(st).length?"Back to highlight order.":"Sorted by relevance, the order the search gave.")}},"Relevance");
  const ths=TCOLS.map(c=>{if(c.nosort)return{c,b:null,th:el("th",{scope:"col",class:"k-"+c.k},c.l)};
   const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
    if(st.sort===c.k)st.dir=st.dir==="asc"?"desc":"asc";else{st.sort=c.k;st.dir="asc"}
-   fill();heads();announce("Sorted by "+colLabel(c)+", "+(st.dir==="asc"?"ascending":"descending"))});
-  return{c,b,th:el("th",{scope:"col",class:"k-"+c.k+(c.wide?" wide":"")},b)}});
+   fill();heads();announce("Sorted by "+colLabel(c)+", "+(st.dir==="asc"?"ascending":"descending")+(hlList(st).length?". Highlight tiers are set aside while sorting by a column.":""))});
+  return{c,b,th:el("th",{scope:"col",class:"k-"+c.k},b)}});
  function heads(){for(const{c,b,th}of ths){if(!b)continue;const on=st.sort===c.k;
    th.setAttribute("aria-sort",on?(st.dir==="asc"?"ascending":"descending"):"none");
    b.replaceChildren(colLabel(c),el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
    b.setAttribute("aria-label","Sort by "+colLabel(c)+(on?", sorted "+(st.dir==="asc"?"ascending":"descending"):""))}
-  relBtn.setAttribute("aria-pressed",st.sort?"false":"true")}
+  relBtn.setAttribute("aria-pressed",st.sort?"false":"true");
+  relBtn.textContent=hlList(st).length?"Back to highlight order":"Relevance";
+}
  function counts(){const chosen=selNames(rows,st);const inShown=shown.filter(p=>st.sel.has(p.id)).length;return{n:chosen.length,hidden:chosen.length-inShown,inShown}}
  function selText(){const c=counts();return c.n+" selected"+(c.hidden?", "+c.hidden+" hidden by the filter":"")}
+ const chosenNow=()=>selOrdered(shown,rows,st);
  function selUI(){const c=counts(),n=c.n;status.textContent=n?selText()+(c.hidden?". The buttons below use all "+n+".":""):"";
   allBox.checked=!!shown.length&&c.inShown===shown.length;allBox.indeterminate=c.inShown>0&&c.inShown<shown.length;
   allBox.setAttribute("aria-label","Select all "+shown.length+" shown");
   tbody.querySelectorAll("input.rowpick").forEach(b=>{const on=st.sel.has(+b.dataset.id);b.checked=on;b.closest("tr").classList.toggle("sel",on)});
-  const chosen=selNames(rows,st);bulk.replaceChildren();
+  const chosen=chosenNow();bulk.replaceChildren();
   if(n){const emails=chosen.filter(p=>p.email).map(p=>p.email);
    bulk.append(
-    el("button",{class:"btn askbtn",type:"button",needs:"message",onclick:()=>{askRow.hidden=false;askMsg.textContent="";askIn.focus()}},"Ask Claude about these "+n),
+    el("button",{class:"btn askbtn",type:"button",needs:"message",onclick:()=>{askRow.hidden=false;askMsg.textContent="";askIn.focus()}},n===1?"Ask Claude about this person":"Ask Claude about these "+n),
     h.prospects?null:el("button",{class:"btn",type:"button",onclick:()=>{announce("Opening "+n+(n===1?" person":" people")+" in Talent Search.");openLink((h.origin||"")+"/candidates?ids="+chosen.map(p=>p.id).join(","),"the Candidates page")}},"Open "+n+" in Talent Search"),
     el("button",{class:"btn",type:"button",onclick:()=>{const t=emails.join(", ");
      if(!t){stat2.textContent="None of them has an email saved.";announce(stat2.textContent);return}
@@ -431,14 +580,18 @@ function peopleTable(rows,st,h){
  function changed(){selUI();if(!counts().n)announce("0 selected");if(h.onSel)h.onSel()}
  const askIn=el("input",{class:"field",type:"text","aria-label":"What should Claude do with them?",placeholder:"What should Claude do with them?",maxlength:"500"});
  const closeAsk=()=>{askRow.hidden=true;const b=bulk.querySelector(".askbtn");if(b)b.focus()};
- const sendAsk=()=>{const t=askIn.value.trim();if(!t){askMsg.textContent="Type what you want Claude to do first.";askIn.focus();return}askMsg.textContent="";const chosen=selNames(rows,st);
+ const sendAsk=()=>{const t=askIn.value.trim();if(!t){askMsg.textContent="Type what you want Claude to do first.";askIn.focus();return}askMsg.textContent="";const chosen=chosenNow();
   askClaude("For these "+chosen.length+" candidates: "+peopleLabel(chosen,h.prospects)+": "+t,null).then(ok=>{if(ok){askIn.value="";askRow.hidden=true;stat2.textContent="Sent to Claude.";const b=bulk.querySelector(".askbtn");if(b)b.focus()}else{askMsg.textContent="Your chat app wouldn't send that. You can type it in the chat yourself."}})};
  const sendBtn=el("button",{class:"btn primary",type:"button",onclick:sendAsk},"Send to Claude");
  askIn.addEventListener("keydown",e=>{if(e.key==="Enter")sendAsk();if(e.key==="Escape"){e.stopPropagation();closeAsk()}});
  askRow.append(askIn,sendBtn,el("button",{class:"btn",type:"button",onclick:closeAsk},"Cancel"),askMsg);
  function setSel(p,on){if(on)st.sel.add(p.id);else st.sel.delete(p.id)}
+ const picksOn=!!h.skills;  // the People table has picks and the Columns button; the Shortlist and Decide tables keep every column
+ function pickTitleBtn(p){return p.current_title?titlePick(p.current_title,st,(n,ti)=>pickAny(n,ti,"row")):""}
  function fill(){shown=sortedRows(rows,st);tbody.replaceChildren();
-  caption.textContent=shown.length+" candidate"+(shown.length===1?"":"s")+(shown.length<rows.length?" shown of "+rows.length:"")+(h.total&&h.total>rows.length?" (the search found "+h.total+")":"");
+  const sc=TCOLS.find(c=>c.k===st.sort);
+  caption.textContent=shown.length+" candidate"+(shown.length===1?"":"s")+(shown.length<rows.length?" shown of "+rows.length:"")+(h.total&&h.total>rows.length?" (the search found "+h.total+")":"")
+   +(sc?". Sorted by "+colLabel(sc)+", "+(st.dir==="asc"?"ascending":"descending")+(hlList(st).length?". Highlight tiers are set aside while sorting by a column.":""):"");
   shown.forEach((p,i)=>{
    const pick=el("input",{type:"checkbox",class:"rowpick","data-id":p.id,"aria-label":"Select "+p.name});
    pick.addEventListener("click",ev=>{const on=pick.checked;
@@ -446,27 +599,31 @@ function peopleTable(rows,st,h){
     last=i;changed()});
    const open=el("button",{class:"link",type:"button","aria-label":"Show card for "+p.name,onclick:()=>h.onOpen(p)},p.name);
    const j=firstJob(p);const hl=hlList(st);
-   const mine=(p.tags||[]).map(String);const low=t=>t.toLowerCase();
-   const lit=mine.filter(t=>hl.some(x=>x.skill===low(t))).sort((a,b)=>hl.findIndex(x=>x.skill===low(a))-hl.findIndex(x=>x.skill===low(b)));
+   const mine=(p.tags||[]).map(String);
+   const lit=mine.filter(t=>hl.some(x=>!hlIsTitle(x)&&x.skill===skillKey(t))).sort((a,b)=>hl.findIndex(x=>x.skill===skillKey(a))-hl.findIndex(x=>x.skill===skillKey(b)));
    const rest=mine.filter(t=>!lit.includes(t));const cut=Math.max(4,lit.length);const vis=[...lit,...rest].slice(0,cut);
-   const skillCell=el("td",{class:"k-skills","data-label":mine.length?"Skills":null},mine.length?el("ul",{class:"chips skillchips","aria-label":"Skills of "+p.name},
-    vis.map(t=>{const h=hl.find(x=>x.skill===low(t));
-     return el("li",{},el("button",{type:"button",class:"chip skillbtn"+(h?" hl":""),"data-skill":low(t),"data-hl":h?h.color:null,"aria-pressed":h?"true":"false",
-      title:h?"Remove the highlight":"Highlight this skill and move people who have it to the top",onclick:()=>pickSkill(t,"row")},t))}),
+   const sum=hlSummary(p,hl);
+   const skillCell=el("td",{class:"k-skills","data-label":mine.length?"Skills":null},
+    sum?el("div",{class:"small tophint"+(hlTop(p,hl)?"":" muted")},sum):null,
+    mine.length?el("ul",{class:"chips skillchips","aria-label":"Skills of "+p.name},
+    vis.map(t=>el("li",{},pickChip(t,st,(n,ti)=>pickAny(n,ti,"row")))),
     mine.length>vis.length?el("li",{class:"small muted"},"+"+(mine.length-vis.length)):null):null);
-   const td=(k,label,...kids)=>el("td",{class:"k-"+k+(["added","updated","color"].includes(k)?" wide":""),"data-label":label},...kids);
+   const td=(k,label,...kids)=>el("td",{class:"k-"+k,"data-label":label},...kids);
    const txt=(k,label,v)=>el("td",{class:"k-"+k,"data-label":v?label:null,title:v||null},v||"");
-   const mt=el("td",{class:"match k-match","data-label":plainMatch(p)?(h.matchLabel||"Match"):null,title:plainMatch(p)||null},el("div",{class:"clamp"},p.match?marked(p.match):(p.reason||"")));
+   const titleCell=el("td",{class:"k-title","data-label":p.current_title?"Title":null,title:p.current_title||null},picksOn?pickTitleBtn(p):(p.current_title||""));
+   const mt=el("td",{class:"match k-match","data-label":plainMatch(p)?(h.matchLabel||"Match"):null,title:plainMatch(p)||null},el("div",{class:"clamp"},p.match?marked(p.match,st):(p.reason||"")));
    const em=el("td",{class:"k-email","data-label":hasEmail(p)?"Email":null},hasEmail(p)?el("span",{class:"chk",title:p.email||"Has an email","aria-label":"Has an email"},"✓"):null,
     p.email?el("a",{class:"addr",href:"mailto:"+p.email,"aria-label":"Email "+p.name},p.email):null);
    const li=el("td",{class:"k-linkedin","data-label":p.linkedin_url?"LinkedIn":null},p.linkedin_url&&safeUrl(p.linkedin_url)?linkBtn(p.linkedin_url,"LinkedIn","LinkedIn profile of "+p.name):null);
    const edge=hlEdge(p,hl);
    tbody.append(el("tr",{class:edge?"hlrow":null,"data-edge":edge},el("td",{class:"pickcell"},pick),el("th",{scope:"row",class:"k-name"},open),
-    txt("title","Title",p.current_title),txt("company","Company",p.current_company),txt("location","Location",p.location),
+    titleCell,skillCell,
     el("td",{class:"k-job","data-label":j?"Job":null,title:(p.jobs||[]).map(x=>x.job||x.job_title).join("; ")||null},jobText(p)),
     el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:"k-stage"+(j&&(j.state==="lost"||j.state==="hired")?" out":"")},j?j.stage:""),
-    em,li,mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),
-    el("td",{class:"wide k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):""),skillCell))});
+    em,li,mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),
+    txt("company","Company",p.current_company),txt("location","Location",p.location),
+    td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),
+    el("td",{class:"k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
   if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"15"},"Nobody matches that filter.")));
   selUI();edges()}
  filter.addEventListener("input",()=>{st.filter=filter.value;fill()});
@@ -474,28 +631,49 @@ function peopleTable(rows,st,h){
  allBox.addEventListener("click",()=>{for(const p of shown)setSel(p,allBox.checked);changed()});
  const none=el("button",{class:"btn",type:"button",onclick:()=>{st.sel.clear();changed()}},"Select none");
  const all=el("button",{class:"btn",type:"button",onclick:()=>{for(const p of shown)st.sel.add(p.id);changed()}},"Select all shown");
- const hlBar=el("div",{class:"hlbar",role:"group","aria-label":"Highlighted skills",hidden:true});
- function drawBar(){const l=hlList(st);hlBar.hidden=!l.length;hlBar.replaceChildren();if(!l.length)return;
-  hlBar.append(el("strong",{class:"small"},"Highlighted skills:"),...l.map(x=>el("button",{type:"button",class:"chip hl removable","data-hl":x.color,"data-skill":x.skill,"aria-label":"Remove highlight: "+x.skill,title:"Remove this highlight",onclick:()=>pickSkill(x.skill,"bar")},x.skill+" ",el("span",{"aria-hidden":"true"},"×"))),
-   el("button",{type:"button",class:"btn",onclick:()=>{st.hl=[];refresh();announce("Highlights cleared. The usual order is back.");caption.focus()}},"Clear"),
-   el("span",{class:"small muted"},"People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden."))}
- function refresh(){drawBar();fill()}
- function pickSkill(t,from){const r=hlToggle(st,t);
-  if(r===null){announce("You can highlight up to "+HL_PALETTE.length+" skills at once. Remove one first.");return}
-  const k=String(t).toLowerCase();refresh();
-  const n=rows.filter(p=>(p.tags||[]).some(x=>String(x).toLowerCase()===k)).length;
-  if(r){announce("Highlighting "+k+" in "+hlList(st).find(x=>x.skill===k).color+". "+n+(n===1?" person has it":" people have it")+", shown first.");const b=hlBar.querySelector('button[data-skill="'+CSS.escape(k)+'"]');if(b)b.focus()}
-  else{announce("Removed the highlight on "+k+".");const nb=hlBar.querySelector("button.removable");(nb||caption).focus()}}
- const hidden=[...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"]),...(h.skills&&rows.some(p=>(p.tags||[]).length)?[]:["skills"])];  // no Color column when nobody has one
- const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")+hidden.map(k=>" hide-"+k).join("")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
- const tools=el("div",{class:"tbar"},filter,emailTog,relBtn,all,none,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
+ const bar=hlBarNode(st,(n,ti,from)=>pickAny(n,ti,from),()=>{st.hl=[];refresh();if(h.onPick)h.onPick();announce("Highlights cleared. The usual order is back.");caption.focus({preventScroll:true})},()=>rows);
+ function refresh(){bar.draw();const keep=scroller.scrollLeft;fill();scroller.scrollLeft=keep;edges()}
+ function pickAny(name,isTitle,from){const r=hlApply(st,name,isTitle,rows);announce(r.text);if(!r.ok)return;
+  refresh();if(h.onPick)h.onPick();
+  const k=hlKey(name,isTitle);
+  if(r.added){const b=bar.node.querySelector('button[data-skill="'+CSS.escape(k)+'"]');if(b)b.focus({preventScroll:true})}
+  else{const nb=bar.node.querySelector("button.removable");(nb||caption).focus({preventScroll:true})}}
+ /* columns. The Shortlist and Decide tables keep every column. The People table shows what has something to show:
+    a column that is empty for every loaded row (Job, Stage, LinkedIn, Match ...) starts hidden, and every column
+    stays one tick away under Columns. */
+ const emptyOf={job:!rows.some(p=>jobText(p)),stage:!rows.some(p=>firstJob(p)),email:!rows.some(hasEmail),linkedin:!rows.some(p=>p.linkedin_url),match:!rows.some(isRealMatch),
+  contacted:!rows.some(p=>p.last_contacted_at),company:!rows.some(p=>p.current_company),location:!rows.some(p=>p.location),updated:!rows.some(p=>p.updated_at),added:!rows.some(p=>p.created_at),color:!rows.some(p=>COLORS.includes(p.color))};
+ const staticHide=picksOn?new Set(h.skills&&rows.some(p=>(p.tags||[]).length)?[...(h.hide||[])]:["skills",...(h.hide||[])])
+  :new Set([...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"]),...(!picksOn||rows.some(p=>plainMatch(p))?[]:["match"]),...(h.skills&&rows.some(p=>(p.tags||[]).length)?[]:["skills"])]);
+ const optKeys=picksOn?["job","stage","email","linkedin","match",...TCOLS.filter(c=>c.opt).map(c=>c.k)].filter(k=>!staticHide.has(k)):TCOLS.filter(c=>c.opt&&!staticHide.has(c.k)).map(c=>c.k);
+ const wide=new Set(TCOLS.filter(c=>c.opt&&c.full).map(c=>c.k));
+ /* what is on until the person chooses: the columns with something in them (a wide view adds the rest that have data) */
+ const defaultCols=()=>new Set(optKeys.filter(k=>!emptyOf[k]&&(["job","stage","email","match"].includes(k)||(isFull()&&wide.has(k)))));
+ const colsNow=()=>st.cols||(picksOn?defaultCols():new Set(isFull()?optKeys:[]));  // the choice is kept once made
+ const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
+ function applyCols(){const on=colsNow();for(const c of TCOLS)table.classList.toggle("hide-"+c.k,!!(staticHide.has(c.k)||(picksOn&&optKeys.includes(c.k)&&!on.has(c.k))||(!picksOn&&c.opt&&!on.has(c.k))))}
+ let colsBtn=null,colsPanel=null;
+ if(picksOn&&optKeys.length){
+  colsBtn=el("button",{class:"btn",type:"button","aria-expanded":"false","aria-controls":"colspanel"},"Columns");
+  colsPanel=el("div",{class:"colspanel",id:"colspanel",role:"group","aria-label":"Columns to show",hidden:true},
+   el("span",{class:"small muted"},"Show more columns:"),
+   ...optKeys.map(k=>{const c=TCOLS.find(x=>x.k===k);const box=el("input",{type:"checkbox","data-col":k,checked:colsNow().has(k)?"":null});
+    box.checked=colsNow().has(k);
+    box.addEventListener("change",()=>{const cur=new Set(colsNow());if(box.checked)cur.add(k);else cur.delete(k);st.cols=cur;applyCols();edges();
+     announce(c.l+" column "+(box.checked?"shown":"hidden")+".")});
+    return el("label",{class:"colopt"},box,el("span",{},c.l+(emptyOf[k]?" (nothing saved)":"")))}));
+  const toggle=open=>{colsPanel.hidden=!open;colsBtn.setAttribute("aria-expanded",open?"true":"false")};
+  colsBtn.addEventListener("click",()=>{toggle(colsPanel.hidden);if(!colsPanel.hidden){const f=colsPanel.querySelector("input");if(f)f.focus()}});
+  colsPanel.addEventListener("keydown",e=>{if(e.key==="Escape"){e.stopPropagation();toggle(false);colsBtn.focus()}})}
+ applyCols();
+ const tools=el("div",{class:"tbar"},filter,emailTog,relBtn,all,none,colsBtn,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
  const scroller=el("div",{class:"tablewrap",tabindex:"-1"},table);
  const eL=el("span",{class:"edge l","aria-hidden":"true"}),eR=el("span",{class:"edge r","aria-hidden":"true"});
  const hint=el("p",{class:"small muted scrollhint",hidden:true},"There are more columns to the right. Scroll sideways to see them.");
- function edges(){const max=scroller.scrollWidth-scroller.clientWidth;const x=scroller.scrollLeft;
-  eL.classList.toggle("on",x>2);eR.classList.toggle("on",max>2&&x<max-2);hint.hidden=!(max>2&&x<max-2)}
+ function edges(){const max=scroller.scrollWidth-scroller.clientWidth;const x=scroller.scrollLeft;const more=max>4&&x<max-2;
+  eL.classList.toggle("on",x>2);eR.classList.toggle("on",more);hint.hidden=!more}
  scroller.addEventListener("scroll",edges,{passive:true});
- if(window.ResizeObserver)new ResizeObserver(edges).observe(scroller);
- wrap.append(tools,bulk,askRow,stat2,hint,hlBar,el("div",{class:"tablebox"},scroller,eL,eR));
- heads();drawBar();fill();
- return{node:wrap,focusCaption:()=>caption.focus(),scroller,edges}}
+ if(window.ResizeObserver){const ro=new ResizeObserver(edges);ro.observe(scroller);ro.observe(table)}
+ wrap.append(tools,colsPanel,bulk,askRow,stat2,bar.node,hint,el("div",{class:"tablebox"},scroller,eL,eR));
+ heads();bar.draw();fill();
+ return{node:wrap,focusCaption:()=>caption.focus(),scroller,edges,chosen:chosenNow,shown:()=>shown,redraw:()=>{bar.draw();const keep=scroller.scrollLeft;fill();scroller.scrollLeft=keep;edges()}}}

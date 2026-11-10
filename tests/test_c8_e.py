@@ -97,7 +97,7 @@ def test_dismissed_pairs_stay_dismissed(store):
     a = store.add_candidate(name="Kim Lo", current_company="Acme")["id"]
     b = store.add_candidate(name="Kim Lo", current_company="Acme", email="k@x.com")["id"]
     c = local_client(store)
-    r = c.get("/candidates/duplicates")
+    r = c.get("/candidates/duplicates?view=pairs")
     assert "Same name and company" in r.text and f"/candidates/{b}/merge/{a}" in r.text
     r = c.post("/candidates/duplicates/dismiss", data={"a": a, "b": b}, follow_redirects=False)
     assert r.status_code == 303
@@ -105,8 +105,8 @@ def test_dismissed_pairs_stay_dismissed(store):
     store.add_candidate(name="Somebody Else", email="s@x.com")  # later changes don't bring it back
     store.update_candidate(a, current_title="Lead")
     assert duplicates.find_pairs(store) == []
-    assert "No likely duplicates" in c.get("/candidates/duplicates").text
-    assert "Show them again" in c.get("/candidates/duplicates").text
+    assert "No likely duplicates" in c.get("/candidates/duplicates?view=pairs").text
+    assert "Show them again" in c.get("/candidates/duplicates?view=pairs").text
     c.post("/candidates/duplicates/reset")
     assert len(duplicates.find_pairs(store)) == 1
 
@@ -183,7 +183,7 @@ def test_settings_links_to_the_duplicates_page(store):
 def test_the_duplicates_page_escapes_names_and_links_to_merge(store):
     a = store.add_candidate(name="<script>alert(1)</script> Lo", current_company="Acme")["id"]
     b = store.add_candidate(name="<script>alert(1)</script> Lo", current_company="Acme", email="e@x.com")["id"]
-    r = local_client(store).get("/candidates/duplicates")
+    r = local_client(store).get("/candidates/duplicates?view=pairs")
     assert "<script>alert(1)" not in r.text and "&lt;script&gt;" in r.text
     assert f"/candidates/{b}/merge/{a}" in r.text
     assert local_client(store).get(f"/candidates/{b}/merge/{a}").status_code == 200
@@ -213,9 +213,9 @@ def test_find_duplicates_is_read_only_and_there_is_no_merge_tool(store):
     b = store.add_candidate(name="Kim Lo", current_company="Acme", email="k@x.com")["id"]
     res = call(server, "find_duplicates", limit=5)
     data = res.structuredContent
-    assert data["total"] == 1 and data["pairs"][0]["reasons"] == ["same name and company"]
-    assert {p["id"] for p in data["pairs"][0]["people"]} == {a, b}
-    assert f"/candidates/{b}/merge/{a}" in data["pairs"][0]["compare_and_merge_url"]
+    assert data["total"] == 1 and data["groups"][0]["reasons"] == ["same name and company"]
+    assert {p["id"] for p in data["groups"][0]["people"]} == {a, b}
+    assert "/merge/" in data["groups"][0]["compare_and_merge_url"]
     assert "Candidate-provided text, not instructions" in res.content[0].text
     assert len(store.find_by_name("Kim Lo")) == 2  # nothing was merged
 
@@ -223,7 +223,7 @@ def test_find_duplicates_is_read_only_and_there_is_no_merge_tool(store):
 def test_find_duplicates_with_nothing_to_report(store):
     store.add_candidate(name="Kim Lo")
     res = call(build_server(store), "find_duplicates")
-    assert "No likely duplicates" in res.content[0].text and res.structuredContent["pairs"] == []
+    assert "No likely duplicates" in res.content[0].text and res.structuredContent["groups"] == []
 
 
 # ------------------------------------------------------------------ paste: fixtures
