@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-10
+
 ### Candidates
 - Click a skill chip to light it up in its own color (first pick red, then yellow, green, blue, purple, orange; a color stays with its skill) on every row where it shows, and move people who have it to the top. People with more of your picked skills come first, and when it's a tie the skill you picked first wins. Nobody is hidden. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
 - Skill highlights are easier to follow: keyboard focus stays on the chip you picked, a status line says what changed, the highlighted skills bar shows each pick's number, color and how many people have it, and every row shows "2 of 2" matches. The color columns are now called Label and Label color so they are not mixed up with highlight colors.
