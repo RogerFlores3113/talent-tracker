@@ -734,26 +734,42 @@
 })();
 
 // Candidates table, skill highlights: after a pick or a remove the page reloads, so put keyboard focus back on the
-// chip the #fragment names (the same chip, else the highlight bar) and say in words what changed.
+// chip the #fragment names (the same chip, else the highlight bar) and say in words what changed. After a remove
+// from the bar the fragment is #removed-<skill>@<id of the chip to focus>: the next chip, else the one before it,
+// else (nothing left) the table.
 (function () {
   function say(text) { const s = document.getElementById("hl-status"); if (s) s.textContent = text; return s; }
-  function people(n) { return n === 1 ? "1 person has it and is" : Number(n).toLocaleString("en-US") + " people have it and are"; }
+  function has(n) {
+    n = Number(n) || 0;
+    return n === 0 ? "Nobody has it." : n === 1 ? "1 person has it." : n.toLocaleString("en-US") + " people have it.";
+  }
   function start() {
     const status = document.getElementById("hl-status");
     if (!status) return;
     const hash = decodeURIComponent((location.hash || "").slice(1));
-    if (!hash) return;
+    if (!hash || hash === "hl-bar" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
     const bar = document.getElementById("hl-bar");
-    const fallback = bar || status;
+    const table = document.getElementById("cand-table");
+    const fallback = bar || table || status;
     let target = null, text = "";
     if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = status; }
-    else if (hash.indexOf("removed-") === 0) { text = "Removed the " + hash.slice(8) + " highlight."; target = fallback; }
+    else if (hash.indexOf("removed-") === 0) {
+      const rest = hash.slice(8), at = rest.lastIndexOf("@");
+      text = "Removed the " + (at < 0 ? rest : rest.slice(0, at)) + " highlight.";
+      target = at < 0 ? null : document.getElementById(rest.slice(at + 1));
+      if (!target) target = table || fallback;
+    }
     else {
       target = document.getElementById(hash);
       const skill = target && target.getAttribute("data-skill");
       if (skill) {
-        const lit = bar && Array.prototype.find.call(bar.querySelectorAll("[data-skill]"), el => el.getAttribute("data-skill") === skill);
-        if (lit) text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + people(lit.getAttribute("data-count") || 0) + " at the top.";
+        const chips = bar ? Array.prototype.slice.call(bar.querySelectorAll("[data-skill]")) : [];
+        const lit = chips.find(el => el.getAttribute("data-skill") === skill);
+        if (lit) {
+          text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + has(lit.getAttribute("data-count") || 0);
+          if (chips.length > 1) text += " People with more of your picks come first.";
+          else text += " They are shown first.";
+        }
         else text = "Removed the " + skill + " highlight.";
       } else { target = fallback; }
     }

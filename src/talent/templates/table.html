@@ -2,6 +2,7 @@
 {% from "_macros.html" import chips %}
 {% block title %}Candidates · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
+{% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#cand-table' }}">{{ 'Skip to highlighted skills' if hl_bar else 'Skip to the table' }}</a>{% endblock %}
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
@@ -134,8 +135,8 @@
   </div>
 </form>{% endif %}
 <div class="table-wrap">
-<table class="dense">
-  <caption class="sr-only">Candidates{% if q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
+<table class="dense" id="cand-table" tabindex="-1">
+  <caption class="sr-only">Candidates{% if hl %}, sorted by highlighted skills first, then {% if q %}best match first{% elif sort == 'color' %}by label color{% else %}by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}{% elif q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
   <thead><tr>
     {% if total %}<th scope="col" class="pickcell"><input type="checkbox" form="bulk-form" data-check-all data-check-name="candidate_ids" aria-label="Tick everyone on this page"></th>{% endif %}
     {% set color_on = not q and sort == 'color' and not hl %}
