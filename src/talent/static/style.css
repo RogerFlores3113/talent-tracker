@@ -655,14 +655,22 @@ td.pickcell, th.pickcell { width: 1%; text-align: center; }
 .btn.link { background: none; border: none; padding: 0; min-height: 0; text-decoration: underline; color: var(--accent, inherit); font: inherit; cursor: pointer; }
 .btn.link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
-/* Highlighted skills: a rainbow color by click order (same palette as the color bubbles). */
+/* Highlighted skills: a fixed color per pick (red, yellow, green, blue, purple, orange), same fills as the color bubbles. */
 .chip.hl { border-color: var(--text); font-weight: 600; background: var(--bub, var(--surface-2)); color: var(--bub-ink, var(--text)); }
 .chip[data-hl="red"] { --bub: var(--tag-red); --bub-ink: var(--tag-red-ink); }
-.chip[data-hl="orange"] { --bub: var(--tag-orange); --bub-ink: var(--tag-orange-ink); }
 .chip[data-hl="yellow"] { --bub: var(--tag-yellow); --bub-ink: var(--tag-yellow-ink); }
 .chip[data-hl="green"] { --bub: var(--tag-green); --bub-ink: var(--tag-green-ink); }
 .chip[data-hl="blue"] { --bub: var(--tag-blue); --bub-ink: var(--tag-blue-ink); }
 .chip[data-hl="purple"] { --bub: var(--tag-purple); --bub-ink: var(--tag-purple-ink); }
+.chip[data-hl="orange"] { --bub: var(--tag-orange); --bub-ink: var(--tag-orange-ink); }
+/* A thin edge on rows that have a picked skill, in the color of their first matching pick. */
+tr.hlrow > td:first-child { box-shadow: inset 4px 0 0 var(--bub); }
+tr.hlrow[data-edge="red"] { --bub: var(--tag-red); }
+tr.hlrow[data-edge="yellow"] { --bub: var(--tag-yellow); }
+tr.hlrow[data-edge="green"] { --bub: var(--tag-green); }
+tr.hlrow[data-edge="blue"] { --bub: var(--tag-blue); }
+tr.hlrow[data-edge="purple"] { --bub: var(--tag-purple); }
+tr.hlrow[data-edge="orange"] { --bub: var(--tag-orange); }
 .chip.hl:hover { filter: brightness(1.08); }
 .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hlbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }

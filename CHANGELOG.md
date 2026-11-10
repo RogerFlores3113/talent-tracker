@@ -5,7 +5,7 @@ All notable changes to Talent Search. Newest first.
 ## [Unreleased]
 
 ### Candidates
-- Click a skill chip to highlight it in a rainbow color (red, orange, yellow, green, blue, purple, in the order you click) and move people who have it to the top. Nobody is hidden any more. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+- Click a skill chip to light it up in its own color (first pick red, then yellow, green, blue, purple, orange; a color stays with its skill) on every row where it shows, and move people who have it to the top. People with more of your picked skills come first, and when it's a tie the skill you picked first wins. Nobody is hidden. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
 
 ### Tour
 - The Saved searches step lights up a real line now. With nothing saved yet it reads "Saved searches: none yet" and says how to save one, instead of an empty bar.

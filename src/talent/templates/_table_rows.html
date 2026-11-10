@@ -1,6 +1,7 @@
 {% from "_macros.html" import chips, color_bubble %}
 {% for c in rows %}
-    <tr>
+    {% set edge = hl_edge(c.tags, hl) if hl else '' %}
+    <tr{% if edge %} class="hlrow" data-edge="{{ edge }}"{% endif %}>
       <td class="pickcell"><input type="checkbox" form="bulk-form" name="candidate_ids" value="{{ c.id }}"{% if ticked and c.id in ticked %} checked{% endif %} aria-label="Tick {{ c.name }}{% if c.current_company %}, {{ c.current_company }}{% elif c.email %}, {{ c.email }}{% endif %}"></td>
       <td class="colorcell">{{ color_bubble(c) }}</td>
       <td><a href="/candidates/{{ c.id }}">{{ c.name }}</a>{% if new_after is not none and c.id > new_after %} <span class="badge new">New</span>{% endif %}</td>
@@ -11,8 +12,8 @@
       <td class="nowrap">{{ c.last_contacted_at | date if c.last_contacted_at else '' }}</td>
       <td class="nowrap">{{ c.updated_at | date }}</td>
       <td class="nowrap">{{ c.created_at | date }}</td>
-      {% set mine = hl_first(c.tags, hl) %}
-      <td>{{ chips(mine[:4], hl=hl, base=dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir)) }}{% if mine | length > 4 %} <span class="fine">+{{ mine | length - 4 }}</span>{% endif %}</td>
+      {% set mine = hl_first(c.tags, hl) %}{% set shown_n = hl_shown(c.tags, hl) %}
+      <td>{{ chips(mine[:shown_n], hl=hl, base=dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir)) }}{% if mine | length > shown_n %} <span class="fine">+{{ mine | length - shown_n }}</span>{% endif %}</td>
     </tr>
 {% else %}
     {% if page_no == 1 %}<tr><td colspan="12" class="none">No candidates{{ ' match that' if q or keep }}.

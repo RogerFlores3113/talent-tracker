@@ -121,7 +121,7 @@ function tableMode(d){
  for(const n of leadLines(d))wrap.append(n);
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
  wrap.append(el("div",{class:"tbar"},back));
- const t=peopleTable(S.people,S,{origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,
+ const t=peopleTable(S.people,S,{skills:true,origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,
   onOpen:p=>{S.idx=S.people.indexOf(p);S.fromTable=true;S.scroll={x:t.scroller.scrollLeft,y:(document.scrollingElement||document.documentElement).scrollTop,id:p.id};setView("card")}});
  SHOWN=t;wrap.append(t.node);
  onKeys(wrap,{Escape:e=>{if(e.target&&e.target.tagName==="INPUT"&&e.target.type==="search"&&e.target.value)return;S.fromTable=false;setView("card")}});
@@ -142,7 +142,7 @@ window.onModeChange=()=>{};
 
 function render(c){
  if(Array.isArray(c.results)){
-  S.d=c;S.people=c.results.slice();S.total=c.total!=null?c.total:S.people.length;S.idx=0;S.mode="card";S.sort=null;S.dir="asc";S.filter="";S.hasEmail=false;S.fromTable=false;S.origin=appOrigin(c.app_url);
+  S.d=c;S.people=c.results.slice();S.total=c.total!=null?c.total:S.people.length;S.idx=0;S.mode="card";S.sort=null;S.dir="asc";S.filter="";S.hasEmail=false;S.hl=[];S.fromTable=false;S.origin=appOrigin(c.app_url);
   const ids=new Set(S.people.map(p=>p.id));for(const i of Array.from(S.sel))if(!ids.has(i))S.sel.delete(i);
   const m=cardMode(c);fetchCards(S.people.slice(0,3).map(p=>p.id));return m}
  if(!c.name&&!c.candidate&&(c.conflict||c.needs_confirmation))return notSaved(c);

@@ -80,7 +80,7 @@ UNDO_WINDOWS = {"1": "hour", "24": "24 hours", "168": "7 days", "720": "30 days"
 CHANGES_SHOWN = 300
 # The colour bubble's words: one letter in the bubble too, so colour is never the only clue.
 COLOR_LETTERS = {"red": "R", "orange": "O", "yellow": "Y", "green": "G", "blue": "B", "purple": "P"}
-# Rainbow order as SQL: red first, then orange... purple, then people with no colour.
+# Color order as SQL: red first, then orange... purple, then people with no colour.
 COLOR_RANK_SQL = ("CASE c.color " + " ".join(f"WHEN '{c}' THEN {i}" for i, c in enumerate(COLORS))
                   + f" ELSE {len(COLORS)} END")
 # Sorting a search by a column (qsort): its key, and whether the first click goes high to low. Without one the
@@ -616,46 +616,65 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 r["main_job_id"], r["main_stage"], r["more_jobs"] = mine[0]["job_id"], mine[0]["stage"], len(mine) - 1
 
     def hl_order_sql(hl_list: list[str]) -> tuple[str, list[str]]:
-        """ORDER BY terms that put people with the highlighted skills first, in click order (everyone stays)."""
-        sql = "".join("EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE) DESC, "
-                      for _ in hl_list)
-        return sql, list(hl_list)
+        """ORDER BY terms for the highlighted skills: most of them first, then the earlier pick wins (everyone stays)."""
+        has = "EXISTS (SELECT 1 FROM candidate_tags ht WHERE ht.candidate_id = c.id AND ht.tag = ? COLLATE NOCASE)"
+        if not hl_list:
+            return "", []
+        count = "(" + " + ".join(has for _ in hl_list) + ") DESC, "
+        return count + "".join(has + " DESC, " for _ in hl_list), [*hl_list, *hl_list]
 
     def hl_rank_hits(hits: list[Any], hl_list: list[str]) -> list[Any]:
         """A stable sort, so the order we already had (best match, colour, column) holds inside each highlight group."""
         if not hl_list:
             return hits
 
-        def key(h: Any) -> tuple[bool, ...]:
+        def key(h: Any) -> tuple[int, ...]:
             have = {str(t).lower() for t in (h.candidate.get("tags") or [])}
-            return tuple(x not in have for x in hl_list)
+            flags = [x in have for x in hl_list]
+            return (-sum(flags), *(not f for f in flags))
         return sorted(hits, key=key)
 
-    def hl_href(base: dict[str, Any], hl_list: list[str], skill: str | None = None, clear: bool = False) -> str:
-        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept."""
-        cur = [h.lower() for h in hl_list]
+    def hl_href(base: dict[str, Any], hl_map: Any, skill: str | None = None, clear: bool = False) -> str:
+        """/candidates link with a skill toggled in (or out of) the highlight list; every other parameter kept.
+        A skill keeps its color while it is picked; a new pick takes the first free color."""
+        cur = dict(hl_map or {})
         if skill is not None:
             k = " ".join(str(skill).split()).lower()
-            cur = [h for h in cur if h != k] if k in cur else [*cur, k]
+            if k in cur:
+                del cur[k]
+            elif len(cur) < searchquery.HL_MAX:
+                cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
         if clear:
-            cur = []
+            cur = {}
         rest = {k: v for k, v in base.items() if v not in ("", None) and k not in ("hl", "page_no", "more")}
         if cur:
-            rest["hl"] = ",".join(searchquery.split_hl(",".join(cur)))
+            rest["hl"] = searchquery.join_hl(cur.items())
         return "/candidates?" + urlencode(rest) if rest else "/candidates"
 
-    def hl_first(tags: list[str], hl_list: list[str]) -> list[str]:
+    def hl_first(tags: list[str], hl_map: Any) -> list[str]:
         """A person's skills with the highlighted ones first, in click order."""
         mine = {t.lower(): t for t in tags}
-        first = [mine[h] for h in hl_list if h in mine]
+        first = [mine[h] for h in hl_map if h in mine]
         return first + [t for t in tags if t not in first]
 
-    def hl_bar(hl_list: list[str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, str]]:
+    def hl_shown(tags: list[str], hl_map: Any) -> int:
+        """How many chips a row shows: four, or every highlighted skill it has if that is more."""
+        low = {t.lower() for t in tags}
+        return max(4, sum(1 for h in hl_map if h in low))
+
+    def hl_edge(tags: list[str], hl_map: Any) -> str:
+        """The color of the first (highest priority) highlighted skill this person has, or ''."""
+        low = {t.lower() for t in tags}
+        return next((c for h, c in hl_map.items() if h in low), "")
+
+    def hl_bar(hl_map: dict[str, str], keep: dict[str, Any], q: str, sort: str, dir: str, qsort: str, qdir: str) -> list[dict[str, str]]:
         base = {**keep, "q": q, "sort": sort, "dir": dir, "qsort": qsort if q else "", "qdir": qdir if q else ""}
-        return [{"skill": h, "color": COLORS[i], "href": hl_href(base, hl_list, h)} for i, h in enumerate(hl_list)]
+        return [{"skill": h, "color": c, "href": hl_href(base, hl_map, h)} for h, c in hl_map.items()]
 
     env.globals["hl_href"] = hl_href
     env.globals["hl_first"] = hl_first
+    env.globals["hl_shown"] = hl_shown
+    env.globals["hl_edge"] = hl_edge
 
     @app.get("/candidates", response_class=HTMLResponse)
     def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
@@ -667,7 +686,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
               ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
         per = 100
-        hl_list = searchquery.split_hl(hl)  # skills to highlight and sort by, in click order (never filters)
+        hl_map = dict(searchquery.parse_hl(hl))  # skill -> color, in click order (sorts and colors, never filters)
+        hl_list = list(hl_map)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
         new_after_id = int(new_after) if new_after.strip().isdigit() else None  # people above this id are new
@@ -736,7 +756,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                        source=source or None, color=color or None, **member)
             where = ("WHERE " + " AND ".join(conds)) if conds else ""
             total = store._row(f"SELECT count(*) AS n FROM candidates c {where}", params)["n"]
-            if sort == "color":  # rainbow order, newest first inside each colour (desc: untagged first, purple back to red)
+            if sort == "color":  # color order, newest first inside each colour (desc: untagged first, purple back to red)
                 order = f"{sql_sort} {direction}, c.updated_at DESC, c.id DESC"
             elif sort in EMPTY_LAST:
                 order = f"({sql_sort} = '') ASC, {sql_sort} {direction}, c.id DESC"
@@ -756,9 +776,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                       client=client, stage=stage, pipe=pipe, color=color,
                                       cf="1" if colored_first and q.strip() else "",
                                       days="" if not pipe or day_n is None else day_n,
-                                      ids=",".join(map(str, id_list)), hl=",".join(hl_list),
+                                      ids=",".join(map(str, id_list)), hl=searchquery.join_hl(hl_map.items()),
                                       **more_params).items() if v != ""}
-        ctx = dict(rows=rows, total=total, q=q, hl=hl_list, hl_bar=hl_bar(hl_list, keep, q, sort, dir, qsort, qdir), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
+        ctx = dict(rows=rows, total=total, q=q, hl=hl_map, hl_bar=hl_bar(hl_map, keep, q, sort, dir, qsort, qdir), ticked=set(id_list), from_chat=len(id_list), tag=tag, location=location, source=source, sort=sort, dir=dir,
                    job=job_id or "", client=client, stage=stage, keep=keep, mf=more_params,
                    more_open=any(k in more_params for k in searchquery.MORE_KEYS),
                    active_chips=filter_chips(q, keep, sort, dir, job_id, more_params),

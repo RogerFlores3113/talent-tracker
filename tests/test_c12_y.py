@@ -1,4 +1,4 @@
-"""Cycle 12, builder Y: clicking a skill highlights it in a rainbow color and sorts by it (never filters)."""
+"""Cycle 12, builder Y: clicking a skill highlights it in a color and sorts by it (never filters)."""
 import html as htmllib
 import re
 from urllib.parse import parse_qs, urlsplit
@@ -84,14 +84,14 @@ def test_bar_colors_and_links(store):
     bar = html[html.index('aria-label="Highlighted skills"'):]
     bar = bar[:bar.index("</div>")]
     assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+)"', bar) == [
-        ("red", "python"), ("orange", "go"), ("yellow", "sql")]
+        ("red", "python"), ("yellow", "go"), ("green", "sql")]
     hrefs = re.findall(r'href="([^"]+)"[^>]*aria-label="Remove highlight: (\w+)"', bar)
     q = _qs(hrefs[1][0])  # remove go
-    assert q["hl"] == ["python,sql"] and q["tag"] == ["python"] and q["sort"] == ["name"]
-    clear = re.search(r'href="([^"]+)">Clear highlights', bar).group(1)
+    assert q["hl"] == ["python:red,sql:green"] and q["tag"] == ["python"] and q["sort"] == ["name"]
+    clear = re.search(r'href="([^"]+)">Clear</a>', bar).group(1)
     q = _qs(clear)
     assert "hl" not in q and q["tag"] == ["python"]
-    assert "Highlighted skills first (python, then go, then sql)" in html
+    assert "People with more of the highlighted skills come first" in html
     assert 'aria-label="Highlighted skills"' not in c.get("/candidates").text
 
 
@@ -105,11 +105,11 @@ def test_row_chip_toggle_and_order(store):
     assert [x[4] for x in chips] == ["go", "python", "react", "aws"]  # go first, still four shown
     assert "+1" in row
     go = chips[0]
-    assert go[1] == ' data-hl="red"' and go[3] == "go, highlighted (remove)"
+    assert go[1] == ' data-hl="red"' and go[3] == "go, highlighted red (remove)"
     q = _qs(go[2])
     assert "hl" not in q and q["tag"] == ["python"] and q["sort"] == ["name"]
     py = chips[1]
-    assert py[3] == "Highlight python" and _qs(py[2])["hl"] == ["go,python"] and _qs(py[2])["tag"] == ["python"]
+    assert py[3] == "Highlight python" and _qs(py[2])["hl"] == ["go:red,python:yellow"] and _qs(py[2])["tag"] == ["python"]
 
 
 def test_candidate_page_chip_starts_highlight(store):
@@ -135,7 +135,7 @@ def test_saved_search_keeps_highlight(store):
     _seed(store)
     c = local_client(store)
     html = c.get("/candidates?hl=python,go").text
-    assert 'name="hl" value="python,go"' in html
+    assert 'name="hl" value="python:red,go:yellow"' in html
 
 
 def test_highlight_alone_is_not_called_a_match(store, client):

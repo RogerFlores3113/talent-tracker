@@ -49,7 +49,7 @@ html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
  html[data-mode=fullscreen] table.ptable td.k-match .clamp{-webkit-line-clamp:3;line-clamp:3}
  table.ptable th.k-name{min-width:clamp(4rem,9vw,8rem)}
 }
-table.ptable.hide-title .k-title,table.ptable.hide-company .k-company,table.ptable.hide-location .k-location,table.ptable.hide-stage .k-stage,table.ptable.hide-contacted .k-contacted,table.ptable.hide-added .k-added,table.ptable.hide-updated .k-updated,table.ptable.hide-color .k-color,table.ptable.hide-match .k-match{display:none!important}
+table.ptable.hide-title .k-title,table.ptable.hide-company .k-company,table.ptable.hide-location .k-location,table.ptable.hide-stage .k-stage,table.ptable.hide-contacted .k-contacted,table.ptable.hide-added .k-added,table.ptable.hide-updated .k-updated,table.ptable.hide-color .k-color,table.ptable.hide-match .k-match,table.ptable.hide-skills .k-skills{display:none!important}
 
 /* finalists table */
 table.ftable th,table.ftable td{max-width:none;white-space:normal;height:auto;padding:6px;vertical-align:top;overflow:visible;text-overflow:clip}
@@ -84,3 +84,17 @@ table.ptable.hide-job .k-job,table.ptable.hide-email .k-email,table.ptable.hide-
  table.ptable td.k-email .addr{white-space:nowrap}
 }
 @media (max-width:560px){.tablebox .edge{display:none}.scrollhint{display:none}}
+
+/* skill highlights: same fixed fills as the Candidates page; the chip keeps its own readable ink */
+.chips.skillchips{margin-top:0;align-items:center}
+button.chip{font:inherit;font-size:.75rem;color:var(--text);border:1px solid var(--line);cursor:pointer;text-decoration:none}
+button.chip:hover{border-color:var(--accent)}
+.chip.hl{font-weight:600;border-color:var(--text);background:var(--bub);color:var(--bub-ink)}
+.chip[data-hl=red]{--bub:#c62828;--bub-ink:#fff}.chip[data-hl=yellow]{--bub:#f6d53d;--bub-ink:#1a1a1a}.chip[data-hl=green]{--bub:#1f7a3d;--bub-ink:#fff}
+.chip[data-hl=blue]{--bub:#2563c9;--bub-ink:#fff}.chip[data-hl=purple]{--bub:#7b3fc4;--bub-ink:#fff}.chip[data-hl=orange]{--bub:#f59a23;--bub-ink:#1a1a1a}
+.hlbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0}
+table.ptable tr.hlrow>td.pickcell{box-shadow:inset 4px 0 0 var(--edge)}
+table.ptable tr[data-edge=red]{--edge:#c62828}table.ptable tr[data-edge=yellow]{--edge:#f6d53d}table.ptable tr[data-edge=green]{--edge:#1f7a3d}
+table.ptable tr[data-edge=blue]{--edge:#2563c9}table.ptable tr[data-edge=purple]{--edge:#7b3fc4}table.ptable tr[data-edge=orange]{--edge:#f59a23}
+@media (max-width:560px){table.ptable tr.hlrow{box-shadow:inset 4px 0 0 var(--edge)}table.ptable tr.hlrow>td.pickcell{box-shadow:none}}
+@media (min-width:561px){table.ptable td.k-skills{min-width:9.5rem}table.ptable td.k-skills .chips{flex-wrap:wrap;gap:4px}table.ptable td.k-skills .chip{white-space:nowrap}}

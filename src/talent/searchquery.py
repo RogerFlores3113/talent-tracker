@@ -550,7 +550,9 @@ def years_of_experience(roles: list[tuple[str | None, str | None]], today: date 
 PARAM_KEYS = ("q", "tag", "location", "source", "job", "client", "stage", "title", "company", "skills", "skill_mode",
               "remote", "exp_min", "exp_max", "contacted", "contacted_days", "added_days", "has_email", "has_linkedin",
               "color", "hl")
-HL_MAX = 6  # skills a person can highlight at once (one rainbow color each)
+HL_MAX = 6  # skills a person can highlight at once (one color each)
+# The highlight colors, in the order a new pick takes the first free one.
+HL_PALETTE = ("red", "yellow", "green", "blue", "purple", "orange")
 CONTACTED_CHOICES = ("never", "older", "within")
 COLOR_CHOICES = ("red", "orange", "yellow", "green", "blue", "purple")
 MORE_KEYS = ("title", "company", "skills", "remote", "exp_min", "exp_max", "contacted", "added_days", "has_email",
@@ -574,14 +576,47 @@ def split_skills(value: Any) -> list[str]:
     return out[:12]
 
 
-def split_hl(value: Any) -> list[str]:
-    """'Python, go,python' -> ['python', 'go'] (lower case, no repeats, at most HL_MAX): skills to highlight, in click order."""
-    out: list[str] = []
+def parse_hl(value: Any) -> list[tuple[str, str]]:
+    """'python:red,go' -> [('python', 'red'), ('go', 'yellow')]: skills to highlight, in click order, each with its color.
+
+    A color written as 'skill:color' stays with that skill; a skill with none (old links: 'python,go') takes the first
+    free color in HL_PALETTE order. Lower case, no repeats, at most HL_MAX."""
+    entries: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
     for part in str(value or "").split(","):
-        p = " ".join(part.split())[:60].lower()
-        if p and p not in out:
-            out.append(p)
-    return out[:HL_MAX]
+        name, _, col = part.rpartition(":")
+        if not name or col.strip().lower() not in HL_PALETTE:
+            name, col = part, ""
+        p = " ".join(name.split())[:60].lower()
+        if p and p not in seen:
+            seen.add(p)
+            entries.append((p, col.strip().lower() or None))
+    entries = entries[:HL_MAX]
+    used: set[str] = set()
+    fixed: list[str | None] = []
+    for _, col in entries:
+        if col and col not in used:
+            used.add(col)
+            fixed.append(col)
+        else:
+            fixed.append(None)
+    out: list[tuple[str, str]] = []
+    for (name, _), col in zip(entries, fixed):
+        if col is None:
+            col = next(c for c in HL_PALETTE if c not in used)
+            used.add(col)
+        out.append((name, col))
+    return out
+
+
+def split_hl(value: Any) -> list[str]:
+    """'Python:red, go,python' -> ['python', 'go'] (lower case, no repeats, at most HL_MAX): skills to highlight, in click order."""
+    return [name for name, _ in parse_hl(value)]
+
+
+def join_hl(pairs: Any) -> str:
+    """[('python', 'red')] -> 'python:red' (what goes in the hl parameter, so a color stays with its skill)."""
+    return ",".join(f"{n}:{c}" for n, c in pairs)
 
 
 def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
@@ -616,7 +651,7 @@ def clean_params(raw: Mapping[str, Any] | None) -> dict[str, str]:
             if s not in (*COLOR_CHOICES, "none"):
                 continue
         elif k == "hl":
-            s = ",".join(split_hl(s))
+            s = join_hl(parse_hl(s))
             if not s:
                 continue
         elif k == "skill_mode":
@@ -685,7 +720,7 @@ def describe(params: Mapping[str, Any]) -> str:
     elif c == "within":
         bits.append(f"contacted in the last {p['contacted_days']} days")
     if "hl" in p:
-        bits.append("highlighting " + ", ".join(p["hl"].split(",")))
+        bits.append("highlighting " + ", ".join(split_hl(p["hl"])))
     if "added_days" in p:
         bits.append(f"added in the last {p['added_days']} days")
     if "has_email" in p:
