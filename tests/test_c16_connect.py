@@ -55,7 +55,8 @@ class Fake:
 
     def go(self, platform, command):
         return integrations.restart_claude(platform=platform, running=self.running, run=self.run, launch=self.launch,
-                                           command=command, sleep=self.sleep, clock=self.clock)
+                                           command=command, sleep=self.sleep, clock=self.clock,
+                                           pids=lambda: [4242])
 
 
 def test_mac_running_is_quit_then_opened():
@@ -76,14 +77,14 @@ def test_mac_not_running_just_opens():
 def test_windows_running_is_asked_to_close_then_started():
     f = Fake()
     r = f.go("win32", [r"C:\Claude\Claude.exe"])
-    assert f.calls == [["taskkill", "/IM", "claude.exe"]] and "/F" not in f.calls[0]
+    assert f.calls == [["taskkill", "/PID", "4242"]] and "/F" not in f.calls[0]
     assert f.launched == [[r"C:\Claude\Claude.exe"]] and r["ok"]
 
 
 def test_windows_that_will_not_close_is_never_force_killed():
     f = Fake(quits=False)
     r = f.go("win32", [r"C:\Claude\Claude.exe"])
-    assert f.calls == [["taskkill", "/IM", "claude.exe"]]  # asked once, politely
+    assert f.calls == [["taskkill", "/PID", "4242"]]  # asked once, politely
     assert f.launched == [] and not r["ok"] and f.t >= 10
     assert r["message"].startswith("Connected") and integrations.quit_instruction("win32") in r["message"]
 
@@ -120,7 +121,7 @@ def test_connect_on_mac_restarts_and_shows_one_message(store, monkeypatch):
         "supported": True, "ok": True, "quit": True, "message": integrations.CLAUDE_DONE})
     text = local_client(store).post("/connect/claude").text
     assert calls == [1] and text.count(integrations.CLAUDE_DONE) == 1
-    assert "One more step" not in text and "completely" not in text.split("What we did")[0]
+    assert "One more step" not in text and "completely" not in text.split("Technical details")[0]
 
 
 def test_connect_when_claude_will_not_close_says_the_one_quit_line(store, monkeypatch):
@@ -134,9 +135,11 @@ def test_connect_when_claude_will_not_close_says_the_one_quit_line(store, monkey
 
 def test_connect_on_linux_does_not_restart(store, monkeypatch):
     _fake_connect(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(integrations, "restart_claude", lambda **k: pytest.fail("restart on Linux"))
     text = local_client(store).post("/connect/claude").text
-    assert sys.platform != "darwin" and "One more step" in text  # today's behaviour
+    assert "Open Claude and start a new chat" in text and "Quit Claude Desktop" not in text
+    assert text.count("start a new chat") == 1 and "Linux has no restart" in text
 
 
 def test_connect_button_says_it_restarts_claude(store, monkeypatch):
@@ -159,13 +162,14 @@ def test_add_skills_installs_saves_reveals_opens_and_is_idempotent(store, env, m
     assert not (env["home"] / ".agents").exists()  # Codex isn't here, so nothing was made for it
     assert (env["dl"] / "talent-search.plugin").is_file() and len(shown) == 1 and opened == [1]
     t = r.text
-    assert "Claude Code</strong>: Added 6 skills" in t and "Codex</strong>: Not found" in t
+    assert "Claude Code</strong>: added 6 skills to your Claude Code skills folder (~/.claude/skills)" in t
+    assert "Codex</strong>: not found" in t
     assert "In Claude, open Customize &gt; Plugins" in t and "Press Add, then Upload plugin" in t
-    assert "Pick talent-search.plugin (it&#39;s selected in the window that just opened)" in t or \
-        "Pick talent-search.plugin (it's selected in the window that just opened)" in t
-    assert "Show in folder" in t and "RogerFlores3113/talent-tracker" in t and "Already up to date" not in t
+    assert "Pick talent-search.plugin" in t and "Show in folder" in t and "Already up to date" not in t
     again = c.post("/connect/skills/add").text
-    assert "Already up to date" in again
+    assert "Already up to date" in again and "is still in" in again
+    assert "Upload plugin" not in again and "selected in the window" not in again
+    assert len(shown) == 1 and opened == [1]  # a repeat press shows and opens nothing again
 
 
 def test_add_skills_keeps_files_the_person_edited(store, env, monkeypatch):

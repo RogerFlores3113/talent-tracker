@@ -58,7 +58,7 @@ PAGE_SIZES = ("100", "250", "all")  # the Candidates "Show" choice; All stops at
 FORM_FIELDS_MAX = 12000  # form fields a bulk post may carry (one per ticked person, plus the filters); Starlette stops at 1000
 BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
-BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
+BIG_IMPORT_ROWS = 5000  # from here on the import page says it can take a little while, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv", "/export.xlsx", "/candidates/export.xlsx",
              "/candidates/export.csv"}  # whole-database downloads: never for another site's page
@@ -566,8 +566,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"saved_searches": store.list_saved_searches(counts=True),
-                "today": actions.action_items(store), "jobs": store.list_jobs("open"),
+        today = actions.action_items(store)
+        next_steps: dict[str, Any] = {}
+        if not today["items"]:  # nothing needs them: say what would help next, only the steps that apply
+            try:
+                dups = duplicates.count(store)
+            except Exception:
+                dups = 0
+            try:
+                claude_ok = integrations.claude_connected()
+            except Exception:
+                claude_ok = True  # can't tell: don't nag
+            next_steps = {"dups": dups, "claude": not claude_ok}
+        return {"saved_searches": store.list_saved_searches(counts=True), "next_steps": next_steps,
+                "today": today, "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
@@ -2191,6 +2203,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
+                    nothing_to_do=importers.nothing_to_do(preview), target_groups=importers.target_groups(),
+                    stage_mapped=any(m in ("stage", "jobs") for m in mapping),
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
                     replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
                     allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
@@ -2270,6 +2284,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
                     for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
+                    headline=importers.result_headline(result, len(rows)),
                     line_note=importers.line_note(file_text, len(rows)),
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
                     closed_lines=importers.closed_job_lines(result),
@@ -2425,6 +2440,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if request.method != "GET" or request.url.path.startswith(("/static/", "/api/")):
             return None
         try:
+            asked = request.query_params.get("tour")
+            if tour.state(store)["active"] and asked in tour.MODES:
+                tour.restart(store, asked)  # a replay link starts over, even while a tour is running
             if not tour.state(store)["active"]:
                 if request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
                     return None  # never over the install buttons on their own
@@ -4591,7 +4609,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
         return page(request, "_connect_result.html", ok=True, target=target, result=result, check=check,
                     restart=restart, quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
-                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
+                    healthy_line=(integrations.ALREADY_HEALTHY_LINE if result.get("already_connected")
+                                  else integrations.HEALTHY_LINE),
+                    restarts=integrations.restart_supported(), claude_running=bool(integrations.app_running("claude")))
 
     @app.post("/connect/{target}/test", response_class=HTMLResponse)
     def connect_test(request: Request, target: str):
@@ -4609,7 +4629,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
         return page(request, "_connect_test.html", target=target, entry=entry, check=check, problems=problems,
                     quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
-                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
+                    test_ok_line=integrations.TEST_OK_LINE, restarts=integrations.restart_supported())
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")

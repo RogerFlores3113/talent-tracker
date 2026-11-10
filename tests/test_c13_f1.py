@@ -108,7 +108,7 @@ def test_label_wording_and_no_color_arrow_while_highlighting(store):
     _seed(store)
     c = local_client(store)
     on = c.get("/candidates?hl=python").text
-    assert "Sorted by highlighted skills first, then by label color." in on
+    assert "Highlighted skills first, then by label color." in on
     assert "Sorted by color: red" not in on
     head = on[on.index('class="colorcell"'):]
     head = head[:head.index("</th>")]

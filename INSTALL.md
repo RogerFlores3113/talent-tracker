@@ -5,6 +5,14 @@ Claude in the Claude desktop app (Code tab or Cowork), Claude Code or Codex, run
 their own computer. Follow these steps exactly. Talk to the person in plain, friendly
 words; they may not be technical.
 
+## 0. Check where you are running
+
+Make sure you are on the person's own computer and not in a cloud sandbox. If you are
+in a sandbox (for example Claude's Cowork or a cloud container), stop. Installing there
+would not put Talent Search on their computer. Give the person the one-line command for
+their system (see step 2) and ask them to run it themselves in a terminal (Mac, Linux)
+or PowerShell (Windows).
+
 ## 1. Detect the operating system
 
 - macOS on Apple Silicon (`uname -m` prints `arm64`): use the shell script.
@@ -13,6 +21,9 @@ words; they may not be technical.
 - Intel Mac or anything else: stop and go to "If it fails".
 
 ## 2. Run the installer
+
+Run exactly one script, the one for this operating system, then stop. Do not run both,
+and do not run it again unless it failed.
 
 macOS or Linux, from any folder:
 
@@ -45,6 +56,11 @@ person's candidates and settings are stored in a separate folder and are kept.
 
 ## 3. What success looks like
 
+Confirm the app opened: the installer prints that Talent Search should be open in the
+browser, or the person sees a browser tab at `http://127.0.0.1:8765`. If that page says
+it is locked, tell the person to open Talent Search from its app icon (Applications on
+Mac, Start menu on Windows, applications menu on Linux) instead.
+
 The script prints "Download verified", then "Installed to ...", then a closing message,
 and exits with status 0. Talent Search opens in the person's web browser at
 `http://127.0.0.1:8765`.
@@ -54,6 +70,23 @@ browser. Press **Connect Claude**, then press **Add skills**." Those two buttons
 the Talent Search window that just opened. **Connect Claude** links the app to Claude,
 and **Add skills** adds the Talent Search skills. You do not need to edit any
 configuration files yourself.
+
+Before they press **Connect Claude**, warn them: on Mac and Windows it quits and reopens
+Claude Desktop (it never forces it), so this chat may close, and they can come back to
+it afterwards. Linux has no restart. Save anything they are typing in Claude first.
+
+If the installer ends with "Already connected. Restart Claude Desktop to use the new
+version.", Talent Search was already linked to Claude Desktop. Tell them to restart
+Claude Desktop and skip Connect.
+
+If Claude Desktop is not installed: Connect still works for Claude Code or Codex. If the
+person wants Claude Desktop, they should install it from claude.ai/download first, then
+press **Connect Claude**.
+
+## About the checksum
+
+The checksum file comes from the same release as the download. It catches a broken or
+partial download, but it would not catch a tampered release.
 
 ## If it fails
 

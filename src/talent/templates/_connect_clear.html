@@ -1,0 +1,4 @@
+{# Every press replaces the page's earlier result: this empties the other result areas (all but `keep`). #}
+{% for rid in ['claude-result', 'codex-result', 'lmstudio-result', 'skills-add-result', 'skills-all-result', 'skills-claude-code-result', 'skills-codex-result', 'plugin-result'] if rid != keep %}
+<div id="{{ rid }}" aria-live="polite" hx-swap-oob="true"></div>
+{% endfor %}

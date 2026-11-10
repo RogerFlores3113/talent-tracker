@@ -139,7 +139,7 @@ def test_import_result_page_copy(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name,Email,Last contacted\nAna,ana@x.com,\nCy,cy@x.com,soon\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "last_contacted_at"})
-    assert "Added 1, updated 0, unchanged 1." in r.text
+    assert "2 rows: 1 person added, 1 unchanged." in r.text
     assert "Imported, with a cell left blank (1)" in r.text and "Skipped rows" not in r.text
 
 

@@ -117,7 +117,7 @@ def test_check_again_reworks_the_preview(store):
     assert "Will add 0, update 1 (title)" in r.text
     r = c.post("/import/check", data={"token": token, "col0": "name", "col1": "email", "col2": "",
                                       "source": "Old sheet"})
-    assert "Will add 0, update 0" in r.text and 'value="Old sheet"' in r.text
+    assert "Nothing will change" in r.text and 'value="Old sheet"' in r.text
     assert store.find_duplicate("ana@x.com")["current_title"] == "Dev"
 
 

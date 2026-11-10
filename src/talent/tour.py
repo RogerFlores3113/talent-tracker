@@ -33,9 +33,10 @@ STEPS: list[dict[str, Any]] = [
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
     {"id": "claude", "title": "Connect Claude Desktop", "path": "/connect", "target": ["#claude-panel"],
      "pulse": "#claude-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "The Connect Claude button connects Claude Desktop with one click. It adds Talent Search to Claude's "
-             "settings and does nothing else. The tour will not click it for you. Click it now or later, then press "
-             "Next. Don't have it? Press Next, you can connect later."},
+     "body": "This panel connects Claude Desktop with one click. It adds Talent Search to Claude's "
+             "settings and does nothing else. The tour will not press its button for you. If Claude is not "
+             "connected yet, press Connect Claude now or later, then press Next. Already connected? The panel "
+             "offers Test connection instead. Don't have it? Press Next, you can connect later."},
     {"id": "codex", "title": "Connect Codex or another app", "path": "/connect", "target": ["#codex-panel"],
      "pulse": "#codex-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
      "body": "Using Codex instead? One click here connects it the same way. LM Studio has its own button just below, "
@@ -44,7 +45,8 @@ STEPS: list[dict[str, Any]] = [
     {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
      "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
      "body": "A skill is a short page of instructions that teaches your AI app to work well here. Press Add skills "
-             "to add them. You see the exact files first. Don't have one? Press Next, you can add them later."},
+             "to add them. It copies them in right away and tells you where they went. A skill file you edited yourself "
+             "is never overwritten. Don't have one? Press Next, you can add them later."},
     {"id": "load", "title": "Try it with demo people", "path": None, "target": [], "modes": (FULL,),
      "action": "load",
      "body": "Want something to click on? The tour can add 16 made-up people and 2 jobs, all named Example. "
@@ -110,6 +112,17 @@ def start(store: Store, mode: str = FULL) -> dict[str, Any]:
         return st
     store.set_settings(tour_active="1", tour_mode=mode if mode in MODES else FULL, tour_step="0", tour_loaded="0",
                        tour_loaded_at="")
+    return state(store)
+
+
+def restart(store: Store, mode: str = FULL) -> dict[str, Any]:
+    """A replay link while a tour is running: go back to its first step. Demo people the tour loaded stay
+    accounted for, so a tour that loaded them keeps its mode (the full tour is the one that clears them)."""
+    st = state(store)
+    if not st["active"]:
+        return start(store, mode)
+    keep_mode = st["mode"] if st["loaded"] else (mode if mode in MODES else FULL)
+    store.set_settings(tour_mode=keep_mode, tour_step="0")
     return state(store)
 
 
@@ -193,7 +206,7 @@ def steps_for(store: Store, mode: str, at: int | None = None) -> list[dict[str, 
                 "pulse": s.get("pulse", ""), "reach": s.get("reach", ""), "action": s.get("action", ""), "cta": ""}
         if s["id"] == "colors" and nobody:
             step["body"] = ("Give people a color to sort them your way: each row has a round bubble you click to "
-                            "change its color. The chips above show only one color. Add a person and try it.")
+                            "change its color. Add a person and try it.")
             step["reach"] = step["pulse"] = ""
         if s["id"] == "load" and present:
             step["action"] = ""

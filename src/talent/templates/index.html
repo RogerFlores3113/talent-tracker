@@ -8,17 +8,19 @@
 {% set tz_unset = not user_zone() and computer_on_utc() %}
 {% set first_run = not (total_all or jobs or searching) %}
 {% set tz_fallback = tz_unset and shown_zone_name() %}
-{% set tz_block %}{% if not searching and (tz_unset or user_zone()) %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone" data-tz-banner data-tz-saved="{{ user_zone() or '' }}"{{ '' if tz_unset else ' hidden' }}>
+{% set keep_zone = tz_fallback or 'UTC' %}
+{% set tz_block %}{% if not searching and tz_unset %}<form method="post" action="/settings/time-zone" class="flash tz-banner" aria-label="Your time zone" data-tz-banner>
   <input type="hidden" name="next" value="/">
-  <span data-tz-text>{% if tz_fallback %}Times show in {{ tz_fallback }}, your company's time zone, because this computer's clock is on UTC. Is that your zone?{% elif tz_unset %}Times show in UTC because this computer's clock is on UTC. Is that your zone?{% else %}This computer's time zone changed. Times show in {{ user_zone() }}. Switch?{% endif %}</span>
+  <span data-tz-text>{% if tz_fallback %}Times show in {{ tz_fallback }}, your company's time zone, because this computer's clock is on UTC. Is that your zone?{% else %}Times show in UTC because this computer's clock is on UTC. Is that your zone?{% endif %}</span>
   <button class="btn small primary" type="submit" name="use_zone" value="" data-tz-use hidden></button>
+  <button class="btn small" type="submit" name="use_zone" value="{{ keep_zone }}">Keep {{ keep_zone }}</button>
   <details class="tz-other" data-tz-other>
     <summary>Pick another</summary>
-    <input type="text" name="time_zone" value="" list="zone-list" autocomplete="off" placeholder="America/Chicago, or ET, CT, MT, PT" aria-label="Time zone">
+    <input type="text" name="time_zone" value="" list="zone-list" autocomplete="off" placeholder="e.g. America/Chicago or PT" aria-label="Time zone">
     <button class="btn small" type="submit">Save</button>
   </details>
 </form>{{ zone_list() }}{% endif %}{% endset %}
-{% if not first_run %}{{ tz_block }}{% endif %}
+{{ tz_block }}
 {% if qp.get('sample') %}<p class="flash">Sample data loaded. Try searching for “rust” or open the Jobs tab. You can remove it any time.</p>{% endif %}
 {% if total_all or jobs or searching %}
 <h1 class="sr-only">Today</h1>
@@ -39,5 +41,4 @@
 {% endif %}
 <p class="sr-only" id="results-status" role="status"></p>
 <section id="results">{% if searching %}{% include "_results.html" %}{% else %}{% include "_overview.html" %}{% endif %}</section>
-{% if first_run %}{{ tz_block }}{% endif %}
 {% endblock %}

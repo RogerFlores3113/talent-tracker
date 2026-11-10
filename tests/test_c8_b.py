@@ -136,7 +136,7 @@ def test_default_sort_is_rainbow_then_untagged_newest_first_inside_each(store):
     html = local_client(store).get("/candidates").text
     assert _names(html) == ["Red Two", "Rae Red", "Olive Orange", "Yan Yellow", "Gus Green", "Bo Blue", "Pat Purple",
                             "Zed Plain", "Una Plain"]
-    assert "Sorted by color" in html
+    assert "Sorted by label color" in html
     desc = _names(local_client(store).get("/candidates?sort=color&dir=desc").text)
     assert desc[:2] == ["Zed Plain", "Una Plain"] and desc[-1] in ("Rae Red", "Red Two")
 
@@ -147,7 +147,7 @@ def test_another_column_sorts_by_that_column_alone(store):
     assert _names(c.get("/candidates?sort=name&dir=asc").text) == ["Abe", "Bea", "Cara"]
     assert _names(c.get("/candidates?sort=name&dir=desc").text) == ["Cara", "Bea", "Abe"]
     page = c.get("/candidates?sort=name&dir=asc").text
-    assert "Sorted by name only" in page and "sort=color" in page  # a way back to the color grouping
+    assert "Sorted by name." in page and "sort=color" in page  # a way back to the color grouping
     assert _names(c.get("/candidates?sort=bogus").text) == ["Bea", "Cara", "Abe"]  # unknown sort: the default
 
 
@@ -192,7 +192,7 @@ def test_search_sorts_by_match_and_colored_first_groups_by_color(store):
             store.set_color(ids[name], color)
     c = local_client(store)
     plain = c.get("/candidates?q=python").text
-    assert "Sorted by best match" in plain and "Colored first" in plain
+    assert "Best match first" in plain and "Colored first" in plain
     by_match = _names(plain)
     assert sorted(by_match) == sorted(ids) and "checked" not in plain.split('name="cf"')[1].split(">")[0]
     grouped = c.get("/candidates?q=python&cf=1").text

@@ -22,7 +22,7 @@
 //                             their interviews still to come, which get cancelled; data-open their sessions
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
-//   data-tz-use               on a submit button (name use_zone): shown as "Use <this browser's zone>?" (one click saves it)
+//   data-tz-use               on a submit button (name use_zone): shown as "Use <this browser's zone>" (one click saves it)
 //   data-stage-pick           on a stage menu: a mouse pick moves at once (or asks for a reason first for an out stage);
 //                             with the keyboard it waits for Enter or blur. After a move, focus returns to that person.
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
@@ -133,33 +133,18 @@
     try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
     if (!zone) return;
     document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
-    // One click: "Use America/Chicago?" saves this browser's zone as it is. UTC is never suggested: it is what we are fixing.
+    // One click: "Use America/Chicago" saves this browser's zone as it is. UTC is never suggested: it is what we are fixing.
     const useless = /^(utc|etc\/utc|gmt|etc\/gmt)$/i.test(zone);
     document.querySelectorAll("button[data-tz-use]").forEach(b => {
       if (useless) return;
-      b.textContent = "Use " + zone + "?"; b.value = zone; b.hidden = false;
+      b.textContent = "Use " + zone; b.value = zone; b.hidden = false;
     });
     // With no one-click button, the box to type in starts open.
     if (useless) document.querySelectorAll("details[data-tz-other]").forEach(d => { d.open = true; });
   }
-  // The banner only shows when it matters: the server shows it when this computer says UTC with no zone saved; for a
-  // saved zone it stays hidden unless this browser's zone has a different offset now.
-  function offsetOf(zone) {
-    try {
-      const p = new Intl.DateTimeFormat("en-US", {timeZone: zone, timeZoneName: "longOffset"}).formatToParts(new Date())
-        .find(x => x.type === "timeZoneName");
-      return p ? p.value : null;
-    } catch (e) { return null; }
-  }
-  function checkZoneBanner() {
-    let zone = "";
-    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* leave it hidden */ }
-    document.querySelectorAll("form[data-tz-banner][hidden]").forEach(f => {
-      const here = offsetOf(zone), saved = offsetOf(f.dataset.tzSaved);
-      if (zone && here && saved && here !== saved) f.hidden = false;
-    });
-  }
-  function zoneStart() { checkZoneBanner(); prefillZones(); }
+  // The banner is decided by the server: it shows only while no zone was ever chosen (a computer that says UTC).
+  // Once the person picks one, or says "Keep ...", it never comes back.
+  function zoneStart() { prefillZones(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", zoneStart);
   else zoneStart();
 
@@ -541,7 +526,8 @@
         else render();
       });
     }
-    function skip() { postForm("/tour/skip", {}); }  // "Skip tour" ends it in one click
+    // "Skip tour" ends it in one click, unless the tour loaded demo people: then it asks first, because ending clears them.
+    function skip() { if (data.demo) askToEnd(); else postForm("/tour/skip", {}); }
     function askToEnd() { confirming = true; render(); }  // Esc asks first, so a stray key doesn't end it
     // The finish step and the "End the tour?" question offer to delete the demo people the recruiter worked with and
     // the saved searches they made during the demo. What they tick is posted with Finish or Skip.
@@ -631,7 +617,11 @@
           [r.l - gap - pw, Math.min(Math.max(8, r.t), vh - ph - 8), r.l - gap - pw >= 8]];
         const ok = tries.find(t => t[2]);
         if (ok) { left = ok[0]; top = ok[1]; }
-        else { left = (vw - pw) / 2; top = Math.max(8, vh - ph - 16); }  // no room beside it: dock at the bottom
+        else {  // no room beside it: dock at the top or the bottom, whichever covers less of the lit-up area
+          left = (vw - pw) / 2;
+          const bottom = Math.max(8, vh - ph - 16), over = t => Math.max(0, Math.min(t + ph, r.b) - Math.max(t, r.t));
+          top = over(8) < over(bottom) ? 8 : bottom;
+        }
       }
       pop.style.left = Math.round(left) + "px"; pop.style.top = Math.round(top) + "px";
     }
@@ -670,13 +660,13 @@
       if (confirming) {
         count.textContent = "Before you go"; title.textContent = "End the tour?";
         body.textContent = data.demo
-          ? "The demo people the tour added will be cleared, and so will anyone you only gave a color to. A backup is saved first. Anyone else you worked with is kept as yours unless you tick the box below."
+          ? "The demo people the tour added will be cleared, and so will anyone you only gave a color to. A backup is saved first. Anyone else you worked with is kept as yours, unless you tick Also delete for them."
           : "The tour closes. You can start it again any time from Take the tour in the footer or in Settings.";
         addPicks();
         acts.append(btn("Keep going", "primary", () => { confirming = false; render(); }),
                     btn(data.demo ? "End tour and clear demo data" : "End the tour", "", () => postForm("/tour/skip", chosen())));
       } else {
-        count.textContent = (idx + 1) + " of " + steps.length;
+        count.textContent = "Step " + (idx + 1);  // no total: skipped steps would change it between pages
         title.textContent = s.title; body.textContent = s.body;
         if (!here(s)) {
           note.textContent = "This step is on another page.";

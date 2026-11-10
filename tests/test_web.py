@@ -1,3 +1,5 @@
+import sys
+
 from conftest import local_client
 
 
@@ -71,8 +73,9 @@ def test_connect_page_and_button(store, tmp_path, monkeypatch):
     (tmp_path / "codex").mkdir()
     c = client(store)
     assert "Connect Claude" in c.get("/connect").text
+    monkeypatch.setattr(sys, "platform", "linux")
     r = c.post("/connect/claude")
-    assert "Quit Claude Desktop completely" in r.text and "Settings &gt; Developer" in r.text
+    assert "Open Claude and start a new chat" in r.text and "Settings &gt; Developer" in r.text
     assert (tmp_path / "claude.json").exists()
     assert "Connected." in c.get("/connect").text
     assert "Restart Codex" in c.post("/connect/codex").text
@@ -93,7 +96,7 @@ def test_every_page_renders_with_sample_data(store):
         assert r.status_code == 200, path
         assert "—" not in r.text, f"em-dash on {path}"
     home = c.get("/").text
-    assert "Interview with Maya Example" in home and "Stuck" in home and "uses none of your data" in home
+    assert "Interview with Maya Example" in home and "Stuck" in home and "Nothing is sent anywhere" in home
     assert c.get("/nope").status_code == 404 and c.get("/candidates/9999").status_code == 404
 
 
@@ -121,7 +124,7 @@ def test_csv_import_flow_and_export(store):
     assert r.status_code == 200 and "Goes to" in r.text
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "tags"})
-    assert "Added 1" in r.text
+    assert "1 person added" in r.text
     assert "Zed Q" in c.get("/export.csv").text
     assert "expired" in c.post("/import/run", data={"token": token}).text  # temp copy removed
 

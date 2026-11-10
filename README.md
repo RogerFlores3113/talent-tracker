@@ -52,7 +52,9 @@ irm https://raw.githubusercontent.com/RogerFlores3113/talent-tracker/main/instal
 The script downloads the latest release, checks it against `SHA256SUMS.txt`, installs it
 (Mac: Applications; Windows: `%LOCALAPPDATA%\Programs\Talent Search`; Linux:
 `~/.local/share/talent-search-app`), and opens it. If Talent Search is already installed it
-is closed and replaced, and your data is kept. Files downloaded this way are not flagged
+is closed and replaced, and your data is kept. Afterwards the app is in your
+Applications folder (Mac), your Start menu (Windows) or your applications menu, or run
+`talent-search` (Linux). Files downloaded this way are not flagged
 by macOS as coming from the internet, so on a Mac you normally skip the "can't be checked
 for malware" window that the manual download below shows. Add `--no-open` (`-NoOpen` on
 Windows) to install without opening it. You can read the scripts first:
@@ -93,8 +95,10 @@ cd "Talent Search"
 
 Talent Search opens in your web browser. Two buttons there finish the setup:
 
-1. Press **Connect Claude**. This links Talent Search to Claude Desktop and, when Claude
-   Desktop is open, restarts it for you so the link takes effect.
+1. Press **Connect Claude**. This links Talent Search to Claude Desktop. On Mac and
+   Windows it quits and reopens Claude Desktop for you so the link takes effect (never by
+   force, so save your work there first). Linux has no restart: reopen Claude Desktop
+   yourself.
 2. Press **Add skills**. This puts the Talent Search skills into Claude Code and Codex,
    whichever you have. For the Claude app, it also saves `talent-search.plugin` and shows
    you where it is: in Claude, open **Customize > Plugins > Add > Upload plugin** and pick

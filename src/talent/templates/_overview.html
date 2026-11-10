@@ -58,6 +58,15 @@
     </div>
     {% if not today['items'] %}
     <p class="none">No interviews, stuck candidates or follow-ups right now. You can choose what shows here in <a href="/settings">Settings</a>.</p>
+    {% set steps = [] %}
+    {% if next_steps.dups %}{% set _ = steps.append(('/candidates/duplicates', 'Review ' ~ next_steps.dups ~ ' possible duplicate' ~ ('' if next_steps.dups == 1 else 's'), 'The same person may have come in twice. Merge them or keep both.')) %}{% endif %}
+    {% if not jobs %}{% set _ = steps.append(('/jobs/new', 'Create your first job', 'A job holds a pipeline you can move people along.')) %}{% endif %}
+    {% if next_steps.claude %}{% set _ = steps.append(('/connect', 'Connect your AI app', 'Then you can ask it to save and search people in plain words.')) %}{% endif %}
+    {% if real_count == 0 %}{% set _ = steps.append(('/import', 'Import people', 'Bring in a CSV from Excel, Google Sheets or another tool.')) %}{% endif %}
+    {% if steps %}<div class="panel next-steps" id="next-steps">
+      <h3>Next steps</h3>
+      <ul class="items">{% for href, label, why in steps %}<li class="item"><div class="item-main"><a class="item-title" href="{{ href }}">{{ label }}</a><div class="fine">{{ why }}</div></div></li>{% endfor %}</ul>
+    </div>{% endif %}
     {% endif %}
     <ul class="items" id="today-list">
     {% for i in today['items'] %}

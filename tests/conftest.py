@@ -37,6 +37,16 @@ def _no_card_key_gap(monkeypatch):
     monkeypatch.setattr(mcp_server, "CARD_MIN_GAP", 0)
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_a_real_claude(monkeypatch):
+    """Tests behave the same on Linux, macOS and Windows: no restart unless a test asks for one with an explicit
+    platform, and no look at the real process list. Tests that want the Mac or Windows behaviour patch these."""
+    from talent import integrations
+    monkeypatch.setattr(integrations, "restart_supported",
+                        lambda platform=None: (platform or "linux") in ("darwin", "win32"))
+    monkeypatch.setattr(integrations, "app_running", lambda app="claude": None)
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(tmp_path / "talent.db")

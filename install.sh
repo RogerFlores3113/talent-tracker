@@ -10,6 +10,7 @@ set -eu
 
 BASE_URL="https://github.com/RogerFlores3113/talent-tracker/releases/latest/download"
 OPEN_APP=1
+UPGRADE=0
 for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN_APP=0 ;;
@@ -114,7 +115,7 @@ if [ "$OS" = "Darwin" ]; then
   APP="$TARGET_DIR/Talent Search.app"
 
   if [ -z "$OVERRIDE_DIR" ] && pgrep -f "Talent Search.app/Contents/MacOS" >/dev/null 2>&1; then
-    say "Talent Search is running, so I am closing it to update it. Your candidates and settings are stored elsewhere and are kept."
+    say "Closing Talent Search so it can be updated. Your candidates and settings are stored elsewhere and are kept."
     osascript -e 'tell application "Talent Search" to quit' >/dev/null 2>&1 || true
     i=0
     while pgrep -f "Talent Search.app/Contents/MacOS" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do
@@ -127,10 +128,12 @@ if [ "$OS" = "Darwin" ]; then
   fi
 
   if [ -e "$APP" ]; then
+    UPGRADE=1
     say "Replacing the existing copy. Your candidates and settings are kept."
     rm -rf "$APP" || fail "Could not remove the old copy at $APP."
   fi
   ditto "$WORK/unpacked/Talent Search.app" "$APP" || fail "Could not copy the app into $TARGET_DIR."
+  chmod +x "$APP/Contents/MacOS/"* 2>/dev/null || true
   say "Installed to $APP"
 
   if [ "$OPEN_APP" = "1" ]; then
@@ -147,16 +150,17 @@ else
   APP_DIR="$TARGET_DIR/Talent Search"
   EXE="$APP_DIR/talent-search"
 
-  if [ -z "$OVERRIDE_DIR" ] && pgrep -f "$APP_DIR/" >/dev/null 2>&1; then
-    say "Talent Search is running, so I am stopping it to update it. Your candidates and settings are stored elsewhere and are kept."
-    pkill -TERM -f "$APP_DIR/" >/dev/null 2>&1 || true
+  if [ -z "$OVERRIDE_DIR" ] && pgrep -f "$EXE" >/dev/null 2>&1; then
+    say "Closing Talent Search so it can be updated. Your candidates and settings are stored elsewhere and are kept."
+    pkill -TERM -f "$EXE" >/dev/null 2>&1 || true
     sleep 2
-    if pgrep -f "$APP_DIR/" >/dev/null 2>&1; then
+    if pgrep -f "$EXE" >/dev/null 2>&1; then
       fail "Talent Search is still open. Please close it and run this again. Your data is safe."
     fi
   fi
 
   if [ -e "$APP_DIR" ]; then
+    UPGRADE=1
     say "Replacing the existing copy. Your candidates and settings are kept."
     rm -rf "$APP_DIR" || fail "Could not remove the old copy at $APP_DIR."
   fi
@@ -166,7 +170,11 @@ else
 
   if [ -z "$OVERRIDE_DIR" ]; then
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
-    ln -sf "$EXE" "$HOME/.local/bin/talent-search"
+    if [ ! -e "$HOME/.local/bin/talent-search" ] || [ -L "$HOME/.local/bin/talent-search" ]; then
+      ln -sf "$EXE" "$HOME/.local/bin/talent-search"
+    else
+      say "Note: $HOME/.local/bin/talent-search already exists and is not a link, so I left it alone."
+    fi
     cat > "$HOME/.local/share/applications/talent-search.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
@@ -187,8 +195,19 @@ fi
 
 say ""
 say "Done. Your candidates and settings live in their own folder and are never touched by installs or updates."
+if [ "$OS" = "Darwin" ]; then
+  say "Talent Search is in your Applications folder (or ~/Applications)."
+  CLAUDE_CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+else
+  say "Talent Search is in your applications menu, or run talent-search."
+  CLAUDE_CFG="$HOME/.config/Claude/claude_desktop_config.json"
+fi
 if [ "$OPEN_APP" = "1" ]; then
   say "Talent Search should now be open in your web browser."
+fi
+if [ "$UPGRADE" = "1" ] && [ -f "$CLAUDE_CFG" ] && grep -q "talent-search" "$CLAUDE_CFG" 2>/dev/null; then
+  say "Already connected. Restart Claude Desktop to use the new version."
+elif [ "$OPEN_APP" = "1" ]; then
   say "Next: press \"Connect Claude\", then press \"Add skills\"."
 else
   say "Next: open Talent Search, then press \"Connect Claude\" and \"Add skills\"."

@@ -2,6 +2,7 @@
 import hashlib
 import io
 import os
+import stat
 import subprocess
 import sys
 import tarfile
@@ -25,7 +26,8 @@ def _make_release(folder: Path) -> str:
         name = "TalentSearch-mac.zip"
         with zipfile.ZipFile(folder / name, "w") as z:
             info = zipfile.ZipInfo("Talent Search.app/Contents/MacOS/Talent Search")
-            info.external_attr = 0o755 << 16
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | 0o755) << 16
             z.writestr(info, SCRIPT)
     else:
         name = "TalentSearch-linux.tar.gz"

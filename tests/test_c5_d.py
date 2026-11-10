@@ -164,7 +164,7 @@ def test_mapping_is_remembered_per_header_set_on_the_web(store):
     r = c.post("/import", files={"file": ("a.csv", text)})
     r = c.post("/import/run", data={"token": _token(r), "filename": "a.csv", "col0": "name", "col1": "email",
                                     "col2": "about"})
-    assert "Added 1" in r.text and "the same matches are used" in r.text and "talent sync" not in r.text
+    assert "1 person added" in r.text and "the same matches are used" in r.text and "talent sync" not in r.text
     r = c.post("/import", files={"file": ("b.csv", b"full name,e-mail,notes field\nBo,bo@x.com,hi\n")})
     assert "the matches you used last time" in r.text
     assert re.search(r'name="col2"[^>]*>.*?<option value="about" selected', r.text, re.S)

@@ -21,7 +21,7 @@ def test_zone_banner_is_a_one_click_button_posting_the_detected_zone(store, monk
     store.add_candidate(name="Ana Ruiz")
     html = c.get("/").text
     assert "data-tz-use" in html and 'name="use_zone"' in html and "Pick another" in html
-    assert 'Intl.DateTimeFormat().resolvedOptions().timeZone' in JS and 'b.textContent = "Use " + zone + "?"' in JS
+    assert 'Intl.DateTimeFormat().resolvedOptions().timeZone' in JS and 'b.textContent = "Use " + zone' in JS
     r = c.post("/settings/time-zone", data={"next": "/", "use_zone": "America/Chicago", "time_zone": ""},
                follow_redirects=False)
     assert r.status_code == 303 and reports.user_zone(store) == "America/Chicago"
@@ -30,10 +30,10 @@ def test_zone_banner_is_a_one_click_button_posting_the_detected_zone(store, monk
     assert reports.user_zone(store) == "America/Los_Angeles"
 
 
-def test_zone_banner_sits_below_the_welcome_cards_on_first_run(store, monkeypatch):
+def test_zone_banner_sits_before_the_welcome_cards_on_first_run(store, monkeypatch):
     _utc(monkeypatch)
     html = local_client(store).get("/").text
-    assert html.index("Welcome to Talent Search") < html.index("data-tz-banner")
+    assert html.index("data-tz-banner") < html.index("Welcome to Talent Search")
     assert html.count("data-tz-banner") == 1
     store.add_candidate(name="Ana Ruiz")
     later = local_client(store).get("/").text
@@ -50,8 +50,9 @@ def test_zone_fallback_says_so_on_today(store, monkeypatch):
 
 def test_locked_page_has_no_command_to_run(store):
     r = local_client(store, unlocked=False).get("/")
-    assert r.status_code == 401 and "talent open" not in r.text and "terminal" not in r.text
+    assert r.status_code == 401 and "talent open" not in r.text
     assert "app icon" in r.text and "Applications" in r.text and "Start menu" in r.text
+    assert "On Linux, open Talent Search from your applications menu, or run talent-search in a terminal." in r.text
     assert "—" not in r.text
 
 
@@ -61,10 +62,11 @@ def test_candidates_explanations_are_folded_under_one_details(store):
     html = local_client(store).get("/candidates", params={"q": "python OR go", "hl": "python"}).text
     d = html[html.index('<details class="how-details"'):]
     d = d[:d.index("</details>")]
-    assert "How does this work?" in d and "How we read your search" in d
-    assert "People with more of these skills come first" in d and "Sorted by" in d
+    assert "How does this work?" in d and "People with more of these skills come first" in d
+    # the plain-language reading stays on the visible line, not inside the fold
+    assert "How we read your search" not in d
     before = html[:html.index('<details class="how-details"')]
-    assert "How we read your search" not in before and "People with more of these skills" not in before
+    assert "How we read your search" in before and "People with more of these skills" not in before
 
 
 def test_candidates_empty_state_has_next_steps(store):

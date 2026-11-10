@@ -1,3 +1,5 @@
+{% set keep = 'skills-all-result' %}
+{% include "_connect_clear.html" %}
 {% if action == 'error' %}
 <p class="error" role="alert" tabindex="-1" autofocus>That didn't work: {{ error }}</p>
 <p class="fine">Nothing was finished. You can also run <code>talent install-skills</code> in a terminal.</p>

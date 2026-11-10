@@ -177,7 +177,7 @@ def test_cli_plugin_and_default(home, tmp_path, capsys):
 def test_page_details_labels_and_friendly_names(store):
     c = local_client(store)
     page = c.get("/connect").text
-    for label in ("Copy Claude Code command", "Copy marketplace name", "Copy Claude Code plugin command 1"):
+    for label in ("Copy Claude Code command", "Copy Claude Code plugin command 1"):
         assert f'aria-label="{label}"' in page
     assert "Find people for a role" in page and "talent-search-source-for-a-role" in page
     assert page.index("Step 1. Connect your AI app") < page.index("Step 2. Add skills")

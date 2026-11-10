@@ -1,5 +1,7 @@
 """Cycle 10 D: paste a resume or note reads every role, strips trailing punctuation, labels the source
 honestly and says what was NOT found; the Connect page speaks to a recruiter first."""
+import sys
+
 import pytest
 
 from talent import importers
@@ -230,7 +232,8 @@ def test_connect_buttons_still_work(store, tmp_path, monkeypatch):
     from conftest import local_client
     root = _connect_env(tmp_path, monkeypatch)
     c = local_client(store)
-    assert "Quit Claude Desktop completely" in c.post("/connect/claude").text
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert "Open Claude and start a new chat" in c.post("/connect/claude").text
     assert (root / "claude" / "claude.json").exists()
     assert "Connected." in c.get("/connect").text and "Test connection" in c.get("/connect").text
     assert c.post("/connect/codex").status_code == 200 and (root / "codex" / "config.toml").exists()

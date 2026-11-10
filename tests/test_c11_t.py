@@ -204,9 +204,8 @@ def test_import_lists_each_merge_with_evidence_and_a_link(store):
                 "Zed Zhang,z@x.com,Acme,\nZed Zhang,z@x.com,Acme,\n")
     header, rows = importers.read_csv(csv_text)
     res = importers.import_rows(store, header, rows, importers.guess_mapping(header, rows), backup=False)
-    assert len(res["merges"]) == 2
-    why = " ".join(m["why"] for m in res["merges"])
-    assert "same name and company" in why and "same email address" in why
+    assert len(res["merges"]) == 1  # the file's own repeat is listed under "Rows saved as one person" only
+    assert "same name and company" in res["merges"][0]["why"] and len(res["merged_rows"]) == 1
     assert all(m["id"] for m in res["merges"]) and res["merge_lines"]
     panel = next(p for p in importers.result_panels(res) if p["key"] == "merge_lines")
     assert panel["rows"] and panel["title"].startswith("Folded into")
@@ -266,7 +265,7 @@ def test_a_typed_search_is_best_match_first_and_a_column_can_be_chosen(store):
     c = local_client(store)
     html = c.get("/candidates", params={"q": "python", "sort": "name"}).text
     names = re.findall(r'class="card-name"[^>]*>([^<]+)<|<a href="/candidates/\d+">([^<]+)</a>', html)
-    assert "Sorted by best match" in html
+    assert "Best match first" in html
     html2 = c.get("/candidates", params={"q": "python", "qsort": "name", "qdir": "asc"}).text
     assert "Sorted by name, low to high" in html2 and "Back to best match first" in html2
     assert html2.index("Amy Adams") < html2.index("Zed Zimmer")

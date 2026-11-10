@@ -126,7 +126,7 @@ def test_web_import_is_one_row_on_changes_with_undo(store):
     r = c.post("/import", files={"file": ("Connections.csv", text.encode())})
     assert 'name="filename" value="Connections.csv"' in r.text
     r = c.post("/import/run", data={"token": _token(r), "filename": "Connections.csv", "col0": "name", "col1": "email"})
-    assert "Added 1" in r.text
+    assert "1 person added" in r.text
     page = c.get("/changes").text
     assert "Imported Connections.csv: 2 rows, 1 new" in page and "Undo this import" in page
     listed = backups.list_backups()
@@ -222,8 +222,8 @@ def test_skipped_column_can_become_a_tag(store):
 
 
 # ------------------------------------------------------- 7. big files
-def test_big_file_says_it_takes_a_minute(store):
-    text = "Name,Email\n" + "".join(f"P{i},p{i}@x.com\n" for i in range(1001))
+def test_big_file_says_it_can_take_a_little_while(store):
+    text = "Name,Email\n" + "".join(f"P{i},p{i}@x.com\n" for i in range(5001))
     r = local_client(store).post("/import", files={"file": ("big.csv", text.encode())})
-    assert "importing 1001 rows takes about a minute" in r.text and "data-busy=" in r.text
+    assert "importing 5,001 rows can take a little while" in r.text and "data-busy=" in r.text
     assert "data-busy-note" in r.text

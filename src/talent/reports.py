@@ -1314,16 +1314,21 @@ def report_text(rep: dict[str, Any], trim: int = 0) -> str:
     if not trim:
         lines.append("- All time on these jobs: " + ", ".join(
             f"{labels[g] if labels[g] != GROUP_LABELS[g] else label} {r[g]}" for g, label in funnel(rep)))
-    listed = [(m["at"], f"{m['name']} to {m['stage']} ({m['job']})", m.get("date_only")) for m in rep["moves"]]
+    # People the client turned down or who withdrew are never named in a client's update: just how many.
+    out_n = sum(1 for m in rep["moves"] if m.get("group") == "out")
+    listed = [(m["at"], f"{m['name']} to {m['stage']} ({m['job']})", m.get("date_only"))
+              for m in rep["moves"] if m.get("group") != "out"]
     listed += [(co["at"], f"{_plural(co['count'], 'person', 'people')} closed, position filled ({co['job']})", False)
                for co in rep.get("closed_out") or []]
     listed.sort(key=lambda x: x[0])
-    if listed:
+    if listed or out_n:
         lines += ["", "Moves this period:"]
         for at, what, plain in listed[:shown_moves]:
             lines.append(f"- {_plain_day(at) if plain else _day(at, tz)}: {what}")
         if len(listed) > shown_moves:
             lines.append(f"- and {len(listed) - shown_moves} more")
+        if out_n:
+            lines.append(f"- Out: {out_n}")
     else:
         lines += ["", "Moves this period: none."]
     if rep.get("results"):

@@ -479,10 +479,12 @@ def install_all(targets: list[str]) -> dict[str, Any]:
             "skipped": [s for r in results for s in r["skipped"]], "edited": [e for r in results for e in r["edited"]]}
 
 
-def add_everywhere(*, reveal_fn=None, open_fn=None) -> dict[str, Any]:
+def add_everywhere(*, reveal_fn=None, open_fn=None, platform: str | None = None) -> dict[str, Any]:
     """The one-click 'Add skills': install into every app found here (only talent-search-* folders we made, files
     the person edited are kept), save talent-search.plugin to Downloads, show it, and open the Claude app.
-    reveal_fn and open_fn are injectable so tests start nothing."""
+    reveal_fn and open_fn are injectable so tests start nothing. On a repeat press (everything current and the
+    plugin file already in place) nothing is opened or shown again."""
+    platform = platform or sys.platform
     reveal_fn = reveal_fn or reveal
     open_fn = open_fn or open_claude_app
     found = detected_targets()
@@ -493,22 +495,33 @@ def add_everywhere(*, reveal_fn=None, open_fn=None) -> dict[str, Any]:
     for t in TARGETS:
         if t not in found:
             apps.append({"target": t, "label": TARGET_LABELS[t], "state": "missing",
-                         "line": "Not found on this computer, so nothing was added."})
+                         "line": "not found on this computer, so nothing was added."})
             continue
         p = next(x for x in plan["plans"] if x["target"] == t)
         n = sum(1 for v in p["labels"].values() if v != "unchanged")
         if n == 0:
-            line = "Already up to date."
+            line = "already up to date."
         else:
-            line = f"Added {len(p['items'])} skills."
+            line = (f"added {len(p['items'])} skills to your {TARGET_LABELS[t]} skills folder "
+                    f"({display_path(target_dir(t))}).")
         apps.append({"target": t, "label": TARGET_LABELS[t], "state": "current" if n == 0 else "added", "line": line})
-    path = write_plugin()
-    shown = bool(reveal_fn(path))
+    path = downloads_dir() / PLUGIN_FILE
+    try:
+        repeat = path.is_file() and path.read_bytes() == build_plugin()
+    except OSError:
+        repeat = False
     can_open = claude_app_command() is not None
-    opened = bool(open_fn()) if can_open else False
+    if repeat:
+        shown = opened = False
+    else:
+        path = write_plugin()
+        shown = bool(reveal_fn(path))
+        opened = bool(open_fn()) if can_open else False
     return {"apps": apps, "up_to_date": current, "skipped": done["skipped"], "edited": done["edited"],
             "plugin_path": str(path), "plugin_file": PLUGIN_FILE, "shown": shown, "can_open_claude": can_open,
-            "opened": opened, "plugin_dir": str(path.parent)}
+            "opened": opened, "plugin_dir": str(path.parent), "plugin_repeat": repeat,
+            # Mac and Windows select the file in the window; Linux can only open the folder
+            "selected": shown and platform in ("darwin", "win32")}
 
 
 # ------------------------------------------------------------------ zip for Claude Desktop (the older way)
