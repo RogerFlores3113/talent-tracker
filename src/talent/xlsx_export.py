@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import csv
 import io
 
-from . import importers, searchquery
+from . import importers, picks, searchquery
 from .searchquery import years_of_experience
 from .store import Store, stage_outcome
 from .xlsx import Colored, Link, Sheet, build_workbook
@@ -66,14 +66,24 @@ def half_years(y: float | None) -> float | None:
 
 
 def hl_words(hl: Iterable[tuple[str, str]]) -> str:
-    """[('python', 'red'), ('data engineer', 'yellow')] -> 'python (red), data engineer (yellow)'."""
-    return ", ".join(f"{n} ({c})" for n, c in hl)
+    """[('python', 'red'), ('title:data engineer', 'yellow')] -> 'python (red), title: Data Engineer (yellow)'."""
+    return ", ".join(f"{picks.label(n)} ({c})" for n, c in hl)
 
 
-def matched_skills(tags: Iterable[str], hl: list[tuple[str, str]]) -> Any:
-    """'python, data engineer (2 of 2)' in the color of the first highlighted skill this person has; '' when none."""
-    mine = {t.lower(): t for t in tags}
-    found = [(mine[n], c) for n, c in hl if n in mine]
+def matched_picks(c: dict[str, Any], hl: list[tuple[str, str]], aliases: dict[str, str] | None = None) -> Any:
+    """'python, title: Data Engineer (2 of 2)' in the color of the first pick this person matches; '' when none.
+    A skill is written as the person has it; look-alike names they merged count as the one pick."""
+    am = aliases or {}
+    tags = c.get("tags") or []
+    hits = picks.person_hits(tags, c.get("current_title"), [n for n, _ in hl], am)
+    found = []
+    for (n, col), hit in zip(hl, hits):
+        if not hit:
+            continue
+        if picks.is_title(n):
+            found.append((picks.label(n), col))
+        else:
+            found.append((next((t for t in tags if picks.canon(t, am) == picks.canon(n, am)), n), col))
     if not found:
         return ""
     return Colored(f"{', '.join(n for n, _ in found)} ({len(found)} of {len(hl)})", found[0][1])
@@ -93,7 +103,7 @@ def _assemble(cols: list[tuple[str, float]], records: list[dict[str, Any]], keep
 
 # --------------------------------------------------------------- the Candidates table
 TABLE_COLS: list[tuple[str, float]] = [
-    ("Name", 24), ("Matched skills", 28), ("Title", 28), ("Company", 24), ("Job", 28), ("Stage", 16),
+    ("Name", 24), ("Matched picks", 28), ("Title", 28), ("Company", 24), ("Job", 28), ("Stage", 16),
     ("More jobs", 9), ("Location", 22), ("Email", 28), ("Phone", 16), ("LinkedIn", 30), ("Website", 30),
     ("Other links", 36), ("Years of experience", 12), ("Skills", 40), ("Last contacted", 14), ("Updated", 14),
     ("Added", 14), ("Label color", 11)]
@@ -104,14 +114,15 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
                    hl: Iterable[tuple[str, str]] = (), now: datetime | None = None, drop_empty: bool = False) -> bytes:
     """The rows the Candidates table shows, in the order it shows them (rows come with main_job, main_stage and
     more_jobs, as the table has them). `total` is how many matched, so a cut-off list says so. `filters` is a list
-    of (what, value) pairs in words, or one line of text. `hl` adds a Matched skills column. `drop_empty` leaves out
+    of (what, value) pairs in words, or one line of text. `hl` adds a Matched picks column. `drop_empty` leaves out
     the columns nothing is in for anyone in the file (Name stays), like the file for a hiring manager."""
     years = store.experience_years()
-    hl = list(hl)
+    aliases = store.skill_alias_map()
+    hl = picks.canon_pairs(hl, aliases)
     records = []
     for c in rows:
         records.append({
-            "Name": c["name"], "Matched skills": matched_skills(c.get("tags") or [], hl) if hl else "",
+            "Name": c["name"], "Matched picks": matched_picks(c, hl, aliases) if hl else "",
             "Title": c.get("current_title") or "", "Company": c.get("current_company") or "",
             "Job": c.get("main_job") or "", "Stage": c.get("main_stage") or "", "More jobs": c.get("more_jobs") or None,
             "Location": c.get("location") or "", "Email": c.get("email") or "", "Phone": c.get("phone") or "",
@@ -120,7 +131,7 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
             "Years of experience": half_years(years.get(c["id"])), "Skills": ", ".join(c.get("tags") or []),
             "Last contacted": _day(c.get("last_contacted_at")), "Updated": _day(c.get("updated_at")),
             "Added": _day(c.get("created_at")), "Label color": c.get("color") or ""})
-    keep = ["Name"] if drop_empty else [h for h, _ in TABLE_COLS if h not in ("Matched skills", "Label color")]
+    keep = ["Name"] if drop_empty else [h for h, _ in TABLE_COLS if h not in ("Matched picks", "Label color")]
     # (a plain dump keeps its columns)
     headers, body, widths = _assemble(TABLE_COLS, records, keep)
     made = now or datetime.now()
@@ -129,7 +140,7 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
         filters = [("Filters", filters)] if filters else []
     about += [(k, v) for k, v in filters]
     if hl:
-        about.append(("Highlighted skills", hl_words(hl)))
+        about.append(("Highlighted picks", hl_words(hl)))
     if total > len(rows):
         about.append(("Note", f"This file has the first {len(rows):,} of {total:,} people"
                               + (f" (the most one file holds is {cap:,})" if cap else "")
@@ -146,10 +157,11 @@ def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (
     """The importer's CSV for these people, in the order of `ids` (the CSV export itself lists people by id).
     Dates are plain yyyy-mm-dd. The private notes and the timeline are left out unless `include_notes`. (The full
     backup in Settings keeps everything: it does not come through here.) Cells that look like formulas keep their
-    leading apostrophe. With `hl`, a "Matched skills" column follows
+    leading apostrophe. With `hl`, a "Matched picks" column follows
     Name, with the same words as the xlsx ("python, sql (2 of 2)"); the importer skips a column it doesn't know."""
     wanted = list(dict.fromkeys(ids))
-    hl = list(hl)
+    aliases = store.skill_alias_map()
+    hl = picks.canon_pairs(hl, aliases)
     raw = importers.export_csv(store, wanted)
     parsed = list(csv.reader(io.StringIO(raw)))
     head, body = parsed[0], parsed[1:]
@@ -174,18 +186,18 @@ def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (
     if not include_notes and notes_at >= 0:
         body = [r[:notes_at] + r[notes_at + 1:] for r in body]
     by_id = dict(zip((c["id"] for c in mine), body))
-    tags = {c["id"]: c.get("tags") or [] for c in mine}
+    by_person = {c["id"]: c for c in mine}
     out = io.StringIO()
     w = csv.writer(out)
     if hl:
-        w.writerow([head[0], "Matched skills", *head[1:]])
+        w.writerow([head[0], "Matched picks", *head[1:]])
     else:
         w.writerow(head)
     for i in wanted:
         if i in by_id:
             row = by_id[i]
             if hl:
-                m = matched_skills(tags[i], hl)
+                m = matched_picks(by_person[i], hl, aliases)
                 row = [row[0], importers._safe_cell(m.text if isinstance(m, Colored) else m), *row[1:]]
             w.writerow(row)
     return b"\xef\xbb\xbf" + out.getvalue().encode("utf-8")
@@ -194,10 +206,10 @@ def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (
 # --------------------------------------------------------------- the file for a hiring manager
 NOTES_MODES = ("none", "latest", "all")
 SHARE_COLS: list[tuple[str, float]] = [
-    ("Name", 20), ("Matched skills", 28), ("Title", 22), ("Company", 18), ("Location", 16),
+    ("Name", 20), ("Matched picks", 28), ("Title", 22), ("Company", 18), ("Location", 16),
     ("Years of experience", 11), ("Skills", 32), ("Stage", 13), ("LinkedIn", 24), ("Website", 24),
     ("Other links", 28), ("About", 50), ("Work history", 42), ("Email", 24), ("Phone", 15), ("Notes", 50)]
-SHARE_HEADERS = [h for h, _ in SHARE_COLS if h not in ("Matched skills", "Email", "Phone", "Notes")]
+SHARE_HEADERS = [h for h, _ in SHARE_COLS if h not in ("Matched picks", "Email", "Phone", "Notes")]
 
 
 def _year(v: str | None) -> str:
@@ -275,7 +287,8 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
     """What the hiring manager's sheet holds: headers, rows, widths, and how many people were left out as rejected.
     `leave_out` names people who stay out of the file; `skip_notes` names people whose note stays out of it."""
     job = store.get_job(job_id) if job_id else None
-    hl = list(hl)
+    aliases = store.skill_alias_map()
+    hl = picks.canon_pairs(hl, aliases)
     out_ids, no_notes = set(leave_out), set(skip_notes)
     people = []
     for cid in dict.fromkeys(i for i in ids if i not in out_ids):
@@ -288,7 +301,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
     for c in people:
         hist = store.work_history(c["id"])
         y = half_years(years_of_experience([(h["start"], h["end"]) for h in hist]))
-        rec = {"Name": c["name"], "Matched skills": matched_skills(c.get("tags") or [], hl) if hl else "",
+        rec = {"Name": c["name"], "Matched picks": matched_picks(c, hl, aliases) if hl else "",
                "Title": c.get("current_title") or "", "Company": c.get("current_company") or "",
                "Location": c.get("location") or "", "Years of experience": y, "Skills": ", ".join(c.get("tags") or []),
                "Stage": stage_of.get(c["id"], "") if job else "",
@@ -305,7 +318,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
             rec["Notes"] = _latest_note(store, c["id"])
         records.append(rec)
     cols = [(h, w) for h, w in SHARE_COLS
-            if (h != "Stage" or (job and any(c["id"] in stage_of for c in people))) and (h != "Matched skills" or hl) and (h not in ("Email", "Phone") or include_contact)
+            if (h != "Stage" or (job and any(c["id"] in stage_of for c in people))) and (h != "Matched picks" or hl) and (h not in ("Email", "Phone") or include_contact)
             and (h != "Notes" or notes in ("latest", "all"))]
     headers, rows, widths = _assemble(cols, records, keep=["Name"])
     return {"headers": headers, "rows": rows, "widths": widths, "job": job, "left_out_rejected": left_out,
@@ -335,7 +348,7 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
     if job:
         about.append(("Job", job["title"] + (f" ({job['company']})" if job.get("company") else "")))
     if t["hl"]:
-        about.append(("Highlighted skills", hl_words(t["hl"])))
+        about.append(("Highlighted picks", hl_words(t["hl"])))
     if t["left_out_rejected"]:
         n = t["left_out_rejected"]
         about.append(("People left out", f"{n} {'person' if n == 1 else 'people'} marked rejected in this job"))
@@ -409,16 +422,17 @@ def note_preview(store: Store, ids: Iterable[int], limit: int = 80) -> dict[int,
 
 
 def nobody_matches(store: Store, ids: Iterable[int], hl: Iterable[tuple[str, str]]) -> bool:
-    """True when skills are highlighted but nobody in `ids` has any of them (the Matched skills column would be empty)."""
-    hl = list(hl)
+    """True when picks are highlighted but nobody in `ids` matches any of them (the Matched picks column would be empty)."""
+    aliases = store.skill_alias_map()
+    hl = picks.canon_pairs(hl, aliases)
     if not hl:
         return False
     for cid in dict.fromkeys(ids):
         try:
-            tags = store.get_candidate(cid).get("tags") or []
+            c = store.get_candidate(cid)
         except Exception:
             continue
-        if not _blank(matched_skills(tags, hl)):
+        if not _blank(matched_picks(c, hl, aliases)):
             return False
     return True
 

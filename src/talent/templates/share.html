@@ -25,7 +25,7 @@
   <input type="hidden" name="hl" value="{{ hl }}">
   <p><strong>{{ count }} {{ 'person' if count == 1 else 'people' }}:</strong>
     {% for p in people[:8] %}{{ p.name }}{{ ', ' if not loop.last }}{% endfor %}{% if count > 8 %} and {{ count - 8 }} more{% endif %}.</p>
-  {% if hl_words %}{% if no_match %}<p class="fine" id="no-match">Nobody here has the highlighted skills, so that column is left out.</p>{% else %}<p class="fine">Highlighted skills go in as a Matched skills column: {{ hl_words }}.</p>{% endif %}{% endif %}
+  {% if hl_words %}{% if no_match %}<p class="fine" id="no-match">Nobody here has the highlighted picks, so that column is left out.</p>{% else %}<p class="fine">Highlighted picks go in as a Matched picks column: {{ hl_words }}.</p>{% endif %}{% endif %}
   <fieldset>
     <legend>What goes in the file</legend>
     <p class="fine">Always in: name, title, company, location, years of experience, skills, links, summary and work history. Columns nobody has anything in are left out. Never in: colors, review marks or links to this app.</p>

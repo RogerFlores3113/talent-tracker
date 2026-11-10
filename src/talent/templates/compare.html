@@ -33,7 +33,8 @@
 </div>
 {% endif %}
 
-{% if hl %}<p class="fine compare-hl">Highlighted skills: {% for h in hl %}<span class="chip hl" data-hl="{{ hl_colors[h] }}"><span class="hl-n" aria-hidden="true">{{ loop.index }}</span> {{ h }}<span class="sr-only"> (highlighted {{ hl_colors[h] }}, number {{ loop.index }})</span></span> {% endfor %}</p>{% endif %}
+{% set has_t = namespace(v=false) %}{% for h in hl %}{% if h.startswith('title:') %}{% set has_t.v = true %}{% endif %}{% endfor %}
+{% if hl %}<p class="fine compare-hl">Highlighted {{ 'picks' if has_t.v else 'skills' }}: {% for h in hl %}<span class="chip hl" data-hl="{{ hl_colors[h] }}"><span class="hl-n" aria-hidden="true">{{ loop.index }}</span> {{ hl_label(h) }}<span class="sr-only"> (highlighted {{ hl_colors[h] }}, number {{ loop.index }})</span></span> {% endfor %}</p>{% endif %}
 
 <section class="panel" aria-labelledby="glance-h">
   <h2 id="glance-h">At a glance</h2>
@@ -66,14 +67,14 @@
       {% for p in people %}
       <td>
       {%- if key == 'title' -%}
-        {% if p.title or p.company %}{{ p.title }}{% if p.title and p.company %} at {% endif %}{{ p.company }}{% else %}<span class="muted">Not saved</span>{% endif %}
+        {% if p.title or p.company %}{% if p.id in title_hit %}<span class="chip hl title-chip" data-hl="{{ hl_colors[hl[title_hit[p.id]]] }}">{{ p.title }}<span class="sr-only"> (matches {{ hl_label(hl[title_hit[p.id]]) }}, highlighted {{ hl_colors[hl[title_hit[p.id]]] }})</span></span>{% else %}{{ p.title }}{% endif %}{% if p.title and p.company %} at {% endif %}{{ p.company }}{% else %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'location' -%}
         {{ p.location or '' }}{% if not p.location %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'years' -%}
         {% if p.years_text %}{{ p.years_text }}{% else %}<span class="muted">No work dates saved</span>{% endif %}
       {%- elif key == 'skills' -%}
         {% set groups = skill_groups[p.id] %}
-        {% if hl %}<p class="hl-have fine">Has {{ hl_have[p.id] }} of {{ hl | length }} highlighted skill{{ '' if hl | length == 1 else 's' }}</p>{% endif %}
+        {% if hl %}<p class="hl-have fine">Has {{ hl_have[p.id] }} of {{ hl | length }} highlighted {{ 'pick' if has_t.v else 'skill' }}{{ '' if hl | length == 1 else 's' }}</p>{% endif %}
         {% if groups %}{% for g in groups %}<div class="sk-group" data-group="{{ g.key }}">{% if g.label %}<span class="sk-label {{ g.key }}">{{ g.label }}</span>{% endif %}<span class="chips">{% for s in g.skills %}{{ skill_chip(s) }}{% endfor %}</span></div>{% endfor %}
         {% else %}<span class="muted">No skills saved</span>{% endif %}
       {%- elif key == 'jobs' -%}

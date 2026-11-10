@@ -69,9 +69,9 @@ def test_share_says_when_nobody_matches_highlights(store):
     job, ana, ben, cy = seed(store)
     c = local_client(store)
     html = c.get(f"/candidates/share?ids={ana['id']},{ben['id']}&hl=cobol:red").text
-    assert "Nobody here has the highlighted skills, so that column is left out." in html
+    assert "Nobody here has the highlighted picks, so that column is left out." in html
     ok = c.get(f"/candidates/share?ids={ana['id']},{ben['id']}&hl=python:red").text
-    assert "Nobody here has the highlighted" not in ok and "Matched skills column" in ok
+    assert "Nobody here has the highlighted" not in ok and "Matched picks column" in ok
 
 
 def test_share_defaults_to_candidates_job_filter_and_names_company(store):

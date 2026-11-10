@@ -49,11 +49,11 @@ def test_bulk_csv_and_xlsx_same_people_same_order_with_matched_skills(store):
     rx = client.post("/candidates/bulk", data={"action": "export_xlsx", **form})
     rows = csv_rows(rc.text)
     assert [x["Name"] for x in rows] == xlsx_names(rx.content) == ["Ben Cho", "Ana Ruiz", "Cy Dunn"]
-    assert [x["Matched skills"] for x in rows] == ["python (1 of 2)", "python, sql (2 of 2)", ""]
+    assert [x["Matched picks"] for x in rows] == ["python (1 of 2)", "python, sql (2 of 2)", ""]
     book = read_xlsx(rx.content)["Candidates"]["rows"]
     assert [r[1] for r in book[1:]] == ["python (1 of 2)", "python, sql (2 of 2)", None]
     plain = client.post("/candidates/bulk", data={"action": "export", "candidate_ids": [b, a]})
-    assert "Matched skills" not in plain.text.splitlines()[0]
+    assert "Matched picks" not in plain.text.splitlines()[0]
 
 
 def test_bulk_select_all_csv_follows_screen_order(store):
@@ -72,8 +72,8 @@ def test_page_csv_route_has_matched_skills(store):
     client = local_client(store)
     r = client.get("/candidates/export.csv?hl=python:red")
     rows = csv_rows(r.text)
-    assert "Matched skills" in rows[0] and any(x["Matched skills"] == "python (1 of 1)" for x in rows)
-    assert "Matched skills" not in client.get("/candidates/export.csv").text.splitlines()[0]
+    assert "Matched picks" in rows[0] and any(x["Matched picks"] == "python (1 of 1)" for x in rows)
+    assert "Matched picks" not in client.get("/candidates/export.csv").text.splitlines()[0]
 
 
 def test_roundtrip_import_ignores_matched_skills_column(store):
@@ -81,9 +81,9 @@ def test_roundtrip_import_ignores_matched_skills_column(store):
     text = xlsx_export.csv_in_order(store, [1, 2], [("python", "red")]).decode("utf-8-sig")
     head, body = importers.read_csv(text)
     mapping = importers.guess_mapping(head) if hasattr(importers, "guess_mapping") else None
-    assert "Matched skills" in head and body
+    assert "Matched picks" in head and body
     if mapping:
-        assert mapping[head.index("Matched skills")] != "tags"
+        assert mapping[head.index("Matched picks")] != "tags"
 
 
 def test_xlsx_drops_columns_empty_for_everyone(store):
@@ -123,10 +123,10 @@ def test_skip_link_and_caption(store):
     client = local_client(store)
     html = client.get("/candidates?hl=python:red").text
     skips = re.findall(r'class="skip-link" href="([^"]+)">([^<]+)<', html)
-    assert skips[0] == ("#main", "Skip to main content") and skips[1] == ("#hl-bar", "Skip to highlighted skills")
+    assert skips[0] == ("#main", "Skip to main content") and skips[1] == ("#hl-bar", "Skip to skill highlights")
     assert "Candidates, sorted by highlighted skills first, then by label color" in html
     plain = client.get("/candidates").text
-    assert re.findall(r'class="skip-link" href="([^"]+)">([^<]+)<', plain)[1] == ("#cand-table", "Skip to the table")
+    assert re.findall(r'class="skip-link" href="([^"]+)">([^<]+)<', plain)[2] == ("#cand-table", "Skip to the table")
     assert "highlighted skills first" not in re.search(r"<caption.*?</caption>", plain, re.S).group()
 
 

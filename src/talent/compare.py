@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import picks
 from .links import link_label, stored_links
 from .searchquery import years_of_experience
 from .store import stage_outcome
@@ -57,8 +58,22 @@ def _web(u: Any) -> str | None:
     return u if u.lower().startswith(("http://", "https://")) else None
 
 
-def _person(store: Any, cid: int, today: date | None) -> dict[str, Any]:
+def _merge_names(tags: list[str], aliases: dict[str, str], kept_names: dict[str, str]) -> list[str]:
+    """A person's skills with every name the person merged shown as the name they kept, once."""
+    out: list[str] = []
+    for t in tags:
+        k = aliases.get(t.lower())
+        name = kept_names.get(k, k) if k else t
+        if name.lower() not in {x.lower() for x in out}:
+            out.append(name)
+    return out
+
+
+def _person(store: Any, cid: int, today: date | None, aliases: dict[str, str] | None = None,
+            kept_names: dict[str, str] | None = None) -> dict[str, Any]:
     c = store.candidate_detail(cid, timeline_limit=5)
+    if aliases:
+        c = {**c, "tags": _merge_names(list(c.get("tags") or []), aliases, kept_names or {})}
     roles = [(w.get("start"), w.get("end")) for w in c.get("work_history") or []]
     years = years_of_experience(roles, today)
     links = []
@@ -250,8 +265,20 @@ def years_gap(people: list[dict[str, Any]]) -> bool:
 
 
 def hl_counts(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
-    """How many of the highlighted skills each person has."""
-    return {p["id"]: sum(1 for h in hl if h in {t.lower() for t in p["tags"]}) for p in people}
+    """How many of the highlighted picks (skills and "title:..." job titles) each person has. Skill names the person
+    merged are already one name here (see build)."""
+    return {p["id"]: sum(picks.person_hits(p["tags"], p["title"], hl)) for p in people}
+
+
+def title_hits(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
+    """For each person, the position in `hl` of the first title pick their current title matches (absent: none)."""
+    out: dict[int, int] = {}
+    for p in people:
+        for i, h in enumerate(hl):
+            if picks.is_title(h) and picks.person_hits([], p["title"], [h])[0]:
+                out[p["id"]] = i
+                break
+    return out
 
 
 NOT_IN_PLAY = "Not in play"
@@ -295,6 +322,8 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
     """The comparison for these people (the first MAX_PEOPLE that exist). Raises ValueError with a friendly line when
     fewer than MIN_PEOPLE are left. "left_out" names the people past the limit."""
     asked = list(dict.fromkeys(int(i) for i in ids))
+    aliases = store.skill_alias_map() if hasattr(store, "skill_alias_map") else {}
+    kept_names = {g["kept"].lower(): g["kept"] for g in store.skill_alias_groups()} if aliases else {}
     people, missing, left_out = [], [], []
     for cid in asked:
         if len(people) >= MAX_PEOPLE:
@@ -304,7 +333,7 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
                 missing.append(cid)
             continue
         try:
-            people.append(_person(store, cid, today))
+            people.append(_person(store, cid, today, aliases, kept_names))
         except (KeyError, LookupError):
             missing.append(cid)
     if len(people) < MIN_PEOPLE:
