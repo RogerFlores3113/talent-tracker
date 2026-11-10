@@ -240,7 +240,7 @@ def test_alias_in_xlsx_matched_picks(store):
     r3 = store.search_candidates("R3").hits[0].candidate
     data = xlsx_export.table_workbook(store, [r3], 1, hl=[("react", "red")])
     rows = read_xlsx(data)["Candidates"]["rows"]
-    assert rows[1][1] == "react.js (1 of 1)"  # written as the person has it
+    assert rows[1][1] == "react (1 of 1)"  # the pick (or kept name), never the alias (c14-f1)
 
 
 # ------------------------------------------------------------------ suggestions
@@ -314,7 +314,7 @@ def test_settings_lists_pairs_and_groups(store):
     assert "Split react.js" in r.text and store.skill_alias_map() == {}
     r = c.post("/settings/skill-names/reject", data={"a": "react", "b": "react.js"}, follow_redirects=True)
     assert "won't suggest" in htmllib.unescape(r.text)
-    assert "react / react.js" not in c.get("/settings").text
+    assert "Treat react, react.js as one skill" not in c.get("/settings").text  # now under Hidden suggestions (c14-f1)
 
 
 def test_highlight_bar_hint_offers_treat_as_one(store):
@@ -354,7 +354,7 @@ def test_skip_link_and_box_without_picks(store):
     html = local_client(store).get("/candidates").text
     skips = re.findall(r'class="skip-link" href="([^"]+)">([^<]+)<', html)
     assert ("#hl-add", "Skip to skill highlights") in skips
-    assert 'id="hl-add"' in html and "<label for=\"hl-add\">Highlight a skill</label>" in html
+    assert 'id="hl-add"' in html and "<label for=\"hl-add\">Highlight a skill or title</label>" in html
     with_picks = local_client(store).get("/candidates?hl=python").text
     assert ("#hl-bar", "Skip to skill highlights") in re.findall(r'class="skip-link" href="([^"]+)">([^<]+)<', with_picks)
     assert 'id="hl-add"' in with_picks

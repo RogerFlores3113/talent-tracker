@@ -771,3 +771,14 @@ form.wording { margin-top: var(--space-5, 24px); padding-top: var(--space-3, 12p
 .dup-member .check { white-space: nowrap; }
 .dup-cluster.maybe { border-left: 4px solid var(--warn); }
 @media (max-width: 40rem) { .dup-member { grid-template-columns: 1fr 1fr; } .dup-member .dup-person { grid-column: 1 / -1; } }
+.skill-pairs .keep-opt { display: inline-flex; gap: var(--space-2); align-items: center; }
+.skill-pairs .keep-label { cursor: pointer; padding: var(--space-1) var(--space-2); }
+.skill-result { font-size: var(--fs-md, 1rem); margin: var(--space-2) 0; }
+/* Candidates "Show 100 / 250 / All": the caption sits beside the buttons, never under them */
+.pagesize { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
+.pagesize .seg { flex: none; }
+/* The board scrolls inside its own box: its hidden labels are positioned against it, so they never widen the page */
+.board { position: relative; max-width: 100%; }
+#pipeline { min-width: 0; max-width: 100%; }
+/* The job table's "Move N ticked" bar stays in view while people are ticked */
+#bulk-move { position: sticky; top: 0; z-index: 5; background: var(--surface); }

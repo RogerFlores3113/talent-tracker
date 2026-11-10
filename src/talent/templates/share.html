@@ -14,8 +14,10 @@
   .share-form .pv-people li { padding: var(--space-2, 8px); border: 1px solid var(--border, var(--line, currentColor)); border-radius: var(--radius-sm, 6px); }
   .share-form .pv-people .pv-note { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
-<h1>Share candidates as a spreadsheet</h1>
-<p class="lead">Make an Excel file you can forward to a hiring manager. You choose what goes in it. The file is made on this computer and goes nowhere until you send it.</p>
+{% if for_me %}<h1>A spreadsheet for you</h1>
+<p class="lead" id="for-me-note"><strong>This file is for you, not one to forward.</strong> It has email, phone and notes in it. To send something to a hiring manager, untick those below or use Share as xlsx from the Candidates table. The file is made on this computer.</p>
+{% else %}<h1>Share candidates as a spreadsheet</h1>
+<p class="lead">Make an Excel file you can forward to a hiring manager. You choose what goes in it. The file is made on this computer and goes nowhere until you send it.</p>{% endif %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if not count %}
 <p class="none">Nobody to share yet. Tick people in the <a href="/candidates">Candidates table</a> first.</p>
@@ -60,12 +62,16 @@
       {% for p in people %}{% set seen = notes_seen.get(p.id, {}) %}
       <li data-id="{{ p.id }}"{% if p.id not in kept_ids %} hidden{% endif %}>
         <strong>{{ p.name }}</strong>
-        <label class="check"><input type="checkbox" name="leave_out" value="{{ p.id }}" {{ 'checked' if p.id in leave_out }}> <span>Leave this person out <span class="sr-only">({{ p.name }})</span></span></label>
+        <label class="check"><input type="checkbox" name="leave_out" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_out }}> <span>Leave this person out <span class="sr-only">({{ p.name }})</span></span></label>
+        {% if p.id in rej_in %}<div class="pv-rej" data-rej{{ ' hidden' if job }}>
+          <p class="share-warn">{{ p.name }} is marked rejected in {{ rej_in[p.id] | join(', ') }}.</p>
+          <label class="check"><input type="checkbox" name="leave_rej" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_rej }}{{ ' disabled' if job }}> <span>Leave {{ p.name }} out because they are rejected</span></label>
+        </div>{% endif %}
         <div class="pv-notes" data-notes {{ 'hidden' if notes not in ('latest', 'all') }}>
           <p class="fine">Note as it will appear:</p>
           <p class="pv-note" data-latest {{ 'hidden' if notes != 'latest' }}>{{ seen.get('latest') or 'No note' }}</p>
           <p class="pv-note" data-all {{ 'hidden' if notes != 'all' }}>{{ seen.get('all') or 'No notes' }}</p>
-          <label class="check"><input type="checkbox" name="leave_note" value="{{ p.id }}" {{ 'checked' if p.id in leave_note }}> <span>Leave this note out <span class="sr-only">({{ p.name }})</span></span></label>
+          <label class="check"><input type="checkbox" name="leave_note" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_note }}{{ ' disabled' if notes not in ('latest', 'all') }}> <span>Leave this note out <span class="sr-only">({{ p.name }})</span></span></label>
         </div>
       </li>
       {% endfor %}

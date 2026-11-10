@@ -72,7 +72,7 @@ def hl_words(hl: Iterable[tuple[str, str]]) -> str:
 
 def matched_picks(c: dict[str, Any], hl: list[tuple[str, str]], aliases: dict[str, str] | None = None) -> Any:
     """'python, title: Data Engineer (2 of 2)' in the color of the first pick this person matches; '' when none.
-    A skill is written as the person has it; look-alike names they merged count as the one pick."""
+    A skill is written as it was picked (or as its group is kept); look-alike names that were merged count as the one pick."""
     am = aliases or {}
     tags = c.get("tags") or []
     hits = picks.person_hits(tags, c.get("current_title"), [n for n, _ in hl], am)
@@ -83,7 +83,8 @@ def matched_picks(c: dict[str, Any], hl: list[tuple[str, str]], aliases: dict[st
         if picks.is_title(n):
             found.append((picks.label(n), col))
         else:
-            found.append((next((t for t in tags if picks.canon(t, am) == picks.canon(n, am)), n), col))
+            # the name that was picked (or the kept name), never one of its aliases; the person's own spelling of it if they have it
+            found.append((next((t for t in tags if t.lower() == n.lower()), n), col))
     if not found:
         return ""
     return Colored(f"{', '.join(n for n, _ in found)} ({len(found)} of {len(hl)})", found[0][1])
@@ -279,6 +280,25 @@ def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any]
             return (3, -pos) if o == "lost" else (0, 0) if o == "hired" else (1, -pos)
         people = sorted(people, key=rank)  # a stable sort: ties keep the order the people came in
     return people, stage_of, left_out
+
+
+def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
+    """For the Share page: the jobs (by title) where each of these people is marked rejected."""
+    out: dict[int, list[str]] = {}
+    mine = set(ids)
+    if not mine:
+        return out
+    stages: dict[int, dict[str, str]] = {}
+    titles: dict[int, str] = {}
+    for r in store._rows("SELECT a.candidate_id, a.job_id, a.stage, j.title FROM applications a JOIN jobs j ON j.id = a.job_id"):
+        if r["candidate_id"] not in mine:
+            continue
+        if r["job_id"] not in stages:
+            stages[r["job_id"]] = {s["name"].lower(): s["outcome"] for s in store.job_stages(r["job_id"])}
+        o = stages[r["job_id"]].get(str(r["stage"]).lower()) or stage_outcome(r["stage"])
+        if o == "lost":
+            out.setdefault(r["candidate_id"], []).append(r["title"])
+    return out
 
 
 def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",

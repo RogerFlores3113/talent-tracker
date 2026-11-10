@@ -105,13 +105,16 @@ def test_hm_view_not_in_play_headings_landmarks_and_title(store):
     live = store.add_job("Data Engineer", "Acme")
     a = store.add_candidate(name="Maya Ross", about="About Maya")
     b = store.add_candidate(name="Sofia Lane", about="About Sofia")
+    c = store.add_candidate(name="Noah Park", about="About Noah")
     store.add_to_pipeline(a["id"], live["id"], "Interview")
+    store.add_to_pipeline(c["id"], live["id"], "Screen")
     store.add_to_pipeline(b["id"], job["id"], "Rejected")
-    html = hm(store, [a["id"], b["id"]])
+    html = hm(store, [a["id"], b["id"], c["id"]])
     assert "<title>Hiring manager comparison" in html and "<h1" in html and "Hiring manager comparison</h1>" in html
     assert "data-focus-here" in html.split("<h1", 1)[1].split(">", 1)[0]
-    assert "1 person left out: not in play in this job." in html
-    assert '<span class="muted">Not in play</span>' in html and "Rejected" not in html and "Designer" not in html
+    # cycle 14 (F1): the person who is not in play is left out entirely, and the line names them
+    assert "1 person left out of this view: Sofia Lane is not in play in this job." in html
+    assert "Rejected" not in html and "Designer" not in html and "About Sofia" not in html
     assert len(re.findall(r'<h2 class="person-h">', html)) == 2
     assert "<header" in html and "<main" in html and "<footer" in html
 

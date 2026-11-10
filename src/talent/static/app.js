@@ -747,6 +747,11 @@
     const status = document.getElementById("hl-status");
     if (!status) return;
     const hash = decodeURIComponent((location.hash || "").slice(1));
+    if (hash === "results-count") {  // after Show 100 / 250 / All: the count, so the new size is heard and Tab starts at the table
+      const rc = document.getElementById("results-count");
+      if (rc) rc.focus();
+      return;
+    }
     if (!hash || hash === "hl-bar" || hash === "hl-add" || hash === "cand-table") return;  // the skip links: the browser moves focus itself
     const bar = document.getElementById("hl-bar");
     const table = document.getElementById("cand-table");
@@ -834,6 +839,17 @@
     if (form) {
       form.addEventListener("submit", e => {
         const act = e.submitter && e.submitter.value;
+        // Every row on the page is ticked and the page holds all the matches: send the search, not thousands of ids.
+        const rows = document.querySelectorAll("input[type=checkbox][name='candidate_ids']");
+        const total = parseInt(count && count.dataset.total || "0", 10) || 0;
+        if (rows.length > 50 && rows.length >= Math.min(total, 5000) &&
+            Array.prototype.every.call(rows, b => b.checked)) {
+          let sa = form.querySelector("input[name=select_all]");
+          if (sa && sa.type === "checkbox") sa.checked = true;
+          else if (!sa) { sa = document.createElement("input"); sa.type = "hidden"; sa.name = "select_all"; sa.value = "1"; form.appendChild(sa); }
+          rows.forEach(b => { b.disabled = true; });
+          window.setTimeout(() => { rows.forEach(b => { b.disabled = false; }); }, 1500);  // a download leaves this page as it was
+        }
         if (!["compare", "export", "export_xlsx", "share"].includes(act)) return;
         const n = ticked();
         const bad = n === 0 ? "Tick at least one person first." : (act === "compare" && n < 2 ? "Tick two to six people to compare." : "");
@@ -902,7 +918,8 @@
   else all();
 })();
 
-// Duplicate groups: the profile marked "Keep this one" is not also merged into itself, so its "Merge in" box goes away.
+// Duplicate groups: the profile marked "Keep this one" is not also merged into itself: it says "Kept" instead of
+// showing a Merge in box. The Merge button says what it will do ("Merge 3 groups, 7 profiles").
 (function () {
   function sync(radio) {
     const card = radio.closest(".dup-cluster");
@@ -911,15 +928,34 @@
       const keep = row.querySelector("input[type=radio]").checked;
       const label = row.querySelector(".merge-in");
       const box = label && label.querySelector("input");
+      const tag = row.querySelector("[data-kept-tag]");
+      if (tag) tag.hidden = !keep;
       if (!box) return;
+      const wasKept = label.hidden;
       label.hidden = keep;
       box.disabled = keep;
+      if (keep) box.checked = false;
+      else if (wasKept) box.checked = box.dataset.def === "1";
     });
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function count() {
+    const btn = document.querySelector("[data-merge-btn]");
+    if (!btn) return;
+    let groups = 0, profiles = 0;
+    document.querySelectorAll(".dup-cluster").forEach(card => {
+      const on = card.querySelector("input[name=cluster]");
+      if (!on || !on.checked) return;
+      const n = card.querySelectorAll(".merge-in input:checked:not(:disabled)").length;
+      if (n) { groups += 1; profiles += n; }
+    });
+    btn.textContent = "Merge " + plural(groups, "group", "groups") + ", " + plural(profiles, "profile", "profiles");
   }
   document.addEventListener("change", e => {
     if (e.target.matches && e.target.matches(".dup-cluster input[type=radio]")) sync(e.target);
+    if (e.target.closest && e.target.closest("#clusters-form")) count();
   });
-  function start() { document.querySelectorAll(".dup-cluster input[type=radio]:checked").forEach(sync); }
+  function start() { document.querySelectorAll(".dup-cluster input[type=radio]:checked").forEach(sync); count(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();

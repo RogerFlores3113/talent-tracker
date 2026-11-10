@@ -72,7 +72,13 @@ def _merge_names(tags: list[str], aliases: dict[str, str], kept_names: dict[str,
 def _person(store: Any, cid: int, today: date | None, aliases: dict[str, str] | None = None,
             kept_names: dict[str, str] | None = None) -> dict[str, Any]:
     c = store.candidate_detail(cid, timeline_limit=5)
+    saved_as: dict[str, list[str]] = {}  # kept name (lower case) -> the spellings this person has saved under it
     if aliases:
+        for t in c.get("tags") or []:
+            k = aliases.get(t.lower())
+            shown = (kept_names or {}).get(k, k) if k else t
+            if k and shown.lower() != t.lower() and t not in saved_as.setdefault(shown.lower(), []):
+                saved_as[shown.lower()].append(t)
         c = {**c, "tags": _merge_names(list(c.get("tags") or []), aliases, kept_names or {})}
     roles = [(w.get("start"), w.get("end")) for w in c.get("work_history") or []]
     years = years_of_experience(roles, today)
@@ -99,7 +105,7 @@ def _person(store: Any, cid: int, today: date | None, aliases: dict[str, str] | 
         "years_text": years_text(years), "tags": list(c.get("tags") or []), "source": c.get("source") or "",
         "last_contacted_at": c.get("last_contacted_at") or "", "created_at": c.get("created_at") or "",
         "about": (c.get("about") or "").strip(), "links": links,
-        "jobs": jobs,
+        "jobs": jobs, "saved_as": saved_as,
     }
 
 
@@ -298,13 +304,24 @@ def active_jobs(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def left_out_note(people: list[dict[str, Any]]) -> str:
-    """For the hiring manager view: a line naming how many people are not in play anywhere they are listed, or ""
-    when everyone still is. People come from active_jobs."""
+    """For the hiring manager view: a line naming the people not in play anywhere they are listed, or "" when
+    everyone still is. People come from active_jobs (all of them, before the left-out ones are dropped)."""
     out = [p for p in people if p.get("not_in_play")]
     if not out:
         return ""
     where = {i for p in out for i in p["ended_job_ids"]}
-    return f"{len(out)} {'person' if len(out) == 1 else 'people'} left out: not in play in {'this job' if len(where) == 1 else 'their jobs'}."
+    names = _join([p["name"] for p in out])
+    return (f"{len(out)} {'person' if len(out) == 1 else 'people'} left out of this view: {names} "
+            f"{'is' if len(out) == 1 else 'are'} not in play in {'this job' if len(where) == 1 else 'their jobs'}.")
+
+
+def rebuild_for(d: dict[str, Any], people: list[dict[str, Any]]) -> dict[str, Any]:
+    """The comparison data again for a smaller set of people (the hiring manager view drops people not in play)."""
+    shared, only, rest = split_skills(people)
+    return {**d, "people": people, "shared": shared, "only": only, "rest": rest, "counts": skill_counts(people),
+            "glance": glance(people, shared, only, contact=False), "glance_hm": glance(people, shared, only, contact=False),
+            "differs": differs(people), "empty": empty_rows(people), "years_gap": years_gap(people),
+            "missing": [], "left_out": [], "capped": False, "asked": len(people)}
 
 
 def public_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -409,6 +426,7 @@ def skill_groups(d: dict[str, Any], hl: list[str] | None = None) -> dict[int, li
             if skills:
                 groups.append({"key": key, "label": label, "skills": [
                     {"name": t, "pos": hl.index(t.lower()) if t.lower() in hl else -1,
+                     "saved": ", ".join(p.get("saved_as", {}).get(t.lower(), [])),
                      "count": d["counts"][t.lower()] if key == "some" else 0, "of": n}
                     for t in _hl_first(skills, hl)]})
         out[p["id"]] = groups

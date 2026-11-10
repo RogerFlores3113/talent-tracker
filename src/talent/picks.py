@@ -141,6 +141,10 @@ def look_alike(a: str, b: str) -> str:
     px, py = _singular(sx), _singular(sy)
     if px == py and len(px) > 2:
         return "plural"
+    for base, versioned in ((sx, sy), (sy, sx)):  # python / python3, html / html5: a version number on the same word
+        m = re.fullmatch(r"([a-z]{3,})\d{1,2}", versioned)
+        if m and m.group(1) == base:
+            return "version"
     for short, long_ in ((sx, sy), (sy, sx)):  # engineer / engineering, manage / managing
         if len(short) > 3 and (long_ == short + "ing" or (short.endswith("e") and long_ == short[:-1] + "ing")):
             return "-ing"

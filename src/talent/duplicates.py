@@ -318,6 +318,18 @@ def looks_different(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return "same" not in seen and seen.count("differ") >= 2
 
 
+def _first(name: Any) -> str:
+    toks = fold_name(name).split()
+    return toks[0] if toks else ""
+
+
+def _same_enough(keep: dict[str, Any], r: dict[str, Any]) -> bool:
+    """Safe to tick for a merge into the kept profile: same first name and no title that differs."""
+    if _first(keep.get("name")) != _first(r.get("name")):
+        return False
+    return _agree(keep.get("current_title"), r.get("current_title")) != "differ"
+
+
 def cluster_cards(store: Store, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The clusters of `found` ready to draw: each person as saved, the one to keep (the most complete, the older one
     when they tie), and whether the card should say "Same name, maybe different people"."""
@@ -339,10 +351,20 @@ def cluster_cards(store: Store, found: list[dict[str, Any]]) -> list[dict[str, A
         for r in members:
             tied = bool(c["links"].get(r["id"], set()) & set(STRONGISH))
             r["differs"] = (r["id"] != keep["id"] and len(names) == 1 and not tied and looks_different(keep, r))
+            r["safe"] = r["id"] != keep["id"] and _same_enough(keep, r)
         others = [r for r in members if r["id"] != keep["id"]]
         maybe = bool(others) and all(r["differs"] for r in others)
+        # A group starts ticked only when every profile shares an email or LinkedIn with another one in it, and the
+        # people are not obviously different (one title). Anyone whose first name or title differs from the kept
+        # profile starts unticked, whatever the group is.
+        exact = all(c["links"].get(r["id"], set()) & set(STRONG) for r in members)
+        titles = {fold_text(r.get("current_title")) for r in members if fold_text(r.get("current_title"))}
+        preticked = exact and len(titles) <= 1 and not maybe
+        for r in members:
+            r["ticked"] = r["safe"]
         cards.append({**c, "keep": keep["id"], "members": members, "count": len(members), "name": keep["name"],
-                      "maybe_different": maybe,
+                      "maybe_different": maybe, "preticked": preticked, "exact": exact, "mixed_titles": len(titles) > 1,
+                      "merge_in": sum(1 for r in members if r["ticked"]),
                       "title": f"{keep['name']}, {len(members)} profiles"})
     return cards
 
@@ -441,14 +463,15 @@ def plausible_for(store: Store, c: dict[str, Any], rows: list[dict[str, Any]]) -
 
 
 def count(store: Store) -> int:
-    """How many pairs there are, remembered until someone is added, edited, merged or dismissed."""
+    """How many groups of possible duplicates there are (what the Duplicates page lists), remembered until someone
+    is added, edited, merged or dismissed."""
     stamp = store._row("SELECT count(*) AS n, max(updated_at) AS u, max(id) AS m FROM candidates")
     row = store._row("SELECT value FROM settings WHERE key = ?", (DISMISSED_KEY,))
     sig = (stamp["n"], stamp["u"], stamp["m"], row["value"] if row else "")
     cached = getattr(store, "_dup_count", None)
     if cached and cached[0] == sig:
         return cached[1]
-    n = len(find_pairs(store))
+    n = len(clusters(store))
     store._dup_count = (sig, n)
     return n
 

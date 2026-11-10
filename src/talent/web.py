@@ -50,11 +50,12 @@ from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
-ONE_SHOT_PARAMS = {"notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
+ONE_SHOT_PARAMS = {"skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
 COMPARE_TICK = "Tick two to six people to compare."
 PAGE_SIZES = ("100", "250", "all")  # the Candidates "Show" choice; All stops at BULK_MAX, the export cap
+FORM_FIELDS_MAX = 12000  # form fields a bulk post may carry (one per ticked person, plus the filters); Starlette stops at 1000
 BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
@@ -70,7 +71,7 @@ LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock th
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
-FLASH_KEYS = ("notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
+FLASH_KEYS = ("skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
 FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
@@ -1002,7 +1003,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """App window only: set a color, add to a job or export, for the people ticked on the Candidates table (or
         every person in the results, when "all of the results" is ticked). There is no bulk delete, and the AI has
         no tool for any of this."""
-        form = await request.form()
+        form = await request.form(max_fields=FORM_FIELDS_MAX)
         action = str(form.get("action") or "")
         matched_total = None  # how many people "all of the results" matched (more than the ids when that is cut off)
         if str(form.get("select_all") or "") == "1":
@@ -1322,8 +1323,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: str = "none",
                    note: str = "", error: str = "", hl: str = "", rejected: bool = False,
-                   leave_out: set[int] | None = None, leave_note: set[int] | None = None) -> HTMLResponse:
+                   leave_out: set[int] | None = None, leave_note: set[int] | None = None,
+                   leave_rej: set[int] | None = None, for_me: bool = False) -> HTMLResponse:
         rows = people_rows(ids)
+        try:
+            rej_in = xlsx_export.rejected_in(store, [r["id"] for r in rows])
+        except Exception:
+            rej_in = {}
+        if leave_rej is None:  # first visit: people rejected in a job are left out unless the recruiter unticks them
+            leave_rej = set(rej_in)
         hl_pairs = hl_pairs_of(hl)
         job_id = int(job) if str(job).isdigit() else None
         try:
@@ -1351,14 +1359,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
                     pv=pv, notes_seen=notes_seen, no_match=no_match,
                     leave_out=leave_out or set(), leave_note=leave_note or set(),
+                    rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
                     kept_ids={p["id"] for p in pv.get("people") or []})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
     def candidates_share(request: Request, ids: str = "", job: str = "", hl: str = "", contact: str = "",
                          notes: str = "", rejected: str = ""):
         """The options for the spreadsheet a recruiter forwards to a hiring manager. /candidates/share?ids=1,2,3"""
+        # contact and notes asked for in the link is "Export for me": a file for the recruiter, not one to forward.
+        # An old notes=1 link now opens on the latest note; notes=all still asks for everything.
+        mine = contact == "1" and notes not in ("", "none", "0")
         return share_page(request, parse_ids(ids), job=job.strip(), hl=hl, contact=contact == "1",
-                          notes=notes_choice(notes, legacy=notes == "1"), rejected=rejected == "1")
+                          notes="latest" if notes == "1" else notes_choice(notes), rejected=rejected == "1", for_me=mine)
 
     @app.post("/candidates/share")
     async def candidates_share_file(request: Request):
@@ -1375,15 +1387,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         rejected = form.get("include_rejected") == "1"
         leave_out = {int(v) for v in form.getlist("leave_out") if str(v).isdigit()}
         leave_note = {int(v) for v in form.getlist("leave_note") if str(v).isdigit()}
+        leave_rej = {int(v) for v in form.getlist("leave_rej") if str(v).isdigit()}
         try:
             job = store.get_job(job_id) if job_id else None
         except NotFound:
             return share_page(request, ids, contact=contact, notes=notes, note=note, hl=hl, rejected=rejected,
-                              leave_out=leave_out, leave_note=leave_note,
+                              leave_out=leave_out, leave_note=leave_note, leave_rej=leave_rej,
                               error="That job isn't there any more. Pick another or leave it empty.")
+        typed_out = set(leave_out)
+        if not job:  # no job picked: people marked rejected in some job stay out when their box is ticked
+            leave_out = leave_out | (leave_rej & set(ids))
         if not [i for i in ids if i not in leave_out]:
             return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
-                              rejected=rejected, leave_out=leave_out, leave_note=leave_note,
+                              rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
                               error="Everyone is left out. Untick \"Leave this person out\" for at least one person.")
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
@@ -1432,10 +1448,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if no_about:
             hidden.add("about")
         if hm:
-            people = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
-            d = {**d, "people": people, "glance": d["glance_hm"], "differs": compare.differs(people)}
+            every = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            people = [p for p in every if not p["not_in_play"]]
+            hm_left_out = compare.left_out_note(every)
+            if len(people) < compare.MIN_PEOPLE:
+                return page(request, "compare.html", d=None, hm=True, hide_chrome=True, hl=hl_list, hl_colors=hl_colors,
+                            back_href=href("/candidates", ids_now),
+                            message=(hm_left_out + " " if hm_left_out else "") + "Fewer than two people are still in play, so there is nothing to compare.")
+            d = compare.rebuild_for(d, people)
+            hidden = set(d["empty"]) | set(compare.HM_HIDDEN) | ({"about"} if no_about else set())
             hidden |= set(compare.empty_rows(people))
-        hm_left_out = compare.left_out_note(people) if hm else ""
+        else:
+            hm_left_out = ""
         rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
         share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
         return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
@@ -1443,7 +1467,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
                     rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
                     no_about=no_about, hide_about_ids=hide_about_ids, hm_left_out=hm_left_out,
-                    hm_form_ids=",".join(map(str, ids_now)), hm_form_hl=searchquery.join_hl(hl_pairs),
+                    hm_form_ids=",".join(str(p["id"]) for p in people), hm_form_hl=searchquery.join_hl(hl_pairs),
                     hm_head="Hiring manager comparison" if hm else "",
                     hl_have=compare.hl_counts(people, hl_list) if hl_list else {}, title_hit=compare.title_hits(people, hl_list) if hl_list else {},
                     hm_href=href("/candidates/compare", ids_now, view="hm"),
@@ -1476,7 +1500,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         pairs = duplicates.find_pairs(store)
         found = duplicates.clusters(store, pairs)
         cards = duplicates.cluster_cards(store, found[:shown])
+        merge_groups = sum(1 for c in cards if c["preticked"] and c["merge_in"])
+        merge_profiles = sum(c["merge_in"] for c in cards if c["preticked"])
         return page(request, "duplicates_clusters.html", cards=cards, total=len(found), shown=shown,
+                    merge_groups=merge_groups, merge_profiles=merge_profiles,
                     pair_total=len(pairs), people=sum(len(c["ids"]) for c in found),
                     dismissed=len(duplicates.dismissed(store)), exact_count=len(duplicates.exact_matches(store)),
                     maybe_label=duplicates.MAYBE_DIFFERENT)
@@ -2767,7 +2794,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     async def move_many(request: Request, job_id: int):
         """The job table's "Move N ticked to [stage]" bar: one action, one status line, one Undo (also on Changes)."""
         job = job_or_404(job_id)
-        form = await request.form()
+        form = await request.form(max_fields=FORM_FIELDS_MAX)
         ids = [int(v) for v in form.getlist("candidate_ids") if str(v).isdigit()]
         stage = str(form.get("stage") or "").strip()
         error, status, batch_id = None, "", None
@@ -3797,6 +3824,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                              "undo_url": f"/changes/decision/{b['id']}/undo", "undo_label": "Undo this decision",
                              "confirm": "Undo this decision? Everyone goes back to the stage they were in, and the "
                                         "interviews it cancelled are put back."})
+        if who in ("", "app"):  # skill names treated as one, split, or answered "not the same"
+            for e in store.skill_alias_log(since, limit):
+                ns = e["names"]
+                text = (f"Treated {_and(ns)} as {e['kept']}" if e["kind"] == "merge" else
+                        f"Split {_and(ns)} from {e['kept']}" if e["kind"] == "split" else
+                        f"Said {_and(ns)} are not the same skill")
+                rows.append({"at": e["at"], "who": "app", "name": "Skill names", "href": "/settings#skill-names",
+                             "text": text, "undoable": not e["undone_at"], "undone": bool(e["undone_at"]),
+                             "undo_url": f"/changes/skill-names/{e['id']}/undo",
+                             "undo_label": "Suggest again" if e["kind"] == "reject" else "Undo"})
         if who in ("", "app"):  # what a stage counts as, changed in the app
             for c in actions.stage_outcome_changes(store, since)[:limit]:
                 rows.append({"at": c["at"], "who": "app", "name": c["job_title"], "href": f"/jobs/{c['job_id']}/edit#stages",
@@ -3805,6 +3842,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         rows = tuck_import_rows(rows)
         rows.sort(key=lambda r: r["at"], reverse=True)  # stable, so each list keeps its own newest-first order
         return rows[:limit]
+
+    def _and(names: list[str]) -> str:
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
     def import_change_rows(since: str | None) -> list[dict[str, Any]]:
         out = []
@@ -4135,37 +4175,68 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         nxt = str(raw or "")
         return nxt if re.match(r"^/(candidates|settings)(\?|#|$)", nxt) and not nxt.startswith("//") and "\\" not in nxt else fallback
 
+    def _skill_back(msg: str, nxt: str = "/settings#skill-names", error: bool = False) -> RedirectResponse:
+        """Back to Settings: the message goes in its own heading inside Skill names, which takes focus on load."""
+        key = "flash_error" if error else "skill_notice"
+        # the #fragment names the message itself: a fragment that names the whole section would make the browser drop focus
+        return RedirectResponse("/settings?" + urlencode({key: msg}) + "#skill-result", status_code=303)
+
     @app.post("/settings/skill-names/merge")
     async def skill_names_merge(request: Request):
-        """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed."""
+        """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed. From
+        Settings: a group of names (names, with the one to keep), a pair (a, b) or two names typed (alias, kept)."""
         form = await request.form()
-        alias, kept = str(form.get("alias") or ""), str(form.get("kept") or "")
+        alias, kept = " ".join(str(form.get("alias") or "").split()), " ".join(str(form.get("kept") or "").split())
+        names = [" ".join(str(n).split()) for n in form.getlist("names") if str(n).strip()]
         if form.get("a") and form.get("b"):  # Settings: the two names and the one to keep
             a, b = str(form.get("a")), str(form.get("b"))
             kept = kept if kept in (a, b) else a
             alias = b if kept == a else a
         nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
+        if len(names) >= 2:  # a group of look-alikes: every other spelling counts as the one to keep
+            kept = kept if kept in names else names[0]
+            others = [n for n in names if n != kept]
+        else:
+            others = [alias]
+        done: list[str] = []
         try:
-            store.add_skill_alias(alias, kept)
+            for o in others:
+                store.add_skill_alias(o, kept)
+                done.append(o)
         except ValueError as exc:
-            return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#skill-names", status_code=303)
+            if not done:
+                return _skill_back(str(exc), error=True)
         if nxt.startswith("/candidates"):
             return RedirectResponse(nxt.split("#")[0] + "#hlmerged", status_code=303)
-        msg = f"Now {alias} counts as {kept}. Nobody's saved skills changed. Split undoes it."
-        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+        who = (", ".join(done[:-1]) + " and " + done[-1]) if len(done) > 1 else (done[0] if done else alias)
+        return _skill_back(f"Now {who} count{'s' if len(done) == 1 else ''} as {kept}. Nobody's saved skills changed. Split undoes it.")
 
     @app.post("/settings/skill-names/reject")
     async def skill_names_reject(request: Request):
-        """'Not the same': remembered, never suggested again."""
+        """'Not the same': remembered, never suggested again (until Suggest again)."""
         form = await request.form()
+        names = [" ".join(str(n).split()) for n in form.getlist("names") if str(n).strip()]
         alias = str(form.get("alias") or form.get("a") or "")
         kept = str((form.get("kept") if form.get("alias") else form.get("b")) or "")
         nxt = _skill_next(str(form.get("next") or ""), "/settings#skill-names")
-        store.reject_skill_pair(alias, kept)
+        if len(names) >= 2:
+            for i, x in enumerate(names):
+                for y in names[i + 1:]:
+                    store.reject_skill_pair(x, y)
+            alias, kept = ", ".join(names[:-1]), names[-1]
+        else:
+            store.reject_skill_pair(alias, kept)
         if nxt.startswith("/candidates"):
             return RedirectResponse(nxt.split("#")[0] + "#hlrejected", status_code=303)
-        msg = f"Okay. We won't suggest {alias} and {kept} as the same skill again."
-        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+        return _skill_back(f"Okay. We won't suggest {alias} and {kept} as the same skill again. They are under Hidden suggestions if you change your mind.")
+
+    @app.post("/settings/skill-names/unreject")
+    async def skill_names_unreject(request: Request):
+        """'Suggest again': take a pair off the Hidden suggestions list."""
+        form = await request.form()
+        a, b = str(form.get("a") or ""), str(form.get("b") or "")
+        n = store.unreject_skill_pair(a, b)
+        return _skill_back(f"Okay. {a} and {b} can be suggested as the same skill again." if n else f"{a} and {b} were not hidden.")
 
     @app.post("/settings/skill-names/split")
     async def skill_names_split(request: Request):
@@ -4173,8 +4244,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         name = str(form.get("name") or "")
         n = store.split_skill_alias(name)
-        msg = (f"Split {name}: the names count as separate skills again." if n else f"{name} was not treated as another skill.")
-        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#skill-names", status_code=303)
+        return _skill_back(f"Split {name}: the names count as separate skills again." if n else f"{name} was not treated as another skill.")
+
+    @app.post("/changes/skill-names/{log_id}/undo")
+    def undo_skill_names(request: Request, log_id: int):
+        try:
+            notice = store.undo_skill_log(log_id)
+        except NotFound:
+            return back(request, "/changes", error="That change is gone. Reload the page.")
+        except ValueError as exc:
+            return back(request, "/changes", error=str(exc))
+        return back(request, "/changes", notice=notice)
 
     @app.post("/settings/time-zone")
     async def set_time_zone(request: Request):
@@ -4207,7 +4287,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     backup_count=len(_backup_files()), backup_folder=str(backups_dir().resolve()),
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
                     new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN,
-                    skill_pairs=store.skill_lookalikes(30), skill_groups=store.skill_alias_groups())
+                    skill_rows=store.skill_lookalike_groups(30), skill_groups=store.skill_alias_groups(),
+                    skill_hidden=store.hidden_skill_pairs())
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]

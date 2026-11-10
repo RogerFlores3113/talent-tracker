@@ -600,6 +600,9 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                     data["phone"] = good[0]
                     if len(good) > 1:
                         notes.append("Other phones: " + ", ".join(good[1:]))
+            elif target == "email" and not _EMAIL.search(v):  # "notanemail": left blank and listed, never saved as an address
+                warnings.append(f"left {col_name} blank, {v[:40]!r} isn't an email address")
+                continue
             elif target == "email" and "email" not in data and len(set(_EMAIL.findall(v))) > 1:
                 first_email, *more = dict.fromkeys(e.lower() for e in _EMAIL.findall(v))
                 data["email"] = first_email  # several in one cell: the first is theirs, the rest stay as a note
@@ -2320,10 +2323,30 @@ def result_panels(result: dict[str, Any]) -> list[dict[str, Any]]:
             else:
                 groups = group_lines(lines)
         rows = (result.get("merges") or [])[:PANEL_LINES] if key == "merge_lines" else []
-        out.append({"key": key, "title": title, "count": len(lines), "groups": groups, "rows": rows,
+        out.append({"key": key, "title": title, "count": blank_row_count(lines) if key == "warnings" else len(lines),
+                    "groups": groups, "rows": rows,
                     "lines": lines[:PANEL_LINES], "more": max(0, len(lines) - PANEL_LINES),
                     "open": key == "possible_duplicates"})
     return out
+
+
+def _split_lead(line: str) -> tuple[str, str]:
+    m = _ROW_LEAD.match(line)
+    return (line[:m.end() - 2], line[m.end():]) if m else ("", line)
+
+
+def _lead_rows(lead: str) -> list[int]:
+    """The row numbers a line's lead names ("Rows 5 and 6 (lines 9 to 12)" -> [5, 6]); [0] when it names none."""
+    return [int(x) for x in re.findall(r"\d+", re.sub(r"\([^)]*\)", "", lead))] or [0]
+
+
+def blank_row_count(lines: list[str]) -> int:
+    """How many rows the "cell left blank" lines are about (a row with two blank cells counts once)."""
+    seen: set[Any] = set()
+    for k, line in enumerate(lines):
+        lead = _split_lead(line)[0]
+        seen.update(_lead_rows(lead) if lead else [("line", k)])
+    return len(seen)
 
 
 def skipped_blank_csv(skipped: list[str], blank: list[str], spans: dict[int, tuple[int, int]] | None = None) -> str:
@@ -2335,14 +2358,17 @@ def skipped_blank_csv(skipped: list[str], blank: list[str], spans: dict[int, tup
     w = csv.writer(buf)
     w.writerow(["Row", "Lines in the file", "What happened", "Reason"])
     for what, lines in (("Skipped", skipped), ("Saved, a cell left blank", blank)):
-        for line in lines:
-            m = _ROW_LEAD.match(line)
-            lead, reason = (line[:m.end() - 2], line[m.end():]) if m else ("", line)
-            nums = [int(x) for x in re.findall(r"\d+", re.sub(r"\([^)]*\)", "", lead))] or [0]
-            for num in nums:
-                a, b = spans.get(num, (0, 0))
-                where = "" if not a else (str(a) if a == b else f"{a} to {b}")
-                w.writerow([num or "", where, what, _safe_cell(reason)])
+        by_row: dict[Any, list[str]] = {}  # one line per row: a row with two blank cells says both reasons
+        for k, line in enumerate(lines):
+            lead, reason = _split_lead(line)
+            for num in _lead_rows(lead) if lead else [("line", k)]:  # a line naming no row stays a line of its own
+                if reason not in by_row.setdefault(num, []):
+                    by_row[num].append(reason)
+        for num, reasons in by_row.items():
+            num = 0 if isinstance(num, tuple) else num
+            a, b = spans.get(num, (0, 0))
+            where = "" if not a else (str(a) if a == b else f"{a} to {b}")
+            w.writerow([num or "", where, what, _safe_cell("; ".join(reasons))])
     return buf.getvalue()
 
 
