@@ -5,7 +5,7 @@
 {% block body %}
 <div class="sec-head">
   <h1>Candidates <span class="muted">{{ total }}</span></h1>
-  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" href="/export.csv">Export CSV</a> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file">Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a></div>
+  <div class="actions-inline">{% if dup_count %}<a class="btn" href="/candidates/duplicates">{{ dup_count }} possible duplicate{{ '' if dup_count == 1 else 's' }}</a> {% endif %}<a class="btn" id="export-csv" href="/candidates/export.csv?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as a CSV file">Export CSV</a> <a class="btn" id="export-xlsx" href="/candidates/export.xlsx?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir) | urlencode }}" title="Everyone this table shows, in this order, as an Excel file">Export xlsx</a> <a class="btn primary" href="/candidates/new">Add</a>{% if total > bulk_max() %} <span class="fine" id="export-cap">Exports hold the first {{ "{:,}".format(bulk_max()) }} of {{ "{:,}".format(total) }} people.</span>{% endif %}</div>
 </div>
 <form class="tablebar" id="tablebar-form" method="get" action="/candidates">
   <input type="search" name="q" value="{{ q }}" placeholder="Search: python OR go, &quot;machine learning&quot;, title:engineer" aria-label="Search candidates">
