@@ -122,7 +122,8 @@ function tableMode(d){
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
  const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},xlWho().label);XL=xl;
  const xlOut=el("span",{class:"small",role:"status","aria-live":"polite"});
- wrap.append(el("div",{class:"tbar"},back,canCall()?xl:null,xlOut));
+ const allBtn=(canCall()&&!S.sel.size&&S.total>S.people.length)?el("button",{class:"btn",type:"button",onclick:()=>loadAllAndExport(allBtn,xlOut)},"Load all and export"):null;
+ wrap.append(el("div",{class:"tbar"},back,canCall()?xl:null,allBtn,xlOut));
  const t=peopleTable(S.people,S,{skills:true,origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,bulkExtra:compareBtn,
   onOpen:p=>{S.idx=S.people.indexOf(p);S.fromTable=true;S.scroll={x:t.scroller.scrollLeft,y:(document.scrollingElement||document.documentElement).scrollTop,id:p.id};setView("card")}});
  SHOWN=t;wrap.append(t.node);
@@ -135,7 +136,18 @@ function xlWho(){const ticked=S.people.filter(p=>S.sel.has(p.id));return ticked.
 function refreshXl(){if(XL&&XL.isConnected)XL.textContent=xlWho().label}
 function exportXlsx(btn,out){
  const w=xlWho();const notLoaded=S.sel.size?0:Math.max(0,S.total-S.people.length);
- exportIds(w.people.map(p=>p.id),btn,out,notLoaded)}
+ exportIds(w.people.map(p=>p.id),btn,out,notLoaded,"list")}
+/* Load the rest of the found people (up to the 200 a file can hold), then make the same plain list file. */
+function loadAllAndExport(btn,out){
+ if(S.loading)return;S.loading=true;btn.disabled=true;out.textContent="Loading everyone...";
+ const tool=TOOL||(ARGS&&ARGS.name_or_id!=null?"run_saved_search":"search_candidates");
+ const step=()=>{if(S.people.length>=S.total||S.people.length>=200){S.loading=false;btn.disabled=false;
+   exportIds(S.people.map(p=>p.id),btn,out,Math.max(0,S.total-S.people.length),"list");return}
+  return callTool(tool,Object.assign({},ARGS||{},{limit:50,offset:nextOffset()})).then(r=>{const d=r&&r.structuredContent;
+   if(r&&r.isError||!d||!d.results||!d.results.length){S.loading=false;btn.disabled=false;out.textContent=said(r)||"Couldn't load everyone.";return}
+   const have=new Set(S.people.map(p=>p.id));for(const p of d.results)if(!have.has(p.id))S.people.push(p);
+   S.total=d.total!=null?d.total:S.total;return step()},()=>{S.loading=false;btn.disabled=false;out.textContent="Couldn't load everyone."})};
+ step()}
 function draw(focus){const m=document.getElementById("main");const d=S.d;
  const n=S.mode==="table"?tableMode(d):cardMode(d);m.replaceChildren(n);
  if(focus==="table"&&SHOWN){const sc=S.scroll;S.scroll=null;

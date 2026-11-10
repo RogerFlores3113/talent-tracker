@@ -74,7 +74,7 @@ def test_tool_text_and_data_say_some_of_them(store):
     res = call(build_server(store), "compare_candidates", candidate_ids=ids)
     emily = data(res)["people"][0]
     assert {"skill": "python", "count": 4, "of": 6} in emily["some_of_them"]
-    assert "python, 4 of 6" in text(res) and "only them: spark" in text(res)
+    assert "python (4 of 6 have it)" in text(res) and "Only them: spark." in text(res)
 
 
 # ------------------------------------------------------------ 2. page layout and header
@@ -145,7 +145,7 @@ def test_compare_takes_the_first_six_and_names_who_was_left_out(store):
     assert "Tess Wong" in t and "6 at a time" in t
     assert t.rstrip().endswith("Open in Talent Search: " + d["app_url"])
     assert "/candidates/share?ids=" in d["share_url"]
-    with pytest.raises(Exception, match="2 to 6"):
+    with pytest.raises(Exception, match="two to six"):
         call(build_server(store), "compare_candidates", candidate_ids=[ids[0]])
 
 

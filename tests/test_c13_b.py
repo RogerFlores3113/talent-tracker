@@ -205,7 +205,7 @@ def test_compare_candidates_tool_and_view(store):
 def test_compare_candidates_rejects_one(store):
     ids = _people(store, 7)
     s = build_server(store)
-    with pytest.raises(Exception, match="2 to 6"):
+    with pytest.raises(Exception, match="two to six"):
         call(s, "compare_candidates", candidate_ids=[ids[0]])  # seven now compares the first six (see test_c13_f3)
 
 
