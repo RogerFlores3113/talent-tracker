@@ -83,9 +83,9 @@ def test_bar_colors_and_links(store):
     assert "Nobody is hidden." in html
     bar = html[html.index('aria-label="Highlighted skills"'):]
     bar = bar[:bar.index("</div>")]
-    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+)"', bar) == [
+    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+) \(\w+\)"', bar) == [
         ("red", "python"), ("yellow", "go"), ("green", "sql")]
-    hrefs = re.findall(r'href="([^"]+)"[^>]*aria-label="Remove highlight: (\w+)"', bar)
+    hrefs = re.findall(r'href="([^"]+)"[^>]*aria-label="Remove highlight: (\w+) \(\w+\)"', bar)
     q = _qs(hrefs[1][0])  # remove go
     assert q["hl"] == ["python:red,sql:green"] and q["tag"] == ["python"] and q["sort"] == ["name"]
     clear = re.search(r'href="([^"]+)">Clear</a>', bar).group(1)
@@ -101,7 +101,7 @@ def test_row_chip_toggle_and_order(store):
     html = c.get("/candidates?hl=go&tag=python&sort=name&dir=asc").text
     row = html[html.index(">Zed Zoe</a>"):]
     row = row[:row.index("</tr>")]
-    chips = re.findall(r'<a class="chip( hl)?"( data-hl="\w+")? href="([^"]+)" aria-label="([^"]+)" title="[^"]*">([^<]+)</a>', row)
+    chips = re.findall(r'<a class="chip( hl)?"(?: id="[^"]+")?(?: data-skill="[^"]+")?( data-hl="\w+")? href="([^"]+)" aria-label="([^"]+)" title="[^"]*">([^<]+)</a>', row)
     assert [x[4] for x in chips] == ["go", "python", "react", "aws"]  # go first, still four shown
     assert "+1" in row
     go = chips[0]

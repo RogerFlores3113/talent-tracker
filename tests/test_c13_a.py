@@ -55,7 +55,7 @@ def test_old_hl_links_still_sort_and_color(store):
     c = local_client(store)
     html = c.get("/candidates?hl=a,b").text
     assert set(_names(html)[:2]) == {"A and B", "All Three"}
-    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+)"', _bar(html)) == [
+    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+) \(\w+\)"', _bar(html)) == [
         ("red", "a"), ("yellow", "b")]
 
 
@@ -63,11 +63,11 @@ def test_color_stays_after_removing_an_earlier_pick(store):
     _seed(store)
     c = local_client(store)
     html = c.get("/candidates?hl=a,b,c").text
-    hrefs = dict((s, h) for h, s in re.findall(r'href="([^"]+)"[^>]*aria-label="Remove highlight: (\w+)"', _bar(html)))
+    hrefs = dict((s, h) for h, s in re.findall(r'href="([^"]+)"[^>]*aria-label="Remove highlight: (\w+) \(\w+\)"', _bar(html)))
     q = _qs(hrefs["a"])  # remove the first pick
     assert q["hl"] == ["b:yellow,c:green"]
     html2 = c.get("/candidates", params={"hl": q["hl"][0]}).text
-    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+)"', _bar(html2)) == [
+    assert re.findall(r'data-hl="(\w+)"[^>]*aria-label="Remove highlight: (\w+) \(\w+\)"', _bar(html2)) == [
         ("yellow", "b"), ("green", "c")]
     # adding a new pick takes the free color (red), not the next one
     row = html2[html2.index(">Only A</a>"):]

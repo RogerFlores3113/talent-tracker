@@ -142,7 +142,7 @@ def test_bulk_compare_needs_two_and_caps_at_six(store):
     c = local_client(store)
     one = c.post("/candidates/bulk", data={"action": "compare", "candidate_ids": [ids[0]]}, follow_redirects=False)
     assert one.status_code == 303 and one.headers["location"] == "/candidates"
-    assert "Tick at least two people" in c.get("/candidates").text  # the message rides in a short-lived cookie
+    assert "Tick two to six people to compare" in c.get("/candidates").text  # the message rides in a short-lived cookie
     many = c.post("/candidates/bulk", data={"action": "compare", "candidate_ids": ids}, follow_redirects=False)
     assert many.headers["location"].startswith("/candidates/compare?ids=")
     assert f"ids={'%2C'.join(map(str, ids[:6]))}" in many.headers["location"] and "of=7" in many.headers["location"]

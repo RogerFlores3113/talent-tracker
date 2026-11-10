@@ -6,6 +6,9 @@ All notable changes to Talent Search. Newest first.
 
 ### Candidates
 - Click a skill chip to light it up in its own color (first pick red, then yellow, green, blue, purple, orange; a color stays with its skill) on every row where it shows, and move people who have it to the top. People with more of your picked skills come first, and when it's a tie the skill you picked first wins. Nobody is hidden. Click it again, or press the x in the new Highlighted skills bar, to take it off. Saved searches keep the highlights.
+- Skill highlights are easier to follow: keyboard focus stays on the chip you picked, a status line says what changed, the highlighted skills bar shows each pick's number, color and how many people have it, and every row shows "2 of 2" matches. The color columns are now called Label and Label color so they are not mixed up with highlight colors.
+- "Use all N people in these results" now follows the order on screen for Compare, exports and Share, so Compare takes the top six you see. The bulk bar groups Compare, Export and Share under "Send out", and Compare says "Tick two to six people to compare."
+- Importing keeps names and titles that start with = + - or @ as plain text, trims emoji from the end of skills, and leaves out skills with no letters (listed in the import warnings).
 
 ### Tour
 - The Saved searches step lights up a real line now. With nothing saved yet it reads "Saved searches: none yet" and says how to save one, instead of an empty bar.

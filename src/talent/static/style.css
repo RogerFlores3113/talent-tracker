@@ -656,7 +656,7 @@ td.pickcell, th.pickcell { width: 1%; text-align: center; }
 .btn.link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
 /* Highlighted skills: a fixed color per pick (red, yellow, green, blue, purple, orange), same fills as the color bubbles. */
-.chip.hl { border-color: var(--text); font-weight: 600; background: var(--bub, var(--surface-2)); color: var(--bub-ink, var(--text)); }
+.chip.hl { border: 1px solid var(--text); border-color: color-mix(in srgb, var(--bub, var(--text)) 35%, var(--text)); font-weight: 600; background: var(--bub, var(--surface-2)); color: var(--bub-ink, var(--text)); }
 .chip[data-hl="red"] { --bub: var(--tag-red); --bub-ink: var(--tag-red-ink); }
 .chip[data-hl="yellow"] { --bub: var(--tag-yellow); --bub-ink: var(--tag-yellow-ink); }
 .chip[data-hl="green"] { --bub: var(--tag-green); --bub-ink: var(--tag-green-ink); }
@@ -674,6 +674,14 @@ tr.hlrow[data-edge="orange"] { --bub: var(--tag-orange); }
 .chip.hl:hover { filter: brightness(1.08); }
 .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hlbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
+.hlbar:focus-visible, .hl-status:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hl-status { margin: 0 0 var(--space-2); }
+.hl-status:empty { display: none; }
+.chip.hl .hl-n { display: inline-block; min-width: 1.2em; text-align: center; font-weight: 700; border-right: 1px solid currentColor; padding-right: 0.3em; margin-right: 0.15em; }
+.chip.hl .hl-count { font-weight: 400; }
+.matchcount { white-space: nowrap; margin-left: var(--space-2); }
+.chip, tr { scroll-margin: 6rem 0; }
+.bulk-send { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); align-items: center; }
 
 /* Compare people (/candidates/compare) */
 .compare-wrap { margin: var(--space-4) 0; position: relative; }

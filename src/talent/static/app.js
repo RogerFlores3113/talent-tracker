@@ -732,3 +732,35 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startTour);
   else startTour();
 })();
+
+// Candidates table, skill highlights: after a pick or a remove the page reloads, so put keyboard focus back on the
+// chip the #fragment names (the same chip, else the highlight bar) and say in words what changed.
+(function () {
+  function say(text) { const s = document.getElementById("hl-status"); if (s) s.textContent = text; return s; }
+  function people(n) { return n === 1 ? "1 person has it and is" : Number(n).toLocaleString("en-US") + " people have it and are"; }
+  function start() {
+    const status = document.getElementById("hl-status");
+    if (!status) return;
+    const hash = decodeURIComponent((location.hash || "").slice(1));
+    if (!hash) return;
+    const bar = document.getElementById("hl-bar");
+    const fallback = bar || status;
+    let target = null, text = "";
+    if (hash === "hlcleared") { text = "Cleared the highlights. The usual order is back."; target = status; }
+    else if (hash.indexOf("removed-") === 0) { text = "Removed the " + hash.slice(8) + " highlight."; target = fallback; }
+    else {
+      target = document.getElementById(hash);
+      const skill = target && target.getAttribute("data-skill");
+      if (skill) {
+        const lit = bar && Array.prototype.find.call(bar.querySelectorAll("[data-skill]"), el => el.getAttribute("data-skill") === skill);
+        if (lit) text = skill + " highlighted " + lit.getAttribute("data-hl") + ". " + people(lit.getAttribute("data-count") || 0) + " at the top.";
+        else text = "Removed the " + skill + " highlight.";
+      } else { target = fallback; }
+    }
+    if (!target) target = fallback;
+    if (text) window.setTimeout(() => say(text), 50);  // after load, so the live region speaks it
+    target.focus();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
