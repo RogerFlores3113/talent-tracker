@@ -2241,7 +2241,9 @@ def _join_names(names: list[str]) -> str:
 class Store:
     """Thread-safe wrapper around one SQLite connection."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(self, path: str | Path = ":memory:", *, scratch: bool = False) -> None:
+        """scratch: a private working copy (an import preview). It leaves the zone times show in alone, since that
+        zone belongs to the recruiter's own database, not to the copy."""
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -2249,6 +2251,7 @@ class Store:
         self._depth = 0  # > 0 inside _write(): nested writes join the outer transaction
         self._saved_counts: dict[Any, tuple[int, int]] = {}  # saved search counts, good until anything is written
         self._saved_counts_stamp: Any = None
+        self._scratch = scratch
         self._open()
 
     def _open(self) -> None:
@@ -2271,8 +2274,9 @@ class Store:
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
         self._refresh_linkedin_keys()
-        row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
-        set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
+        if not self._scratch:
+            row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
+            set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:

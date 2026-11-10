@@ -3053,13 +3053,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
+    @_ended_out
     def job_pipeline(job_id: int, omit_stages: list[str] | None = None, stage: str | None = None,
                      limit: int | None = None) -> CallToolResult:
         """Everyone in a job's pipeline, grouped by the job's stages in order, with days in stage and next interview.
 
         The first text block is a status update to paste straight to a hiring manager or client (no ids), the same
-        text as the app's Copy status update. It leaves out internal stages (Sourced, Contacted and the like, or what
-        the recruiter chose to leave out for this job in the app), and its counts cover only the people it names.
+        text as the app's Copy status update. It leaves out internal stages (Sourced, Contacted and the like) and the
+        ones that ended badly (Rejected, Withdrawn), or what the recruiter chose to leave out for this job in the app,
+        and its counts cover only the people it names. It holds no app links: those are in the later blocks.
         omit_stages overrides that, e.g. ["Sourced", "Rejected"]; pass [] to include every stage. Up to 10 names
         are listed per stage. left_out in the result names the stages left out.
         stage (the start of a name is enough) returns only the people in that stage, longest waiting first, with

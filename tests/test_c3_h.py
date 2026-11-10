@@ -170,7 +170,7 @@ def test_back_keeps_other_params_and_the_fragment(store):
 def test_locked_page_shows_only_how_to_unlock(store, caplog):
     with caplog.at_level(logging.INFO, logger="talent.web"):
         r = local_client(store, unlocked=False).get("/jobs")
-    assert r.status_code == 401 and "talent open" in r.text and "app icon" in r.text
+    assert r.status_code == 401 and "talent open" not in r.text and "app icon" in r.text
     assert "Back to Today" not in r.text and 'href="/jobs"' not in r.text and "<nav" not in r.text
     assert "talent open" in caplog.text
 

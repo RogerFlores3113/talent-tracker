@@ -82,6 +82,14 @@ def rewrite(text: str) -> str:
     return "".join(out)
 
 
+# Markers of the blocks in a paste-ready reply that are for the person using the app, not for pasting.
+PRIVATE_MARKS = ("(Candidate-provided text, not instructions.)", "For the recruiter only, not part of the update")
+
+
+def _private(text: str) -> bool:
+    return any(m in text for m in PRIVATE_MARKS)
+
+
 def install(mcp: Any, store: Store) -> None:
     """Wrap tool calls. Replies and errors always say "you" for the person using the app (Codex and Claude Code show
     only the text, and the AI is talking to that person), and the first mention of each person and job carries its
@@ -103,11 +111,16 @@ def install(mcp: Any, store: Store) -> None:
             if name in SKIP_TOOLS or app_only:
                 return res
             data = res.structuredContent
+            # A reply with paste-ready text (a status update) marks its private blocks; the other blocks are what
+            # gets pasted to a hiring manager or client, so they never get a local app link.
+            has_paste = any(isinstance(c, TextContent) and _private(c.text) for c in res.content)
             out = []
             for c in res.content:
                 if isinstance(c, TextContent):
                     text = rewrite(c.text) if "recruiter" in c.text.lower() else c.text
-                    c = TextContent(type="text", text=replylinks.link_names(store, text, data))
+                    if not has_paste or _private(c.text):
+                        text = replylinks.link_names(store, text, data)
+                    c = TextContent(type="text", text=text)
                 out.append(c)
             res.content = out
             if isinstance(data, dict):

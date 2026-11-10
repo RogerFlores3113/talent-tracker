@@ -159,9 +159,10 @@ def test_job_pipeline_text_reads_like_a_status_update(store, pst):
     store.log(maya, "interview", "Onsite", at=when, job_id=job["id"])
     res = call(server, "job_pipeline", job_id=job["id"])
     out = res.content[0].text  # the paste-ready update is the first block, the same text as the app's
-    assert out.split("\nOpen in Talent Search:")[0] == actions.job_status_text(store, job["id"])
+    assert out == actions.job_status_text(store, job["id"], omit_stages=actions.page_omit(store, job["id"]))
+    assert "127.0.0.1" not in out and "Lee Park" not in out
     assert out.splitlines()[0] == "Payments Lead, Acme Pay · Remote"
-    assert "1 candidate in process, none hired yet. 1 out." in out
+    assert "1 candidate in process, none hired yet." in out and "1 out." not in out
     local = when.astimezone()
     assert "Interviewing (1): Maya Chen (new today)" in out
     assert f"- Maya Chen: {local:%a %b} {local.day}, 3:00 PM P" in out  # 23:00 UTC is 3 PM Pacific

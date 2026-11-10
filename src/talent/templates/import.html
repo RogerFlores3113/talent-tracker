@@ -146,7 +146,7 @@
 {% if result.held_back %}<p class="fine">Held back {{ result.held_back }} move{{ '' if result.held_back == 1 else 's' }} that would have put {{ 'someone' if result.held_back == 1 else 'people' }} earlier in a pipeline. They stay where they are. The list is under "Already in that job".</p>{% endif %}
 {% if result.email_columns_skipped %}<p class="fine" id="email-skipped">{{ result.email_columns_skipped | join(', ') }} looked like {{ 'an email column' if result.email_columns_skipped | length == 1 else 'email columns' }} and {{ 'was' if result.email_columns_skipped | length == 1 else 'were' }} left out, so those addresses were not imported.</p>{% endif %}
 {% if new_jobs %}{{ openings_form(new_jobs, result.backup_name) }}{% endif %}
-<p class="fine">We saved how this file was read. Next time you import a file with the same columns, the same matches are used, and on the command line: talent sync FILE</p>
+<p class="fine">We saved how this file was read. Next time you import a file with the same columns, the same matches are used.</p>
 <p class="actions-inline"><a class="btn primary" href="/candidates">See candidates</a> <a class="btn" href="/import">Import another</a></p>
 {% else %}
 {% if new_jobs %}{{ openings_form(new_jobs, '') }}{% else %}<p class="lead">No jobs are waiting for their number of openings.</p>{% endif %}

@@ -1,78 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Connect AI · Talent Search{% endblock %}
 {% block body %}
-<h1>Connect your AI app</h1>
-<p class="lead">Once connected, ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
-{% include "_site_note.html" %}
-
-<section class="panel" id="skills-panel">
-  <h2>Install skills</h2>
-  <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> {{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs.</p>
-  <ul class="plain" id="skill-list">{% for k in skill_info %}<li><strong>{{ k.title }}</strong>: {{ k.line }} <code>{{ k.folder }}</code></li>{% endfor %}</ul>
-
-  <p id="where-cards-show"><strong>Where the cards show:</strong> Cards and tables show in the Claude desktop app and the ChatGPT desktop app. Claude asks once to display them: choose Always allow. Claude Code, the Codex command line and claude.ai in a browser show the same answers as text. After you update Talent Search, quit and reopen the app so it picks up the new views.</p>
-  <h3 id="claude-plugin">Claude app (desktop or claude.ai): the plugin</h3>
-  <p><strong>This is the one for most people.</strong> The plugin adds the {{ skill_names|length }} skills above to the Claude app. It adds the skills only: the Claude app still needs the Talent Search connection, which you make in the Claude Desktop section <a href="#claude-panel">further down this page</a>.</p>
-  {% if plugin_saved %}<p class="ok">Already saved: {{ plugin_file }} is in {{ plugin_where }}. Upload it in Claude if you haven't yet.</p>{% endif %}
-  <p>The Claude app takes one plugin file. Press the button and we save it in {{ plugin_where }} and show it to you.</p>
-  <p><button class="btn primary" hx-post="/connect/skills/plugin/save" hx-target="#plugin-result">Get the Claude plugin</button>
-    {% if can_open_claude %}<button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result-top">Open Claude</button> <span id="claude-open-result-top" aria-live="polite"></span>{% endif %}
-    <a href="/connect/skills.plugin" download>Or download {{ plugin_file }} here</a></p>
-  <div id="plugin-result" aria-live="polite"></div>
-  <ol id="plugin-steps">{% for st in plugin_steps %}<li>{{ st }}</li>{% endfor %}</ol>
-  <p id="plugin-check"><strong>Check it worked:</strong> start a new chat in Claude and ask “What Talent Search skills do you have?” It should name them.</p>
-  <div class="fine" id="plugin-claude-code">
-    <p><strong>Which one should I pick?</strong> If you use the Claude app, use the button above. Use the two commands below only if you already work in Claude Code. Type them in Claude Code, one after the other:</p>
-    {% for c in plugin_commands %}
-    <pre class="code wrap" id="plugin-cmd-{{ loop.index }}">{{ c }}</pre>
-    <p><button class="btn" type="button" data-copy-from="plugin-cmd-{{ loop.index }}" aria-label="Copy Claude Code plugin command {{ loop.index }}">Copy</button></p>
-    {% endfor %}
-    <p>Then run <code>/plugin list</code>: talent-search should be there.</p>
-  </div>
-
-  <h3>Claude Code and Codex</h3>
-  <p>One button adds the skills to every app we find on this computer. You see the files first.</p>
-  {% include "_skills_found.html" %}
-  <p><button class="btn primary" id="install-skills-btn" hx-post="/connect/skills/all/preview-install" hx-target="#skills-all-result">Install skills</button></p>
-  <div id="skills-all-result" aria-live="polite"></div>
-
-  <details class="fine">
-    <summary>Want updates? Add it as a marketplace in the Claude app</summary>
-    <p>In the Claude app: Customize, Plugins, Add marketplace, then type <code id="mkt-repo">{{ marketplace_repo }}</code>.</p>
-    <p><button class="btn" type="button" data-copy-from="mkt-repo" aria-label="Copy marketplace name">Copy</button></p>
-    <p>In Claude Code, use the two commands shown under the plugin button above.</p>
-  </details>
-
-  <details class="fine" id="skills-one-app">
-    <summary>One app at a time, or remove skills</summary>
-    <div class="connect-grid">
-    {% for s in skill_status %}
-    <div>
-      <h3>{{ s.label }}</h3>
-      <p class="fine">{% if s.count %}{% if s.current and not s.skipped %}<span class="ok">Installed ({{ s.count }} skills, version {{ s.versions|join(', ') }}).</span>{% else %}Installed: {{ s.count }} of {{ s.total }} skills{% if s.versions %}, version {{ s.versions|join(', ') }}{% endif %}.{% if s.skipped %} {{ s.skipped }} left alone because you have your own.{% else %} Add again to update.{% endif %}{% endif %}{% else %}{% if s.skipped %}{{ s.skipped }} left alone because you have your own. {% endif %}Not added yet.{% endif %}{% if s.edited %} {{ s.edited }} file{{ '' if s.edited == 1 else 's' }} edited by you will be kept.{% endif %} Folder: <code>{{ s.base }}</code></p>
-      <button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-install" hx-target="#skills-{{ s.target }}-result">{{ 'Update' if s.count else 'Add' }} Talent Search skills for {{ s.label }}</button>
-      {% if s.count %}<button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-remove" hx-target="#skills-{{ s.target }}-result">Remove Talent Search skills</button>{% endif %}
-      <div id="skills-{{ s.target }}-result"></div>
-    </div>
-    {% endfor %}
-    </div>
-  </details>
-
-  <details class="fine" id="skills-older-way">
-    <summary>Older way: upload skills one at a time</summary>
-    <p>{{ desktop_steps }}</p>
-    <p><a class="btn" href="/connect/skills.zip" download>Download all skills as one .zip</a></p>
-    <ul class="plain">{% for z in skill_zips %}<li><a href="/connect/skills/{{ z.name }}.zip" download>{{ z.label }} (.zip)</a></li>{% endfor %}</ul>
-  </details>
-  <p class="fine">Prefer to have your AI app do it? Ask Claude Code or Codex: “Install the Talent Search skills by following INSTALL-SKILLS.md in <code>{{ skills_source }}</code>”. Or run <code>talent install-skills</code> in a terminal, which lists what it adds first.</p>
-</section>
-
-<section class="panel" id="chooser">
-  <h2>Which AI app do you use?</h2>
-  <p>Pick yours and press its button. That's all it takes. You can connect more than one.</p>
-</section>
-
-<div class="connect-grid connect-three" id="app-chooser">
+{% macro claude_panel() %}
   <section class="panel" id="claude-panel">
     <h2>Claude Desktop</h2>
     {% if not claude.installed %}
@@ -81,45 +10,32 @@
       <p class="fine">Already installed? Open it once, then come back and reload this page.</p>
     {% elif claude.launch_problem %}
       <p class="flash warn">{{ claude.launch_problem }}</p>
-      <button class="btn primary" type="button" disabled>Connect Claude Desktop</button>
+      <button class="btn primary" type="button" disabled>Connect Claude</button>
     {% elif claude.entry and claude.entry_problems %}
       <p class="flash warn"><strong>Talent Search is set up in Claude Desktop, but it can't start:</strong></p>
       <ul class="plain">{% for p in claude.entry_problems %}<li>{{ p }}</li>{% endfor %}</ul>
-      <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Repair Claude Desktop</button>
+      <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Repair Claude Desktop{% if restarts and claude.claude_running %} (restarts Claude){% endif %}</button>
     {% elif claude.entry %}
       <p><span class="ok">Connected.</span>{% if claude.store_version %} (This is the Microsoft Store copy of Claude Desktop.){% endif %}</p>
-      <p class="fine">Press Test connection to check that it works. Then close Claude Desktop completely and open it again.</p>
+      <p class="fine">{% if restarts %}Not seeing Talent Search in Claude? Press Reconnect: it restarts Claude for you.{% else %}Press Test connection to check that it works. Then close Claude Desktop completely and open it again.{% endif %}</p>
       {% if claude.quarantine %}<p class="flash warn">{{ claude.quarantine }}</p>{% endif %}
       <button class="btn primary" hx-post="/connect/claude/test" hx-target="#claude-result" hx-indicator="#claude-busy">Test connection</button>
-      <button class="btn" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Reconnect</button>
+      <button class="btn" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Reconnect{% if restarts and claude.claude_running %} (restarts Claude){% endif %}</button>
     {% else %}
       <p>Adds Talent Search to Claude. Your results show up as cards right in the chat.</p>
-      <button class="btn primary" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Connect Claude Desktop</button>
+      <button class="btn primary" id="connect-claude-btn" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Connect Claude{% if restarts and claude.claude_running %} (restarts Claude){% endif %}</button>
     {% endif %}
-    {% if claude.installed and claude.claude_running %}
+    {% if claude.installed and claude.claude_running and restarts and not claude.launch_problem %}
+    <p class="fine claude-open">Save anything you're typing in Claude first.</p>
+    {% elif claude.installed and claude.claude_running %}
     <p class="fine claude-open">Claude Desktop is open. After connecting, {{ claude_quit[0]|lower }}{{ claude_quit[1:] }}</p>
     {% endif %}
     {% if claude.config_error %}<p class="flash warn">{{ claude.config_error }}</p>{% endif %}
-    <p class="fine">Skills: <a href="#claude-plugin">Get the Claude plugin for Claude Desktop</a>, at the top of this page.</p>
-    <span class="checking" id="claude-busy">Checking...</span>
+    <span class="checking" id="claude-busy">Working...</span>
     <div id="claude-result" aria-live="polite"></div>
   </section>
-
-  <section class="panel" id="claude-code-panel">
-    <h2>Claude Code</h2>
-    <p>Claude Code is Claude for a terminal or code editor.</p>
-    <details id="claude-code-steps">
-    <summary>Show the steps</summary>
-    <p>1. Connect it. Paste this into a terminal and press Enter. It works in every folder you open Claude Code in.</p>
-    <pre class="code wrap" id="claude-code-cmd">{{ claude_code_command }}</pre>
-    <p><button class="btn" type="button" data-copy-from="claude-code-cmd" aria-label="Copy Claude Code command">Copy</button></p>
-    <p>2. Add the skills with <a href="#skills-panel">Install skills</a> at the top of this page.</p>
-    <p class="fine">Then start a new Claude Code session and type <code>/mcp</code> to check that talent-search is listed.</p>
-    </details>
-    {% for s in skill_status if s.target == 'claude-code' and s.count %}<p><span class="ok">{{ s.count }} skills added.</span></p>{% endfor %}
-    <p class="fine">Not sure if you have it? If you don't know what Claude Code is, pick Claude Desktop.</p>
-  </section>
-
+{% endmacro %}
+{% macro codex_panel() %}
   <section class="panel" id="codex-panel">
     <h2>Codex</h2>
     {% if not codex_installed %}
@@ -131,12 +47,12 @@
       <button class="btn primary" hx-post="/connect/codex" hx-target="#codex-result" hx-indicator="#codex-busy">{{ 'Reconnect' if codex_on else 'Connect' }} Codex</button>
       {% if codex_on %}<button class="btn" hx-post="/connect/codex/test" hx-target="#codex-result" hx-indicator="#codex-busy">Test connection</button>{% endif %}
     {% endif %}
-    <p class="fine">Skills: use <a href="#skills-panel">Install skills</a> at the top of this page.</p>
+    <p class="fine">Skills: Step 2 below adds them to Codex too.</p>
     <span class="checking" id="codex-busy">Checking...</span>
     <div id="codex-result" aria-live="polite"></div>
   </section>
-</div>
-
+{% endmacro %}
+{% macro lmstudio_panel() %}
 <section class="panel" id="lmstudio-panel">
   <h2>Using a model that runs on this computer? (LM Studio)</h2>
   {% if not lmstudio_installed %}
@@ -149,6 +65,117 @@
   {% endif %}
   <span class="checking" id="lmstudio-busy">Checking...</span>
   <div id="lmstudio-result" aria-live="polite"></div>
+</section>
+{% endmacro %}
+
+<h1>Connect your AI app</h1>
+<p class="lead">Two steps, one click each. Then ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
+{% include "_site_note.html" %}
+
+<h2 class="step" id="step-connect">Step 1. Connect your AI app</h2>
+<div id="chooser">
+{% if fit_app == 'codex' %}{{ codex_panel() }}{% elif fit_app == 'lmstudio' %}{{ lmstudio_panel() }}{% else %}{{ claude_panel() }}{% endif %}
+</div>
+
+<h2 class="step" id="step-skills">Step 2. Add skills</h2>
+<section class="panel" id="skills-panel">
+  <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> {{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs.</p>
+  <p><button class="btn primary" id="install-skills-btn" hx-post="/connect/skills/add" hx-target="#skills-add-result" hx-indicator="#skills-busy">Add skills</button>
+    <span class="checking" id="skills-busy">Working...</span></p>
+  <p class="fine">Adds them to Claude Code and Codex if they are here, and gets the file for the Claude app ready.</p>
+  <div id="skills-add-result" aria-live="polite"></div>
+  <p id="where-cards-show" class="fine"><strong>Where the cards show:</strong> Cards and tables show in the Claude desktop app and the ChatGPT desktop app. Claude asks once to display them: choose Always allow. Claude Code, the Codex command line and claude.ai in a browser show the same answers as text. After you update Talent Search, quit and reopen the app so it picks up the new views.</p>
+
+  <details class="fine" id="skills-claude-by-hand">
+    <summary>Claude app: do it by hand, or get updates</summary>
+    <h3 id="claude-plugin">Claude app (desktop or claude.ai): the plugin</h3>
+    <p>The plugin adds the {{ skill_names|length }} skills to the Claude app. It adds the skills only: the Claude app still needs the connection from Step 1.</p>
+    {% if plugin_saved %}<p class="ok">Already saved: {{ plugin_file }} is in {{ plugin_where }}. Upload it in Claude if you haven't yet.</p>{% endif %}
+    <p><button class="btn" hx-post="/connect/skills/plugin/save" hx-target="#plugin-result">Save the Claude plugin file</button>
+      {% if can_open_claude %}<button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result-top">Open Claude</button> <span id="claude-open-result-top" aria-live="polite"></span>{% endif %}
+      <a href="/connect/skills.plugin" download>Or download {{ plugin_file }} here</a></p>
+    <div id="plugin-result" aria-live="polite"></div>
+    <ol id="plugin-steps">{% for st in plugin_steps %}<li>{{ st }}</li>{% endfor %}</ol>
+    <p id="plugin-check"><strong>Check it worked:</strong> start a new chat in Claude and ask “What Talent Search skills do you have?” It should name them.</p>
+    <p>Want updates? In the Claude app: Customize, Plugins, Add marketplace, then type <code id="mkt-repo">{{ marketplace_repo }}</code>.</p>
+    <p><button class="btn" type="button" data-copy-from="mkt-repo" aria-label="Copy marketplace name">Copy</button></p>
+    <div id="plugin-claude-code">
+      <p><strong>Which one should I pick?</strong> If you use the Claude app, use the Add skills button above. Use the two commands below only if you already work in Claude Code. Type them in Claude Code, one after the other:</p>
+      {% for c in plugin_commands %}
+      <pre class="code wrap" id="plugin-cmd-{{ loop.index }}">{{ c }}</pre>
+      <p><button class="btn" type="button" data-copy-from="plugin-cmd-{{ loop.index }}" aria-label="Copy Claude Code plugin command {{ loop.index }}">Copy</button></p>
+      {% endfor %}
+      <p>Then run <code>/plugin list</code>: talent-search should be there.</p>
+    </div>
+  </details>
+
+  <details class="fine" id="skills-one-app">
+    <summary>One app at a time, or remove skills</summary>
+    <p>What each skill does:</p>
+    <ul class="plain" id="skill-list">{% for k in skill_info %}<li><strong>{{ k.title }}</strong>: {{ k.line }} <code>{{ k.folder }}</code></li>{% endfor %}</ul>
+    <h3>Claude Code and Codex</h3>
+    {% include "_skills_found.html" %}
+    <div id="skills-all-result" aria-live="polite"></div>
+    <div class="connect-grid">
+    {% for s in skill_status %}
+    <div>
+      <h3>{{ s.label }}</h3>
+      <p class="fine">{% if s.count %}{% if s.current and not s.skipped %}<span class="ok">Installed ({{ s.count }} skills, version {{ s.versions|join(', ') }}).</span>{% else %}Installed: {{ s.count }} of {{ s.total }} skills{% if s.versions %}, version {{ s.versions|join(', ') }}{% endif %}.{% if s.skipped %} {{ s.skipped }} left alone because you have your own.{% else %} Add again to update.{% endif %}{% endif %}{% else %}{% if s.skipped %}{{ s.skipped }} left alone because you have your own. {% endif %}Not added yet.{% endif %}{% if s.edited %} {{ s.edited }} file{{ '' if s.edited == 1 else 's' }} edited by you will be kept.{% endif %} Folder: <code>{{ s.base }}</code></p>
+      <button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-install" hx-target="#skills-{{ s.target }}-result">{{ 'Update' if s.count else 'Add' }} Talent Search skills for {{ s.label }}</button>
+      {% if s.count %}<button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-remove" hx-target="#skills-{{ s.target }}-result">Remove Talent Search skills</button>{% endif %}
+      <div id="skills-{{ s.target }}-result"></div>
+    </div>
+    {% endfor %}
+    </div>
+    <p>Nothing outside folders named <code>talent-search-</code> is ever touched, and a file you change stays yours.</p>
+  </details>
+
+  <details class="fine" id="skills-older-way">
+    <summary>Older way: upload skills one at a time</summary>
+    <p>{{ desktop_steps }}</p>
+    <p><a class="btn" href="/connect/skills.zip" download>Download all skills as one .zip</a></p>
+    <ul class="plain">{% for z in skill_zips %}<li><a href="/connect/skills/{{ z.name }}.zip" download>{{ z.label }} (.zip)</a></li>{% endfor %}</ul>
+  </details>
+  <p class="fine">Prefer to have your AI app do it? Ask Claude Code or Codex: “Install the Talent Search skills by following INSTALL-SKILLS.md in <code>{{ skills_source }}</code>”. Or run <code>talent install-skills</code> in a terminal, which lists what it adds first.</p>
+</section>
+
+<section class="panel" id="try-asking">
+  <h2>Try asking</h2>
+  <ul class="plain">
+    <li>“Save this person to Talent Search:” and paste a LinkedIn link or resume.</li>
+    <li>“Who do I have in Austin with Rust experience?”</li>
+    <li>“Create a Senior Backend Engineer job and add my three best Go candidates.”</li>
+    <li>“Move Priya to Interviewing for the Data Lead role.”</li>
+    <li>“What should I do today?”</li>
+  </ul>
+  <p><a href="/recipes">More ready-made requests</a></p>
+</section>
+
+
+<details class="panel" id="other-apps"{% if tour_payload(request) %} open{% endif %}>
+  <summary><strong>Other apps (Claude Code, Codex, ChatGPT desktop, LM Studio, Cursor...)</strong></summary>
+  <div class="connect-grid connect-three" id="app-chooser">
+  {% if fit_app != 'claude' %}{{ claude_panel() }}{% endif %}
+  <section class="panel" id="claude-code-panel">
+    <h2>Claude Code</h2>
+    <p>Claude Code is Claude for a terminal or code editor.</p>
+    <details id="claude-code-steps">
+    <summary>Show the steps</summary>
+    <p>1. Connect it. Paste this into a terminal and press Enter. It works in every folder you open Claude Code in.</p>
+    <pre class="code wrap" id="claude-code-cmd">{{ claude_code_command }}</pre>
+    <p><button class="btn" type="button" data-copy-from="claude-code-cmd" aria-label="Copy Claude Code command">Copy</button></p>
+    <p>2. Add the skills with <a href="#skills-panel">Add skills</a> in Step 2 above.</p>
+    <p class="fine">Then start a new Claude Code session and type <code>/mcp</code> to check that talent-search is listed.</p>
+    </details>
+    {% for s in skill_status if s.target == 'claude-code' and s.count %}<p><span class="ok">{{ s.count }} skills added.</span></p>{% endfor %}
+    <p class="fine">Not sure if you have it? If you don't know what Claude Code is, pick Claude Desktop.</p>
+  </section>
+
+
+  {% if fit_app != 'codex' %}{{ codex_panel() }}{% endif %}
+  </div>
+  {% if fit_app != 'lmstudio' %}{{ lmstudio_panel() }}{% endif %}
+  <section class="panel" id="other-ai-apps">
   <h3>Other AI apps</h3>
   <p class="fine">Using a different app (Cursor, Windsurf, Jan)? See “Details for technical users” at the bottom of this page.</p>
   <h3 id="chatgpt-desktop">ChatGPT desktop app</h3>
@@ -161,19 +188,8 @@
   <button class="btn" type="button" data-copy-from="chatgpt-args" aria-label="Copy ChatGPT arguments">Copy</button>
   <p class="fine">Environment variable: <code>TALENT_DATA_DIR</code> = <code>{{ stdio_data_dir }}</code></p>
   <p class="fine">The ChatGPT website and the ChatGPT phone app can't reach apps on this computer.</p>
-</section>
-
-<section class="panel">
-  <h2>Try asking</h2>
-  <ul class="plain">
-    <li>“Save this person to Talent Search:” and paste a LinkedIn link or resume.</li>
-    <li>“Who do I have in Austin with Rust experience?”</li>
-    <li>“Create a Senior Backend Engineer job and add my three best Go candidates.”</li>
-    <li>“Move Priya to Interviewing for the Data Lead role.”</li>
-    <li>“What should I do today?”</li>
-  </ul>
-  <p><a href="/recipes">More ready-made requests</a></p>
-</section>
+  </section>
+</details>
 
 <details class="panel" id="by-hand">
   <summary>Details for technical users</summary>

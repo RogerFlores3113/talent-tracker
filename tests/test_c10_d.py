@@ -199,7 +199,7 @@ def test_connect_missing_apps_say_so_and_still_offer_the_others(store, tmp_path,
     _connect_env(tmp_path, monkeypatch, claude=False)
     page = local_client(store).get("/connect").text
     assert "Claude Desktop isn&#39;t installed on this computer." in page or "Claude Desktop isn't installed" in page
-    assert "Get Claude Desktop" in page and ">Connect Claude Desktop<" not in page
+    assert "Get Claude Desktop" in page and ">Connect Claude<" not in page
     assert ">Connect Codex<" in page and ">Connect LM Studio<" in page  # the other apps are still offered
 
 
@@ -207,7 +207,7 @@ def test_connect_installed_app_has_one_button(store, tmp_path, monkeypatch):
     from conftest import local_client
     _connect_env(tmp_path, monkeypatch)
     page = local_client(store).get("/connect").text
-    assert ">Connect Claude Desktop<" in page and "isn't installed" not in page and "isn&#39;t installed" not in page
+    assert ">Connect Claude<" in page and "isn't installed" not in page and "isn&#39;t installed" not in page
 
 
 def test_connect_page_leads_with_the_plain_question_and_folds_the_jargon(store, tmp_path, monkeypatch):
@@ -215,7 +215,7 @@ def test_connect_page_leads_with_the_plain_question_and_folds_the_jargon(store, 
     _connect_env(tmp_path, monkeypatch)
     page = local_client(store).get("/connect").text
     fold = page.index("Details for technical users")
-    assert page.index("Which AI app do you use?") < page.index('id="claude-panel"') < fold
+    assert page.index("Step 1. Connect your AI app") < page.index('id="claude-panel"') < fold
     plain = page[:fold]
     for jargon in ("MCP", "mcpServers", "config.toml", "JSON", "Show full report"):
         assert jargon not in plain, jargon

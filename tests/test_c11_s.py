@@ -129,7 +129,7 @@ def test_routes(store, home, tmp_path, monkeypatch):
     monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
     c = local_client(store)
     page = c.get("/connect").text
-    assert "Install skills" in page and "Get the Claude plugin" in page and "Not found on this computer" in page
+    assert "Add skills" in page and "Save the Claude plugin file" in page and "Not found on this computer" in page
     assert "Install anyway" in page and "Older way: upload skills one at a time" in page
     assert "/plugin marketplace add RogerFlores3113/talent-tracker" in page and "/plugin install talent-search@talent-tracker" in page
     assert "talent-search@talent-tracker" in page and "Customize" in page
@@ -180,7 +180,7 @@ def test_page_details_labels_and_friendly_names(store):
     for label in ("Copy Claude Code command", "Copy marketplace name", "Copy Claude Code plugin command 1"):
         assert f'aria-label="{label}"' in page
     assert "Find people for a role" in page and "talent-search-source-for-a-role" in page
-    assert page.index("Claude app (desktop or claude.ai)") < page.index("Claude Code and Codex")
+    assert page.index("Step 1. Connect your AI app") < page.index("Step 2. Add skills")
     assert "<details id=\"claude-code-steps\">" in page
     assert len(skills.skill_info()) == 6 and all(k["line"] for k in skills.skill_info())
 

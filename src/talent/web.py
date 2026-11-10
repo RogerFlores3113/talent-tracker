@@ -68,6 +68,7 @@ KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock this window."
+LOCKED_PAGE = "Open Talent Search from its app icon to unlock this window."  # the page for a recruiter: no commands
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
@@ -478,7 +479,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if request.url.path.startswith("/api/"):
             resp: Response = JSONResponse({"detail": LOCKED}, status_code=401)
         else:  # only the way to unlock: every other link would land on this page again
-            resp = templates.TemplateResponse(request, "locked.html", {"message": LOCKED}, status_code=401)
+            resp = templates.TemplateResponse(request, "locked.html", {"message": LOCKED_PAGE}, status_code=401)
             if time.monotonic() - locked_logged[0] > 60:  # the same hint in the serve log, once a minute at most
                 locked_logged[0] = time.monotonic()
                 log.info(LOCKED_LOG)
@@ -4261,7 +4262,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         home = str(form.get("next") or "") == "/"  # the banner on Today: back there
         try:
-            name = reports.save_user_zone(store, str(form.get("time_zone") or ""))
+            # the banner's one-click button sends use_zone (this browser's zone); the box sends time_zone
+            name = reports.save_user_zone(store, str(form.get("use_zone") or form.get("time_zone") or ""))
         except ValueError as exc:
             if home:
                 return back(request, "/", error=str(exc))
@@ -4445,6 +4447,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             plugin_where=_plugin_where(),
             marketplace_repo=skills.REPO,
             can_open_claude=skills.claude_app_command() is not None,
+            restarts=integrations.restart_supported(),
+            fit_app=("claude" if status["installed"] else "codex" if integrations.codex_config_path().parent.is_dir()
+                     else "lmstudio" if integrations.lmstudio_config_path().parent.is_dir() else "claude"),
             skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
                         for n in skills.skill_names()],
         )
@@ -4472,6 +4477,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
         return Response(skills.build_plugin(), media_type="application/octet-stream",
                         headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
+
+    @app.post("/connect/skills/add", response_class=HTMLResponse)
+    def skills_add(request: Request):
+        """One click: skills into every app found here, the Claude plugin saved and shown, Claude opened."""
+        try:
+            r = skills.add_everywhere()
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_add_result.html", error=integrations.friendly_error(exc))
+        return page(request, "_skills_add_result.html", r=r, plugin_where=_plugin_where(),
+                    marketplace_repo=skills.REPO, **_found_ctx())
+
+    @app.post("/connect/skills/plugin/reveal", response_class=HTMLResponse)
+    def skills_plugin_reveal(request: Request):
+        """'Show in folder' for the saved plugin file (saves it first if it isn't there)."""
+        path = skills.downloads_dir() / skills.PLUGIN_FILE
+        try:
+            if not path.is_file():
+                path = skills.write_plugin()
+            shown = skills.reveal(path)
+        except Exception as exc:
+            integrations.log_failure(exc)
+            return HTMLResponse(f'<span class="error">{html_escape(integrations.friendly_error(exc))}</span>')
+        return HTMLResponse('<span class="ok">Shown in your file manager.</span>' if shown else
+                            f'<span class="fine">The file is in {html_escape(str(path.parent))}.</span>')
 
     @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
     def skills_plugin_save(request: Request):
@@ -4552,11 +4582,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if result.get("ok") and target in ("claude", "lmstudio") and result.get("entry"):
                 check = integrations.test_launch(result["entry"], timeout=45)
                 check["line"] = integrations.result_line(check)
+            restart = None
+            if (target == "claude" and check and check["ok"] and result.get("installed", True)
+                    and integrations.restart_supported()):
+                restart = integrations.restart_claude()  # one click: quit Claude if open, open it again
         except Exception as exc:  # never a 500 or a traceback in the window
             integrations.log_failure(exc)
             return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
         return page(request, "_connect_result.html", ok=True, target=target, result=result, check=check,
-                    quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
+                    restart=restart, quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
                     healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
 
     @app.post("/connect/{target}/test", response_class=HTMLResponse)

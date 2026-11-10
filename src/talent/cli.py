@@ -342,7 +342,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("sample-data", help="load made-up candidates to try the app")
     sub.add_parser("tour-reset", help="forget that the first-run tour ran, so it starts again on an empty database")
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
-    sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
+    cc = sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
+    cc.add_argument("--restart", action="store_true",
+                    help="then quit Claude Desktop (if open) and open it again so it loads Talent Search (Mac and Windows)")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
     sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
     sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
@@ -535,6 +537,12 @@ def main(argv: list[str] | None = None) -> None:
                 for line in test["stderr_tail"][-5:]:
                     print(f"  {line}")
                 sys.exit(1)
+            if target == "claude" and getattr(args, "restart", False) and test["ok"]:
+                if integrations.restart_supported():
+                    print("Restarting Claude Desktop...")
+                    print(integrations.restart_claude()["message"])
+                else:
+                    print("There is no Claude Desktop to restart on this computer.")
     elif cmd in ("check-claude", "check-codex", "check-lmstudio"):
         from . import integrations
 

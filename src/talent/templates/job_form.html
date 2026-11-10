@@ -3,6 +3,7 @@
 {% block body %}
 <h1>{{ 'Edit ' ~ j.title if j.id else 'New job' }}</h1>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if not j.id %}<p class="lead">Only the title is required. A job holds a pipeline: the stages a candidate moves through, from first contact to hired. You can rename the stages any time.</p>{% endif %}
 <form class="form" method="post" action="{{ '/jobs/' ~ j.id if j.id else '/jobs' }}">
   <label>Job title<input type="text" name="title" value="{{ j.title or '' }}" required></label>
   <label>Company<input type="text" name="company" value="{{ j.company or '' }}"></label>

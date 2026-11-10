@@ -479,6 +479,38 @@ def install_all(targets: list[str]) -> dict[str, Any]:
             "skipped": [s for r in results for s in r["skipped"]], "edited": [e for r in results for e in r["edited"]]}
 
 
+def add_everywhere(*, reveal_fn=None, open_fn=None) -> dict[str, Any]:
+    """The one-click 'Add skills': install into every app found here (only talent-search-* folders we made, files
+    the person edited are kept), save talent-search.plugin to Downloads, show it, and open the Claude app.
+    reveal_fn and open_fn are injectable so tests start nothing."""
+    reveal_fn = reveal_fn or reveal
+    open_fn = open_fn or open_claude_app
+    found = detected_targets()
+    plan = plan_all(found)
+    current = bool(plan["plans"]) and plan["counts"]["new"] == 0 and plan["counts"]["updated"] == 0
+    done = install_all(found) if found else {"results": [], "skipped": [], "edited": [], "written": []}
+    apps: list[dict[str, Any]] = []
+    for t in TARGETS:
+        if t not in found:
+            apps.append({"target": t, "label": TARGET_LABELS[t], "state": "missing",
+                         "line": "Not found on this computer, so nothing was added."})
+            continue
+        p = next(x for x in plan["plans"] if x["target"] == t)
+        n = sum(1 for v in p["labels"].values() if v != "unchanged")
+        if n == 0:
+            line = "Already up to date."
+        else:
+            line = f"Added {len(p['items'])} skills."
+        apps.append({"target": t, "label": TARGET_LABELS[t], "state": "current" if n == 0 else "added", "line": line})
+    path = write_plugin()
+    shown = bool(reveal_fn(path))
+    can_open = claude_app_command() is not None
+    opened = bool(open_fn()) if can_open else False
+    return {"apps": apps, "up_to_date": current, "skipped": done["skipped"], "edited": done["edited"],
+            "plugin_path": str(path), "plugin_file": PLUGIN_FILE, "shown": shown, "can_open_claude": can_open,
+            "opened": opened, "plugin_dir": str(path.parent)}
+
+
 # ------------------------------------------------------------------ zip for Claude Desktop (the older way)
 def build_zip() -> bytes:
     """One zip holding one zip per skill. Claude's Customize > Skills takes one skill per zip, and each zip has

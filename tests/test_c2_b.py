@@ -35,7 +35,7 @@ def test_key_file_is_private_and_stable():
 def test_window_is_locked_without_the_key(store):
     c = local_client(store, unlocked=False)
     r = c.get("/")
-    assert r.status_code == 401 and "run talent open" in r.text and "unlock this window" in r.text
+    assert r.status_code == 401 and "talent open" not in r.text and "unlock this window" in r.text
     assert r.headers["content-security-policy"].startswith("default-src 'self'")
     assert c.get("/candidates").status_code == 401
     assert c.get("/export.csv").status_code == 401 and c.get("/backup").status_code == 401

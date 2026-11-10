@@ -21,10 +21,48 @@ See [CHANGELOG.md](CHANGELOG.md) for everything in each version.
 **Requirements:** macOS on Apple Silicon (M1 or later) for now, Windows 10 or 11 (64-bit),
 or Linux x86_64.
 
-## Download
+## Install
+
+Pick whichever is easiest. All three put the app somewhere permanent, which matters:
+if you run it from Downloads, from inside a zip or from a disk image, your computer runs
+a temporary copy, and AI apps such as Claude Desktop can't find it later.
+
+### 1. Ask Claude to install it
+
+In the Claude desktop app (the **Code** tab or **Cowork**) or in Claude Code, paste this:
+
+> Install Talent Search from https://github.com/RogerFlores3113/talent-tracker
+
+Claude reads [INSTALL.md](INSTALL.md), runs the installer and tells you what to press next.
+
+### 2. One line in a terminal
+
+Mac or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RogerFlores3113/talent-tracker/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/RogerFlores3113/talent-tracker/main/install.ps1 | iex
+```
+
+The script downloads the latest release, checks it against `SHA256SUMS.txt`, installs it
+(Mac: Applications; Windows: `%LOCALAPPDATA%\Programs\Talent Search`; Linux:
+`~/.local/share/talent-search-app`), and opens it. If Talent Search is already installed it
+is closed and replaced, and your data is kept. Files downloaded this way are not flagged
+by macOS as coming from the internet, so on a Mac you normally skip the "can't be checked
+for malware" window that the manual download below shows. Add `--no-open` (`-NoOpen` on
+Windows) to install without opening it. You can read the scripts first:
+[install.sh](install.sh) and [install.ps1](install.ps1).
+
+### 3. Download it yourself
 
 Get the file for your computer from the
-[latest release](https://github.com/RogerFlores3113/talent-tracker/releases/latest):
+[latest release](https://github.com/RogerFlores3113/talent-tracker/releases/latest). Each
+release also lists `SHA256SUMS.txt` so you can check your download.
 
 | Computer | File |
 |---|---|
@@ -32,42 +70,40 @@ Get the file for your computer from the
 | Windows | `TalentSearch-windows.zip` |
 | Linux | `TalentSearch-linux.tar.gz` |
 
-Each release also lists `SHA256SUMS.txt` so you can check your download.
+**Mac:** open the `.dmg`, drag **Talent Search** onto **Applications**, eject the disk
+image and open it from Applications. The first time, macOS says it can't be checked for
+malware because the app isn't notarized yet: right-click the app, choose **Open**, then
+**Open** again (on newer macOS, **System Settings > Privacy & Security > Open Anyway**).
+Do this once **before** you connect Claude, so macOS trusts it.
 
-## Install
+**Windows:** right-click the zip, choose **Extract All**, move the **Talent Search** folder
+somewhere permanent (such as Documents), and open **Talent Search.exe**. If SmartScreen
+appears, choose **More info**, then **Run anyway**. Keep both exe files in the folder
+together; `talent-search-mcp.exe` is the one AI apps start.
 
-Put the app somewhere permanent before you open it. If you run it from Downloads, from
-inside a zip or from a disk image, your computer runs a temporary copy, and AI apps
-such as Claude Desktop can't find it later.
-
-### Mac
-
-1. Open `TalentSearch-mac.dmg`.
-2. Drag **Talent Search** onto the **Applications** shortcut in the window.
-3. Eject the disk image, then open **Talent Search** from your Applications folder.
-4. The first time, it says it can't be checked for malware because it isn't notarized
-   yet. Right-click the app, choose **Open**, then **Open** again. On newer macOS,
-   go to **System Settings > Privacy & Security** and press **Open Anyway**.
-5. Open Talent Search once this way **before** you connect Claude Desktop, so macOS
-   trusts it and Claude can start it.
-
-### Windows
-
-1. Right-click `TalentSearch-windows.zip` and choose **Extract All**.
-2. Move the **Talent Search** folder somewhere permanent, such as Documents or
-   `C:\Users\<you>\Apps`.
-3. Open **Talent Search.exe** inside it.
-4. If Windows SmartScreen appears, choose **More info**, then **Run anyway**.
-
-Keep both exe files in the folder together. `talent-search-mcp.exe` is the one AI apps start.
-
-### Linux
+**Linux:**
 
 ```bash
 tar -xzf TalentSearch-linux.tar.gz
 cd "Talent Search"
 ./talent-search
 ```
+
+## Connect Claude and add skills
+
+Talent Search opens in your web browser. Two buttons there finish the setup:
+
+1. Press **Connect Claude**. This links Talent Search to Claude Desktop and, when Claude
+   Desktop is open, restarts it for you so the link takes effect.
+2. Press **Add skills**. This puts the Talent Search skills into Claude Code and Codex,
+   whichever you have. For the Claude app, it also saves `talent-search.plugin` and shows
+   you where it is: in Claude, open **Customize > Plugins > Add > Upload plugin** and pick
+   that file. To get updates, add the marketplace `RogerFlores3113/talent-tracker` in
+   **Customize > Plugins** instead.
+
+More detail, Codex and LM Studio, and other ways in are under
+[Connect Claude Desktop](#connect-claude-desktop) and
+[Skills for your AI app](#skills-for-your-ai-app) below.
 
 ## First run
 
@@ -84,18 +120,16 @@ Your data is one file, `talent.db`, in `~/Library/Application Support/Talent Sea
 
 ## Connect Claude Desktop
 
-1. Install [Claude Desktop](https://claude.ai/download) and open it once. (On a Mac,
-   also open Talent Search once with right-click > **Open**, as in Install above.)
-2. In Talent Search, open **Connect AI** and press **Connect Claude Desktop**.
-   The page shows the settings file it wrote and checks that Talent Search starts.
-3. **Quit Claude Desktop completely.** Closing the window is not enough.
-   - Mac: choose **Claude > Quit Claude** in the menu bar, or press Cmd+Q.
-   - Windows: right-click the Claude icon by the clock and choose **Quit**.
-4. Open Claude Desktop again.
-5. Check **Settings > Developer** in Claude Desktop. **talent-search** should be listed there
-   as running.
-6. In a chat, Talent Search's tools are under the **+** menu. Try:
-   *"What should I do today in Talent Search?"*
+1. Install [Claude Desktop](https://claude.ai/download) and open it once. (If you
+   downloaded Talent Search yourself on a Mac, also open it once with right-click >
+   **Open**, as in Install above.)
+2. In Talent Search, open **Connect AI** and press **Connect Claude**. It writes Claude
+   Desktop's settings, checks that Talent Search starts, and, if Claude Desktop is open,
+   quits and reopens it for you (save anything you're typing in Claude first). It never
+   forces Claude to close: if Claude doesn't quit, the page says how to quit it yourself.
+3. In Claude, start a new chat and ask *"What should I do today in Talent Search?"*
+   Talent Search's tools are under the **+** menu, and **Settings > Developer** lists
+   **talent-search** as running.
 
 If something looks off, press **Test connection** on the Connect AI page. **Show full
 report** copies a report you can paste into a bug report.
@@ -115,15 +149,18 @@ and arguments shown on that page. The ChatGPT website and the ChatGPT phone app 
 
 Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline
 reviews, feedback and decisions) that teach your AI app how to use it well. On the
-Connect AI page, press **Install skills**. It adds them to Claude Code and Codex, whichever
-it finds on your computer, and shows you the exact files first. Only folders named
-`talent-search-*` that the app made are ever updated or removed.
+Connect AI page, press **Add skills**. In one go it:
 
-For the Claude app (desktop or claude.ai), press **Get the Claude plugin**. It saves
-`talent-search.plugin` in your Downloads folder and shows it to you. In Claude, open
-Customize > Plugins > Add > Upload plugin and pick that file. Plugins added in the Claude
-app also show up in Claude Code. Want updates? Add the marketplace
-`RogerFlores3113/talent-tracker` (in Claude Code:
+- adds them to Claude Code and Codex, whichever it finds on your computer (only folders
+  named `talent-search-*` that the app made are ever updated, and a skill file you edited
+  is kept);
+- saves `talent-search.plugin` in your Downloads folder, shows it in Finder or Explorer and
+  opens Claude. In Claude, open **Customize > Plugins**, press **Add**, then **Upload
+  plugin**, and pick that file. Claude has no way for another app to add skills for you,
+  so this last step is yours.
+
+Want updates instead? Add the marketplace `RogerFlores3113/talent-tracker` in
+**Customize > Plugins > Add marketplace** (in Claude Code:
 `claude plugin marketplace add RogerFlores3113/talent-tracker`, then
 `claude plugin install talent-search@talent-tracker`).
 
@@ -136,7 +173,7 @@ skills/INSTALL-SKILLS.md".
 ## Troubleshooting
 
 **Claude Desktop doesn't show Talent Search.**
-Fully quit Claude Desktop (see step 3 above) and open it again. Then press **Test
+Press **Connect Claude** again, or fully quit Claude Desktop and open it again. Then press **Test
 connection** on the Connect AI page. If the entry disappeared, Claude was probably open
 while you connected and wrote over the file: quit Claude, press **Connect Claude
 Desktop** again, then reopen Claude. For a full report, run this.
@@ -163,7 +200,7 @@ Look at Claude's log for it:
 - Windows: `%APPDATA%\Claude\logs\mcp-server-talent-search.log`
 - Windows, Claude from the Microsoft Store: `%LOCALAPPDATA%\Packages\Claude_...\LocalCache\Roaming\Claude\logs`
 
-If you moved the app, press **Connect Claude Desktop** again so it points at the new
+If you moved the app, press **Connect Claude** again so it points at the new
 place. On a Mac, also open the app once with right-click > **Open** so macOS trusts it.
 
 **I installed Claude Desktop from the Microsoft Store.**
@@ -190,8 +227,9 @@ See First run for the folder. **Settings > Download a backup** saves a complete 
 while the app is running. **Export candidates as CSV** gives a spreadsheet copy.
 
 **How do I update?**
-Download the new version and replace the app (drag the new one onto Applications and
-choose Replace, or replace the folder). Your data is kept in its own folder. Press
+Run the one-line install command again (see Install above), which closes the app and
+replaces it. Or download the new version and replace the app yourself (drag the new one
+onto Applications and choose Replace, or replace the folder). Your data is kept in its own folder. Press
 **Connect** again if you moved the app.
 
 **How do I move to a new computer?**
@@ -248,6 +286,7 @@ hdiutil create -volname "Talent Search" -srcfolder dmg-staging -ov -format UDZO 
 CI (`.github/workflows/ci.yml`) runs tests on Linux, Windows and macOS, builds the
 Mac `.app` (as a `.dmg` and a zip), the Windows folder (zip) and the Linux folder
 (`.tar.gz`), smoke-tests the MCP server and the one-click connect inside each build,
+runs `install.sh` / `install.ps1` against each fresh build and smoke-tests the installed copy,
 and publishes a GitHub Release when you push a `v*` tag.
 
 ### Making a release

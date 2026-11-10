@@ -33,19 +33,18 @@ STEPS: list[dict[str, Any]] = [
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
     {"id": "claude", "title": "Connect Claude Desktop", "path": "/connect", "target": ["#claude-panel"],
      "pulse": "#claude-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "One click on this button connects Claude Desktop. It adds Talent Search to Claude's settings and does "
-             "nothing else. The tour will not click it for you. Click it now or later, then press Next. "
-             "Don't have it? Press Next, you can connect later."},
+     "body": "The Connect Claude button connects Claude Desktop with one click. It adds Talent Search to Claude's "
+             "settings and does nothing else. The tour will not click it for you. Click it now or later, then press "
+             "Next. Don't have it? Press Next, you can connect later."},
     {"id": "codex", "title": "Connect Codex or another app", "path": "/connect", "target": ["#codex-panel"],
      "pulse": "#codex-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
      "body": "Using Codex instead? One click here connects it the same way. LM Studio has its own button just below, "
-             "and any other app that runs local tools (Cursor, Windsurf and others) takes the settings under Details for technical users. "
+             "and any other app that runs local tools (Cursor, Windsurf and others) has its own setup steps on the Connect page. "
              "Don't have it? Press Next, you can connect later."},
     {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
      "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "A skill is a short page of instructions that teaches your AI app to work well here. Press the button "
-             "for your app to add them. You see the exact files first. Don't have one? Press Next, you can add "
-             "them later."},
+     "body": "A skill is a short page of instructions that teaches your AI app to work well here. Press Add skills "
+             "to add them. You see the exact files first. Don't have one? Press Next, you can add them later."},
     {"id": "load", "title": "Try it with demo people", "path": None, "target": [], "modes": (FULL,),
      "action": "load",
      "body": "Want something to click on? The tour can add 16 made-up people and 2 jobs, all named Example. "

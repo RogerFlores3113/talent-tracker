@@ -1989,7 +1989,7 @@ def preview_import(store: Store, header: list[str], rows: list[list[str]], mappi
                    source: str = "CSV import", add_stages: bool = False, **opts: Any) -> dict[str, Any]:
     """What import_rows would do, worked out on a private copy of the database. Nothing here changes.
     opts: import_rows' move_stages and profile."""
-    scratch = Store(":memory:")
+    scratch = Store(":memory:", scratch=True)
     try:
         try:
             with store._lock:
@@ -2015,7 +2015,7 @@ def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], map
     copy = folder / "preview.db"
     try:
         store.backup_to(copy)
-        scratch = Store(copy)
+        scratch = Store(copy, scratch=True)
         try:
             result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages,
                                  **opts)

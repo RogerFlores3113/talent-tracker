@@ -5,6 +5,16 @@
 {% elif ok and result.ok is sameas false %}
 <p class="flash warn">{{ result.problem }}</p>
 <p class="fine">Nothing was changed in {{ app }}'s settings.</p>
+{% elif ok and target == 'claude' and restart and restart.supported and check and check.ok %}
+{# One click on Mac and Windows: one message. #}
+{% if restart.ok %}<p class="ok" role="status" tabindex="-1" autofocus>{{ restart.message }}</p>
+{% else %}<p class="flash warn" role="status" tabindex="-1" autofocus>{{ restart.message }}</p>{% endif %}
+{% if result.quarantine %}<p class="flash warn">{{ result.quarantine }}</p>{% endif %}
+<details class="fine"><summary>What we did</summary>
+  <p>{{ healthy_line }} The entry is in <code>{{ result.path }}</code>.{% if restart.quit %} Claude was quit and opened again so it loads Talent Search.{% endif %}</p>
+  {% if result.backup and not result.already_connected %}<p>Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
+  <p>{{ look_text }}</p>
+</details>
 {% elif ok %}
 {% if target == 'claude' and check and check.ok %}
 <p class="ok">{{ healthy_line }}</p>
@@ -24,7 +34,7 @@
 {% else %}
 <p>{{ result.next_step or ('Restart ' ~ app ~ ' to load Talent Search.') }}</p>
 {% endif %}
-{% if check %}
+{% if check and not (target == 'claude' and restart and restart.supported and check.ok) %}
   {% if check.ok %}
   <p class="ok">{{ check.line }}</p>
   {% else %}
@@ -34,7 +44,7 @@
   {% endif %}
   {% if check.stray_stdout %}<p class="fine">It also printed text that isn't part of the protocol, which can get in the app's way: {{ check.stray_stdout[0][:160] }}</p>{% endif %}
 {% endif %}
-{% if result.backup and not result.already_connected %}<p class="fine">Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
+{% if result.backup and not result.already_connected and not (target == 'claude' and restart and restart.supported and check and check.ok) %}<p class="fine">Your previous settings were saved as a backup next to the original file ({{ result.backup.replace('\\', '/').rsplit('/', 1)[-1] }}).</p>{% endif %}
 {% else %}
 <p class="error">That didn't work: {{ error }}</p>
 <p class="fine">You can still connect by hand with the settings under “Details for technical users”.</p>

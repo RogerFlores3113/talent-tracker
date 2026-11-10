@@ -199,7 +199,7 @@ def test_time_zone_bar_shows_only_when_the_computer_zone_looks_unset(store, monk
     store.add_candidate(name="Ana Ruiz")
     monkeypatch.setattr(reports, "computer_on_utc", lambda: True)
     shown = c.get("/").text
-    assert "data-tz-banner" in shown and "Set your time zone" in shown and 'data-tz-saved=""' in shown
+    assert "data-tz-banner" in shown and "Pick another" in shown and "use_zone" in shown and 'data-tz-saved=""' in shown
     assert 'data-tz-saved="" hidden' not in shown
     monkeypatch.setattr(reports, "computer_on_utc", lambda: False)
     assert "data-tz-banner" not in c.get("/").text  # a computer with its own zone and nothing saved: no bar

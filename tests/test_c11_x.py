@@ -186,15 +186,14 @@ def test_in_the_pipeline_wording_and_jobs_without_a_client(store):
 
 
 # ------------------------------------------------------------------ 6. Connect page
-def test_connect_plugin_steps_show_once_and_the_plugin_comes_first(store):
+def test_connect_plugin_steps_show_once_and_connect_comes_before_skills(store):
     page = local_client(store).get("/connect").text
     assert page.count('id="plugin-steps"') == 1 and page.count('id="plugin-check"') == 1
-    assert page.index('id="plugin-steps"') < page.index("Claude Code and Codex")
+    assert page.index('id="claude-panel"') < page.index('id="skills-panel"') < page.index('id="try-asking"')
     assert "/plugin install talent-search@talent-tracker" in page
     assert "Check it worked" in page
     assert "Which one should I pick?" in page
-    assert "Get the Claude plugin for Claude Desktop" in page
-    assert "still needs the Talent Search connection" in page
+    assert "still needs the connection from Step 1" in page
     assert "works in every app" not in page and "every AI app" not in page
 
 

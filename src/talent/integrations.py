@@ -188,6 +188,77 @@ def app_running(app: str = "claude") -> bool | None:
         return None
 
 
+CLAUDE_DONE = "Done. In Claude, start a new chat and ask: What should I do today in Talent Search?"
+
+
+def restart_supported(platform: str | None = None) -> bool:
+    """Only Mac and Windows have a Claude Desktop we can quit and reopen."""
+    return (platform or sys.platform) in ("darwin", "win32")
+
+
+def _run_quiet(cmd: list[str], timeout: float = 10.0) -> int:
+    return subprocess.run(cmd, capture_output=True, timeout=timeout).returncode
+
+
+def _launch_detached(cmd: list[str]) -> None:
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def restart_claude(*, platform: str | None = None, running=None, run=None, launch=None, command: list[str] | None = None,
+                   sleep=None, clock=None, wait: float | None = None) -> dict[str, Any]:
+    """Quit Claude Desktop gracefully (never forced) so it rereads its settings, then open it. Never raises.
+
+    Returns {supported, ok, was_running, quit, opened, message}. ok means Claude is open again. message is the one
+    line to show: CLAUDE_DONE on success, otherwise what to do by hand. Everything that touches a process is
+    injectable (running, run, launch, sleep, clock) so tests never start or stop anything."""
+    platform = platform or sys.platform
+    out: dict[str, Any] = {"supported": restart_supported(platform), "ok": False, "was_running": None, "quit": False,
+                           "opened": False, "message": ""}
+    if not out["supported"]:
+        return out
+    try:
+        from . import skills
+
+        running = running or app_running
+        run = run or _run_quiet
+        launch = launch or _launch_detached
+        sleep = sleep or time.sleep
+        clock = clock or time.monotonic
+        cmd = command if command is not None else skills.claude_app_command(platform)
+        if platform == "darwin":
+            quit_cmd, limit = ["osascript", "-e", 'tell application "Claude" to quit'], 15.0
+        else:
+            quit_cmd, limit = ["taskkill", "/IM", "claude.exe"], 10.0  # no /F: a forced kill can lose a draft
+        if wait is not None:
+            limit = wait
+        was = running("claude")
+        out["was_running"] = was
+        if was:
+            try:
+                run(quit_cmd)
+            except Exception:
+                pass
+            deadline = clock() + limit
+            while running("claude") and clock() < deadline:
+                sleep(0.5)
+            if running("claude"):
+                out["message"] = "Connected, but Claude is still open. " + quit_instruction(platform)
+                return out
+            out["quit"] = True
+        if not cmd:
+            out["message"] = "Connected. Open Claude Desktop to finish, then start a new chat."
+            return out
+        launch(cmd)
+        out["opened"] = True
+        out["ok"] = True
+        out["message"] = CLAUDE_DONE
+    except Exception as exc:  # whatever happens, the connection itself is already saved
+        log_failure(exc)
+        out["ok"] = False
+        out["message"] = "Connected. " + quit_instruction(platform)
+    return out
+
+
 def _not_installed(path: Path, app_name: str) -> dict[str, Any] | None:
     """The app keeps its settings in path.parent; if that folder is missing the app isn't set up here."""
     if path.parent.is_dir():

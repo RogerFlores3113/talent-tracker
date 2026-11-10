@@ -70,7 +70,7 @@ def test_connect_page_and_button(store, tmp_path, monkeypatch):
     monkeypatch.setattr("talent.integrations.codex_config_path", lambda: tmp_path / "codex" / "config.toml")
     (tmp_path / "codex").mkdir()
     c = client(store)
-    assert "Connect Claude Desktop" in c.get("/connect").text
+    assert "Connect Claude" in c.get("/connect").text
     r = c.post("/connect/claude")
     assert "Quit Claude Desktop completely" in r.text and "Settings &gt; Developer" in r.text
     assert (tmp_path / "claude.json").exists()

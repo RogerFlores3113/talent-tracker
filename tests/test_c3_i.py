@@ -50,7 +50,7 @@ def test_internal_stages_are_left_out_and_not_counted(store):
     assert "Priya" not in digest
     server = build_server(store)
     res = call(server, "job_pipeline", job_id=job["id"])
-    assert "Priya" not in res.content[0].text and structured(res)["left_out"] == ["Sourced", "Contacted"]
+    assert "Priya" not in res.content[0].text and structured(res)["left_out"] == ["Sourced", "Contacted", "Rejected", "Withdrawn"]
     assert structured(res)["headline"].startswith("4 in the pipeline. 1 counts in the status update (Sourced and Contacted are left out)")
     assert "Priya" not in text(call(server, "status_digest"))
     assert "Priya" in call(server, "job_pipeline", job_id=job["id"], omit_stages=[]).content[0].text

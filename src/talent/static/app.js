@@ -22,7 +22,7 @@
 //                             their interviews still to come, which get cancelled; data-open their sessions
 //                             with no outcome yet, named as still open)
 //   data-tz-prefill           on a time zone box: fill it with this browser's own zone when it's empty
-//   data-tz-use               on a submit button beside it: shown as "Use <this browser's zone>" (one click saves it)
+//   data-tz-use               on a submit button (name use_zone): shown as "Use <this browser's zone>?" (one click saves it)
 //   data-stage-pick           on a stage menu: a mouse pick moves at once (or asks for a reason first for an out stage);
 //                             with the keyboard it waits for Enter or blur. After a move, focus returns to that person.
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
@@ -133,14 +133,14 @@
     try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* an old browser: leave it empty */ }
     if (!zone) return;
     document.querySelectorAll("input[data-tz-prefill]").forEach(b => { if (!b.value) b.value = zone; });
-    // One click: "Use America/Chicago" saves this browser's zone as it is.
-    document.querySelectorAll("button[data-tz-use]").forEach(b => { b.textContent = "Use " + zone; b.hidden = false; });
-    // The banner says what it found, so the one click is the obvious thing to do.
-    document.querySelectorAll("form[data-tz-banner]:not([data-tz-saved]), form[data-tz-banner][data-tz-saved='']").forEach(f => {
-      const t = f.querySelector("[data-tz-text]");
-      const m = t && t.textContent.match(/^Times show in ([^.]+)\./);
-      if (t && m && m[1].trim() !== zone) t.textContent = "Times show in " + m[1].trim() + ", but this browser is in " + zone + ". Is that yours?";
+    // One click: "Use America/Chicago?" saves this browser's zone as it is. UTC is never suggested: it is what we are fixing.
+    const useless = /^(utc|etc\/utc|gmt|etc\/gmt)$/i.test(zone);
+    document.querySelectorAll("button[data-tz-use]").forEach(b => {
+      if (useless) return;
+      b.textContent = "Use " + zone + "?"; b.value = zone; b.hidden = false;
     });
+    // With no one-click button, the box to type in starts open.
+    if (useless) document.querySelectorAll("details[data-tz-other]").forEach(d => { d.open = true; });
   }
   // The banner only shows when it matters: the server shows it when this computer says UTC with no zone saved; for a
   // saved zone it stays hidden unless this browser's zone has a different offset now.
@@ -828,8 +828,15 @@
     }
     function refresh() {
       const n = ticked();
-      if (count) count.textContent = n + (n === 1 ? " person" : " people") + " ticked";
-      if (panel) panel.hidden = n === 0;
+      if (count) {
+        const hint = count.querySelector("[data-when-empty]");
+        if (hint) hint.hidden = n !== 0;
+        // keep the hint element; only the number text changes
+        const first = count.firstChild;
+        if (first && first.nodeType === 3) first.textContent = n + (n === 1 ? " person" : " people") + " ticked ";
+        else count.textContent = n + (n === 1 ? " person" : " people") + " ticked";
+      }
+      if (form) form.querySelectorAll("[data-needs-ticks]").forEach(x => { x.hidden = n === 0; });  // the bar stays one line until someone is ticked
       if (msg && n > 0 && !msg.hidden) msg.hidden = true;
     }
     function later() { window.setTimeout(refresh, 0); }

@@ -17,6 +17,7 @@
 <section class="panel rollup">
   <div class="sec-head"><h2>{{ ('Where each team stands' if inhouse() else 'Where each client stands') if rollup | length > 1 else 'Status update' }}</h2>
     <span class="copy-status"><button type="button" class="btn small" data-copy-text="{{ digest_text }}" data-copy-note="next" data-copy-msg="Copied. Paste it into an email or chat.">Copy status for all open jobs</button><span class="fine" role="status"></span></span></div>
+  <p class="fine">Paste this into an email to your {{ 'hiring managers' if inhouse() else 'clients' }}. Each job has its own Status update, where you choose which stages to leave out, like people you haven't {{ 'put forward' if inhouse() else 'presented' }} yet.</p>
   {% if rollup | length > 1 %}
   <table class="dense">
     <thead><tr><th>{{ 'Hiring manager' if by_manager else 'Company' }}</th><th>Open jobs</th><th>In process</th><th>Openings filled</th><th></th></tr></thead>

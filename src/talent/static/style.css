@@ -270,6 +270,8 @@ select { padding: var(--space-2) var(--space-2); }
 .inject-warn code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .tz-banner { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); border-left-color: var(--accent); }
 .tz-banner input[type=text] { min-width: 14em; }
+.tz-other summary { cursor: pointer; color: var(--accent); font-size: var(--fs-sm); }
+.tz-other[open] { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .badge { font-size: var(--fs-xs); font-weight: 600; padding: 2px var(--space-3); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); text-transform: capitalize; vertical-align: middle; border: 1px solid var(--line); }
 .sec-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-6) 0 var(--space-3); }
 .sec-head:first-child { margin-top: 0; }
@@ -782,3 +784,9 @@ form.wording { margin-top: var(--space-5, 24px); padding-top: var(--space-3, 12p
 #pipeline { min-width: 0; max-width: 100%; }
 /* The job table's "Move N ticked" bar stays in view while people are ticked */
 #bulk-move { position: sticky; top: 0; z-index: 5; background: var(--surface); }
+
+/* Candidates: the explanations sit folded under one line, so the table comes first */
+.how-works p { margin: 0 0 var(--space-1); }
+.how-details summary { cursor: pointer; color: var(--accent); font-size: var(--fs-sm); }
+.how-details[open] { margin-bottom: var(--space-2); }
+.bulk-count [data-when-empty] { font-weight: 400; margin-left: var(--space-2); }
