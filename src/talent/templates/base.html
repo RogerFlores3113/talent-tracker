@@ -29,7 +29,7 @@
   <main id="main" tabindex="-1">
     {% set fq = request.state.flash or {} %}
     {% if fq.get('flash_error') %}<p class="flash warn" role="alert">{{ fq.get('flash_error') }}</p>{% endif %}
-    {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}</p>{% endif %}
+    {% if fq.get('notice') %}<p class="flash" role="status">{{ fq.get('notice') }}{% if fq.get('notice_href') and safe_path(fq.get('notice_href')) %} <a href="{{ fq.get('notice_href') }}">{{ fq.get('notice_href_text') or 'Open it' }}</a>{% endif %}</p>{% endif %}
     {% block body %}{% endblock %}
   </main>
   {% if not hide_chrome %}<footer class="foot">

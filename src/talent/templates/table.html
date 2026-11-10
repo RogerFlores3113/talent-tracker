@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import chips %}
+{% from "_macros.html" import chips, cur %}
 {% block title %}Candidates · Talent Search{% endblock %}
 {% block bodyclass %}wide{% endblock %}
 {% block skiplinks %}{{ super() }}<a class="skip-link" href="{{ '#hl-bar' if hl_bar else '#cand-table' }}">{{ 'Skip to highlighted skills' if hl_bar else 'Skip to the table' }}</a>{% endblock %}
@@ -111,6 +111,10 @@
   {% if color %}<a href="/candidates?{{ dict(keep, color='') | urlencode }}" class="small">Show all labels</a>{% endif %}
 </div>
 <p class="fine">{% if hl and not q and sort == 'color' %}Sorted by highlighted skills first, then by label color. Click a bubble to change someone's label color. Pick another column to sort by it instead.{% else %}{% if hl %}People with more of the highlighted skills come first. Inside each group the usual order applies. {% endif %}{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by label color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's label color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Label color to group by label color again.{% endif %}{% endif %}</p>
+{% if total > 100 %}<nav class="seg pagesize" id="page-size" aria-label="How many people to show at a time"><span class="fine">Show</span>
+  {% for n, label in [('100', '100'), ('250', '250'), ('all', 'All')] %}<a href="/candidates?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir, size='' if n == '100' else n) | urlencode }}" class="{{ 'on' if size == n }}"{{ cur(size == n) }}>{{ label }}</a>{% endfor %}
+  {% if size == 'all' and total > bulk_max() %}<span class="fine" id="page-size-cap">All stops at {{ "{:,}".format(bulk_max()) }}, the same limit as exports. Narrow the filters to reach the rest.</span>{% elif size == 'all' %}<span class="fine">Showing all {{ total }}.</span>{% endif %}
+</nav>{% endif %}
 {% if total %}<form id="bulk-form" class="bulkbar panel" method="post" action="/candidates/bulk" aria-label="Do something for the people you tick">
   {% for k, v in keep.items() %}<input type="hidden" name="f_{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="f_q" value="{{ q }}">{% endif %}<input type="hidden" name="f_sort" value="{{ sort }}"><input type="hidden" name="f_dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="f_qsort" value="{{ qsort }}"><input type="hidden" name="f_qdir" value="{{ qdir }}">{% endif %}
   <p class="fine"><strong>For the people you tick:</strong> tick rows in the table (the box in the header ticks everyone on this page).{% if total > rows | length %}

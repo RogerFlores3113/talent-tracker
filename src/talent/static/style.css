@@ -743,3 +743,11 @@ body.compare-full main { max-width: none; }
   table.compare .rowlabel { width: 6.5rem; padding: var(--space-2) var(--space-2); }
   table.compare th, table.compare td { padding: var(--space-2); }
 }
+
+/* Duplicate groups: one card per group of profiles, with Keep this one and a Merge in box for each profile */
+.dup-title { font-size: 1.05rem; margin: 0 0 0.25rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.dup-members { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.5rem; }
+.dup-member { display: grid; grid-template-columns: auto auto 1fr; gap: 0.5rem 1rem; align-items: start; padding: 0.4rem 0; border-top: 1px solid var(--line); }
+.dup-member .check { white-space: nowrap; }
+.dup-cluster.maybe { border-left: 4px solid var(--warn); }
+@media (max-width: 40rem) { .dup-member { grid-template-columns: 1fr 1fr; } .dup-member .dup-person { grid-column: 1 / -1; } }

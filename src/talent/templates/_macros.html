@@ -54,3 +54,9 @@
     <button class="btn{{ ' primary' if answered and not inhouse() }}" type="submit" name="inhouse" value="0"{% if answered %} aria-pressed="{{ 'false' if inhouse() else 'true' }}"{% endif %}>Clients</button></p>
 </form>
 {%- endmacro %}
+
+{% macro job_chips(tags, job_id, hl, rid) -%}
+{#- The same clickable highlight chips as the Candidates table, for the job table: a pick reloads /jobs/<id>?view=table. -#}
+{% set mine = hl_first(tags, hl) %}{% set shown_n = hl_shown(tags, hl) %}
+{% if mine %}<span class="chips">{% for t in mine[:shown_n] %}{% set pos = hl[t | lower] if (t | lower) in hl else '' %}<a class="chip{{ ' hl' if pos }}" id="chip-{{ rid }}-{{ hl_slug(t) }}" data-skill="{{ t | lower }}"{% if pos %} data-hl="{{ pos }}"{% endif %} href="{{ job_hl_href(job_id, hl, t, rid=rid) }}" aria-label="{{ (t ~ ', highlighted ' ~ pos ~ ' (remove)') if pos else ('Highlight ' ~ t) }}" title="{{ 'Remove the highlight' if pos else 'Highlight this skill and sort people who have it to the top' }}">{{ t }}</a>{% endfor %}</span>{% if mine | length > shown_n %} <span class="fine">+{{ mine | length - shown_n }}</span>{% endif %}{% endif %}
+{%- endmacro %}

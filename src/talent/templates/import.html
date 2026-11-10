@@ -9,6 +9,7 @@
   {% else %}<ul class="plain">{% for s in p.lines %}<li>{{ s }}</li>{% endfor %}</ul>
   {% if p.more %}<p class="fine">And {{ p.more }} more. <a href="/import/{{ token }}/{{ which }}.csv?panel={{ p.key }}">Download the full list (CSV)</a></p>{% endif %}{% endif %}
 </details>{% endmacro %}
+{% macro skipped_report(panels, token, which) %}{% if panels | selectattr('key', 'in', ('skipped', 'warnings')) | list %}<p class="fine" id="skipped-report"><a class="btn small" href="/import/{{ token }}/{{ which }}.csv?panel=skipped_blank">Download skipped and blank-cell rows (CSV)</a> One line per row with the reason, ready to hand back to whoever made the file. It is saved on this computer only.</p>{% endif %}{% endmacro %}
 {% macro openings_form(jobs, backup) %}<form method="post" action="/import/openings" class="stack panel" aria-label="Openings for the new jobs">
   <input type="hidden" name="backup" value="{{ backup or '' }}">
   <p><strong>How many openings does each new job have?</strong></p>
@@ -30,6 +31,7 @@
 </form>
 {% elif step == 'map' %}
 <p class="lead">{{ total }} row{{ '' if total == 1 else 's' }}{% if filename %} in {{ filename }}{% endif %}. Check which column goes where. {% if profile %}These are the matches you used last time for a file with these columns{% if profile.file %} ({{ profile.file }}){% endif %}.{% else %}We guessed from the headers.{% endif %}</p>
+{% if line_note %}<p class="fine" id="line-note">{{ line_note }}</p>{% endif %}
 {% if export_phrase %}<p class="fine" id="export-kind">Looks like {{ export_phrase }}. We matched its columns for you. Check them below.</p>{% endif %}
 <form method="post" action="/import/run" class="stack" data-busy="Working on it. {{ total }} row{{ '' if total == 1 else 's' }} can take {{ 'a minute' if big else 'a few seconds' }}. Keep this page open, the result shows here when it's done.">
   <input type="hidden" name="token" value="{{ token }}">
@@ -88,6 +90,7 @@
         </tbody></table></div>
       {% if email_changes | length > 100 %}<p class="fine">The first 100 are listed. The choice above covers all {{ email_changes | length }}.</p>{% endif %}
     </fieldset>{% endif %}
+    {{ skipped_report(panels, token, 'preview') }}
     {% for p in panels %}{{ panel_list(p, 'preview') }}{% endfor %}
     <p class="fine">Nothing has changed yet. Changed a column above? Check again before you import.</p>
   </section>{% endif %}
@@ -102,6 +105,7 @@
   <p class="fine" data-busy-note role="status" aria-live="polite"></p>
 </form>
 {% elif step != 'openings' %}
+{% if line_note %}<p class="fine" id="line-note">{{ line_note }}</p>{% endif %}
 <p class="flash">Added {{ result.added }}, updated {{ result.updated }}, unchanged {{ result.unchanged }}{% if result.skipped_rows %}, skipped {{ result.skipped_rows }} row{{ '' if result.skipped_rows == 1 else 's' }}{% endif %}{% if result.notes %}, {{ result.notes }} note{{ '' if result.notes == 1 else 's' }} added{% endif %}.</p>
 {% if result.backup_name %}<form class="actions-inline" method="post" action="/import/undo" data-confirm="Undo this import? Your data goes back to how it was just before it. A copy with the import in it is backed up first.">
   <input type="hidden" name="backup" value="{{ result.backup_name }}">
@@ -127,6 +131,7 @@
   </ul>
   {% if came_new | length > 100 %}<p class="fine">The first 100 are listed. The rest are on <a href="/candidates/duplicates?reason=name-company-emails">Possible duplicates</a>.</p>{% endif %}
 </section>{% endif %}
+{{ skipped_report(panels, token, 'result') }}
 {% for p in panels %}{{ panel_list(p, 'result') }}
 {% endfor %}
 {% if result.stages_added and result.missing_stages %}<p class="fine">Added {{ result.missing_stages | length }} new stage{{ '' if result.missing_stages | length == 1 else 's' }}: {% for m in result.missing_stages[:10] %}{{ m.stage }} on {{ m.job }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}

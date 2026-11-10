@@ -406,7 +406,7 @@ def test_more_filters_labels_are_plain(store):
 def test_duplicates_page_buttons_carry_the_pair_and_keep_linkedin_capitalized(store):
     store.add_candidate(name="Kim Lo", current_company="Acme", email="a@x.com")
     store.add_candidate(name="Kim Lo", current_company="Acme", email="b@x.com")
-    page = local_client(store).get("/candidates/duplicates").text
+    page = local_client(store).get("/candidates/duplicates?view=pairs").text
     assert 'aria-label="Compare and merge Kim Lo (a@x.com) and Kim Lo (b@x.com)"' in page  # same name: told apart by email
     assert 'aria-label="Not the same person: Kim Lo (a@x.com) and Kim Lo (b@x.com)"' in page
     assert "Pairs found" in page
@@ -417,7 +417,7 @@ def test_duplicates_reasons_keep_linkedin_capitalized(store):
     store.add_candidate(name="Someone Else", linkedin_url="https://linkedin.com/in/other")
     with store._lock, store._conn:  # two profiles that share a LinkedIn can only come from an old import
         store._conn.execute("UPDATE candidates SET linkedin_key = (SELECT linkedin_key FROM candidates WHERE name = 'Kim Lo')")
-    page = local_client(store).get("/candidates/duplicates").text
+    page = local_client(store).get("/candidates/duplicates?view=pairs").text
     assert "<strong>Same LinkedIn</strong>" in page
 
 
@@ -427,7 +427,7 @@ def test_duplicates_reasons_keep_their_capitals(store):
         with store._lock, store._conn:  # two rows with one LinkedIn, the way an old import could leave them
             store._conn.execute("INSERT INTO candidates(name, created_at, updated_at, linkedin_url, linkedin_key) "
                                 "VALUES (?, ?, ?, ?, ?)", (name, now_iso(), now_iso(), url, normalize_linkedin(url)))
-    page = local_client(store).get("/candidates/duplicates").text
+    page = local_client(store).get("/candidates/duplicates?view=pairs").text
     assert "<strong>Same LinkedIn</strong>" in page
 
 

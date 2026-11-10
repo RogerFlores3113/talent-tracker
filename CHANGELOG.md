@@ -59,6 +59,13 @@ All notable changes to Talent Search. Newest first.
 - The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
 - Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
 
+### Volume work
+- The job table has a tick box on every row and one in the header. Tick people and press "Move N ticked to [stage]" to move them all at once, with a status line that says how many moved and one Undo (also on Changes). The table also has a Skills column with the same clickable highlight chips as Candidates, and picks sort each stage the same way.
+- Candidates: choose Show 100, 250 or All. The choice stays in the address, so Use all and exports follow it. All stops at the same 5,000 limit as exports, and says so.
+- Possible duplicates now shows one card per group ("Kim Haddad, 6 profiles") instead of a long list of pairs, 50 groups at a time with no 2,000 pair limit. Pick which profile to keep with Keep this one, untick anyone who is a different person, and the rest are merged into the kept one after one backup. When the name matches but city, title and phone all differ, the card says "Same name, maybe different people" and starts unticked. The pair list is still there under Show as pairs.
+- Adding people to a job from Candidates now links to the job ("Open Data Lead") in the confirmation.
+- Import: phone values with fewer than 4 digits (like "-555" or "'-") are left out with a warning. The import page offers a CSV download of the skipped rows and the rows saved with a blank cell, with the reason for each, kept on this computer. Counts say rows throughout, and a note says when a row runs over several lines.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search
