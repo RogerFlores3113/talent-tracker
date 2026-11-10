@@ -20,6 +20,10 @@ All notable changes to Talent Search. Newest first.
 - Share as xlsx: tick people, press Share as xlsx and pick what goes in a spreadsheet for a hiring manager. Email, phone and your private notes are off unless you tick them. You can add the job (it adds each person's stage) and a one-line note at the top. The file never has colors, review marks or links to this app.
 - In a chat, the People table has an Export xlsx button, and Claude can make the same shortlist file in your Downloads folder with no email, phone or notes. If it needs those, it gives you a link to the Share page instead.
 
+### Compare people
+- Tick two to six people on Candidates and press Compare to see them side by side: title, location, years of experience, skills, jobs and stages, source, last contacted, links and about. An "At a glance" list says in plain words what they share and where they differ ("Only Maya has rust and payments", "Noah has the most experience"). Skills everyone has are marked shared, skills only one person has are marked only them, and highlighted skills keep their colors. Remove anyone from the comparison, or go back to the list with the same people ticked.
+- In Claude, the People table has a Compare button for two to six selected people, and Claude can compare people for you (it only reads).
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

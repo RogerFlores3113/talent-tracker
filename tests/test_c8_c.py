@@ -296,6 +296,8 @@ def _args_for(tool, ids):
     for k in (tool.parameters or {}).get("required", []):
         if k == "candidate_id":
             base[k] = ids["cid"]
+        elif k == "candidate_ids":  # compare_candidates: two saved people
+            base[k] = [ids["cid"], ids.get("named") or ids["cid"] + 1]
         elif k == "job_id":
             base[k] = ids["jid"]
         elif k == "interview_id":

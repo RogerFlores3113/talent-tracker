@@ -87,7 +87,7 @@ _TOOLS = (r"save_candidates?|update_candidate|log_activity|move_stage|add_to_pip
           r"update_client|create_client|submit_to_client|mark_update_sent|mark_chased|propose_candidates|"
           r"keep_prospects?|pass_prospects?|add_suggestion|complete_suggestion|update_interview|"
           r"add_interview_feedback|book_loop|set_loop_template|list_(?:jobs|prospects|followups|outreach|offers|"
-          r"interviews|action_items)|job_pipeline|status_digest|client_report|compare_finalists|report_problem")
+          r"interviews|action_items)|job_pipeline|status_digest|client_report|compare_finalists|compare_candidates|report_problem")
 _ADDR = r"<?[\w.+-]+@[\w-]+(?:\.[\w-]+)+>?"
 _ALL = r"(?:all|every|each|entire|whole|complete|full|everything)"
 _PEOPLE = r"(?:candidates?|records?|profiles?|stages?|emails?|jobs?|pipelines?|contacts?|notes?|offers?|clients?|database)"

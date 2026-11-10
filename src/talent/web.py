@@ -34,7 +34,7 @@ from . import ai_caps, site_guard, trust
 from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import chase, desk, duplicates, opsreview, tour
+from . import chase, compare, desk, duplicates, opsreview, tour
 from . import searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -856,6 +856,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, "/candidates", error="Tick at least one person first.")
         n = len(ids)
         who = f"{n} {'person' if n == 1 else 'people'}"
+        if action == "compare":
+            if n < compare.MIN_PEOPLE:
+                return back(request, "/candidates", error="Tick at least two people to compare.")
+            q = [("ids", ",".join(map(str, ids[:compare.MAX_PEOPLE])))]
+            if n > compare.MAX_PEOPLE:
+                q.append(("of", str(n)))
+            hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("f_hl") or "")))
+            if hl:
+                q.append(("hl", hl))
+            return RedirectResponse("/candidates/compare?" + urlencode(q), status_code=303)
         if action == "export":
             stamp = datetime.now().strftime("%Y-%m-%d")
             return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
@@ -1137,6 +1147,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, include_notes=notes,
                                                     job_id=job_id, note=note)
         return xlsx_response(data, name)
+
+    @app.get("/candidates/compare", response_class=HTMLResponse)
+    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = ""):
+        """Two to six people side by side, with what is the same and what is different. Read-only."""
+        hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
+        hl_list = [h for h, _ in hl_pairs]
+        hl_colors = dict(hl_pairs)
+        asked = compare.parse_ids(ids)
+        try:
+            d = compare.build(store, asked)
+        except ValueError as exc:
+            return page(request, "compare.html", d=None, message=str(exc), hl=hl_list, hl_colors=hl_colors,
+                        back_href="/candidates")
+        people = d["people"]
+        total = int(of) if of.isdigit() and int(of) > len(people) else d["asked"]
+        ids_now = [p["id"] for p in people]
+
+        def href(path: str, ids_: list[int]) -> str:
+            q = [("ids", ",".join(map(str, ids_)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
+            return path + "?" + urlencode(q)
+        removes = ({p["id"]: href("/candidates/compare", [i for i in ids_now if i != p["id"]]) for p in people}
+                   if len(people) > compare.MIN_PEOPLE else {})
+        return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
+                    capped=total > len(people), share_href="/candidates/share?" + urlencode([("ids", ",".join(map(str, ids_now)))]),
+                    removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
+                    rows=compare.ROWS, skill_groups=compare.skill_groups(d, hl_list))
 
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
     def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
