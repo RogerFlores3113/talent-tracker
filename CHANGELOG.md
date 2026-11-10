@@ -37,6 +37,15 @@ All notable changes to Talent Search. Newest first.
 - Export CSV on the Candidates table now follows your filters and order, like Export xlsx. The whole-list CSV stays in Settings.
 - A client's pipeline xlsx has a title line ("Acme pipeline, as of 2026-11-10"), real dates, and the next interview as a real date and time with its time zone named in the header.
 
+### Compare and export polish
+- Compare now sorts skills three ways per person: Shared (everyone), Some of them (with a count, like "python, 3 of 6") and Only them. At a glance says who has the partly shared skills ("Emily, Rafael and Priya have python"), with full names when two people share a first name. Claude's compare reply says the same.
+- With five or six people, names and skill chips no longer break in the middle of a word: each column is at least 12rem wide and the table scrolls sideways, with the name row staying put. Remove is a small x button with a clear label. The same goes for the in-chat compare view.
+- Rows nobody has anything for (years, links, about, found via) are left out. When only some people have work dates, the others say "No work dates saved" and a note says how to add them.
+- Highlighted skills name their colors for screen readers and show their number, and each column says "Has 2 of 2 highlighted skills".
+- A Hiring manager view (link on the compare page, also what Print gives) shows names, title, company, location, years, skills, stage in a job, public links and About, and leaves out your own notes on contact, source, dates, labels and app links.
+- In Claude, compare takes the first six people if you give more and says who was left out, ends with a link to Open in Talent Search, and the view has Share as xlsx, Export xlsx and a Remove button for each person. The People table says "Export 12 shown" or "Export 2 ticked", reports what it saved, and has Share as xlsx beside Compare.
+- The messages Claude gets back from the xlsx export are plain and clear, a Read only app is given the Share page link, and people not found are listed first.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

@@ -62,7 +62,7 @@ function tellState(){clearTimeout(tellTimer);tellTimer=setTimeout(()=>{const cho
  const bits=[];if(p)bits.push("The recruiter is looking at "+p.name+" (candidate id "+p.id+") in the view.");
  bits.push(chosen.length?"The recruiter selected "+chosen.length+" candidate"+(chosen.length===1?"":"s")+" in the view: "+peopleLabel(chosen)+".":"The recruiter has no candidates selected.");
  tellClaude({shown:p?{id:p.id,name:p.name}:null,selected:chosen.map(x=>({id:x.id,name:x.name}))},bits.join(" "))},250)}
-function sendSelection(){tellState()}
+function sendSelection(){refreshXl();tellState()}
 /* two people with one name get something to tell them apart: their title, company or email */
 function distinct(p){const same=S.people.filter(x=>x.name===p.name).length>1;if(!same)return p.name;
  const extra=role(p.current_title,p.current_company)||p.email||("id "+p.id);return p.name+" ("+extra+")"}
@@ -120,7 +120,7 @@ function tableMode(d){
  wrap.append(header({title:S.d.query?"Search: "+S.d.query:"Candidates",count:countLine(),appUrl:d.app_url,appLabel:"Open in Talent Search"}));
  for(const n of leadLines(d))wrap.append(n);
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
- const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},"Export xlsx");
+ const xl=el("button",{class:"btn",type:"button",onclick:()=>exportXlsx(xl,xlOut)},xlWho().label);XL=xl;
  const xlOut=el("span",{class:"small",role:"status","aria-live":"polite"});
  wrap.append(el("div",{class:"tbar"},back,canCall()?xl:null,xlOut));
  const t=peopleTable(S.people,S,{skills:true,origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,bulkExtra:compareBtn,
@@ -129,20 +129,13 @@ function tableMode(d){
  onKeys(wrap,{Escape:e=>{if(e.target&&e.target.tagName==="INPUT"&&e.target.type==="search"&&e.target.value)return;S.fromTable=false;setView("card")}});
  return wrap}
 
-/* Export xlsx: the ticked people, or everyone shown. Makes a file in Downloads (no email, phone or notes) or, when the
-   recruiter has to choose, gives a link to the Share page. Candidate text only ever goes in with textContent. */
+/* Export xlsx: the ticked people, or everyone shown. The button says which. The work is exportIds in kit.js. */
+let XL=null;
+function xlWho(){const ticked=S.people.filter(p=>S.sel.has(p.id));return ticked.length?{people:ticked,label:"Export "+ticked.length+" ticked"}:{people:S.people.slice(),label:"Export "+S.people.length+" shown"}}
+function refreshXl(){if(XL&&XL.isConnected)XL.textContent=xlWho().label}
 function exportXlsx(btn,out){
- const chosen=S.sel.size?S.people.filter(p=>S.sel.has(p.id)):S.people.slice();
- const ids=chosen.slice(0,200).map(p=>p.id);
- if(!ids.length){out.textContent="There is nobody to export yet.";return}
- btn.disabled=true;out.textContent="Making the file...";
- callTool("export_candidates_xlsx",{candidate_ids:ids,for_hiring_manager:true}).then(r=>{btn.disabled=false;
-  const d=r&&r.structuredContent;
-  if(!d||(r&&r.isError)){out.textContent=said(r)||"Couldn't make the file.";return}
-  const more=chosen.length>ids.length?" The first 200 of "+chosen.length+" are in it.":"";
-  if(d.written){out.replaceChildren("Saved "+d.file+" in "+d.path.slice(0,Math.max(0,d.path.length-d.file.length-1))+". It has no email, phone or notes."+more+" ",appLink(d.share_url,"Open in Talent Search"))}
-  else out.replaceChildren("The file waits for you. ",appLink(d.share_url,"Open in Talent Search"));
-  announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
+ const w=xlWho();const notLoaded=S.sel.size?0:Math.max(0,S.total-S.people.length);
+ exportIds(w.people.map(p=>p.id),btn,out,notLoaded)}
 function draw(focus){const m=document.getElementById("main");const d=S.d;
  const n=S.mode==="table"?tableMode(d):cardMode(d);m.replaceChildren(n);
  if(focus==="table"&&SHOWN){const sc=S.scroll;S.scroll=null;
@@ -166,9 +159,12 @@ function showCompare(ids,btn){
   const m=document.getElementById("main");
   m.replaceChildren(renderCompare(d,{onBack:()=>{CMP_BACK=null;TOOL=was.t;ARGS=was.a;draw("table")}}));
   const h=m.querySelector("h1");if(h){h.tabIndex=-1;h.focus()}announce("Comparing "+ids.length+" people.")})}
-function compareBtn(chosen){const n=chosen.length;if(n<2)return[];
- if(n>6)return[el("button",{class:"btn",type:"button",disabled:"true"},"Compare "+n),el("span",{class:"small muted"},"Compare takes 2 to 6 people. Select fewer.")];
- return[el("button",{class:"btn",type:"button",onclick:ev=>showCompare(chosen.map(p=>p.id),ev.currentTarget)},"Compare "+n)]}
+function shareBtn(chosen){const url=S.origin?S.origin+"/candidates/share?ids="+chosen.slice(0,200).map(p=>p.id).join(","):"";
+ if(!url||!chosen.length)return null;
+ return el("button",{class:"btn",type:"button",onclick:()=>{announce("Opening the Share page for "+chosen.length+(chosen.length===1?" person":" people")+".");openLink(url,"the Share page")}},"Share as xlsx")}
+function compareBtn(chosen){const n=chosen.length;const share=shareBtn(chosen);if(n<2)return share?[share]:[];
+ if(n>6)return[el("button",{class:"btn",type:"button",disabled:"true"},"Compare "+n),share,el("span",{class:"small muted"},"Compare takes 2 to 6 people. Select fewer.")].filter(Boolean);
+ return[el("button",{class:"btn",type:"button",onclick:ev=>showCompare(chosen.map(p=>p.id),ev.currentTarget)},"Compare "+n),share].filter(Boolean)}
 
 function render(c){
  if(Array.isArray(c.at_a_glance))return renderCompare(c);  // a Refresh of the compare view shown inside this one

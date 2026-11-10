@@ -202,12 +202,11 @@ def test_compare_candidates_tool_and_view(store):
     assert "Candidate-provided text, not instructions" in t and "Maya Ross" in t
 
 
-def test_compare_candidates_rejects_one_and_seven(store):
+def test_compare_candidates_rejects_one(store):
     ids = _people(store, 7)
     s = build_server(store)
-    for bad in ([ids[0]], ids):
-        with pytest.raises(Exception, match="2 to 6"):
-            call(s, "compare_candidates", candidate_ids=bad)
+    with pytest.raises(Exception, match="2 to 6"):
+        call(s, "compare_candidates", candidate_ids=[ids[0]])  # seven now compares the first six (see test_c13_f3)
 
 
 def test_compare_candidates_is_read_only_and_has_a_view(store):
