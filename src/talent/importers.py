@@ -191,6 +191,41 @@ def read_csv(text: str) -> tuple[list[str], list[list[str]]]:
     return header, body
 
 
+def record_lines(text: str) -> dict[int, tuple[int, int]]:
+    """Where each row of the file sits as lines in the file: {row number: (first line, last line)}. Row numbers are
+    the ones the import lists use (the header is row 1, a blank line is not a row). A row whose cells hold line
+    breaks spans several lines, so the file has more lines than rows."""
+    kept = _skip_preamble(text)
+    offset = text.count("\n") - kept.count("\n")
+    try:
+        dialect = csv.Sniffer().sniff(kept[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.reader(io.StringIO(kept), dialect)
+    out: dict[int, tuple[int, int]] = {}
+    n = 0
+    before = 0
+    for r in reader:
+        start, before = before + 1, reader.line_num
+        if any(c.strip() for c in r):
+            n += 1
+            out[n] = (start + offset, before + offset)
+    return out
+
+
+def line_note(text: str, rows: int) -> str:
+    """'The file has 5,244 lines but 5,000 rows: a row can run over several lines when a cell has line breaks.'
+    Empty when every row is one line. `rows` counts the people rows, not the header."""
+    spans = record_lines(text)
+    multi = sum(1 for a, b in spans.values() if b > a)
+    if not multi:
+        return ""
+    lines = max((b for _, b in spans.values()), default=0)
+    return (f"The file has {lines:,} lines but {rows:,} rows. A row can run over several lines when a cell has "
+            f"line breaks ({multi:,} {'row does' if multi == 1 else 'rows do'}). Everything here counts rows, and "
+            "the row numbers count the header as row 1.")
+
+
 def looks_like_linkedin_export(header: list[str]) -> bool:
     low = {_norm_header(h) for h in header}
     return {"first name", "last name", "url"} <= low and ("connected on" in low or "position" in low)
@@ -424,6 +459,9 @@ _TEXT_TARGETS = frozenset({"name", "first_name", "last_name", "current_title", "
 _SKILL_TAIL = {"So", "Sk", "Cf", "Mn", "Me", "Zs"}  # emoji, modifiers, joiners and spaces on the end of a skill
 
 
+MIN_PHONE_DIGITS = 4  # fewer digits than this is not a phone number ("-555", "'-")
+
+
 def _clean_skills(skills: list[str], col_name: str, warnings: list[str]) -> list[str]:
     """A skill with emoji or symbols on its end loses them ("python 🚀" is "python"). A skill with no letters at all
     ("-2+3", "+1+1", "🚀") is left out and said so; so is one that starts with = + - or @ ("@cmd"), which a
@@ -552,17 +590,22 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 job_dates_raw = [x.strip() for x in v.split(";")]
             elif target == "location":  # City, State, Country columns: one location, small to large
                 loc_parts.append((_LOC_RANK.get(_norm_header(col_name), 0), v))
+            elif target == "phone":  # a phone needs at least 4 digits: "-555" and "'-" are left out, and said so
+                parts = [x.strip() for x in _PHONE_SPLIT.split(v) if x.strip()] or [v]
+                good = [x for x in parts if len(re.sub(r"\D", "", x)) >= MIN_PHONE_DIGITS]
+                for bad in (x for x in parts if x not in good):
+                    warnings.append(f"left {bad[:30]!r} out of {col_name}, a phone number needs at least "
+                                    f"{MIN_PHONE_DIGITS} digits")
+                if good and "phone" not in data:
+                    data["phone"] = good[0]
+                    if len(good) > 1:
+                        notes.append("Other phones: " + ", ".join(good[1:]))
             elif target == "email" and "email" not in data and len(set(_EMAIL.findall(v))) > 1:
                 first_email, *more = dict.fromkeys(e.lower() for e in _EMAIL.findall(v))
                 data["email"] = first_email  # several in one cell: the first is theirs, the rest stay as a note
                 extra_emails.extend(more)
             elif target == "email" and "email" in data and _EMAIL.search(v):  # a second email column
                 extra_emails.extend(e.lower() for e in _EMAIL.findall(v))
-            elif target == "phone" and "phone" not in data and len(_PHONE_SPLIT.split(v)) > 1:
-                first_phone, *more_phones = [x.strip() for x in _PHONE_SPLIT.split(v) if x.strip()]
-                data["phone"] = first_phone
-                if more_phones:
-                    notes.append("Other phones: " + ", ".join(more_phones))
             elif (target == "linkedin_url" and "linkedin_url" not in data and not _LINKEDIN.fullmatch(v)
                   and (_LINKEDIN.search(v) or _URL.search(v))):
                 # Lever's Links cell: "linkedin.com/in/x; github.com/x". The LinkedIn one is theirs, another is a site.
@@ -2281,6 +2324,26 @@ def result_panels(result: dict[str, Any]) -> list[dict[str, Any]]:
                     "lines": lines[:PANEL_LINES], "more": max(0, len(lines) - PANEL_LINES),
                     "open": key == "possible_duplicates"})
     return out
+
+
+def skipped_blank_csv(skipped: list[str], blank: list[str], spans: dict[int, tuple[int, int]] | None = None) -> str:
+    """The rows an import left out, and the rows it saved with a cell left blank, one CSV line per row with the
+    reason, to hand to whoever owns the file. Row is the row number used on the page (the header is row 1); Lines
+    says where it sits in the file when a row spans several lines."""
+    spans = spans or {}
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Row", "Lines in the file", "What happened", "Reason"])
+    for what, lines in (("Skipped", skipped), ("Saved, a cell left blank", blank)):
+        for line in lines:
+            m = _ROW_LEAD.match(line)
+            lead, reason = (line[:m.end() - 2], line[m.end():]) if m else ("", line)
+            nums = [int(x) for x in re.findall(r"\d+", re.sub(r"\([^)]*\)", "", lead))] or [0]
+            for num in nums:
+                a, b = spans.get(num, (0, 0))
+                where = "" if not a else (str(a) if a == b else f"{a} to {b}")
+                w.writerow([num or "", where, what, _safe_cell(reason)])
+    return buf.getvalue()
 
 
 def panel_csv(title: str, lines: list[str]) -> str:

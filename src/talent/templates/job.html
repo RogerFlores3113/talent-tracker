@@ -54,6 +54,15 @@
 </div>
 <div id="add-results">{% include "_add_results.html" %}</div>
 
+{% if view == 'table' %}
+{% if hl_bar %}<div class="hlbar" id="hl-bar" tabindex="-1" role="group" aria-label="Highlighted skills">
+  <span class="fine"><strong>Highlighted skills:</strong></span>
+  {% for h in hl_bar %}<a class="chip hl removable" id="hlbar-{{ hl_slug(h.skill) }}" data-hl="{{ h.color }}" data-skill="{{ h.skill }}" href="{{ h.href }}" title="Remove this highlight" aria-label="Remove highlight: {{ 'title: ' ~ h.label if h.title else h.label }} ({{ h.color }})"><span class="hl-n" aria-hidden="true">{{ h.n }}</span> {{ 'title: ' ~ h.label if h.title else h.label }} <span aria-hidden="true">×</span></a>{% endfor %}
+  <a class="small" href="{{ hl_clear }}">Clear</a>
+  <span class="fine">People with more of these skills come first inside each stage. Nobody is hidden.</span>
+</div>{% else %}<p class="fine">Click a skill in the table to highlight it. People who have it come first in each stage.</p>{% endif %}
+<p class="fine hl-status" id="hl-status" role="status" aria-live="polite" tabindex="-1"></p>
+{% endif %}
 <div id="pipeline" data-move-url="/jobs/{{ job.id }}/move">{% include "_pipeline.html" %}</div>
 {% if job.description %}<details class="panel"><summary>Job description</summary><p class="about">{{ job.description }}</p></details>{% endif %}
 <section class="panel todos" id="todos">

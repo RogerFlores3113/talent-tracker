@@ -173,7 +173,7 @@ def _merge_backups():
 def test_merge_ticked_pairs_makes_one_backup_and_shows_who_is_kept(store):
     ids = _many_pairs(store, 4)
     c = local_client(store)
-    assert "Merge ticked pairs" in c.get("/candidates/duplicates").text
+    assert "Merge ticked pairs" in c.get("/candidates/duplicates?view=pairs").text
     pairs = [p for p in duplicates.find_pairs(store)]
     values = [f"{p['keep']}-{p['other']}" for p in pairs]
     review = c.post("/candidates/duplicates/merge-review", data={"pair": values}).text

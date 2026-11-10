@@ -861,3 +861,55 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();
+
+// Job table: the "Move N ticked to [stage]" bar. The button says how many are ticked and stays off until someone is.
+// (data-bulk-move on the form; its checkboxes sit in the table and point at it with the form attribute)
+(function () {
+  function update(form) {
+    const n = Array.from(document.querySelectorAll("input[type=checkbox][name='candidate_ids']"))
+      .filter(b => b.form === form && b.checked).length;
+    const btn = form.querySelector("[data-bulk-move-btn]");
+    const note = form.querySelector("[data-bulk-move-count]");
+    const sel = form.querySelector("select[name='stage']");
+    const stage = sel && sel.value;
+    if (btn) {
+      btn.disabled = n === 0;
+      btn.textContent = n === 0 ? "Move ticked" : "Move " + n + " ticked" + (stage ? " to " + stage : "");
+    }
+    if (note) note.textContent = n === 0 ? "Nobody ticked yet. Tick the boxes below, or the one in the header for everyone."
+      : n + (n === 1 ? " person" : " people") + " ticked." + (stage ? "" : " Pick a stage to move them to.");
+  }
+  function all() { document.querySelectorAll("form[data-bulk-move]").forEach(update); }
+  document.addEventListener("change", e => {
+    if (e.target.closest && e.target.closest("input[type=checkbox], select[name='stage']")) window.setTimeout(all, 0);
+  });
+  document.addEventListener("htmx:afterSwap", all);
+  document.addEventListener("htmx:afterSettle", e => {  // after a move, say what happened where a screen reader will hear it
+    const st = document.getElementById("move-status");
+    if (st && e.target && e.target.id === "pipeline") st.focus();
+  });
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", all);
+  else all();
+})();
+
+// Duplicate groups: the profile marked "Keep this one" is not also merged into itself, so its "Merge in" box goes away.
+(function () {
+  function sync(radio) {
+    const card = radio.closest(".dup-cluster");
+    if (!card) return;
+    card.querySelectorAll(".dup-member").forEach(row => {
+      const keep = row.querySelector("input[type=radio]").checked;
+      const label = row.querySelector(".merge-in");
+      const box = label && label.querySelector("input");
+      if (!box) return;
+      label.hidden = keep;
+      box.disabled = keep;
+    });
+  }
+  document.addEventListener("change", e => {
+    if (e.target.matches && e.target.matches(".dup-cluster input[type=radio]")) sync(e.target);
+  });
+  function start() { document.querySelectorAll(".dup-cluster input[type=radio]:checked").forEach(sync); }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
