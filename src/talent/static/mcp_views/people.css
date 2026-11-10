@@ -32,8 +32,6 @@ table.ptable .out{color:var(--muted);text-decoration:line-through;text-decoratio
  table.ptable td.pickcell{order:-2}table.ptable th[scope=row]{order:-1}
 }
 @media (forced-colors:active){.btn,.chip,.avatar{border:1px solid ButtonText}.btn.primary{background:Highlight;color:HighlightText}mark{background:Highlight;color:HighlightText}}
-html:not([data-mode=fullscreen]) table.ptable .wide{display:none}
-@media (max-width:560px){html table.ptable .wide{display:block!important}}
 
 /* People table: columns size to what they hold and text wraps, so nothing is clipped or scrolls sideways
    (full screen adds Added, Updated and Color; inline keeps the compact set; below 560px it stacks) */
@@ -85,16 +83,22 @@ table.ptable.hide-job .k-job,table.ptable.hide-email .k-email,table.ptable.hide-
 }
 @media (max-width:560px){.tablebox .edge{display:none}.scrollhint{display:none}}
 
-/* skill highlights: same fixed fills as the Candidates page; the chip keeps its own readable ink */
-.chips.skillchips{margin-top:0;align-items:center}
-button.chip{font:inherit;font-size:.75rem;color:var(--text);border:1px solid var(--line);cursor:pointer;text-decoration:none}
-button.chip:hover{border-color:var(--accent)}
-.chip.hl{font-weight:600;border-color:var(--text);background:var(--bub);color:var(--bub-ink)}
-.chip[data-hl=red]{--bub:#c62828;--bub-ink:#fff}.chip[data-hl=yellow]{--bub:#f6d53d;--bub-ink:#1a1a1a}.chip[data-hl=green]{--bub:#1f7a3d;--bub-ink:#fff}
-.chip[data-hl=blue]{--bub:#2563c9;--bub-ink:#fff}.chip[data-hl=purple]{--bub:#7b3fc4;--bub-ink:#fff}.chip[data-hl=orange]{--bub:#f59a23;--bub-ink:#1a1a1a}
-.hlbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0}
+.hlbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0;position:sticky;top:0;z-index:6;background:var(--surface);padding:4px 0;border-bottom:1px solid var(--line)}
 table.ptable tr.hlrow>td.pickcell{box-shadow:inset 4px 0 0 var(--edge)}
 table.ptable tr[data-edge=red]{--edge:#c62828}table.ptable tr[data-edge=yellow]{--edge:#f6d53d}table.ptable tr[data-edge=green]{--edge:#1f7a3d}
 table.ptable tr[data-edge=blue]{--edge:#2563c9}table.ptable tr[data-edge=purple]{--edge:#7b3fc4}table.ptable tr[data-edge=orange]{--edge:#f59a23}
 @media (max-width:560px){table.ptable tr.hlrow{box-shadow:inset 4px 0 0 var(--edge)}table.ptable tr.hlrow>td.pickcell{box-shadow:none}}
 @media (min-width:561px){table.ptable td.k-skills{min-width:9.5rem}table.ptable td.k-skills .chips{flex-wrap:wrap;gap:4px}table.ptable td.k-skills .chip{white-space:nowrap}}
+
+/* cycle 14 D2: Columns button, title picks, quiet status line, the row tint reaching the sticky cells */
+.colspanel{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;border:1px solid var(--line);border-radius:8px;background:var(--chip);padding:6px 10px;margin:0 0 6px}
+.colopt{display:inline-flex;gap:4px;align-items:center;font-size:.8125rem}
+button.titlebtn{font:inherit;color:inherit;background:none;border:1px solid transparent;border-radius:999px;padding:0 4px;margin:0 -4px;cursor:pointer;text-align:left}
+button.titlebtn:hover{border-color:var(--accent)}
+button.titlebtn.chip.hl{padding:1px 8px;margin:0;border-color:var(--text)}
+.tophint{margin:0 0 3px;font-weight:600}.tophint.muted{font-weight:400}
+.xlstatus{min-height:2.7em;margin:0 0 4px;overflow-wrap:anywhere}
+.xlstatus code.path{font-family:ui-monospace,Menlo,monospace;font-size:.6875rem;user-select:all}
+table.ptable tr.sel>th[scope=row].k-name,table.ptable tr.sel>td.pickcell,table.ptable tr.sel>th[scope=row]{background:var(--chip)}
+table.ptable tbody tr:hover>th[scope=row].k-name,table.ptable tbody tr:hover>td.pickcell{background:var(--chip)}
+table.ptable tr.hlrow>td.pickcell{box-shadow:inset 4px 0 0 var(--edge)}

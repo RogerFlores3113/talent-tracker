@@ -151,22 +151,22 @@ def test_compare_takes_the_first_six_and_names_who_was_left_out(store):
 
 def test_compare_view_has_share_export_and_remove():
     js = (VIEWS / "compare.js").read_text()
-    for needle in ("Share as xlsx", "Export xlsx", "Remove \"+p.name+\" from the comparison", "compare_candidates", "exportIds(",
+    for needle in ("Share as xlsx", "Export for hiring manager", "Remove \"+p.name+\" from the comparison", "compare_candidates", "exportIds(",
                    "No work dates saved", "Some of them"):
         assert needle in js, needle
     assert "innerHTML" not in js
     css = (VIEWS / "compare.css").read_text()
-    assert "12rem" in css and "hyphens:none" in css and "position:sticky" in css
+    assert "9.5rem" in css and "hyphens:none" in css and "position:sticky" in css
 
 
 # ------------------------------------------------------------ 7. People table
 def test_people_table_export_and_share_buttons():
     js = (VIEWS / "people.js").read_text()
-    assert '" ticked"' in js and '" shown"' in js and "more not loaded; open in Talent Search to export all" in (VIEWS / "kit.js").read_text()
+    assert '" ticked"' in js and '"all "+S.people.length+" shown"' in js and "more not loaded; open in Talent Search to export all" in (VIEWS / "kit.js").read_text()
     assert "Share as xlsx" in js and "/candidates/share?ids=" in js
     kit = (VIEWS / "kit.js").read_text()
     assert "innerHTML" not in kit.split("function exportIds")[1].split("function profileLink")[0]
-    assert "Saved \"+d.file+\" with" in kit
+    assert "Saved \"+d.people" in kit
 
 
 # ------------------------------------------------------------ 8. export replies

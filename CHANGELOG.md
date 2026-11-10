@@ -59,6 +59,13 @@ All notable changes to Talent Search. Newest first.
 - The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
 - Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
 
+### In-chat views (cycle 14)
+- Claude can open People and Compare already tiered: search_candidates, run_saved_search and compare_candidates take a highlight list (skills in your order, a job title as "title:Data Engineer"). Picks you make in the view are kept when you press Refresh or Back to the list.
+- The in-chat table fits a chat window: Name, Title, Skills, then Job and Stage, with Company, Location, Updated, Added and Last contacted behind a Columns button. Show as table no longer jumps to full screen (Full screen is its own button), skill chips work in card view too, each row says "Top match: python, red. 2 of 2", the pick bar stays in view, and picked chips are named for screen readers with their color and number.
+- In-chat Compare keeps the order you chose, names anyone left out at the top, colors your picks, fits three people without sideways scrolling, and has a Hiring manager view button.
+- In-chat exports are clearer: "Export for hiring manager" (no contact details or notes) and "Export for me" (opens the Share page with contact and notes ticked). The saved file's full path is shown with a Copy path button, and export_candidates_xlsx with only a job_id exports that job's people.
+- Fixes: the sticky Name cell takes the row tint, the table no longer jumps when you click a chip or export, and Today's list is no longer clipped at the bottom. The pipeline star now has a plain explanation.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

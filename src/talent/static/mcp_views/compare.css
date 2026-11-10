@@ -4,11 +4,11 @@
 .cmp-glance ul{margin:0;padding-left:18px;font-size:.875rem}.cmp-glance li{margin:2px 0}
 .cmp-wrap{position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;margin-top:8px}
 .cmp-wrap:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-table.ctable{border-collapse:separate;border-spacing:0;width:100%;min-width:calc(7.5rem + var(--cols,3)*12rem);table-layout:fixed;font-size:.8125rem}
+table.ctable{border-collapse:separate;border-spacing:0;width:100%;min-width:calc(6rem + var(--cols,3)*9.5rem);table-layout:fixed;font-size:.8125rem}
 table.ctable th,table.ctable td{text-align:left;vertical-align:top;padding:6px 10px;border-bottom:1px solid var(--line);overflow-wrap:break-word;word-break:normal;hyphens:none}
 table.ctable thead th{background:var(--chip);position:sticky;top:0;z-index:2;box-shadow:0 1px 0 var(--line)}
 table.ctable thead .cmp-rowlabel{z-index:3}
-table.ctable .cmp-rowlabel{width:7.5rem;position:sticky;left:0;z-index:1;background:var(--chip);border-right:1px solid var(--line);font-weight:600}
+table.ctable .cmp-rowlabel{width:6rem;position:sticky;left:0;z-index:1;background:var(--chip);border-right:1px solid var(--line);font-weight:600}
 table.ctable tbody tr:last-child th,table.ctable tbody tr:last-child td{border-bottom:0}
 .cmp-name{display:flex;align-items:flex-start;gap:6px;font-weight:700}
 .cmp-nm{flex:1 1 auto;min-width:0;overflow-wrap:normal;word-break:normal;hyphens:none}
@@ -22,3 +22,12 @@ table.ctable ul.plain{list-style:none;margin:0;padding:0}
 .cmp-label.shared::before{content:"\2713 "}
 .cmp-diff{display:inline-block;margin-left:4px;font-size:.6875rem;font-weight:600;color:var(--muted);border:1px dashed var(--line);border-radius:999px;padding:0 6px;white-space:nowrap}
 .never{font-style:italic}.cmp-about{margin:0;white-space:pre-wrap}
+
+/* cycle 14 D2: three people fit a 720px chat without sideways scroll; more scroll under sticky names */
+.cmp-wrap:not(.scrolls){overflow-x:hidden}
+.cmpskill{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:0 4px;max-width:100%;margin:0 2px 2px 0}
+.cmpskill .cmp-n{white-space:nowrap;font-size:.6875rem}
+.leftout{border-left:4px solid var(--accent)}
+.hlnote{margin:4px 0}
+table.ctable .chip.hl{font-weight:600}
+table.ctable td .chips{gap:2px}

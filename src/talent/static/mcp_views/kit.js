@@ -126,8 +126,9 @@ function exportIds(ids,btn,out,notLoaded,kind){
   const cut=ids.length>sent.length?" The first 200 of "+ids.length+" are in it.":"";
   const more=notLoaded>0?" ("+notLoaded+" more not loaded; open in Talent Search to export all)":"";
   const nf=d.not_found&&d.not_found.length?" Not found and left out: "+d.not_found.join(", ")+".":"";
-  if(d.written){const dir=d.path.slice(0,Math.max(0,d.path.length-d.file.length-1));
-   out.replaceChildren("Saved "+d.file+" with "+d.people+(d.people===1?" person":" people")+" in "+dir+". It has no email, phone or notes."+cut+nf+more+" ",appLink(d.share_url,"Open in Talent Search"))}
+  if(d.written){const cs=el("span",{class:"small muted",role:"status"});
+   out.replaceChildren("Saved "+d.people+(d.people===1?" person":" people")+" to ",el("code",{class:"path"},d.path),". It has no email, phone or notes."+cut+nf+more+" ",
+    el("button",{class:"link small",type:"button",onclick:()=>copyText(d.path,out,cs,"Path copied.")},"Copy path")," ",cs," ",appLink(d.share_url,"Open in Talent Search"))}
   else out.replaceChildren("No file made yet. Pick what goes in on the Share page. ",appLink(d.share_url,"Open the Share page"));
   announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
 function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const li=/(^|\.)linkedin\.com$/i.test(x.hostname);
@@ -237,7 +238,12 @@ function personCard(c,o){o=o||{};const lvl=o.headingLevel||2;const nm=c.name||"C
  if(c.phone)contact.append(el("a",{href:"tel:"+String(c.phone).replace(/[^\d+]/g,""),"aria-label":"Call "+nm},c.phone));
  if(contact.childNodes.length)card.append(contact);
  card.append(linksRow(c));
- if(c.tags&&c.tags.length)card.append(el("ul",{class:"chips","aria-label":"Skills"},c.tags.map(t=>el("li",{class:"chip"},t))));
+ if(c.tags&&c.tags.length){
+  if(o.onSkill){const hl=hlList(o.hl);const sum=hlSummary(c,hl);  // clickable skills: the same picks as the table
+   if(sum)card.append(el("div",{class:"small tophint"+(hlTop(c,hl)?"":" muted")},sum));
+   const lit=c.tags.filter(t=>hl.some(x=>x.skill===normKey(t)));const rest=c.tags.filter(t=>!lit.includes(t));
+   card.append(el("ul",{class:"chips skillchips","aria-label":"Skills of "+nm},[...lit,...rest].map(t=>el("li",{},pickChip(t,o.hl,(n,ti)=>o.onSkill(n,ti))))))}
+  else card.append(el("ul",{class:"chips","aria-label":"Skills"},c.tags.map(t=>el("li",{class:"chip"},t))))}
  const facts=el("dl",{class:"facts"});
  const fact=(k,v)=>{if(v==null||v==="")return;facts.append(el("dt",{},k),el("dd",{},v))};
  fact("Last contacted",c.last_contacted_at?dateEl(c.last_contacted_at):(o.partial?null:"never"));
@@ -304,7 +310,8 @@ function showResult(d,meta){DATA=d;if(meta)META=meta;let n;useZone(d);ABS_USED=f
  try{n=render(d)}catch(e){n=errorState("Couldn't show this.")}
  const m=document.getElementById("main");m.replaceChildren(n||emptyState("Nothing to show."));
  if(ABS_USED&&ZONE_SAID&&ZONE){const h=m.querySelector(".vhead");const t=el("p",{class:"small muted zonenote",style:"margin:-4px 0 6px"},"Times in "+zoneShort());if(h)h.after(t);else m.prepend(t)}
- const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}}
+ const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}
+ setTimeout(()=>{try{sendSize()}catch(e){}},250)}
 
 window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
  if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
@@ -320,9 +327,14 @@ window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const
  else if(m.method==="ui/resource-teardown"&&m.id!=null)post({jsonrpc:"2.0",id:m.id,result:{}});
 });
 let lastW=0,lastH=0;
-new ResizeObserver(()=>{const w=document.documentElement.scrollWidth,h=document.documentElement.scrollHeight;
- if(isFull()){if(w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
- if(w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}).observe(document.documentElement);
+/* the height the view needs: whichever is larger, the page or the bottom of the last thing on it, so the last block is never clipped */
+function viewHeight(){const de=document.documentElement,b=document.body;const cs=getComputedStyle(b);
+ const bottom=b.getBoundingClientRect().bottom+(window.scrollY||0)+(parseFloat(cs.paddingBottom)||0)+(parseFloat(cs.marginBottom)||0);
+ return Math.ceil(Math.max(de.scrollHeight,bottom))}
+function sendSize(){const w=document.documentElement.scrollWidth,h=viewHeight();if(isFull()){if(w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
+ if(w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}
+{const ro=new ResizeObserver(sendSize);ro.observe(document.documentElement);ro.observe(document.body)}
+
 req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
  if(r&&r.isError){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));return}
  HOST=(r&&r.hostCapabilities)||{};mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{})});
@@ -344,34 +356,78 @@ function stageRank(p){if(typeof p.stage_rank==="number")return p.stage_rank;cons
  const i=STAGE_ORDER.findIndex(r=>r.test(j.stage||""));return i<0?50:i}
 function jobText(p){const js=p.jobs||[];if(!js.length)return"";const j=js[0];return(j.job||j.job_title||"")+(js.length>1?" +"+(js.length-1)+" more":"")}
 function hasEmail(p){return!!(p.email||p.has_email)}
+/* The order is what a recruiter reads first: Name, Title, Skills, then the job. opt:1 columns sit behind the Columns button. */
 const TCOLS=[
  {k:"name",l:"Name",v:p=>p.name},
  {k:"title",l:"Title",v:p=>p.current_title},
- {k:"company",l:"Company",v:p=>p.current_company},
- {k:"location",l:"Location",v:p=>p.location},
+ {k:"skills",l:"Skills",nosort:1,v:p=>(p.tags||[]).length},
  {k:"job",l:"Job",v:p=>jobText(p)},
  {k:"stage",l:"Stage",v:p=>stageRank(p)},
  {k:"email",l:"Email",v:p=>p.email||(p.has_email?"~":null)},
  {k:"linkedin",l:"LinkedIn",v:p=>p.linkedin_url?"a":null},
  {k:"match",l:"Match",v:plainMatch},
- {k:"contacted",l:"Last contacted",v:p=>p.last_contacted_at,date:1},
- {k:"added",l:"Added",v:p=>p.created_at,date:1,wide:1},
- {k:"updated",l:"Updated",v:p=>p.updated_at,date:1,wide:1},
- {k:"color",l:"Color",v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i},wide:1},
- {k:"skills",l:"Skills",nosort:1,v:p=>(p.tags||[]).length}];
-/* skill highlights: a fixed color per pick (first pick red, then yellow, green, blue, purple, orange), kept while it stays picked.
-   People with more picked skills come first; on a tie the earlier pick wins. Nobody is hidden. Same rules as the Candidates page. */
+ {k:"contacted",l:"Last contacted",opt:1,full:1,v:p=>p.last_contacted_at,date:1},
+ {k:"company",l:"Company",opt:1,full:1,v:p=>p.current_company},
+ {k:"location",l:"Location",opt:1,full:1,v:p=>p.location},
+ {k:"updated",l:"Updated",opt:1,full:1,v:p=>p.updated_at,date:1},
+ {k:"added",l:"Added",opt:1,full:1,v:p=>p.created_at,date:1},
+ {k:"color",l:"Color",opt:1,full:1,v:p=>{const i=COLORS.indexOf(p.color);return i<0?null:i}}];
+/* highlights: a fixed color per pick (first pick red, then yellow, green, blue, purple, orange), kept while it stays picked.
+   A pick is a skill ("python") or a job title ("title:data engineer"). People with more picks come first; on a tie the
+   earlier pick wins. Nobody is hidden. Same rules as the Candidates page. Matching here is by skill tag (any case) and
+   by the person's current title (case and spacing ignored); the server's own match is the one the app uses. */
 const HL_PALETTE=["red","yellow","green","blue","purple","orange"];
 function hlList(st){return st.hl||(st.hl=[])}
-function hlToggle(st,skill){const k=String(skill).trim().toLowerCase(),l=hlList(st);const i=l.findIndex(x=>x.skill===k);
+function normKey(t){return String(t||"").toLowerCase().split(/\s+/).filter(Boolean).join(" ")}
+function hlIsTitle(x){return x.skill.indexOf("title:")===0}
+function hlName(x){return hlIsTitle(x)?x.skill.slice(6):x.skill}
+function titleCase(s){return String(s).replace(/(^|[\s/-])(\p{L})/gu,(m,a,b)=>a+b.toUpperCase())}
+/* what a pick is called on screen and to a screen reader: "python" or "title: Data Engineer" */
+function hlText(x){return hlIsTitle(x)?"title: "+titleCase(hlName(x)):x.skill}
+function hlToggle(st,name,isTitle){const k=(isTitle?"title:":"")+normKey(name),l=hlList(st);const i=l.findIndex(x=>x.skill===k);
  if(i>=0){l.splice(i,1);return false}
  if(l.length>=HL_PALETTE.length)return null;
  l.push({skill:k,color:HL_PALETTE.find(c=>!l.some(x=>x.color===c))});return true}
-function hlFlags(p,l){const have=new Set((p.tags||[]).map(t=>String(t).toLowerCase()));return l.map(h=>have.has(h.skill))}
+/* the picks the server echoes ({name,color,kind}) as the view's own list */
+function hlSeed(st,d){st.hl=((d&&d.highlight)||[]).filter(x=>x&&x.name).slice(0,HL_PALETTE.length).map(x=>({skill:(x.kind==="title"?"title:":"")+normKey(x.name),color:HL_PALETTE.includes(x.color)?x.color:"red"}))}
+/* the picks as the tool's highlight argument, in click order, each with its color so a color stays with its pick */
+function hlArgs(st){return hlList(st).map(x=>x.skill+":"+x.color)}
+function hlFlags(p,l){const have=new Set((p.tags||[]).map(t=>normKey(t)));const ti=normKey(p.current_title||p.title);
+ return l.map(h=>hlIsTitle(h)?(ti!==""&&ti===hlName(h)):have.has(h.skill))}
+function hlCount(p,l){return hlFlags(p,l).filter(Boolean).length}
+function hlTop(p,l){const f=hlFlags(p,l);const i=f.indexOf(true);return i<0?null:l[i]}
 function hlOrder(rows,st){const l=hlList(st);if(!l.length)return rows;
  const idx=new Map(rows.map((p,i)=>[p,i]));const key=new Map(rows.map(p=>{const f=hlFlags(p,l);return[p,[-f.filter(Boolean).length,...f.map(x=>x?0:1)]]}));
  return rows.slice().sort((a,b)=>{const x=key.get(a),y=key.get(b);for(let i=0;i<x.length;i++)if(x[i]!==y[i])return x[i]-y[i];return idx.get(a)-idx.get(b)})}
-function hlEdge(p,l){const f=hlFlags(p,l);const i=f.indexOf(true);return i<0?null:l[i].color}
+function hlEdge(p,l){const t=hlTop(p,l);return t?t.color:null}
+/* "Top match: python, red. 2 of 2", as on the Candidates page */
+function hlSummary(p,l){if(!l.length)return null;const n=hlCount(p,l),t=hlTop(p,l);
+ return t?"Top match: "+hlText(t)+", "+t.color+". "+n+" of "+l.length:"No highlighted picks. 0 of "+l.length}
+/* how many people are in the top tier: the most picks anyone has */
+function hlTierText(rows,st){const l=hlList(st);if(!l.length)return"The usual order is back.";
+ let best=0,n=0;for(const p of rows){const c=hlCount(p,l);if(c>best){best=c;n=1}else if(c===best&&c>0)n++}
+ return best?n+(n===1?" person is":" people are")+" in the top tier, with "+best+" of "+l.length+".":"Nobody has any of them."}
+/* a pick made (or taken back): toggles it and says what happened. Returns {ok, text} */
+function hlApply(st,name,isTitle,rows){const r=hlToggle(st,name,isTitle);
+ if(r===null)return{ok:false,text:"You can highlight up to "+HL_PALETTE.length+" picks at once. Remove one first."};
+ const k=(isTitle?"title:":"")+normKey(name);const x=hlList(st).find(y=>y.skill===k);
+ const label=hlText({skill:k});
+ if(r){const n=rows.filter(p=>hlFlags(p,[x])[0]).length;
+  return{ok:true,added:true,text:"Highlighting "+label+" in "+x.color+". "+n+(n===1?" person has it":" people have it")+", shown first. "+hlTierText(rows,st)}}
+ return{ok:true,added:false,text:"Removed the highlight on "+label+". "+hlTierText(rows,st)}}
+/* a skill chip that is a pick button; the name carries the color and number once picked */
+function pickChip(name,st,onPick,tag){const k=normKey(name),l=hlList(st);const i=l.findIndex(x=>x.skill===k);const h=i>=0?l[i]:null;
+ return el(tag||"button",{type:"button",class:"chip skillbtn"+(h?" hl":""),"data-skill":k,"data-hl":h?h.color:null,"aria-pressed":h?"true":"false",
+  "aria-label":h?name+", highlighted "+h.color+", pick "+(i+1)+" (remove)":null,
+  title:h?"Remove the highlight":"Highlight this skill and move people who have it to the top",onclick:()=>onPick(name,false)},name)}
+/* the bar of picks: sticky, one button per pick to remove it, and Clear */
+function hlBarNode(st,onPick,onClear){
+ const bar=el("div",{class:"hlbar",role:"group","aria-label":"Highlighted picks",hidden:true});
+ function draw(){const l=hlList(st);bar.hidden=!l.length;bar.replaceChildren();if(!l.length)return;
+  bar.append(el("strong",{class:"small"},"Highlighted:"),...l.map((x,i)=>el("button",{type:"button",class:"chip hl removable","data-hl":x.color,"data-skill":x.skill,"aria-label":"Remove highlight: "+hlText(x)+" ("+x.color+")",title:"Remove this highlight",onclick:()=>onPick(hlName(x),hlIsTitle(x),"bar")},hlText(x)+" ",el("span",{"aria-hidden":"true"},"\u00d7"))),
+   el("button",{type:"button",class:"btn",onclick:onClear},"Clear"),
+   el("span",{class:"small muted"},"People with more of these come first; when it's a tie, the pick you made first wins. Nobody is hidden."))}
+ return{node:bar,draw}}
 function cmpVals(a,b,date){if(date){a=parseD(a);b=parseD(b);a=a?+a:null;b=b?+b:null}
  if(typeof a==="string")a=a.toLowerCase();if(typeof b==="string")b=b.toLowerCase();
  return a<b?-1:a>b?1:0}
@@ -386,6 +442,8 @@ function sortedRows(rows,st){const idx=new Map(rows.map((p,i)=>[p.id,i]));let ou
    const c=cmpVals(a,b,col.date);return c?c*sign:idx.get(x.id)-idx.get(y.id)})}
  return hlOrder(out,st)}
 function selNames(rows,st){return rows.filter(p=>st.sel.has(p.id))}
+/* the ticked people in the order the screen shows them (the order the web Compare and Export take too), then any the filter hides */
+function selOrdered(shown,rows,st){const seen=new Set(shown.map(p=>p.id));return[...shown.filter(p=>st.sel.has(p.id)),...rows.filter(p=>!seen.has(p.id)&&st.sel.has(p.id))]}
 function peopleLabel(ps,noId){return ps.map(p=>noId?p.name:p.name+" (id "+p.id+")").join(", ")}
 function peopleTable(rows,st,h){
  const wrap=el("div",{});
@@ -406,7 +464,7 @@ function peopleTable(rows,st,h){
   const b=el("button",{class:"sort",type:"button"});b.addEventListener("click",()=>{
    if(st.sort===c.k)st.dir=st.dir==="asc"?"desc":"asc";else{st.sort=c.k;st.dir="asc"}
    fill();heads();announce("Sorted by "+colLabel(c)+", "+(st.dir==="asc"?"ascending":"descending"))});
-  return{c,b,th:el("th",{scope:"col",class:"k-"+c.k+(c.wide?" wide":"")},b)}});
+  return{c,b,th:el("th",{scope:"col",class:"k-"+c.k},b)}});
  function heads(){for(const{c,b,th}of ths){if(!b)continue;const on=st.sort===c.k;
    th.setAttribute("aria-sort",on?(st.dir==="asc"?"ascending":"descending"):"none");
    b.replaceChildren(colLabel(c),el("span",{class:"arr","aria-hidden":"true"},on?(st.dir==="asc"?" ▲":" ▼"):""));
@@ -414,11 +472,12 @@ function peopleTable(rows,st,h){
   relBtn.setAttribute("aria-pressed",st.sort?"false":"true")}
  function counts(){const chosen=selNames(rows,st);const inShown=shown.filter(p=>st.sel.has(p.id)).length;return{n:chosen.length,hidden:chosen.length-inShown,inShown}}
  function selText(){const c=counts();return c.n+" selected"+(c.hidden?", "+c.hidden+" hidden by the filter":"")}
+ const chosenNow=()=>selOrdered(shown,rows,st);
  function selUI(){const c=counts(),n=c.n;status.textContent=n?selText()+(c.hidden?". The buttons below use all "+n+".":""):"";
   allBox.checked=!!shown.length&&c.inShown===shown.length;allBox.indeterminate=c.inShown>0&&c.inShown<shown.length;
   allBox.setAttribute("aria-label","Select all "+shown.length+" shown");
   tbody.querySelectorAll("input.rowpick").forEach(b=>{const on=st.sel.has(+b.dataset.id);b.checked=on;b.closest("tr").classList.toggle("sel",on)});
-  const chosen=selNames(rows,st);bulk.replaceChildren();
+  const chosen=chosenNow();bulk.replaceChildren();
   if(n){const emails=chosen.filter(p=>p.email).map(p=>p.email);
    bulk.append(
     el("button",{class:"btn askbtn",type:"button",needs:"message",onclick:()=>{askRow.hidden=false;askMsg.textContent="";askIn.focus()}},"Ask Claude about these "+n),
@@ -431,12 +490,18 @@ function peopleTable(rows,st,h){
  function changed(){selUI();if(!counts().n)announce("0 selected");if(h.onSel)h.onSel()}
  const askIn=el("input",{class:"field",type:"text","aria-label":"What should Claude do with them?",placeholder:"What should Claude do with them?",maxlength:"500"});
  const closeAsk=()=>{askRow.hidden=true;const b=bulk.querySelector(".askbtn");if(b)b.focus()};
- const sendAsk=()=>{const t=askIn.value.trim();if(!t){askMsg.textContent="Type what you want Claude to do first.";askIn.focus();return}askMsg.textContent="";const chosen=selNames(rows,st);
+ const sendAsk=()=>{const t=askIn.value.trim();if(!t){askMsg.textContent="Type what you want Claude to do first.";askIn.focus();return}askMsg.textContent="";const chosen=chosenNow();
   askClaude("For these "+chosen.length+" candidates: "+peopleLabel(chosen,h.prospects)+": "+t,null).then(ok=>{if(ok){askIn.value="";askRow.hidden=true;stat2.textContent="Sent to Claude.";const b=bulk.querySelector(".askbtn");if(b)b.focus()}else{askMsg.textContent="Your chat app wouldn't send that. You can type it in the chat yourself."}})};
  const sendBtn=el("button",{class:"btn primary",type:"button",onclick:sendAsk},"Send to Claude");
  askIn.addEventListener("keydown",e=>{if(e.key==="Enter")sendAsk();if(e.key==="Escape"){e.stopPropagation();closeAsk()}});
  askRow.append(askIn,sendBtn,el("button",{class:"btn",type:"button",onclick:closeAsk},"Cancel"),askMsg);
  function setSel(p,on){if(on)st.sel.add(p.id);else st.sel.delete(p.id)}
+ const picksOn=!!h.skills;  // the People table has picks and the Columns button; the Shortlist and Decide tables keep every column
+ function pickTitleBtn(p){const t=p.current_title;if(!t)return"";
+  const k="title:"+normKey(t),l=hlList(st),i=l.findIndex(x=>x.skill===k),x=i>=0?l[i]:null;
+  return el("button",{type:"button",class:"titlebtn"+(x?" chip hl":""),"data-hl":x?x.color:null,"data-title":normKey(t),"aria-pressed":x?"true":"false",
+   "aria-label":x?"title: "+titleCase(normKey(t))+", highlighted "+x.color+", pick "+(i+1)+" (remove)":"Highlight title: "+t,
+   title:x?"Remove the highlight":"Highlight this title and move people who have it to the top",onclick:()=>pickAny(t,true,"row")},t)}
  function fill(){shown=sortedRows(rows,st);tbody.replaceChildren();
   caption.textContent=shown.length+" candidate"+(shown.length===1?"":"s")+(shown.length<rows.length?" shown of "+rows.length:"")+(h.total&&h.total>rows.length?" (the search found "+h.total+")":"");
   shown.forEach((p,i)=>{
@@ -446,27 +511,31 @@ function peopleTable(rows,st,h){
     last=i;changed()});
    const open=el("button",{class:"link",type:"button","aria-label":"Show card for "+p.name,onclick:()=>h.onOpen(p)},p.name);
    const j=firstJob(p);const hl=hlList(st);
-   const mine=(p.tags||[]).map(String);const low=t=>t.toLowerCase();
-   const lit=mine.filter(t=>hl.some(x=>x.skill===low(t))).sort((a,b)=>hl.findIndex(x=>x.skill===low(a))-hl.findIndex(x=>x.skill===low(b)));
+   const mine=(p.tags||[]).map(String);
+   const lit=mine.filter(t=>hl.some(x=>x.skill===normKey(t))).sort((a,b)=>hl.findIndex(x=>x.skill===normKey(a))-hl.findIndex(x=>x.skill===normKey(b)));
    const rest=mine.filter(t=>!lit.includes(t));const cut=Math.max(4,lit.length);const vis=[...lit,...rest].slice(0,cut);
-   const skillCell=el("td",{class:"k-skills","data-label":mine.length?"Skills":null},mine.length?el("ul",{class:"chips skillchips","aria-label":"Skills of "+p.name},
-    vis.map(t=>{const h=hl.find(x=>x.skill===low(t));
-     return el("li",{},el("button",{type:"button",class:"chip skillbtn"+(h?" hl":""),"data-skill":low(t),"data-hl":h?h.color:null,"aria-pressed":h?"true":"false",
-      title:h?"Remove the highlight":"Highlight this skill and move people who have it to the top",onclick:()=>pickSkill(t,"row")},t))}),
+   const sum=hlSummary(p,hl);
+   const skillCell=el("td",{class:"k-skills","data-label":mine.length?"Skills":null},
+    sum?el("div",{class:"small tophint"+(hlTop(p,hl)?"":" muted")},sum):null,
+    mine.length?el("ul",{class:"chips skillchips","aria-label":"Skills of "+p.name},
+    vis.map(t=>el("li",{},pickChip(t,st,(n,ti)=>pickAny(n,ti,"row")))),
     mine.length>vis.length?el("li",{class:"small muted"},"+"+(mine.length-vis.length)):null):null);
-   const td=(k,label,...kids)=>el("td",{class:"k-"+k+(["added","updated","color"].includes(k)?" wide":""),"data-label":label},...kids);
+   const td=(k,label,...kids)=>el("td",{class:"k-"+k,"data-label":label},...kids);
    const txt=(k,label,v)=>el("td",{class:"k-"+k,"data-label":v?label:null,title:v||null},v||"");
+   const titleCell=el("td",{class:"k-title","data-label":p.current_title?"Title":null,title:p.current_title||null},picksOn?pickTitleBtn(p):(p.current_title||""));
    const mt=el("td",{class:"match k-match","data-label":plainMatch(p)?(h.matchLabel||"Match"):null,title:plainMatch(p)||null},el("div",{class:"clamp"},p.match?marked(p.match):(p.reason||"")));
    const em=el("td",{class:"k-email","data-label":hasEmail(p)?"Email":null},hasEmail(p)?el("span",{class:"chk",title:p.email||"Has an email","aria-label":"Has an email"},"✓"):null,
     p.email?el("a",{class:"addr",href:"mailto:"+p.email,"aria-label":"Email "+p.name},p.email):null);
    const li=el("td",{class:"k-linkedin","data-label":p.linkedin_url?"LinkedIn":null},p.linkedin_url&&safeUrl(p.linkedin_url)?linkBtn(p.linkedin_url,"LinkedIn","LinkedIn profile of "+p.name):null);
    const edge=hlEdge(p,hl);
    tbody.append(el("tr",{class:edge?"hlrow":null,"data-edge":edge},el("td",{class:"pickcell"},pick),el("th",{scope:"row",class:"k-name"},open),
-    txt("title","Title",p.current_title),txt("company","Company",p.current_company),txt("location","Location",p.location),
+    titleCell,skillCell,
     el("td",{class:"k-job","data-label":j?"Job":null,title:(p.jobs||[]).map(x=>x.job||x.job_title).join("; ")||null},jobText(p)),
     el("td",{"data-label":j?"Stage":null,title:j?stageText(j):null,class:"k-stage"+(j&&(j.state==="lost"||j.state==="hired")?" out":"")},j?j.stage:""),
-    em,li,mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),
-    el("td",{class:"wide k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):""),skillCell))});
+    em,li,mt,td("contacted",p.last_contacted_at?"Last contacted":null,dateEl(p.last_contacted_at)),
+    txt("company","Company",p.current_company),txt("location","Location",p.location),
+    td("updated",p.updated_at?"Updated":null,dateEl(p.updated_at)),td("added",p.created_at?"Added":null,dateEl(p.created_at)),
+    el("td",{class:"k-color","data-label":p.color?"Color":null},p.color?el("span",{},el("span",{class:"dot"+colorCls(p.color),"aria-hidden":"true"}),p.color):"")))});
   if(!shown.length)tbody.append(el("tr",{},el("td",{colspan:"15"},"Nobody matches that filter.")));
   selUI();edges()}
  filter.addEventListener("input",()=>{st.filter=filter.value;fill()});
@@ -474,28 +543,41 @@ function peopleTable(rows,st,h){
  allBox.addEventListener("click",()=>{for(const p of shown)setSel(p,allBox.checked);changed()});
  const none=el("button",{class:"btn",type:"button",onclick:()=>{st.sel.clear();changed()}},"Select none");
  const all=el("button",{class:"btn",type:"button",onclick:()=>{for(const p of shown)st.sel.add(p.id);changed()}},"Select all shown");
- const hlBar=el("div",{class:"hlbar",role:"group","aria-label":"Highlighted skills",hidden:true});
- function drawBar(){const l=hlList(st);hlBar.hidden=!l.length;hlBar.replaceChildren();if(!l.length)return;
-  hlBar.append(el("strong",{class:"small"},"Highlighted skills:"),...l.map(x=>el("button",{type:"button",class:"chip hl removable","data-hl":x.color,"data-skill":x.skill,"aria-label":"Remove highlight: "+x.skill,title:"Remove this highlight",onclick:()=>pickSkill(x.skill,"bar")},x.skill+" ",el("span",{"aria-hidden":"true"},"×"))),
-   el("button",{type:"button",class:"btn",onclick:()=>{st.hl=[];refresh();announce("Highlights cleared. The usual order is back.");caption.focus()}},"Clear"),
-   el("span",{class:"small muted"},"People with more of these skills come first; when it's a tie, the skill you picked first wins. Nobody is hidden."))}
- function refresh(){drawBar();fill()}
- function pickSkill(t,from){const r=hlToggle(st,t);
-  if(r===null){announce("You can highlight up to "+HL_PALETTE.length+" skills at once. Remove one first.");return}
-  const k=String(t).toLowerCase();refresh();
-  const n=rows.filter(p=>(p.tags||[]).some(x=>String(x).toLowerCase()===k)).length;
-  if(r){announce("Highlighting "+k+" in "+hlList(st).find(x=>x.skill===k).color+". "+n+(n===1?" person has it":" people have it")+", shown first.");const b=hlBar.querySelector('button[data-skill="'+CSS.escape(k)+'"]');if(b)b.focus()}
-  else{announce("Removed the highlight on "+k+".");const nb=hlBar.querySelector("button.removable");(nb||caption).focus()}}
- const hidden=[...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"]),...(h.skills&&rows.some(p=>(p.tags||[]).length)?[]:["skills"])];  // no Color column when nobody has one
- const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")+hidden.map(k=>" hide-"+k).join("")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
- const tools=el("div",{class:"tbar"},filter,emailTog,relBtn,all,none,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
+ const bar=hlBarNode(st,(n,ti,from)=>pickAny(n,ti,from),()=>{st.hl=[];refresh();if(h.onPick)h.onPick();announce("Highlights cleared. The usual order is back.");caption.focus({preventScroll:true})});
+ function refresh(){bar.draw();const keep=scroller.scrollLeft;fill();scroller.scrollLeft=keep;edges()}
+ function pickAny(name,isTitle,from){const r=hlApply(st,name,isTitle,rows);announce(r.text);if(!r.ok)return;
+  refresh();if(h.onPick)h.onPick();
+  const k=(isTitle?"title:":"")+normKey(name);
+  if(r.added){const b=bar.node.querySelector('button[data-skill="'+CSS.escape(k)+'"]');if(b)b.focus({preventScroll:true})}
+  else{const nb=bar.node.querySelector("button.removable");(nb||caption).focus({preventScroll:true})}}
+ /* columns: what is always out of the way (no data, or the caller hides it) and what the person turns on or off */
+ const staticHide=new Set([...(h.hide||[]),...(rows.some(p=>COLORS.includes(p.color))?[]:["color"]),...(h.linkedin?[]:["linkedin"]),...(!picksOn||rows.some(p=>plainMatch(p))?[]:["match"]),...(h.skills&&rows.some(p=>(p.tags||[]).length)?[]:["skills"])]);
+ const optKeys=TCOLS.filter(c=>c.opt&&!staticHide.has(c.k)).map(c=>c.k);
+ const colsNow=()=>st.cols||new Set(isFull()?optKeys:[]);  // a wide view starts with every column; the choice is kept once made
+ const table=el("table",{class:"ptable"+(h.prospects?" prospects":"")},caption,el("thead",{},el("tr",{},el("th",{scope:"col",class:"pickcell"},allBox),...ths.map(t=>t.th))),tbody);
+ function applyCols(){const on=colsNow();for(const c of TCOLS)table.classList.toggle("hide-"+c.k,!!(staticHide.has(c.k)||(picksOn&&c.opt&&!on.has(c.k))))}
+ let colsBtn=null,colsPanel=null;
+ if(picksOn&&optKeys.length){
+  colsBtn=el("button",{class:"btn",type:"button","aria-expanded":"false","aria-controls":"colspanel"},"Columns");
+  colsPanel=el("div",{class:"colspanel",id:"colspanel",role:"group","aria-label":"Columns to show",hidden:true},
+   el("span",{class:"small muted"},"Show more columns:"),
+   ...optKeys.map(k=>{const c=TCOLS.find(x=>x.k===k);const box=el("input",{type:"checkbox","data-col":k,checked:colsNow().has(k)?"":null});
+    box.checked=colsNow().has(k);
+    box.addEventListener("change",()=>{const cur=new Set(colsNow());if(box.checked)cur.add(k);else cur.delete(k);st.cols=cur;applyCols();edges();
+     announce(c.l+" column "+(box.checked?"shown":"hidden")+".")});
+    return el("label",{class:"colopt"},box,el("span",{},c.l))}));
+  const toggle=open=>{colsPanel.hidden=!open;colsBtn.setAttribute("aria-expanded",open?"true":"false")};
+  colsBtn.addEventListener("click",()=>{toggle(colsPanel.hidden);if(!colsPanel.hidden){const f=colsPanel.querySelector("input");if(f)f.focus()}});
+  colsPanel.addEventListener("keydown",e=>{if(e.key==="Escape"){e.stopPropagation();toggle(false);colsBtn.focus()}})}
+ applyCols();
+ const tools=el("div",{class:"tbar"},filter,emailTog,relBtn,all,none,colsBtn,status,h.more?el("button",{class:"btn",type:"button",onclick:ev=>h.more.onClick(ev.currentTarget)},h.more.label):null);
  const scroller=el("div",{class:"tablewrap",tabindex:"-1"},table);
  const eL=el("span",{class:"edge l","aria-hidden":"true"}),eR=el("span",{class:"edge r","aria-hidden":"true"});
  const hint=el("p",{class:"small muted scrollhint",hidden:true},"There are more columns to the right. Scroll sideways to see them.");
- function edges(){const max=scroller.scrollWidth-scroller.clientWidth;const x=scroller.scrollLeft;
-  eL.classList.toggle("on",x>2);eR.classList.toggle("on",max>2&&x<max-2);hint.hidden=!(max>2&&x<max-2)}
+ function edges(){const max=scroller.scrollWidth-scroller.clientWidth;const x=scroller.scrollLeft;const more=max>4&&x<max-2;
+  eL.classList.toggle("on",x>2);eR.classList.toggle("on",more);hint.hidden=!more}
  scroller.addEventListener("scroll",edges,{passive:true});
- if(window.ResizeObserver)new ResizeObserver(edges).observe(scroller);
- wrap.append(tools,bulk,askRow,stat2,hint,hlBar,el("div",{class:"tablebox"},scroller,eL,eR));
- heads();drawBar();fill();
- return{node:wrap,focusCaption:()=>caption.focus(),scroller,edges}}
+ if(window.ResizeObserver){const ro=new ResizeObserver(edges);ro.observe(scroller);ro.observe(table)}
+ wrap.append(tools,colsPanel,bulk,askRow,stat2,bar.node,hint,el("div",{class:"tablebox"},scroller,eL,eR));
+ heads();bar.draw();fill();
+ return{node:wrap,focusCaption:()=>caption.focus(),scroller,edges,chosen:chosenNow,shown:()=>shown}}
