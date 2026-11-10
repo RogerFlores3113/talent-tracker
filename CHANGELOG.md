@@ -4,6 +4,28 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-10
+
+### Install and connect
+- One-step install: paste the repo link into Claude (Code tab, Cowork or Claude Code) and say "Install Talent Search", or run one line in a terminal. The install script downloads the latest release, checks it against SHA256SUMS.txt, refuses a file that doesn't match, installs it and opens it. It never gets around Gatekeeper or SmartScreen.
+- Connect Claude now writes the settings and restarts Claude Desktop for you, closing it gracefully first. Add skills installs the skills for Claude Code and Codex in one press and saves the Claude plugin upload. The result is one sentence and one next step, and Test connection has its own result.
+
+### First run and Today
+- Today offers your detected time zone as a button ("Use X" or "Keep UTC") instead of a text box, and only asks when no zone is chosen yet.
+- Today shows the next steps for a new database, the tour restarts from Settings and says "Step N", and the footer says the app runs on this computer and sends nothing anywhere.
+- Candidates has an empty state, the search reading line is easier to see, and the bulk bar stays compact until you tick people.
+
+### Import
+- An import keeps your time zone instead of switching shown times to UTC.
+- Clearer results ("2,000 rows: 1,960 people added, 40 repeats merged"), repeats listed once, a job title matches the only job with that title, and "Import anyway" when nothing would change. Up to 5,000 rows import without the big-import step.
+- Jobs an import makes keep their openings "not set" until you give a number, even if you skip the question. Until then nothing calls the job filled, offers to close it out, or says "44 hired against 1 opening"; updates say "44 hired so far".
+
+### Sharing and status updates
+- The status update from chat leaves out rejected and withdrawn people and has no links to this app in the text you paste.
+- With a job picked, a Share file lists only that job's people. Rejected and withdrawn people stay out unless you tick them, and the file says who was left out and why. Claude's shortlist file follows the same rule.
+- A file without email and phone has email addresses and phone numbers taken out of About and work history too, and so does the hiring manager compare page. The Share preview shows each person's About and work history as the file will have them.
+- Client updates count people who are out instead of naming them.
+
 ## [0.1.4] - 2026-11-10
 
 ### In-chat views (cycle 15)
