@@ -7,6 +7,7 @@
 {% macro differs_mark(key) -%}
 {% if d.differs.get(key) %}<span class="diffmark" title="This is not the same for everyone">differs</span>{% endif %}
 {%- endmacro %}
+{% block bodyclass %}{{ 'compare-full' if d and d.people | length >= 4 }}{% endblock %}
 {% block body %}
 <h1>{{ 'Comparison' if hm else 'Compare people' }}</h1>
 {% if not d %}
@@ -20,7 +21,8 @@
 <p class="fine">Side by side: {{ people | length }} people.{% if capped and not hm %} You chose {{ total }} people, so this shows the first {{ people | length }}. Compare fewer to choose which ones.{% endif %}{% if d.missing and not hm %} {{ d.missing | length }} chosen {{ 'person is' if d.missing | length == 1 else 'people are' }} no longer saved and left out.{% endif %}</p>
 
 {% if hm %}
-<p class="fine no-print" id="hm-note">Hiring manager view: only what is fine to share, and nothing about your own notes or contact with them. Use your browser's Print to print it. <a href="{{ full_href }}">Back to the full comparison</a></p>
+<p class="fine no-print" id="hm-note">Hiring manager view. Hides your notes, contact dates, labels and links back to this app. About text is shown as written: read it before you send this. Only stages still in play are shown. Use your browser's Print to print it.</p>
+<p class="acts no-print" id="hm-actions"><a class="btn" id="hm-about" href="{{ about_href }}">{{ 'Show About' if no_about else 'Hide About' }}</a> <a href="{{ full_href }}">Back to the full comparison</a></p>
 {% else %}
 <div id="compare-actions" class="acts compare-actions no-print" role="group" aria-label="What to do with this comparison">
   <a class="btn primary" id="share-xlsx" href="{{ share_href }}">Share as xlsx</a>
@@ -33,11 +35,13 @@
 
 <section class="panel" aria-labelledby="glance-h">
   <h2 id="glance-h">At a glance</h2>
-  {% if d.glance %}<ul class="glance">{% for line in d.glance %}<li{% if "ever contacted" in line or "been contacted" in line %} class="hm-hide"{% endif %}>{{ line }}</li>{% endfor %}</ul>
+  {% if d.glance %}<ul class="glance">{% for line in d.glance %}<li{% if "contact logged" in line %} class="hm-hide"{% endif %}>{{ line }}</li>{% endfor %}</ul>
   {% else %}<p class="fine">Nothing stands out. They look much alike on what is saved.</p>{% endif %}
 </section>
 
-<div class="table-wrap compare-wrap" tabindex="0" role="region" aria-label="Comparison table, scrolls sideways">
+<h2 id="side-h" class="compare-h">Side by side</h2>
+{% if people | length >= 4 %}<p class="fine compare-hint hint-{{ people | length }} no-print" id="compare-hint">Scroll sideways to see all {{ people | length }} people.</p>{% endif %}
+<div class="table-wrap compare-wrap" id="compare-region" tabindex="0" role="region" aria-label="Comparison table, scrolls sideways"{% if people | length >= 4 %} aria-describedby="compare-hint"{% endif %}>
 <table class="compare" id="compare-table" style="--cols: {{ people | length }}">
   <caption class="sr-only">{{ people | length }} people compared. Each column is a person; each row is one thing about them. Rows marked "differs" are not the same for everyone.</caption>
   <thead>
@@ -47,7 +51,7 @@
       <th scope="col" class="person">
         <div class="namerow">{% if not hm %}<span class="cbub small hm-hide" data-color="{{ p.color }}" aria-hidden="true"></span>{% endif %}
           {% if hm %}<span class="pname">{{ p.name }}</span>{% else %}<a class="pname" href="/candidates/{{ p.id }}">{{ p.name }}</a>{% endif %}
-          {% if removes %}<a class="rm hm-hide" href="{{ removes[p.id] }}" aria-label="Remove {{ p.name }} from the comparison" title="Remove {{ p.name }} from the comparison"><span aria-hidden="true">&times;</span></a>{% endif %}</div>
+          {% if removes %}<a class="rm hm-hide" id="rm-{{ p.id }}" href="{{ removes[p.id] }}" aria-label="Remove {{ p.name }} from the comparison" title="Remove {{ p.name }} from the comparison"><span aria-hidden="true">&times;</span></a>{% endif %}</div>
       </th>
       {% endfor %}
     </tr>
@@ -70,11 +74,11 @@
         {% if groups %}{% for g in groups %}<div class="sk-group" data-group="{{ g.key }}">{% if g.label %}<span class="sk-label {{ g.key }}">{{ g.label }}</span>{% endif %}<span class="chips">{% for s in g.skills %}{{ skill_chip(s) }}{% endfor %}</span></div>{% endfor %}
         {% else %}<span class="muted">No skills saved</span>{% endif %}
       {%- elif key == 'jobs' -%}
-        {% if p.jobs %}<ul class="plain">{% for j in p.jobs %}<li>{% if hm %}{{ j.job }}{% else %}<a href="/jobs/{{ j.job_id }}">{{ j.job }}</a>{% endif %}: {{ j.stage }}</li>{% endfor %}</ul>{% else %}<span class="muted">Not in any job</span>{% endif %}
+        {% if p.jobs %}<ul class="plain">{% for j in p.jobs %}<li>{% if hm %}{{ j.job }}{% else %}<a href="/jobs/{{ j.job_id }}">{{ j.job }}</a>{% endif %}: {{ j.stage }}</li>{% endfor %}</ul>{% elif not hm %}<span class="muted">Not in any job</span>{% endif %}
       {%- elif key == 'source' -%}
         {{ p.source or '' }}{% if not p.source %}<span class="muted">Not saved</span>{% endif %}
       {%- elif key == 'contacted' -%}
-        {% if p.last_contacted_at %}{{ p.last_contacted_at | ago }} <span class="muted">({{ p.last_contacted_at | date }})</span>{% else %}<span class="never">Never</span>{% endif %}
+        {% if p.last_contacted_at %}{{ p.last_contacted_at | ago }} <span class="muted">({{ p.last_contacted_at | date }})</span>{% else %}<span class="never">None logged</span>{% endif %}
       {%- elif key == 'added' -%}
         {{ p.created_at | date }}
       {%- elif key == 'links' -%}

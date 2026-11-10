@@ -185,8 +185,9 @@ def history_text(entries: list[dict[str, Any]], limit: int = 8) -> str:
 
 
 def share_filename(job: dict[str, Any] | None = None, now: datetime | None = None, note: str = "") -> str:
-    """shortlist-<job title or note>-YYYY-MM-DD.xlsx, or shortlist-YYYY-MM-DD.xlsx with neither."""
-    name = slug((job or {}).get("title") or "") or slug(note)
+    """shortlist-<job title>-YYYY-MM-DD.xlsx, or shortlist-YYYY-MM-DD.xlsx with no job. The note at the top is free
+    text (it may say anything), so it is never part of a file name; `note` is only kept so older callers still work."""
+    name = slug((job or {}).get("title") or "")
     name = re.sub(r"^shortlist(-for)?(-|$)", "", name)  # "Shortlist for X" would say shortlist twice
     return f"shortlist-{name + '-' if name else ''}{stamp(now)}.xlsx"
 
@@ -198,18 +199,9 @@ def _latest_note(store: Store, candidate_id: int) -> str:
     return ""
 
 
-def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",
-                job_id: int | None = None, hl: Iterable[tuple[str, str]] = (), include_rejected: bool = False,
-                ) -> dict[str, Any]:
-    """What the hiring manager's sheet holds: headers, rows, widths, and how many people were left out as rejected."""
-    job = store.get_job(job_id) if job_id else None
-    hl = list(hl)
-    people = []
-    for cid in dict.fromkeys(ids):
-        try:
-            people.append(store.get_candidate(cid))
-        except Exception:  # someone removed since the page was shown: skip them
-            continue
+def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any] | None, include_rejected: bool,
+                 ) -> tuple[list[dict[str, Any]], dict[int, str], int]:
+    """(who goes in the file in file order, their stage in the job, how many rejected people were left out)."""
     stage_of: dict[int, str] = {}
     info: dict[str, tuple[int, str]] = {}
     if job:
@@ -235,7 +227,23 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
             o = outcome(cid)
             pos = info.get(stage_of[cid].lower(), (0, ""))[0]
             return (3, -pos) if o == "lost" else (0, 0) if o == "hired" else (1, -pos)
-        people.sort(key=rank)  # a stable sort: ties keep the order the people came in
+        people = sorted(people, key=rank)  # a stable sort: ties keep the order the people came in
+    return people, stage_of, left_out
+
+
+def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",
+                job_id: int | None = None, hl: Iterable[tuple[str, str]] = (), include_rejected: bool = False,
+                ) -> dict[str, Any]:
+    """What the hiring manager's sheet holds: headers, rows, widths, and how many people were left out as rejected."""
+    job = store.get_job(job_id) if job_id else None
+    hl = list(hl)
+    people = []
+    for cid in dict.fromkeys(ids):
+        try:
+            people.append(store.get_candidate(cid))
+        except Exception:  # someone removed since the page was shown: skip them
+            continue
+    people, stage_of, left_out = _pick_people(store, people, job, include_rejected)
     records = []
     for c in people:
         hist = store.work_history(c["id"])
@@ -255,7 +263,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
             rec["Notes"] = _latest_note(store, c["id"])
         records.append(rec)
     cols = [(h, w) for h, w in SHARE_COLS
-            if (h != "Stage" or job) and (h != "Matched skills" or hl) and (h not in ("Email", "Phone") or include_contact)
+            if (h != "Stage" or (job and any(c["id"] in stage_of for c in people))) and (h != "Matched skills" or hl) and (h not in ("Email", "Phone") or include_contact)
             and (h != "Notes" or notes in ("latest", "all"))]
     headers, rows, widths = _assemble(cols, records, keep=["Name"])
     return {"headers": headers, "rows": rows, "widths": widths, "job": job, "left_out_rejected": left_out,
@@ -299,8 +307,11 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
 
 
 def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]) -> dict[str, Any]:
-    """For the Share page: which columns could be in the file and when (base, stage, contact, notes), the file name
-    now, and the names the file would start with."""
+    """For the Share page: which columns could be in the file and when (base, stage, contact, notes), and, for each
+    job the person could pick (key "" is no job), who the file would hold: the first names, how many people, and
+    whether the Stage column is in it, with rejected people left out ("out") and put back in ("in"). Worked out here,
+    so the page can show it exactly without asking the server again."""
+    hl = list(hl)
     full = share_table(store, ids, include_contact=True, notes="all", job_id=None, hl=hl)
     cols = []
     for h in full["headers"]:
@@ -308,8 +319,30 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
         cols.append({"name": h, "kind": kind})
         if h == "Skills":
             cols.append({"name": "Stage", "kind": "stage"})
-    names = [r[0] for r in full["rows"]]
-    return {"cols": cols, "names": names[:3]}
+    people = []
+    for cid in dict.fromkeys(ids):
+        try:
+            people.append(store.get_candidate(cid))
+        except Exception:
+            continue
+
+    def view(job: dict[str, Any] | None, rejected: bool) -> dict[str, Any]:
+        kept, stage_of, _ = _pick_people(store, people, job, rejected)
+        return {"names": [c["name"] for c in kept[:3]], "count": len(kept),
+                "stage": bool(job and any(c["id"] in stage_of for c in kept))}
+
+    plain = view(None, True)
+    jobs: dict[str, Any] = {"": {"out": plain, "in": plain}}
+    mine = {c["id"] for c in people}
+    in_jobs = {r["job_id"] for r in store._rows("SELECT DISTINCT job_id, candidate_id FROM applications")
+               if r["candidate_id"] in mine}
+    for j in store.membership_choices()["job_choices"]:
+        if j["id"] not in in_jobs:  # nobody here is in it: the file is the same as with no job
+            jobs[str(j["id"])] = {"out": plain, "in": plain}
+            continue
+        job = store.get_job(j["id"])
+        jobs[str(j["id"])] = {"out": view(job, False), "in": view(job, True)}
+    return {"cols": cols, "names": plain["names"], "jobs": jobs}
 
 
 # --------------------------------------------------------------- a client's pipeline

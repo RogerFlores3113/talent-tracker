@@ -161,7 +161,7 @@ def test_share_form_wording_radios_preview_and_live_line(store):
     assert "About and work history are copied as written. Read them before you send the file." in html
     assert 'type="radio" name="notes" value="none" checked' in html
     assert 'value="latest"' in html and 'value="all"' in html and "Latest note only" in html
-    assert "All notes and timeline" in html and "No notes" in html and "Notes go out word for word." in html
+    assert "All notes and timeline" in html and "No notes" in html and "Notes go out word for word and may hold pay" in html
     assert 'name="hl" value="python:red"' in html and 'name="include_rejected"' in html
     assert re.search(r'id="pv-file">shortlist-\d{4}-\d{2}-\d{2}\.xlsx<', html)
     assert "Ana Ruiz, Ben Cho" in html and "Matched skills" in html
@@ -177,8 +177,8 @@ def test_share_filename_rules():
     now = datetime(2026, 11, 10)
     assert xlsx_export.share_filename(None, now) == "shortlist-2026-11-10.xlsx"
     assert xlsx_export.share_filename({"title": "Senior Backend Engineer"}, now) == "shortlist-senior-backend-engineer-2026-11-10.xlsx"
-    assert xlsx_export.share_filename(None, now, "Shortlist for the backend role") == "shortlist-the-backend-role-2026-11-10.xlsx"
-    assert xlsx_export.share_filename(None, now, "Top picks") == "shortlist-top-picks-2026-11-10.xlsx"
+    assert xlsx_export.share_filename(None, now, "Shortlist for the backend role") == "shortlist-2026-11-10.xlsx"
+    assert xlsx_export.share_filename(None, now, "Top picks") == "shortlist-2026-11-10.xlsx"
 
 
 # ---------------------------------------------------------------- 8. caps

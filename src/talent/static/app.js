@@ -764,3 +764,17 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();
+
+// Compare, after Remove (x): the page reloads, so put keyboard focus on the Remove button the #fragment names (the
+// next person's), or on the table region when no Remove buttons are left.
+(function () {
+  function start() {
+    const hash = decodeURIComponent((location.hash || "").slice(1));
+    if (!/^(rm-\d+|compare-region)$/.test(hash)) return;
+    const t = document.getElementById(hash) || document.getElementById("compare-region");
+    if (!t) return;
+    try { t.focus({preventScroll: false}); } catch (e) { t.focus(); }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();

@@ -46,6 +46,12 @@ All notable changes to Talent Search. Newest first.
 - In Claude, compare takes the first six people if you give more and says who was left out, ends with a link to Open in Talent Search, and the view has Share as xlsx, Export xlsx and a Remove button for each person. The People table says "Export 12 shown" or "Export 2 ticked", reports what it saved, and has Share as xlsx beside Compare.
 - The messages Claude gets back from the xlsx export are plain and clear, a Read only app is given the Share page link, and people not found are listed first.
 
+### Hiring manager view and share form
+- The Hiring manager view is safer to send: it shows only stages still in play (nothing for Rejected or Withdrawn), says plainly what it hides and that About text is shown as written, and has a Hide About button that stays in its links. It also has a Side by side heading.
+- The Share form warns when you include notes ("may hold pay, other interviews or private remarks"), and its preview now matches the file exactly: the people and count with rejected people left out (or added back when you tick the box) and the Stage column only when someone is in the job. The note box no longer suggests a job name when no job is picked.
+- The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
+- Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

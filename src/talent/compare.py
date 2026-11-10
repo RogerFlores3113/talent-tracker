@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from .links import link_label, stored_links
 from .searchquery import years_of_experience
+from .store import stage_outcome
 
 MIN_PEOPLE = 2
 MAX_PEOPLE = 6
@@ -66,14 +67,24 @@ def _person(store: Any, cid: int, today: date | None) -> dict[str, Any]:
     if _web(c.get("website")):
         links.append({"label": "Website", "url": c["website"]})
     links += [{"label": link_label(u), "url": u} for u in stored_links(c.get("links")) if _web(u)]
+    outcomes: dict[int, dict[str, str]] = {}
+    jobs = []
+    for p in c.get("pipelines") or []:
+        if p["job_id"] not in outcomes:
+            try:
+                outcomes[p["job_id"]] = {s["name"].lower(): s["outcome"] for s in store.job_stages(p["job_id"])}
+            except Exception:  # a job that cannot be read counts by its stage name
+                outcomes[p["job_id"]] = {}
+        o = outcomes[p["job_id"]].get(str(p["stage"]).lower()) or stage_outcome(p["stage"])
+        jobs.append({"job_id": p["job_id"], "job": p["job_title"] + (f" ({p['job_company']})" if p.get("job_company") else ""),
+                     "stage": p["stage"], "outcome": o})
     return {
         "id": c["id"], "name": c["name"], "color": c.get("color") or "", "title": c.get("current_title") or "",
         "company": c.get("current_company") or "", "location": c.get("location") or "", "years": years,
         "years_text": years_text(years), "tags": list(c.get("tags") or []), "source": c.get("source") or "",
         "last_contacted_at": c.get("last_contacted_at") or "", "created_at": c.get("created_at") or "",
         "about": (c.get("about") or "").strip(), "links": links,
-        "jobs": [{"job_id": p["job_id"], "job": p["job_title"] + (f" ({p['job_company']})" if p.get("job_company") else ""),
-                  "stage": p["stage"]} for p in c.get("pipelines") or []],
+        "jobs": jobs,
     }
 
 
@@ -193,13 +204,13 @@ def glance(people: list[dict[str, Any]], shared: list[str], only: dict[int, list
         ys.sort(key=lambda t: -t[0])
         if round(ys[0][0] * 2) > round(ys[1][0] * 2):
             out.append(f"{name[ys[0][1]['id']]} has the most experience ({years_text(ys[0][0])}).")
-    # never contacted
+    # no contact logged (a stage can say Contacted without a logged call or message)
     never = [p for p in people if not p["last_contacted_at"]] if contact else []
     if never and len(never) == n:
-        out.append("Nobody here has been contacted yet.")
+        out.append("No contact logged with anyone here yet.")
     elif never:
         who = _join([name[p["id"]] for p in never])
-        out.append(f"{who} {'was' if len(never) == 1 else 'were'} never contacted.")
+        out.append(f"No contact logged with {who} yet.")
     return out[:GLANCE_MAX]
 
 
@@ -241,6 +252,12 @@ def years_gap(people: list[dict[str, Any]]) -> bool:
 def hl_counts(people: list[dict[str, Any]], hl: list[str]) -> dict[int, int]:
     """How many of the highlighted skills each person has."""
     return {p["id"]: sum(1 for h in hl if h in {t.lower() for t in p["tags"]}) for p in people}
+
+
+def active_jobs(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The hiring manager view: each person's jobs where they are still in play. A stage that ended (Rejected,
+    Withdrawn, or a win that is not theirs to announce) is not shown at all."""
+    return [{**p, "jobs": [j for j in p["jobs"] if j.get("outcome") == "open"]} for p in people]
 
 
 def public_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -305,7 +322,7 @@ def text_lines(d: dict[str, Any]) -> list[str]:
             bits.append("skills (" + " | ".join(parts) + ")")
         if p["jobs"]:
             bits.append("jobs: " + "; ".join(f"{j['job']}: {j['stage']}" for j in p["jobs"]))
-        bits.append("last contacted " + (_day(p["last_contacted_at"]) if p["last_contacted_at"] else "never"))
+        bits.append("last contacted " + (_day(p["last_contacted_at"]) if p["last_contacted_at"] else "none logged"))
         out.append("- " + " | ".join(bits))
     if d.get("left_out"):
         out.append("Left out, because compare takes 6 at a time: "

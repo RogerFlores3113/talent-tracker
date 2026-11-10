@@ -15,6 +15,11 @@
   var rejected = document.getElementById("rejected-row");
   var file = document.getElementById("pv-file");
   var colsOut = document.getElementById("pv-cols");
+  var namesOut = document.getElementById("pv-names");
+  var countOut = document.getElementById("pv-count");
+  var rejBox = form.querySelector("input[name=include_rejected]");
+  var total = parseInt(form.getAttribute("data-count") || "0", 10);
+  var jobs = data.jobs || {};
 
   function slug(text) {
     var s = (text || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -28,17 +33,21 @@
   function update() {
     var opt = job && job.options[job.selectedIndex];
     var title = opt ? opt.getAttribute("data-title") || "" : "";
-    var name = slug(title) || slug(note ? note.value : "");
-    name = name.replace(/^shortlist(-for)?(-|$)/, "");
+    var name = slug(title);  // only the job: the note at the top is free text and never goes in a file name
     if (file) file.textContent = "shortlist-" + (name ? name + "-" : "") + today + ".xlsx";
+    if (note) note.placeholder = title ? "Shortlist for " + title : "A line for the top of the file";
     var hasJob = !!(job && job.value);
     var n = notesChoice();
+    var pick = (jobs[hasJob ? job.value : ""] || {})[hasJob && rejBox && rejBox.checked ? "in" : "out"] ||
+      {names: data.names || [], count: total, stage: false};
     var shown = [];
     cols.forEach(function (c) {
-      if (c.kind === "base" || (c.kind === "stage" && hasJob) || (c.kind === "contact" && contact && contact.checked) ||
+      if (c.kind === "base" || (c.kind === "stage" && pick.stage) || (c.kind === "contact" && contact && contact.checked) ||
           (c.kind === "notes" && n !== "none")) shown.push(c.name);
     });
     if (colsOut) colsOut.textContent = shown.join(", ");
+    if (namesOut) namesOut.textContent = pick.count ? pick.names.join(", ") + (pick.count > 3 ? " and " + (pick.count - 3) + " more" : "") : "Nobody";
+    if (countOut) countOut.textContent = pick.count + (pick.count !== total ? " of " + total + " (rejected people are left out)" : "");
     if (warn) warn.hidden = n === "none";
     if (rejected) rejected.hidden = !hasJob;
   }
