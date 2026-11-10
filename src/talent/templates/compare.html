@@ -2,7 +2,7 @@
 {% from "_macros.html" import color_bubble %}
 {% block title %}{{ 'Hiring manager comparison' if hm else 'Compare people' }} · Talent Search{% endblock %}
 {% macro skill_chip(s) -%}
-<span class="chip{{ ' hl' if s.pos >= 0 }}"{% if s.pos >= 0 %} data-hl="{{ hl_colors[hl[s.pos]] }}"{% endif %}>{{ s.name }}{% if s.count %}<span class="sk-n">, {{ s.count }} of {{ s.of }}</span>{% endif %}{% if s.pos >= 0 %}<span class="sr-only"> (highlighted {{ hl_colors[hl[s.pos]] }})</span>{% endif %}</span>
+<span class="chip{{ ' hl' if s.pos >= 0 }}"{% if s.pos >= 0 %} data-hl="{{ hl_colors[hl[s.pos]] }}"{% endif %}{% if s.saved %} title="Saved as {{ s.saved }}"{% endif %}>{{ s.name }}{% if s.saved %}<span class="sr-only"> (saved as {{ s.saved }})</span>{% endif %}{% if s.count %}<span class="sk-n">, {{ s.count }} of {{ s.of }}</span>{% endif %}{% if s.pos >= 0 %}<span class="sr-only"> (highlighted {{ hl_colors[hl[s.pos]] }})</span>{% endif %}</span>
 {%- endmacro %}
 {% macro differs_mark(key) -%}
 {% if d.differs.get(key) %}<span class="diffmark" title="This is not the same for everyone">differs</span>{% endif %}

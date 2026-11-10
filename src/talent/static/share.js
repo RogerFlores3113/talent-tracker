@@ -48,6 +48,15 @@
     var left = {};
     var boxes = form.querySelectorAll("input[name=leave_out]");
     for (var b = 0; b < boxes.length; b++) if (boxes[b].checked) left[boxes[b].value] = true;
+    var rejBoxes = form.querySelectorAll("input[name=leave_rej]");  // rejected somewhere: only counts with no job picked
+    for (var q = 0; q < rejBoxes.length; q++) {
+      rejBoxes[q].disabled = hasJob;
+      var holder = rejBoxes[q].closest("[data-rej]");
+      if (holder) holder.hidden = hasJob;
+      if (!hasJob && rejBoxes[q].checked) left[rejBoxes[q].value] = true;
+    }
+    var noteBoxes = form.querySelectorAll("input[name=leave_note]");
+    for (var k = 0; k < noteBoxes.length; k++) noteBoxes[k].disabled = n === "none";
     if (pick.people) {  // who is in the file: the kept people minus the ones ticked "Leave this person out"
       var kept = pick.people.filter(function (p) { return !left[p.id]; });
       pick = {names: kept.slice(0, 3).map(function (p) { return p.name; }), count: kept.length, stage: pick.stage,
@@ -79,10 +88,22 @@
     if (warn) warn.hidden = n === "none";
     if (rejected) rejected.hidden = !hasJob;
   }
+  var live = document.getElementById("share-live");
+  function say(text) { if (live) { live.textContent = ""; setTimeout(function () { live.textContent = text; }, 30); } }
   form.addEventListener("input", update);
-  form.addEventListener("change", update);
+  form.addEventListener("change", function (ev) {
+    update();
+    var t = ev.target;
+    if (!t || t.type !== "checkbox") return;
+    var who = t.getAttribute("data-name") || "";
+    if (t.name === "leave_out" || t.name === "leave_rej") {
+      var kept = countOut ? countOut.textContent : "";
+      say(who + (t.checked ? " is left out. " : " is back in the file. ") + (kept ? kept + " in the file." : ""));
+    } else if (t.name === "leave_note") {
+      say("The note for " + who + (t.checked ? " is left out." : " is back in."));
+    }
+  });
   form.addEventListener("submit", function () {
-    var live = document.getElementById("share-live");
     if (live) live.textContent = "Your spreadsheet is downloading. Look in your Downloads folder.";
   });
   update();

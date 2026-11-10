@@ -86,6 +86,18 @@ All notable changes to Talent Search. Newest first.
 - In-chat exports are clearer: "Export for hiring manager" (no contact details or notes) and "Export for me" (opens the Share page with contact and notes ticked). The saved file's full path is shown with a Copy path button, and export_candidates_xlsx with only a job_id exports that job's people.
 - Fixes: the sticky Name cell takes the row tint, the table no longer jumps when you click a chip or export, and Today's list is no longer clipped at the bottom. The pipeline star now has a plain explanation.
 
+### Cycle 14, web fixes (F1)
+- The hiring manager view now really leaves out anyone who is not in play: no column, nothing about them in At a glance, and a line that names who was left out and why.
+- Share with no job picked now says "Sofia Example is marked rejected in Senior Backend" beside the person, with a ticked "Leave out" box so a rejected person does not go in the file unless you untick it.
+- Settings, Skill names: after Treat as one, Split or Not the same, the result is read out and has focus. Three or more spellings (react, react.js, reactjs) are one row with one Treat as one, python and python3 are suggested, and once names are merged a look-alike shows as that group. "Not the same" pairs wait under Hidden suggestions with Suggest again, you can merge two names you type yourself, each pair's Name to keep says which pair it is for, and clicking a name selects it.
+- Skill merges, splits and Not the same answers are on Changes with Undo (Suggest again for the last). The Matched picks column shows the name you picked or the kept name, never the old spelling, and Compare shows "Saved as ..." on a merged skill.
+- Possible duplicates is safer at volume: groups start unticked unless everyone shares an email or LinkedIn address, nobody with a different first name or title is ticked, the button says "Merge 3 groups, 7 profiles", the kept person says Kept, "Keep all as separate people" is one click, and the count on Candidates counts groups.
+- Importing a CSV leaves an email cell that is not an address blank and lists it with the other blank cells; the skipped and blank-cell download has one line per row and its count matches the page.
+- Share: leaving a person or a note out is announced, note boxes are not in the page while No notes is chosen, and the page you reach from Export for me says it is a file for you, not one to forward, and starts on the latest note.
+- Keyboard: after Show 100 / 250 / All focus goes to the result count; the Highlight box is named "Highlight a skill or title".
+- Layout: the Show 100 / 250 / All caption no longer overlaps the buttons, the job page at 1400 pixels does not scroll sideways (the board scrolls in its own box), the job table's Move ticked bar stays in view, and a title in the job table is a pick chip like on Candidates.
+- Selecting everything on Candidates (for example Show All, tick the header box, Export as xlsx) sends the search instead of thousands of ids, so it no longer stalls, and bulk actions accept up to 5,000 ticked people.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

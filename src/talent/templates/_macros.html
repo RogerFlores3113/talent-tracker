@@ -66,6 +66,11 @@
 </form>
 {%- endmacro %}
 
+{#- The title chip for the job table: the same as title_cell, but a pick reloads /jobs/<id>?view=table. -#}
+{% macro job_title_chip(a, job_id, hl) -%}
+{% set tp = title_pick({'current_title': a.current_title}) %}{% if a.current_title and tp %}{% set on = (hl or {}).get(tp, '') %}<a class="chip title-chip{{ ' hl' if on }}" id="chip-{{ a.candidate_id }}-{{ hl_slug(tp) }}" data-skill="{{ tp }}"{% if on %} data-hl="{{ on }}"{% endif %} href="{{ job_hl_href(job_id, hl or {}, tp, rid=a.candidate_id) }}" aria-label="{{ ('Highlighted ' ~ on ~ ', title: ' ~ a.current_title ~ ' (remove)') if on else ('Highlight title: ' ~ a.current_title) }}" title="{{ 'Remove the title highlight' if on else 'Highlight this job title: matches the same title at any level and sorts those people to the top' }}">{{ a.current_title }}</a>{% else %}{{ a.current_title or '' }}{% endif %}
+{%- endmacro %}
+
 {% macro job_chips(tags, job_id, hl, rid) -%}
 {#- The same clickable highlight chips as the Candidates table, for the job table: a pick reloads /jobs/<id>?view=table. -#}
 {% set mine = hl_first(tags, hl) %}{% set shown_n = hl_shown(tags, hl) %}

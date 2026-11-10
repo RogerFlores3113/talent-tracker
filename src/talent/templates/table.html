@@ -62,7 +62,7 @@
 </form>
 {% include "_search_tips.html" %}
 {% if from_chat %}<p class="panel ids-banner" role="status"><strong>{{ from_chat }} {{ 'person' if from_chat == 1 else 'people' }} from your chat.</strong> <a href="/candidates">Show everyone</a></p>{% endif %}
-{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% endif %}
+{% if q or (keep | list | reject('equalto', 'hl') | list) %}<p class="match-count" id="results-count" tabindex="-1" role="status"><strong>{{ total }} {{ 'person' if total == 1 else 'people' }} match{{ 'es' if total == 1 }}</strong></p>{% elif total > 100 %}<p class="fine" id="results-count" tabindex="-1"><strong>{{ "{:,}".format(total) }} people</strong></p>{% endif %}
 {% if new_after is not none %}<p class="fine">People saved since you last opened this search are marked <span class="badge new">New</span>.{% if not q %} The newest are first.{% endif %}</p>{% endif %}
 {% if closest %}<p class="suggest">No one has every word. These people have some of them, so treat them as close matches.</p>{% endif %}
 {% if how_read %}<p class="fine how-read"><strong>How we read your search:</strong> {{ how_read }}</p>{% endif %}
@@ -82,7 +82,7 @@
 </form>{% endfor %}{% endif %}
 <form class="hl-add" id="hl-add-form" method="get" action="/candidates" role="search" aria-label="Highlight a skill or job title">
   {% for k, v in keep.items() if k != 'hl' %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}{% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}<input type="hidden" name="sort" value="{{ sort }}"><input type="hidden" name="dir" value="{{ dir }}">{% if q and qsort %}<input type="hidden" name="qsort" value="{{ qsort }}"><input type="hidden" name="qdir" value="{{ qdir }}">{% endif %}{% if hl %}<input type="hidden" name="hl" value="{{ keep.get('hl', '') }}">{% endif %}
-  <label for="hl-add">Highlight a skill</label>
+  <label for="hl-add">Highlight a skill or title</label>
   <input type="text" id="hl-add" name="hl_add" list="hl-list" autocomplete="off" maxlength="70" placeholder="python, or title: data engineer" aria-describedby="hl-add-help">
   <button class="btn small" type="submit">Highlight</button>
   <span class="fine" id="hl-add-help">Type a skill, or "title: " and a job title, then press Enter. Up to {{ 6 }} at once.</span>
@@ -126,8 +126,8 @@
   {% if color %}<a href="/candidates?{{ dict(keep, color='') | urlencode }}" class="small">Show all labels</a>{% endif %}
 </div>
 <p class="fine">{% if hl and not q and sort == 'color' %}Sorted by highlighted skills first, then by label color. Click a bubble to change someone's label color. Pick another column to sort by it instead.{% else %}{% if hl %}People with more of the highlighted skills come first. Inside each group the usual order applies. {% endif %}{% if q and qsort %}Sorted by {{ qsort }}, {{ 'low to high' if qdir == 'asc' else 'high to low' }}. <a href="/candidates?{{ dict(keep, q=q) | urlencode }}">Back to best match first</a>.{% elif q %}Sorted by best match{{ ', then grouped by color (red first)' if colored_first else '. Click a column heading to sort by it instead. Tick Colored first to group by label color (red, orange, yellow, green, blue, purple), best match first inside each color' }}.{% elif sort == 'color' %}Sorted by color: red, orange, yellow, green, blue, purple, then people with no color; newest first inside each. Click a bubble to change someone's label color. Pick another column to sort by it alone.{% else %}Sorted by {{ sort }} only. Click Label color to group by label color again.{% endif %}{% endif %}</p>
-{% if total > 100 %}<nav class="seg pagesize" id="page-size" aria-label="How many people to show at a time"><span class="fine">Show</span>
-  {% for n, label in [('100', '100'), ('250', '250'), ('all', 'All')] %}<a href="/candidates?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir, size='' if n == '100' else n) | urlencode }}" class="{{ 'on' if size == n }}"{{ cur(size == n) }}>{{ label }}</a>{% endfor %}
+{% if total > 100 %}<nav class="pagesize" id="page-size" aria-label="How many people to show at a time"><span class="fine pagesize-label" aria-hidden="true">Show</span>
+  <span class="seg">{% for n, label in [('100', '100'), ('250', '250'), ('all', 'All')] %}<a href="/candidates?{{ dict(keep, q=q, sort=sort, dir=dir, qsort=qsort, qdir=qdir, size='' if n == '100' else n) | urlencode }}#results-count" class="{{ 'on' if size == n }}"{{ cur(size == n) }}>{{ label }}<span class="sr-only"> people at a time</span></a>{% endfor %}</span>
   {% if size == 'all' and total > bulk_max() %}<span class="fine" id="page-size-cap">All stops at {{ "{:,}".format(bulk_max()) }}, the same limit as exports. Narrow the filters to reach the rest.</span>{% elif size == 'all' %}<span class="fine">Showing all {{ total }}.</span>{% endif %}
 </nav>{% endif %}
 {% if total %}<form id="bulk-form" class="bulkbar panel" method="post" action="/candidates/bulk" aria-label="Do something for the people you tick">
@@ -158,7 +158,8 @@
 </form>{% endif %}
 <div class="table-wrap">
 <table class="dense" id="cand-table" tabindex="-1">
-  <caption class="sr-only">Candidates{% if hl %}, sorted by highlighted skills first, then {% if q %}best match first{% elif sort == 'color' %}by label color{% else %}by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}{% elif q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
+  {% set n_colored = namespace(v=0) %}{% for c in COLORS %}{% set n_colored.v = n_colored.v + (color_counts[c] or 0) %}{% endfor %}
+  <caption class="sr-only">Candidates{% if sort == 'color' and not q and not hl and not n_colored.v %}, newest first (nobody has a label color yet){% elif hl %}, sorted by highlighted skills first, then {% if q %}best match first{% elif sort == 'color' %}by label color{% else %}by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}{% elif q %}, best match first{% else %}, sorted by {{ sort }}, {{ 'ascending' if dir == 'asc' else 'descending' }}{% endif %}</caption>
   <thead><tr>
     {% if total %}<th scope="col" class="pickcell"><input type="checkbox" form="bulk-form" data-check-all data-check-name="candidate_ids" aria-label="Tick everyone on this page"></th>{% endif %}
     {% set color_on = not q and sort == 'color' and not hl %}
