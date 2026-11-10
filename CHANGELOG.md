@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-10
+
 ### In-chat views (cycle 15)
 - The cards and tables in Claude and ChatGPT now wear your Talent Search theme (Sunset to forest by default) instead of plain white, with the app's gradient rule, buttons and chips, and they follow the chat app's light or dark mode (Forest night and Midnight stay dark, Ocean stays light). The view's colors are read from the app's own theme file, so they stay in step, and the chat app's colors no longer override them.
 
