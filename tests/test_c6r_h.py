@@ -205,10 +205,16 @@ def test_lowercase_interviewer_names_read_with_capitals(store):
     assert actions.tidy_names("DJ Patel and kim lee") == "DJ Patel and Kim Lee"
     assert actions.tidy_names("bo@x.com") == "bo@x.com" and actions.tidy_names("Sam de la Cruz") == "Sam de la Cruz"
     jid, cid = _job(store)
-    a = store.log(cid, "interview", "Tech", at=_ago(30), job_id=jid, interviewer="sam ortiz")["id"]
-    store.log(cid, "interview", "Values", at=_ago(29), job_id=jid, interviewer="Sam Ortiz")
+    # Both at midday on the same past day, so they always land in the same week. Times 30 and 29 hours ago
+    # straddled the Sunday-Monday line once a week (failed at 05:00 UTC on a Tuesday).
+    noon = as_local(datetime.now(timezone.utc) - timedelta(days=2)).replace(hour=12, minute=0, second=0,
+                                                                            microsecond=0)
+    a = store.log(cid, "interview", "Tech", at=noon.astimezone(timezone.utc).isoformat(), job_id=jid,
+                  interviewer="sam ortiz")["id"]
+    store.log(cid, "interview", "Values", at=(noon + timedelta(hours=1)).astimezone(timezone.utc).isoformat(),
+              job_id=jid, interviewer="Sam Ortiz")
     assert interviews.named(store.get_interview(a)) == ["Sam Ortiz"]
-    day = as_local(datetime.now(timezone.utc) - timedelta(hours=30)).date()
+    day = noon.date()
     out = interviews.week_text(interviews.week(store, day - timedelta(days=day.weekday())))
     assert "sam ortiz" not in out and "Sam Ortiz 2" in out
 
