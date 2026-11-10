@@ -1149,30 +1149,43 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return xlsx_response(data, name)
 
     @app.get("/candidates/compare", response_class=HTMLResponse)
-    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = ""):
-        """Two to six people side by side, with what is the same and what is different. Read-only."""
+    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = ""):
+        """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
+        hiring manager view: nothing about the recruiter's own work, no app links, ready to print."""
         hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
         hl_list = [h for h, _ in hl_pairs]
         hl_colors = dict(hl_pairs)
+        hm = view == "hm"
         asked = compare.parse_ids(ids)
         try:
             d = compare.build(store, asked)
         except ValueError as exc:
             return page(request, "compare.html", d=None, message=str(exc), hl=hl_list, hl_colors=hl_colors,
-                        back_href="/candidates")
+                        back_href="/candidates", hm=False, hide_chrome=False)
         people = d["people"]
         total = int(of) if of.isdigit() and int(of) > len(people) else d["asked"]
         ids_now = [p["id"] for p in people]
 
-        def href(path: str, ids_: list[int]) -> str:
+        def href(path: str, ids_: list[int], **extra: str) -> str:
             q = [("ids", ",".join(map(str, ids_)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
-            return path + "?" + urlencode(q)
+            return path + "?" + urlencode(q + list(extra.items()))
         removes = ({p["id"]: href("/candidates/compare", [i for i in ids_now if i != p["id"]]) for p in people}
-                   if len(people) > compare.MIN_PEOPLE else {})
+                   if len(people) > compare.MIN_PEOPLE and not hm else {})
+        hidden = set(d["empty"]) | (set(compare.HM_HIDDEN) if hm else set())
+        rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
+        if hm:
+            people = [{**p, "links": compare.public_links(p["links"])} for p in people]
+            d = {**d, "people": people, "glance": d["glance_hm"]}
+            if "links" not in hidden and not any(p["links"] for p in people):
+                rows = [r for r in rows if r[0] != "links"]
+        share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
         return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
-                    capped=total > len(people), share_href="/candidates/share?" + urlencode([("ids", ",".join(map(str, ids_now)))]),
+                    capped=total > len(people), share_href="/candidates/share?" + urlencode(share_q),
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
-                    rows=compare.ROWS, skill_groups=compare.skill_groups(d, hl_list))
+                    rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
+                    hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
+                    hm_href=href("/candidates/compare", ids_now, view="hm"),
+                    full_href=href("/candidates/compare", ids_now))
 
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
     def duplicates_page(request: Request, shown: int = 50, reason: str = ""):

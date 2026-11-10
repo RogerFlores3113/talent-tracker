@@ -370,5 +370,7 @@ def test_mcp_tool_waits_in_cautious_mode_and_checks_ids(store, tmp_path, monkeyp
 
 def test_people_view_has_export_button():
     from pathlib import Path
-    js = (Path(__file__).resolve().parent.parent / "src/talent/static/mcp_views/people.js").read_text()
-    assert 'export_candidates_xlsx' in js and '"Export xlsx"' in js and "innerHTML" not in js.split("function exportXlsx")[1].split("function draw")[0]
+    views = Path(__file__).resolve().parent.parent / "src/talent/static/mcp_views"
+    js, kit = (views / "people.js").read_text(), (views / "kit.js").read_text()  # the call itself now lives in kit.js (exportIds)
+    assert 'export_candidates_xlsx' in kit and '"Export "' in js and "exportIds(" in js
+    assert "innerHTML" not in js.split("function exportXlsx")[1].split("function draw")[0]

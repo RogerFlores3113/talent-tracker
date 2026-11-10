@@ -114,6 +114,22 @@ function openLink(url,label){const x=safeUrl(url);if(!x)return Promise.resolve(f
 const openApp=openLink;
 function linkBtn(url,text,aria,cls){return el("button",{class:cls||"link",type:"button","aria-label":aria||null,onclick:()=>openLink(url,text)},text)}
 function appLink(url,label){return url?el("button",{class:"link small",type:"button",onclick:()=>openLink(url,label||"Talent Search")},label||"Open in Talent Search"):null}
+/* Export xlsx for these people (shared by the People table and the Compare view): export_candidates_xlsx makes a file in
+   Downloads (no email, phone or notes) or, when you have to choose, gives the Share page link. Text only, no HTML. */
+function exportIds(ids,btn,out,notLoaded){
+ if(!ids.length){out.textContent="There is nobody to export yet.";return}
+ const sent=ids.slice(0,200);
+ btn.disabled=true;out.textContent="Making the file...";
+ callTool("export_candidates_xlsx",{candidate_ids:sent,for_hiring_manager:true}).then(r=>{btn.disabled=false;
+  const d=r&&r.structuredContent;
+  if(!d||(r&&r.isError)){out.textContent=said(r)||"Couldn't make the file.";return}
+  const cut=ids.length>sent.length?" The first 200 of "+ids.length+" are in it.":"";
+  const more=notLoaded>0?" ("+notLoaded+" more not loaded; open in Talent Search to export all)":"";
+  const nf=d.not_found&&d.not_found.length?" Not found and left out: "+d.not_found.join(", ")+".":"";
+  if(d.written){const dir=d.path.slice(0,Math.max(0,d.path.length-d.file.length-1));
+   out.replaceChildren("Saved "+d.file+" with "+d.people+(d.people===1?" person":" people")+" in "+dir+". It has no email, phone or notes."+cut+nf+more+" ",appLink(d.share_url,"Open in Talent Search"))}
+  else out.replaceChildren("No file made yet. Pick what goes in on the Share page. ",appLink(d.share_url,"Open the Share page"));
+  announce(out.textContent)},()=>{btn.disabled=false;out.textContent="Couldn't make the file."})}
 function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const li=/(^|\.)linkedin\.com$/i.test(x.hostname);
  const text=li?"LinkedIn":(fallback||"Profile");
  return linkBtn(x.href,text,who?(li?"LinkedIn profile of "+who:text+" of "+who):null)}

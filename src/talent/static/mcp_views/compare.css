@@ -2,14 +2,20 @@
 .cmp-glance{background:var(--chip);border-radius:8px;padding:8px 12px;margin:8px 0}
 .cmp-glance h2{font-size:.9375rem;margin:0 0 4px;text-transform:none;letter-spacing:0;color:var(--text)}
 .cmp-glance ul{margin:0;padding-left:18px;font-size:.875rem}.cmp-glance li{margin:2px 0}
-.cmp-wrap{position:relative;overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+.cmp-wrap{position:relative;overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:8px;margin-top:8px}
 .cmp-wrap:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-table.ctable{border-collapse:separate;border-spacing:0;width:100%;min-width:34rem;table-layout:fixed;font-size:.8125rem}
-table.ctable th,table.ctable td{text-align:left;vertical-align:top;padding:6px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
-table.ctable thead th{background:var(--chip)}
+table.ctable{border-collapse:separate;border-spacing:0;width:100%;min-width:calc(7.5rem + var(--cols,3)*12rem);table-layout:fixed;font-size:.8125rem}
+table.ctable th,table.ctable td{text-align:left;vertical-align:top;padding:6px 10px;border-bottom:1px solid var(--line);overflow-wrap:break-word;word-break:normal;hyphens:none}
+table.ctable thead th{background:var(--chip);position:sticky;top:0;z-index:2;box-shadow:0 1px 0 var(--line)}
+table.ctable thead .cmp-rowlabel{z-index:3}
 table.ctable .cmp-rowlabel{width:7.5rem;position:sticky;left:0;z-index:1;background:var(--chip);border-right:1px solid var(--line);font-weight:600}
 table.ctable tbody tr:last-child th,table.ctable tbody tr:last-child td{border-bottom:0}
-.cmp-name{display:flex;align-items:center;gap:6px;font-weight:700}
+.cmp-name{display:flex;align-items:flex-start;gap:6px;font-weight:700}
+.cmp-nm{flex:1 1 auto;min-width:0;overflow-wrap:normal;word-break:normal;hyphens:none}
+.cmp-rm{flex:none;display:inline-flex;align-items:center;justify-content:center;width:1.5rem;height:1.5rem;padding:0;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:inherit;font-weight:400;line-height:1;cursor:pointer}
+.cmp-rm:hover{color:#c62828;border-color:#c62828}.cmp-rm:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+table.ctable .chip{display:inline-block;max-width:100%;overflow-wrap:normal;word-break:normal;hyphens:none}
+.cmp-n{font-weight:400;color:var(--muted)}
 table.ctable ul.plain{list-style:none;margin:0;padding:0}
 .cmp-group+.cmp-group{margin-top:6px}
 .cmp-label{display:block;font-size:.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}

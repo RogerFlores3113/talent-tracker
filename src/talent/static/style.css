@@ -676,20 +676,30 @@ tr.hlrow[data-edge="orange"] { --bub: var(--tag-orange); }
 .hlbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
 
 /* Compare people (/candidates/compare) */
-.compare-wrap { margin: var(--space-4) 0; position: relative; }
+.compare-wrap { margin: var(--space-4) 0; position: relative; overflow: auto; max-height: 82vh; }
 .compare-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-table.compare { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 40rem; table-layout: fixed; }
-table.compare th, table.compare td { text-align: left; vertical-align: top; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-table.compare thead th { background: var(--surface-2); position: sticky; top: 0; z-index: 2; }
+table.compare { border-collapse: separate; border-spacing: 0; width: 100%; min-width: calc(9.5rem + var(--cols, 3) * 12rem); table-layout: fixed; }
+table.compare th, table.compare td { text-align: left; vertical-align: top; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--line); overflow-wrap: break-word; word-break: normal; hyphens: none; }
+table.compare thead th { background: var(--surface-2); position: sticky; top: 0; z-index: 2; box-shadow: 0 1px 0 var(--line); }
 table.compare .rowlabel { width: 9.5rem; position: sticky; left: 0; z-index: 1; background: var(--surface-2); font-weight: 600; font-size: var(--fs-sm); border-right: 1px solid var(--line); }
 table.compare thead .rowlabel { z-index: 3; }
 table.compare tbody tr:last-child th, table.compare tbody tr:last-child td { border-bottom: 0; }
-table.compare .pname { font-weight: 700; }
-table.compare .pacts { display: flex; gap: var(--space-3); margin-top: var(--space-1); font-weight: 400; }
-table.compare .namerow { align-items: flex-start; }
+table.compare .pname { font-weight: 700; overflow-wrap: normal; word-break: normal; hyphens: none; }
+table.compare .namerow { align-items: flex-start; gap: var(--space-2); }
+table.compare .namerow .pname { flex: 1 1 auto; min-width: 0; }
+table.compare .namerow .cbub { flex: none; margin-top: 3px; }
+table.compare .rm { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; border: 1px solid var(--line); border-radius: var(--radius-pill); color: var(--muted); text-decoration: none; font-weight: 400; line-height: 1; background: var(--surface); }
+table.compare .rm:hover { color: var(--bad); border-color: var(--bad); }
+table.compare .rm:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+table.compare .chip { display: inline-block; overflow-wrap: normal; word-break: normal; hyphens: none; max-width: 100%; }
+table.compare .sk-n { font-weight: 400; color: var(--muted); }
+table.compare .chip.hl .sk-n { color: inherit; }
+.hl-n { display: inline-block; min-width: 1.1em; text-align: center; font-weight: 700; }
+table.compare .hl-have { margin: 0 0 var(--space-2); }
 table.compare ul.plain { list-style: none; margin: 0; padding: 0; }
 table.compare .sk-group + .sk-group { margin-top: var(--space-2); }
 table.compare .chips { margin-top: 2px; }
+.print-only { display: none; }
 .sk-label { display: block; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .sk-label.shared::before { content: "\2713 "; }
 .diffmark { display: inline-block; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); border: 1px dashed var(--field-line, var(--line)); border-radius: var(--radius-pill); padding: 0 var(--space-2); margin-left: var(--space-1); white-space: nowrap; }
@@ -703,6 +713,16 @@ ul.glance li { margin: var(--space-1) 0; }
 .aboutmore[open] .moretxt::after { content: attr(data-less); }
 .aboutmore[open] .clip { display: none; }
 .about-full { white-space: pre-wrap; margin: 0; }
+@media print {
+  .hm-hide, .compare-actions { display: none !important; }
+  .print-only { display: block; }
+  .aboutmore { display: none; }
+  .compare-wrap { max-height: none; overflow: visible; border: none; box-shadow: none; }
+  table.compare { min-width: 0; table-layout: auto; }
+  table.compare thead th, table.compare .rowlabel { position: static; background: none; }
+  table.compare th, table.compare td { border-bottom: 1px solid #999; color: #000; }
+  .chip { border: 1px solid #666; }
+}
 @media (max-width: 640px) {
   table.compare .rowlabel { width: 6.5rem; padding: var(--space-2) var(--space-2); }
   table.compare th, table.compare td { padding: var(--space-2); }
