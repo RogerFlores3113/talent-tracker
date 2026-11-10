@@ -15,6 +15,10 @@ All notable changes to Talent Search. Newest first.
 ### Today
 - The Add a to-do row wraps on narrower windows instead of pushing its button out of the panel.
 
+### Compare people
+- Tick two to six people on Candidates and press Compare to see them side by side: title, location, years of experience, skills, jobs and stages, source, last contacted, links and about. An "At a glance" list says in plain words what they share and where they differ ("Only Maya has rust and payments", "Noah has the most experience"). Skills everyone has are marked shared, skills only one person has are marked only them, and highlighted skills keep their colors. Remove anyone from the comparison, or go back to the list with the same people ticked.
+- In Claude, the People table has a Compare button for two to six selected people, and Claude can compare people for you (it only reads).
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

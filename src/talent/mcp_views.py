@@ -34,12 +34,15 @@ URIS = {
     "interviews": "ui://talent-search/interviews.html",
     "owed": "ui://talent-search/feedback-owed.html",
     "duplicates": "ui://talent-search/duplicates.html",
+    "compare": "ui://talent-search/compare.html",
 }
 
 # The People view serves search results, one candidate and a saved candidate; the older names are aliases of it.
 ALIASES = {"candidate": "people", "results": "people"}
 # Views that draw the people table (or one like it) also load people.css.
 WITH_TABLE = ("people", "decide", "shortlist")
+# Views that offer Compare (the People table, and Saved searches which shows it) carry the compare view's code and styles.
+WITH_COMPARE = ("people", "searches")
 # The host draws a border around the view (it sits inside the chat like a card).
 RESOURCE_META = {"ui": {"prefersBorder": True}}
 _DIR = Path(__file__).parent / "static" / "mcp_views"
@@ -56,13 +59,16 @@ def view_html(name: str) -> str:
     own = _DIR / (name + ".css")  # a view may bring its own styles (interviews.css ...)
     table = name in WITH_TABLE or name == "searches"  # these show the People card or table, so they need people.css
     css = (_read("kit.css") + ("\n" + _read("people.css") if table else "")
-           + ("\n" + own.read_text(encoding="utf-8") if own.exists() and own.name != "people.css" else ""))
+           + ("\n" + own.read_text(encoding="utf-8") if own.exists() and own.name != "people.css" else "")
+           + ("\n" + _read("compare.css") if name in WITH_COMPARE else ""))
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))
            .replace("__LINK_LABELS__", labels_json()))  # one table of link names, shared with the app
     # Saved searches shows the People view inside itself: people.js loads first, its two entry points are kept,
     # then searches.js takes over render and draw (see searches.js).
-    scripts = (_read("people.js") + "\n</script><script>const renderPeople=render,drawPeople=draw;</script><script>\n"
-               if name == "searches" else "") + _read(name + ".js")
+    # (compare.js comes first: its plain render() is replaced by people.js's, which calls renderCompare itself.)
+    scripts = ((_read("compare.js") + "\n" if name in WITH_COMPARE else "")
+               + (_read("people.js") + "\n</script><script>const renderPeople=render,drawPeople=draw;</script><script>\n"
+                  if name == "searches" else "") + _read(name + ".js"))
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Talent Search</title>"

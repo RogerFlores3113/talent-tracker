@@ -39,6 +39,7 @@ function listView(d){
  if(!items.length){wrap.append(emptyState("No saved searches yet. Ask Claude to save one, and it will show up here."));return wrap}
  wrap.append(el("ul",{class:"plain","aria-label":"Saved searches"},items.map(ssCard)));return wrap}
 render=function(d){
+ if(Array.isArray(d.at_a_glance))return renderCompare(d);
  if(Array.isArray(d.saved_searches)){SS.list=d;SS.name=null;return listView(d)}
  if(Array.isArray(d.results)){const n=renderPeople(d);if(SS.name)n.prepend(backBar());return n}
  return emptyState("Nothing to show.")};

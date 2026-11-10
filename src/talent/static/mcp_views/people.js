@@ -121,7 +121,7 @@ function tableMode(d){
  for(const n of leadLines(d))wrap.append(n);
  const back=el("button",{class:"btn",type:"button",onclick:()=>{S.fromTable=false;setView("card")}},"Show as cards");
  wrap.append(el("div",{class:"tbar"},back));
- const t=peopleTable(S.people,S,{origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,
+ const t=peopleTable(S.people,S,{origin:S.origin,total:S.total,more:moreBtnSpec(),onSel:sendSelection,bulkExtra:compareBtn,
   onOpen:p=>{S.idx=S.people.indexOf(p);S.fromTable=true;S.scroll={x:t.scroller.scrollLeft,y:(document.scrollingElement||document.documentElement).scrollTop,id:p.id};setView("card")}});
  SHOWN=t;wrap.append(t.node);
  onKeys(wrap,{Escape:e=>{if(e.target&&e.target.tagName==="INPUT"&&e.target.type==="search"&&e.target.value)return;S.fromTable=false;setView("card")}});
@@ -140,7 +140,22 @@ function setView(mode){if(mode===S.mode)return;S.mode=mode;if(mode==="table")S.f
  draw(mode);announce(mode==="table"?"Showing "+S.people.length+" candidates as a table.":"Showing cards. Candidate "+(S.idx+1)+" of "+S.people.length+".")}
 window.onModeChange=()=>{};
 
+function showCompare(ids,btn){
+ if(!canCall()){askClaude("Compare these candidates side by side: "+peopleLabel(S.people.filter(p=>ids.includes(p.id))),btn);return}
+ btn.disabled=true;announce("Comparing "+ids.length+" people.");
+ callTool("compare_candidates",{candidate_ids:ids}).then(r=>{btn.disabled=false;
+  const d=r&&r.structuredContent;
+  if(r&&r.isError||!d||!Array.isArray(d.people)){announce(said(r)||"Couldn't compare them.");return}
+  const was={t:TOOL,a:ARGS};TOOL="compare_candidates";ARGS={candidate_ids:ids};
+  const m=document.getElementById("main");
+  m.replaceChildren(renderCompare(d,{onBack:()=>{CMP_BACK=null;TOOL=was.t;ARGS=was.a;draw("table")}}));
+  const h=m.querySelector("h1");if(h){h.tabIndex=-1;h.focus()}announce("Comparing "+ids.length+" people.")})}
+function compareBtn(chosen){const n=chosen.length;if(n<2)return[];
+ if(n>6)return[el("button",{class:"btn",type:"button",disabled:"true"},"Compare "+n),el("span",{class:"small muted"},"Compare takes 2 to 6 people. Select fewer.")];
+ return[el("button",{class:"btn",type:"button",onclick:ev=>showCompare(chosen.map(p=>p.id),ev.currentTarget)},"Compare "+n)]}
+
 function render(c){
+ if(Array.isArray(c.at_a_glance))return renderCompare(c);  // a Refresh of the compare view shown inside this one
  if(Array.isArray(c.results)){
   S.d=c;S.people=c.results.slice();S.total=c.total!=null?c.total:S.people.length;S.idx=0;S.mode="card";S.sort=null;S.dir="asc";S.filter="";S.hasEmail=false;S.fromTable=false;S.origin=appOrigin(c.app_url);
   const ids=new Set(S.people.map(p=>p.id));for(const i of Array.from(S.sel))if(!ids.has(i))S.sel.delete(i);

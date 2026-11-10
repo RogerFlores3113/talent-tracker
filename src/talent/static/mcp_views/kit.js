@@ -279,7 +279,7 @@ function openCard(cls,url,...kids){const m=/\/candidates\/(\d+)/.exec(String(url
 
 function setNotice(t){const n=document.getElementById("notice");if(n)n.textContent=t||""}
 /* ---- refresh and results */
-const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists","list_jobs","list_saved_searches","list_interviews","status_digest","client_report","list_feedback_owed","find_duplicates","list_followups"];
+const READ_TOOLS=["search_candidates","run_saved_search","get_candidate","job_pipeline","list_action_items","list_prospects","finalists","decide_view","compare_finalists","compare_candidates","list_jobs","list_saved_searches","list_interviews","status_digest","client_report","list_feedback_owed","find_duplicates","list_followups"];
 function canRefresh(){return canCall()&&TOOL&&ARGS&&READ_TOOLS.includes(TOOL)}
 function refresh(btn){if(btn)btn.disabled=true;announce("Refreshing.");
  callTool(TOOL,ARGS).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}showResult(d,r._meta)})}
