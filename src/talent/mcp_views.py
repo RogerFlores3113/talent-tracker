@@ -82,4 +82,5 @@ def view_html(name: str) -> str:
 def tool_meta(name: str) -> dict:
     uri = URIS[name]
     # "ui/resourceUri" is the older flat key some hosts still read.
-    return {"ui": {"resourceUri": uri}, "ui/resourceUri": uri}
+    # "openai/outputTemplate" is the alias ChatGPT reads; other hosts ignore it.
+    return {"ui": {"resourceUri": uri}, "ui/resourceUri": uri, "openai/outputTemplate": uri}

@@ -137,7 +137,7 @@ function profileLink(u,fallback,who){const x=safeUrl(u);if(!x)return null;const 
 /* ---- messages to Claude */
 function markSent(btn){if(!btn||!btn.isConnected||btn.tagName!=="BUTTON")return;btn.disabled=true;
  if(!btn.nextSibling||!btn.nextSibling.classList||!btn.nextSibling.classList.contains("sentnote"))btn.after(el("span",{class:"sentnote small muted",role:"status"},"Sent to Claude"))}
-function askClaude(text,btn){return req("ui/message",{role:"user",content:{type:"text",text}}).then(r=>{
+function askClaude(text,btn){return req("ui/message",{role:"user",content:[{type:"text",text}]}).then(r=>{
  if(r&&r.isError){if(btn)btn.hidden=true;announce("Your chat app wouldn't send that message. You can type it in the chat yourself.");return false}
  announce("Sent to Claude.");markSent(btn);return true})}
 /* askOrLink: askClaude for a button or select that would change something. Says what happened in the status node;
@@ -304,7 +304,8 @@ function showResult(d,meta){DATA=d;if(meta)META=meta;let n;useZone(d);ABS_USED=f
  try{n=render(d)}catch(e){n=errorState("Couldn't show this.")}
  const m=document.getElementById("main");m.replaceChildren(n||emptyState("Nothing to show."));
  if(ABS_USED&&ZONE_SAID&&ZONE){const h=m.querySelector(".vhead");const t=el("p",{class:"small muted zonenote",style:"margin:-4px 0 6px"},"Times in "+zoneShort());if(h)h.after(t);else m.prepend(t)}
- const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}}
+ const dr=document.getElementById("drawer");if(dr){dr.replaceChildren();dr.hidden=true;m.hidden=false}
+ if(typeof sendSize==="function")sendSize(true)}
 
 window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
  if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
@@ -320,12 +321,17 @@ window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const
  else if(m.method==="ui/resource-teardown"&&m.id!=null)post({jsonrpc:"2.0",id:m.id,result:{}});
 });
 let lastW=0,lastH=0;
-new ResizeObserver(()=>{const w=document.documentElement.scrollWidth,h=document.documentElement.scrollHeight;
- if(isFull()){if(w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
- if(w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}).observe(document.documentElement);
-req("ui/initialize",{protocolVersion:"2026-01-26",clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
- if(r&&r.isError){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));return}
- HOST=(r&&r.hostCapabilities)||{};mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{})});
+function sendSize(force){const w=Math.max(1,Math.ceil(document.documentElement.scrollWidth)),h=Math.max(1,Math.ceil(document.documentElement.scrollHeight));
+ if(isFull()){if(force||w!==lastW){lastW=w;note("ui/notifications/size-changed",{width:w})}return}
+ if(!force&&w===lastW&&h===lastH)return;lastW=w;lastH=h;note("ui/notifications/size-changed",{width:w,height:h})}
+new ResizeObserver(()=>sendSize(false)).observe(document.documentElement);
+function startFailed(){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));sendSize(true)}
+/* The handshake, in the shape the MCP Apps spec (2026-01-26) wants: appInfo, appCapabilities, protocolVersion.
+   clientInfo is kept for older hosts (extra keys are ignored). If a host still refuses, ask once more with only the spec fields. */
+function handshake(r){HOST=(r&&r.hostCapabilities)||{};mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{});sendSize(true)}
+req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
+ if(r&&r.isError)return req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r2=>{if(r2&&r2.isError)startFailed();else handshake(r2)});
+ handshake(r)});
 
 /* ---- people table: peopleTable(rows, st, h)
    rows: lean people (id, name, current_title, current_company, location, jobs[], match, last_contacted_at, created_at, updated_at, color, email, app_url)

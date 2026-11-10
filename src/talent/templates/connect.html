@@ -10,6 +10,7 @@
   <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> {{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs.</p>
   <ul class="plain" id="skill-list">{% for k in skill_info %}<li><strong>{{ k.title }}</strong>: {{ k.line }} <code>{{ k.folder }}</code></li>{% endfor %}</ul>
 
+  <p id="where-cards-show"><strong>Where the cards show:</strong> Cards and tables show in the Claude desktop app and on claude.ai. Claude asks once to display them: choose Always allow. Claude Code and the Codex command line show the same answers as text. After you update Talent Search, quit and reopen Claude so it picks up the new views.</p>
   <h3 id="claude-plugin">Claude app (desktop or claude.ai): the plugin</h3>
   <p><strong>This is the one for most people.</strong> The plugin adds the {{ skill_names|length }} skills above to the Claude app. It adds the skills only: the Claude app still needs the Talent Search connection, which you make in the Claude Desktop section <a href="#claude-panel">further down this page</a>.</p>
   {% if plugin_saved %}<p class="ok">Already saved: {{ plugin_file }} is in {{ plugin_where }}. Upload it in Claude if you haven't yet.</p>{% endif %}
