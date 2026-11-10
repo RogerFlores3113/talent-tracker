@@ -2241,7 +2241,9 @@ def _join_names(names: list[str]) -> str:
 class Store:
     """Thread-safe wrapper around one SQLite connection."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(self, path: str | Path = ":memory:", *, scratch: bool = False) -> None:
+        """scratch: a private working copy (an import preview). It leaves the zone times show in alone, since that
+        zone belongs to the recruiter's own database, not to the copy."""
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -2249,6 +2251,7 @@ class Store:
         self._depth = 0  # > 0 inside _write(): nested writes join the outer transaction
         self._saved_counts: dict[Any, tuple[int, int]] = {}  # saved search counts, good until anything is written
         self._saved_counts_stamp: Any = None
+        self._scratch = scratch
         self._open()
 
     def _open(self) -> None:
@@ -2271,8 +2274,9 @@ class Store:
             self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
         self._refresh_linkedin_keys()
-        row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
-        set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
+        if not self._scratch:
+            row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (USER_ZONE_KEY,)).fetchone()
+            set_shown_zone(row[0] if row else None)  # a new store starts on its own saved zone, else this computer's
 
     # ------------------------------------------------------------------ infra
     def _migrate(self) -> None:
@@ -5636,6 +5640,38 @@ class Store:
             raise NotFound(f"No job with id {job_id}")
         return row
 
+    def openings_unset_ids(self) -> set[int]:
+        """Jobs whose number of openings nobody has set yet: an import made them, so their 1 is only a stand-in.
+        Until it is set, nothing says such a job is filled or counts its hires against that 1."""
+        out: set[int] = set()
+        for key in (OPENINGS_UNSET_KEY, OPENINGS_ASK_KEY):
+            row = self._row("SELECT value FROM settings WHERE key = ?", (key,))
+            try:
+                ids = json.loads(row["value"]) if row else []
+            except ValueError:
+                continue
+            if isinstance(ids, list):
+                out.update(int(i) for i in ids if isinstance(i, int))
+        return out
+
+    def mark_openings_unset(self, job_ids: Iterable[int]) -> None:
+        """Remember that these jobs' openings are only the stand-in 1 (see openings_unset_ids)."""
+        self._edit_id_list(OPENINGS_UNSET_KEY, add=set(job_ids))
+
+    def _edit_id_list(self, key: str, add: set[int] = frozenset(), drop: set[int] = frozenset()) -> None:
+        with self._lock, self._conn:
+            row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            try:
+                ids = json.loads(row[0]) if row else []
+            except ValueError:
+                ids = []
+            ids = [i for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
+            new = sorted((set(ids) | set(add)) - set(drop))
+            if row is None and not new:
+                return
+            self._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                               "value = excluded.value", (key, json.dumps(new)))
+
     def update_job(self, job_id: int, *, by: str = "app", **data: Any) -> dict[str, Any]:
         """Change a job's details. by="ai" logs the old values, so the change can be undone from Changes."""
         allowed = {"title", "company", "location", "description", "status", *JOB_EXTRA_FIELDS}
@@ -5665,6 +5701,10 @@ class Store:
                     self._log_ai("job_edit", job_id=job_id, body=_job_change_body(job, fields),
                                  old={**{k: job.get(k) for k in fields}, "_at": job["updated_at"]},
                                  new={**fields, "_at": ts})
+        if data.get("openings") not in (None, "") and job_id in self.openings_unset_ids():
+            # someone said how many openings this job has: it is no longer the import's stand-in
+            for key in (OPENINGS_UNSET_KEY, OPENINGS_ASK_KEY):
+                self._edit_id_list(key, drop={job_id})
         return self.get_job(job_id)
 
     def delete_job(self, job_id: int, *, by: str = "app") -> None:
@@ -6165,6 +6205,8 @@ class Store:
             self._conn.execute("DELETE FROM search_outbox")
 
 
+OPENINGS_UNSET_KEY = "openings_unset"  # settings row: jobs whose openings are only the stand-in 1
+OPENINGS_ASK_KEY = "import_openings_ask"  # settings row: jobs an import made, whose openings we still ask about
 JOB_EXTRA_FIELDS = ("hiring_manager", "hiring_manager_email", "openings", "target_date", "min_active")
 
 

@@ -840,7 +840,7 @@ def _plain(sentence: str, data: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
 
 
-def _batch_job_warning(job: dict[str, Any], added: int, hired: int) -> str | None:
+def _batch_job_warning(job: dict[str, Any], added: int, hired: int, unset: bool = False) -> str | None:
     """After save_candidates added people to a job: a warning when its openings are all filled already, or when
     it isn't open, so the AI asks before more people are worked on."""
     if not added:
@@ -849,7 +849,7 @@ def _batch_job_warning(job: dict[str, Any], added: int, hired: int) -> str | Non
         return (f"{_job_name(job)} is {str(job.get('status') or '').replace('_', ' ')}. Ask the recruiter whether it "
                 "still needs people.")
     openings = job.get("openings") or 1
-    if hired >= openings:
+    if hired >= openings and not unset:  # an import's stand-in 1 says nothing about the headcount
         return (f"{_job_name(job)} already has {hired} hired for {openings} opening{'' if openings == 1 else 's'}, "
                 "so these people would over-fill it. Ask the recruiter whether it still needs people.")
     return None
@@ -2684,11 +2684,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             if j["id"] in soon:
                 j["next_interview"] = soon[j["id"]]
 
+        unset = store.openings_unset_ids()
+
         def line(j: dict[str, Any]) -> str:
             openings, hired = j.get("openings") or 1, j.get("hired_count", 0)
             seats = f"{openings} opening{'' if openings == 1 else 's'}"
             bits = [f"{j.get('active_count', 0)} in the pipeline",
-                    f"{hired} hired for {seats} (over by {hired - openings})" if hired > openings
+                    f"{hired} hired, openings not set yet" if j["id"] in unset
+                    else f"{hired} hired for {seats} (over by {hired - openings})" if hired > openings
                     else f"{hired} of {openings} hired" if openings > 1 else f"{hired} hired"]
             if j.get("hiring_manager"):
                 bits.append(f"hiring manager {j['hiring_manager']}")
@@ -3053,13 +3056,15 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         return CallToolResult(content=[TextContent(type="text", text="\n".join(lines))], structuredContent=data)
 
     @mcp.tool(annotations=READ, meta=tool_meta("pipeline"))
+    @_ended_out
     def job_pipeline(job_id: int, omit_stages: list[str] | None = None, stage: str | None = None,
                      limit: int | None = None) -> CallToolResult:
         """Everyone in a job's pipeline, grouped by the job's stages in order, with days in stage and next interview.
 
         The first text block is a status update to paste straight to a hiring manager or client (no ids), the same
-        text as the app's Copy status update. It leaves out internal stages (Sourced, Contacted and the like, or what
-        the recruiter chose to leave out for this job in the app), and its counts cover only the people it names.
+        text as the app's Copy status update. It leaves out internal stages (Sourced, Contacted and the like) and the
+        ones that ended badly (Rejected, Withdrawn), or what the recruiter chose to leave out for this job in the app,
+        and its counts cover only the people it names. It holds no app links: those are in the later blocks.
         omit_stages overrides that, e.g. ["Sourced", "Rejected"]; pass [] to include every stage. Up to 10 names
         are listed per stage. left_out in the result names the stages left out.
         stage (the start of a name is enough) returns only the people in that stage, longest waiting first, with
@@ -3303,12 +3308,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        f"page, where you pick what goes in: {share_url}.")
             return _plain(lost + why, {"written": False, "people": len(found), "share_url": share_url,
                                        "app_url": share_url, "for_me_url": for_me_url, "not_found": missing})
+        if job and not xlsx_export.share_table(store, found, job_id=job_id)["rows"]:
+            raise ValueError(f"No file made. None of those people is still in {_job_name(job)}: the file for a job "
+                             "lists only its own people who are in play or hired. Leave job_id out, or pick its people.")
         data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id)
+        if job and n < len(found):
+            lost += (f"Left out {len(found) - n} {'person' if len(found) - n == 1 else 'people'} not in "
+                     f"{_job_name(job)} or out of it (rejected or withdrawn).\n")
         if (kind or "").lower() == "list":
             name = "candidates-" + name[len("shortlist-"):] if name.startswith("shortlist-") else name
         path = xlsx_export.save_to_downloads(data, name)
         line = (f"{lost}Made {name} with {n} {'person' if n == 1 else 'people'}, saved at {path} on your "
-                "computer. It has no email, phone or notes. Nothing was sent: forward the file yourself. "
+                "computer. It has no email, phone or notes, and email addresses and phone numbers written in About "
+                "or work history are taken out. Nothing was sent: forward the file yourself. "
                 f"To change what is in it: {share_url}")
         return _plain(line, {"written": True, "path": str(path), "file": path.name, "people": n,
                              "job": _slim({k: job.get(k) for k in ("id", "title", "company")}) if job else None,
@@ -3758,7 +3770,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             (", and " if i == len(bits) - 1 else ", ") + b for i, b in enumerate(bits[1:], 1))
         if job is not None:
             sentence += f"; added {added} to {_job_name(job)} in {stage_name}"
-        warning = (_batch_job_warning(job, added, actions.job_numbers(store, job_id)["hired"])
+        warning = (_batch_job_warning(job, added, actions.job_numbers(store, job_id)["hired"],
+                                      job_id in store.openings_unset_ids())
                    if job is not None else None)
         lines = [sentence + "."]
         names = {"saved": "Saved", "updated": "Updated", "unchanged": "Already saved, nothing new",

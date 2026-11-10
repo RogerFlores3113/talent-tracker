@@ -140,7 +140,10 @@ def test_one_status_update_for_the_app_and_the_ai(store):
     assert "- Out: Lee Park (Rejected)" in lines and any(l.startswith("- New: ") and "Ana Ruiz in Screening" in l
                                                           for l in lines)
     res = call(build_server(store), "job_pipeline", job_id=job["id"])
-    assert re.sub(r"\nOpen in Talent Search:.*$", "", re.sub(r" \(http://127\.0\.0\.1:\d+/\w+/\d+\)", "", res.content[0].text), flags=re.S) == text_ and "Candidate-provided" in res.content[1].text
+    # The paste block is the job page's Copy status update (rejected people left out), with no local links.
+    page_text = actions.job_status_text(store, job["id"], omit_stages=actions.page_omit(store, job["id"]))
+    assert res.content[0].text == page_text and "127.0.0.1" not in res.content[0].text
+    assert "Lee Park" not in res.content[0].text and "Candidate-provided" in res.content[1].text
     assert structured(res)["counts"] == {"active": 2, "hired": 0, "out": 1}
 
     left = actions.job_status_text(store, job["id"], omit_stages=["sourced", "rej"])

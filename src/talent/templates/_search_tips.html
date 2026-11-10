@@ -10,7 +10,7 @@
     <li><code>-recruiter</code> or <code>NOT manager</code> leaves out people who have that exact word.</li>
     <li><code>title:engineer</code>, <code>company:acme</code>, <code>location:sf</code>, <code>skill:python</code> and <code>source:referral</code> narrow to one field. Punctuation stays, so <code>skill:c++</code> and <code>skill:node.js</code> work, and <code>skill:python OR go</code> means either skill. Typing the same prefix twice, like <code>company:google company:meta</code>, means either one, and so does a prefix typed together with the same filter in More filters.</li>
     <li><code>-title:manager</code> or <code>NOT source:referral</code> leaves out people whose Title or Found via has it.</li>
-    <li>Example: <code>title:engineer "machine learning" python OR go -recruiter</code>. Brackets are ignored. Under the search box we show how your search was read. If a prefix is mistyped, like <code>skil:python</code>, you get a "Did you mean" link.</li>
+    <li>Example: <code>title:engineer "machine learning" python OR go -recruiter</code>. Brackets are ignored, so they cannot group anything. Words are all required (AND), and OR joins only the word before it and the word after it, so <code>python java OR go</code> means python AND (java OR go). We show how your search was read, in plain words, with the results, so you can check it. If a prefix is mistyped, like <code>skil:python</code>, you get a "Did you mean" link.</li>
   </ul>
   {% if tips_more_link %}<p class="fine">More filters (skills, remote, years of experience, last contacted) are on the <a href="/candidates">Candidates</a> page, where you can also save a search.</p>{% endif %}
 </details>

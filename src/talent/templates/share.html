@@ -31,7 +31,7 @@
   <fieldset>
     <legend>What goes in the file</legend>
     <p class="fine">Always in: name, title, company, location, years of experience, skills, links, summary and work history. Columns nobody has anything in are left out. Never in: colors, review marks or links to this app.</p>
-    <p class="fine"><strong>About and work history are copied as written. Read them before you send the file.</strong></p>
+    <p class="fine"><strong>About and work history go in as written, except that email addresses and phone numbers in them are taken out unless you include email and phone. Read them in the preview before you send the file.</strong></p>
     <label class="check"><input type="checkbox" name="include_contact" value="1" {{ 'checked' if contact }}> <span>Include email and phone</span></label>
   </fieldset>
   <fieldset>
@@ -45,7 +45,8 @@
   <p><label for="share-job">Job this is for <span class="fine">(optional, adds each person's stage in it, furthest along first)</span></label><br>
     <select id="share-job" name="job_id"><option value="" data-title="" data-company="">No job</option>{% for j in jobs %}<option value="{{ j.id }}" data-title="{{ j.title }}" data-company="{{ j.company or '' }}" {{ 'selected' if job | string == j.id | string }}>{{ j.title }}{% if j.company %} ({{ j.company }}){% endif %}</option>{% endfor %}</select></p>
   <div id="rejected-row" {{ 'hidden' if not job }}>
-    <label class="check"><input type="checkbox" name="include_rejected" value="1" {{ 'checked' if rejected }}> <span>Include people marked rejected <span class="fine">(left out unless you tick this)</span></span></label>
+    <p class="fine">With a job picked, the file lists only that job's people.</p>
+    <label class="check"><input type="checkbox" name="include_rejected" value="1" {{ 'checked' if rejected }}> <span>Include people who are rejected or withdrawn in this job <span class="fine">(left out unless you tick this)</span></span></label>
   </div>
   <p><label for="share-note">A note at the top <span class="fine">(optional, one line)</span></label><br>
     <input id="share-note" type="text" name="note" value="{{ note }}" maxlength="300" placeholder="{{ 'Shortlist for ' ~ job_title if job_title else 'A line for the top of the file' }}"></p>
@@ -55,7 +56,7 @@
       <dt>File name</dt><dd id="pv-file">{{ file_name }}</dd>
       <dt>Columns</dt><dd id="pv-cols">{% for c in preview.cols if c.kind == 'base' or (c.kind == 'stage' and pv.stage) or (c.kind == 'contact' and contact) or (c.kind == 'notes' and notes in ('latest', 'all')) %}{{ c.name }}{{ ', ' if not loop.last }}{% endfor %}</dd>
       <dt>People</dt><dd id="pv-names">{% if pv.count %}{{ pv.names | join(', ') }}{% if pv.count > 3 %} and {{ pv.count - 3 }} more{% endif %}{% else %}Nobody{% endif %}</dd>
-      <dt>How many</dt><dd id="pv-count">{{ pv.count }}{% if pv.count != count %} of {{ count }} <span class="fine">(rejected people are left out)</span>{% endif %}</dd>
+      <dt>How many</dt><dd id="pv-count">{{ pv.count }}{% if pv.count != count %} of {{ count }}{% set why = [] %}{% if pv.not_in_job %}{% set _ = why.append(pv.not_in_job ~ ' not in this job') %}{% endif %}{% if pv.rejected_out %}{% set _ = why.append(pv.rejected_out ~ ' rejected or withdrawn') %}{% endif %}{% if why %} <span class="fine">(left out: {{ why | join(', ') }})</span>{% endif %}{% endif %}</dd>
     </dl>
     <p class="fine" id="pv-people-note">Each person below, as they will appear. Tick "Leave this person out" to keep someone out of the file.</p>
     <ul class="pv-people" id="pv-people" aria-label="People in the file">
@@ -67,6 +68,15 @@
           <p class="share-warn">{{ p.name }} is marked rejected in {{ rej_in[p.id] | join(', ') }}.</p>
           <label class="check"><input type="checkbox" name="leave_rej" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_rej }}{{ ' disabled' if job }}> <span>Leave {{ p.name }} out because they are rejected</span></label>
         </div>{% endif %}
+        {% set ab = about_seen.get(p.id, {}) %}<div class="pv-about">
+          <p class="fine">About as it will appear:</p>
+          <p class="pv-note" data-plain {{ 'hidden' if contact }}>{{ ab.get('about') or 'Nothing in About' }}</p>
+          <p class="pv-note" data-full {{ 'hidden' if not contact }}>{{ ab.get('about_full') or 'Nothing in About' }}</p>
+          <p class="fine">Work history:</p>
+          <p class="pv-note" data-plain {{ 'hidden' if contact }}>{{ ab.get('history') or 'None saved' }}</p>
+          <p class="pv-note" data-full {{ 'hidden' if not contact }}>{{ ab.get('history_full') or 'None saved' }}</p>
+          {% if ab.get('removed') %}<p class="fine" data-plain {{ 'hidden' if contact }}>{{ ab.removed }} email address{{ '' if ab.removed == 1 else 'es' }} or phone number{{ '' if ab.removed == 1 else 's' }} taken out.</p>{% endif %}
+        </div>
         <div class="pv-notes" data-notes {{ 'hidden' if notes not in ('latest', 'all') }}>
           <p class="fine">Note as it will appear:</p>
           <p class="pv-note" data-latest {{ 'hidden' if notes != 'latest' }}>{{ seen.get('latest') or 'No note' }}</p>

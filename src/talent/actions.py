@@ -762,8 +762,11 @@ def job_numbers(store: Store, job_id: int, omit: set[str] | None = None,
          for o in ("open", "hired", "lost")}
     all_hired = sum(len(g["candidates"]) for g in groups if g["outcome"] == "hired")
     openings = job.get("openings") or 1
-    return {"active": n["open"], "hired": n["hired"], "out": n["lost"], "openings": openings,
-            "filled": all_hired >= openings, "filled_seats": min(all_hired, openings), "hired_all": all_hired, "word": hire_word(store, job_id)}
+    # an import's stand-in 1 is not a headcount: such a job is never "filled" and never counted against it
+    unset = job_id in store.openings_unset_ids()
+    return {"active": n["open"], "hired": n["hired"], "out": n["lost"], "openings": openings, "unset": unset,
+            "filled": not unset and all_hired >= openings, "filled_seats": 0 if unset else min(all_hired, openings),
+            "hired_all": all_hired, "word": hire_word(store, job_id)}
 
 
 def thin_target(job: dict[str, Any], cap: int = 5) -> int:
@@ -789,10 +792,8 @@ def against_text(hired: int, openings: int, word: str = "hired") -> str:
 def over_openings(store: Store, company: str | None = None, manager: str | None = None) -> list[dict[str, Any]]:
     """Open jobs with more hires than openings: [{job_id, title, company, hired, openings, text}]. Often the openings
     number was never set after an import, so the recruiter is offered a chance to correct it."""
-    from .importers import openings_to_ask
-
     keep = _job_filter(store, company, manager)
-    unset = set(openings_to_ask(store))
+    unset = store.openings_unset_ids()
     out = []
     for j in store.list_jobs("open"):
         if not keep(j):
@@ -820,7 +821,9 @@ def headline(nums: dict[str, Any], status: str = "open") -> str:
     """'2 candidates in process, none placed yet. 1 out.', '1 candidate in process, 1 hired, 2 openings.' or,
     once every opening is taken, '3 candidates in process, 1 of 1 opening filled.' / '1 of 1 opening filled.'"""
     a, h, word, o = nums["active"], nums["hired"], nums["word"], nums["openings"]
-    if nums["filled"] and nums.get("hired_all", 0) > o:
+    if nums.get("unset"):
+        hires = f"{h} {word} so far" if h else f"none {word} yet"
+    elif nums["filled"] and nums.get("hired_all", 0) > o:
         hires = against_text(nums["hired_all"], o, word)
     elif nums["filled"]:
         seats = filled_text(nums["filled_seats"], o)
@@ -1535,6 +1538,9 @@ def _company_names(store: Store) -> list[str | None]:
 def _rollup_seats(r: dict[str, Any]) -> str:
     """'1 of 3 openings filled', or 'N hired against M openings' when the hires outnumber all the openings (one
     job over while another is still open stays '1 of 3', and the over-filled job is flagged on its own)."""
+    if r.get("unset"):  # an import's stand-in openings in the mix: say the hires, not "44 hired against 1"
+        word = r.get("word", "hired")
+        return f"{r['hired_all']} {word} so far" if r["hired_all"] else f"none {word} yet"
     if r["hired_all"] > r["openings"]:
         return against_text(r["hired_all"], r["openings"], r.get("word", "hired"))
     return filled_text(r["filled"], r["openings"])
@@ -1568,6 +1574,7 @@ def company_rollup(store: Store, company: str | None = None, omit_stages: list[s
         r["openings"] += nums["openings"]
         r["filled"] += nums["filled_seats"]
         r["hired_all"] += nums["hired_all"]
+        r["unset"] = r.get("unset", False) or nums["unset"]
         r.setdefault("words", set()).add(nums["word"])
     for r in rows.values():
         r.pop("_people"), r.pop("_hired")
@@ -1613,6 +1620,7 @@ def manager_rollup(store: Store, manager: str | None = None, omit_stages: list[s
         for k, n in (("active", "active"), ("hired", "hired"), ("openings", "openings"), ("filled", "filled_seats"),
                      ("hired_all", "hired_all")):
             r[k] += nums[n]
+        r["unset"] = r.get("unset", False) or bool(nums.get("unset"))
         r["words"].add(nums["word"])
     for r in rows.values():
         r["word"] = "placed" if r.pop("words") == {"placed"} else "hired"

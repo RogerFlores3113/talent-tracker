@@ -127,13 +127,14 @@ def test_share_job_blank_stage_rejected_left_out_and_stage_order(store):
     ids = [dee["id"], ben["id"], eli["id"], ana["id"]]
     book = read_xlsx(share(client, ids, job_id=str(job["id"])).content)
     head, rows = table(book, skip=1)
-    assert [r["Name"] for r in rows] == ["Ana Ruiz", "Dee Lo", "Ben Cho"]  # furthest along first, not in the job last
-    assert [r.get("Stage") for r in rows] == ["Interviewing", "Sourced", None]
+    assert [r["Name"] for r in rows] == ["Ana Ruiz", "Dee Lo"]  # furthest along first; Ben isn't in the job (cycle 17)
+    assert [r.get("Stage") for r in rows] == ["Interviewing", "Sourced"]
     about = {r[0]: r[1] for r in book["About this file"]["rows"][1:]}
-    assert "1 person marked rejected" in about["People left out"]
+    assert "1 person rejected or withdrawn in this job" in about["People left out"]
+    assert "1 person not in this job" in about["People left out"]
     book = read_xlsx(share(client, ids, job_id=str(job["id"]), include_rejected="1").content)
     names = [r["Name"] for r in table(book, skip=1)[1]]
-    assert names == ["Ana Ruiz", "Dee Lo", "Ben Cho", "Eli Re"]
+    assert names == ["Ana Ruiz", "Dee Lo", "Eli Re"]
     # no job: the ids order
     book = read_xlsx(share(client, ids).content)
     assert [r["Name"] for r in table(book)[1]] == ["Dee Lo", "Ben Cho", "Eli Re", "Ana Ruiz"]
@@ -158,7 +159,7 @@ def test_share_notes_choices(store):
 def test_share_form_wording_radios_preview_and_live_line(store):
     job, ana, ben, cy = seed(store)
     html = local_client(store).get(f"/candidates/share?ids={ana['id']},{ben['id']}&hl=python:red").text
-    assert "About and work history are copied as written. Read them before you send the file." in html
+    assert "About and work history go in as written, except that email addresses and phone numbers in them are taken out" in html
     assert 'type="radio" name="notes" value="none" checked' in html
     assert 'value="latest"' in html and 'value="all"' in html and "Latest note only" in html
     assert "All notes and timeline" in html and "No notes" in html and "Notes go out word for word and may hold pay" in html

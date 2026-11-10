@@ -60,13 +60,17 @@
     if (pick.people) {  // who is in the file: the kept people minus the ones ticked "Leave this person out"
       var kept = pick.people.filter(function (p) { return !left[p.id]; });
       pick = {names: kept.slice(0, 3).map(function (p) { return p.name; }), count: kept.length, stage: pick.stage,
-              kept: pick.people.length, ids: pick.people};
+              kept: pick.people.length, ids: pick.people, not_in_job: pick.not_in_job || 0,
+              rejected_out: pick.rejected_out || 0};
     }
     var rows = form.querySelectorAll("#pv-people li");
     var inJob = {};
     if (pick.ids) pick.ids.forEach(function (p) { inJob[p.id] = true; });
     for (var r = 0; r < rows.length; r++) {
       rows[r].hidden = pick.ids ? !inJob[rows[r].getAttribute("data-id")] : false;
+      var full = !!(contact && contact.checked);  // About as the file will have it: contact lines out unless asked
+      rows[r].querySelectorAll("[data-plain]").forEach(function (el) { el.hidden = full; });
+      rows[r].querySelectorAll("[data-full]").forEach(function (el) { el.hidden = !full; });
       var nb = rows[r].querySelector("[data-notes]");
       if (nb) {
         nb.hidden = n === "none";
@@ -82,9 +86,11 @@
     });
     if (colsOut) colsOut.textContent = shown.join(", ");
     if (namesOut) namesOut.textContent = pick.count ? pick.names.join(", ") + (pick.count > 3 ? " and " + (pick.count - 3) + " more" : "") : "Nobody";
-    var keptAll = pick.kept !== undefined ? pick.kept : pick.count;
+    var why = [];
+    if (pick.not_in_job) why.push(pick.not_in_job + " not in this job");
+    if (pick.rejected_out) why.push(pick.rejected_out + " rejected or withdrawn");
     if (countOut) countOut.textContent = pick.count + (pick.count !== total ? " of " + total : "") +
-      (keptAll !== total ? " (rejected people are left out)" : "");
+      (why.length ? " (left out: " + why.join(", ") + ")" : "");
     if (warn) warn.hidden = n === "none";
     if (rejected) rejected.hidden = !hasJob;
   }

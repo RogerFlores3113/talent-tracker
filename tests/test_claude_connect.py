@@ -249,6 +249,8 @@ def test_test_route_healthy_and_missing(store, tmp_path, monkeypatch):
     html = local_client(store).post("/connect/claude/test").text
     assert "answered with 24 tools in 1.8 s" in html
     web_setup(tmp_path, monkeypatch, connected=False)
+    monkeypatch.setattr(integrations, "restart_supported", lambda platform=None: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
     html = local_client(store).post("/connect/claude/test").text
     assert "isn't in Claude Desktop's settings file any more" in html and "Quit Claude Desktop" in html
 
@@ -258,10 +260,11 @@ def test_connect_route_reports_path_readback_restart_and_check(store, tmp_path, 
     monkeypatch.setattr(integrations, "test_launch", lambda entry, timeout=30.0: {
         "ok": False, "seconds": 0.2, "tools": 0, "stderr_tail": ["Traceback boom"], "stray_stdout": [],
         "error": "It stopped right away (exit code 1), before it said hello."})
+    monkeypatch.setattr(sys, "platform", "darwin")
     html = local_client(store).post("/connect/claude").text
-    assert str(p) in html and "read the file back" in html
-    assert "Quit Claude Desktop completely" in html and "Settings &gt; Developer" in html
-    assert "The check failed" in html and "Traceback boom" in html
+    assert str(p) in html and "read the file back" not in html
+    assert "Quit Claude Desktop completely" in html and html.count("Quit Claude Desktop completely") == 1
+    assert "The check failed" in html and "Traceback boom" in html and "But the test failed" in html
 
 
 # ------------------------------------------------- hardening (review findings)
@@ -383,21 +386,21 @@ def test_connect_route_wording_and_hidden_stderr(store, tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(integrations, "test_launch", lambda entry, timeout=30.0: seen.update(t=timeout) or fake_ok(entry))
     html = unescape(local_client(store).post("/connect/claude").text)
-    assert "Added to Claude Desktop's settings and tested: Talent Search starts and answers." in html
-    assert "If Claude Desktop was open, quit it completely and reopen it to finish." in html
+    assert integrations.HEALTHY_LINE in html
+    assert "If Claude Desktop was open" not in html and "One more step" not in html
     assert "talent-search" in html and "noisy log line" not in html
     assert seen["t"] == 45
     again = local_client(store).post("/connect/claude").text
-    assert "tested: Talent Search starts and answers" in unescape(again)
+    assert integrations.ALREADY_HEALTHY_LINE in unescape(again)
 
 
 def test_connect_route_already_set_up(store, tmp_path, monkeypatch):
     web_setup(tmp_path, monkeypatch)
     monkeypatch.setattr(integrations, "test_launch", fake_ok)
-    assert "tested: Talent Search starts and answers" in unescape(local_client(store).post("/connect/claude").text)
+    assert integrations.ALREADY_HEALTHY_LINE in unescape(local_client(store).post("/connect/claude").text)
     monkeypatch.setattr(integrations, "test_launch", lambda e, timeout=30.0: {**fake_ok(e), "ok": False, "error": "x"})
     html = unescape(local_client(store).post("/connect/claude").text)
-    assert "Already set up" in html and "Added, but the test failed" in html
+    assert "already had Talent Search" in html and "But the test failed" in html
 
 
 def test_connect_route_never_500s(store, tmp_path, monkeypatch):

@@ -58,7 +58,7 @@ PAGE_SIZES = ("100", "250", "all")  # the Candidates "Show" choice; All stops at
 FORM_FIELDS_MAX = 12000  # form fields a bulk post may carry (one per ticked person, plus the filters); Starlette stops at 1000
 BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all of the results" is ticked
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
-BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
+BIG_IMPORT_ROWS = 5000  # from here on the import page says it can take a little while, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DOWNLOADS = {"/backup", "/export.csv", "/export.xlsx", "/candidates/export.xlsx",
              "/candidates/export.csv"}  # whole-database downloads: never for another site's page
@@ -68,6 +68,7 @@ KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 LOCKED = "Open Talent Search from its app icon (or run talent open) to unlock this window."
+LOCKED_PAGE = "Open Talent Search from its app icon to unlock this window."  # the page for a recruiter: no commands
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
@@ -478,7 +479,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if request.url.path.startswith("/api/"):
             resp: Response = JSONResponse({"detail": LOCKED}, status_code=401)
         else:  # only the way to unlock: every other link would land on this page again
-            resp = templates.TemplateResponse(request, "locked.html", {"message": LOCKED}, status_code=401)
+            resp = templates.TemplateResponse(request, "locked.html", {"message": LOCKED_PAGE}, status_code=401)
             if time.monotonic() - locked_logged[0] > 60:  # the same hint in the serve log, once a minute at most
                 locked_logged[0] = time.monotonic()
                 log.info(LOCKED_LOG)
@@ -565,8 +566,20 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     def overview_ctx() -> dict[str, Any]:
         people, sample_jobs = sample_ids(store)
-        return {"saved_searches": store.list_saved_searches(counts=True),
-                "today": actions.action_items(store), "jobs": store.list_jobs("open"),
+        today = actions.action_items(store)
+        next_steps: dict[str, Any] = {}
+        if not today["items"]:  # nothing needs them: say what would help next, only the steps that apply
+            try:
+                dups = duplicates.count(store)
+            except Exception:
+                dups = 0
+            try:
+                claude_ok = integrations.claude_connected()
+            except Exception:
+                claude_ok = True  # can't tell: don't nag
+            next_steps = {"dups": dups, "claude": not claude_ok}
+        return {"saved_searches": store.list_saved_searches(counts=True), "next_steps": next_steps,
+                "today": today, "jobs": store.list_jobs("open"),
                 "recent": store.recent_candidates(6), "recipes_plan": recipes.plan_my_day(),
                 "real_count": store.count_candidates() - len(people), "has_sample": bool(people or sample_jobs)}
 
@@ -1351,12 +1364,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             no_match = xlsx_export.nobody_matches(store, [r["id"] for r in rows], hl_pairs)
         except Exception:
             notes_seen, no_match = {}, False
+        try:
+            about_seen = xlsx_export.about_preview(store, [r["id"] for r in rows])
+        except Exception:
+            about_seen = {}
         return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
                     count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
                     notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
                     rejected=rejected, preview=preview, today=xlsx_export.stamp(),
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
-                    pv=pv, notes_seen=notes_seen, no_match=no_match,
+                    pv=pv, notes_seen=notes_seen, no_match=no_match, about_seen=about_seen,
                     leave_out=leave_out or set(), leave_note=leave_note or set(),
                     rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
                     kept_ids={p["id"] for p in pv.get("people") or []})
@@ -1400,6 +1417,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
                               rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
                               error="Everyone is left out. Untick \"Leave this person out\" for at least one person.")
+        if job and not xlsx_export.share_table(store, ids, job_id=job_id, include_rejected=rejected,
+                                               leave_out=leave_out)["rows"]:
+            return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
+                              rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
+                              error=f"Nobody here is still in {job['title']}. Pick another job, or No job.")
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
@@ -1447,7 +1469,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if no_about:
             hidden.add("about")
         if hm:
-            every = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            every = [{**p, "links": compare.public_links(p["links"]),  # no email or phone in a page to forward
+                      "about": xlsx_export.strip_contact(p.get("about") or "")[0]} for p in compare.active_jobs(people)]
             people = [p for p in every if not p["not_in_play"]]
             hm_left_out = compare.left_out_note(every)
             if len(people) < compare.MIN_PEOPLE:
@@ -2190,6 +2213,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     preview_lines=importers.preview_lines(preview) if preview else [],
                     panels=importers.result_panels(preview) if preview else [], big=len(rows) > BIG_IMPORT_ROWS,
                     button_label=importers.button_label(preview, len(rows)), add_stages=add_stages,
+                    nothing_to_do=importers.nothing_to_do(preview), target_groups=importers.target_groups(),
+                    stage_mapped=any(m in ("stage", "jobs") for m in mapping),
                     move_stages=move_stages, profile=prof, client=client, reopen_jobs=reopen_jobs,
                     replace_stages=replace_stages, no_client="job_title" in mapping and "job_company" not in mapping,
                     allow_backward=allow_backward, other_tool=importers.other_tool(store, header),
@@ -2269,6 +2294,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
                     for i in result.get("new_job_ids") or [] if i in ask]
         return page(request, "import.html", step="done", result=result, token=token,
+                    headline=importers.result_headline(result, len(rows)),
                     line_note=importers.line_note(file_text, len(rows)),
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
                     closed_lines=importers.closed_job_lines(result),
@@ -2424,6 +2450,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if request.method != "GET" or request.url.path.startswith(("/static/", "/api/")):
             return None
         try:
+            asked = request.query_params.get("tour")
+            if tour.state(store)["active"] and asked in tour.MODES:
+                tour.restart(store, asked)  # a replay link starts over, even while a tour is running
             if not tour.state(store)["active"]:
                 if request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
                     return None  # never over the install buttons on their own
@@ -2643,6 +2672,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", "status",
                                                     *JOB_EXTRA_FIELDS) if k in form}
+        if not data.get("openings", "x").strip() and job_id in store.openings_unset_ids():
+            data.pop("openings")  # left blank on an import-made job: still not set, rather than a made-up 1
         try:
             store.update_job(job_id, **data)
         except ValueError as exc:
@@ -2707,7 +2738,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/jobs/{job_id}/edit", response_class=HTMLResponse)
     def edit_job(request: Request, job_id: int):
-        return page(request, "job_form.html", j=job_or_404(job_id), error=None, stages=store.job_stages(job_id),
+        j = {**job_or_404(job_id), "openings_unset": job_id in store.openings_unset_ids()}
+        return page(request, "job_form.html", j=j, error=None, stages=store.job_stages(job_id),
                     outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
 
     @app.post("/jobs/{job_id}/stages", response_class=HTMLResponse)
@@ -4261,7 +4293,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         home = str(form.get("next") or "") == "/"  # the banner on Today: back there
         try:
-            name = reports.save_user_zone(store, str(form.get("time_zone") or ""))
+            # the banner's one-click button sends use_zone (this browser's zone); the box sends time_zone
+            name = reports.save_user_zone(store, str(form.get("use_zone") or form.get("time_zone") or ""))
         except ValueError as exc:
             if home:
                 return back(request, "/", error=str(exc))
@@ -4445,6 +4478,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             plugin_where=_plugin_where(),
             marketplace_repo=skills.REPO,
             can_open_claude=skills.claude_app_command() is not None,
+            restarts=integrations.restart_supported(),
+            fit_app=("claude" if status["installed"] else "codex" if integrations.codex_config_path().parent.is_dir()
+                     else "lmstudio" if integrations.lmstudio_config_path().parent.is_dir() else "claude"),
             skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
                         for n in skills.skill_names()],
         )
@@ -4472,6 +4508,31 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
         return Response(skills.build_plugin(), media_type="application/octet-stream",
                         headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
+
+    @app.post("/connect/skills/add", response_class=HTMLResponse)
+    def skills_add(request: Request):
+        """One click: skills into every app found here, the Claude plugin saved and shown, Claude opened."""
+        try:
+            r = skills.add_everywhere()
+        except Exception as exc:  # never a 500 or a traceback in the window
+            integrations.log_failure(exc)
+            return page(request, "_skills_add_result.html", error=integrations.friendly_error(exc))
+        return page(request, "_skills_add_result.html", r=r, plugin_where=_plugin_where(),
+                    marketplace_repo=skills.REPO, **_found_ctx())
+
+    @app.post("/connect/skills/plugin/reveal", response_class=HTMLResponse)
+    def skills_plugin_reveal(request: Request):
+        """'Show in folder' for the saved plugin file (saves it first if it isn't there)."""
+        path = skills.downloads_dir() / skills.PLUGIN_FILE
+        try:
+            if not path.is_file():
+                path = skills.write_plugin()
+            shown = skills.reveal(path)
+        except Exception as exc:
+            integrations.log_failure(exc)
+            return HTMLResponse(f'<span class="error">{html_escape(integrations.friendly_error(exc))}</span>')
+        return HTMLResponse('<span class="ok">Shown in your file manager.</span>' if shown else
+                            f'<span class="fine">The file is in {html_escape(str(path.parent))}.</span>')
 
     @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
     def skills_plugin_save(request: Request):
@@ -4552,12 +4613,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             if result.get("ok") and target in ("claude", "lmstudio") and result.get("entry"):
                 check = integrations.test_launch(result["entry"], timeout=45)
                 check["line"] = integrations.result_line(check)
+            restart = None
+            if (target == "claude" and check and check["ok"] and result.get("installed", True)
+                    and integrations.restart_supported()):
+                restart = integrations.restart_claude()  # one click: quit Claude if open, open it again
         except Exception as exc:  # never a 500 or a traceback in the window
             integrations.log_failure(exc)
             return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
         return page(request, "_connect_result.html", ok=True, target=target, result=result, check=check,
-                    quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
-                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
+                    restart=restart, quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
+                    healthy_line=(integrations.ALREADY_HEALTHY_LINE if result.get("already_connected")
+                                  else integrations.HEALTHY_LINE),
+                    restarts=integrations.restart_supported(), claude_running=bool(integrations.app_running("claude")))
 
     @app.post("/connect/{target}/test", response_class=HTMLResponse)
     def connect_test(request: Request, target: str):
@@ -4575,7 +4642,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return page(request, "_connect_result.html", ok=False, target=target, error=integrations.friendly_error(exc))
         return page(request, "_connect_test.html", target=target, entry=entry, check=check, problems=problems,
                     quit_text=integrations.quit_instruction(), look_text=integrations.claude_where_to_look(),
-                    healthy_line=integrations.HEALTHY_LINE, reopen_line=integrations.REOPEN_LINE)
+                    test_ok_line=integrations.TEST_OK_LINE, restarts=integrations.restart_supported())
 
     # ------------------------------------------------------------ JSON
     @app.get("/api/health")

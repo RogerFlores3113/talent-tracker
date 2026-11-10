@@ -1,19 +1,22 @@
 {% set app = {'claude': 'Claude Desktop', 'codex': 'Codex', 'lmstudio': 'LM Studio'}[target] %}
+{% set keep = target ~ '-result' %}
+{% include "_connect_clear.html" %}
+<div role="status" tabindex="-1" autofocus>
 {% if entry is none %}
-<p class="flash warn">The entry isn't in {{ app }}'s settings file any more.{% if target == 'claude' %} This happens when Claude Desktop was open while we connected. {{ quit_text }} Press Connect, then open it.{% else %} Press Connect to add it again.{% endif %}</p>
+<p class="flash warn">The entry isn't in {{ app }}'s settings file any more.{% if target == 'claude' and restarts %} This happens when Claude Desktop was open while we connected. {{ quit_text }} Press Connect, then open it.{% else %} Press Connect to add it again.{% endif %}</p>
 {% else %}
   {% for p in problems %}<p class="error">{{ p }}</p>{% endfor %}
   {% if check.ok %}
-  {% if target == 'claude' and not problems %}<p class="ok">{{ healthy_line }}</p>{% endif %}
-  <p class="ok">{{ check.line }}</p>
+  {% if target == 'claude' and not problems %}<p class="ok">{{ test_ok_line }}</p>{% else %}<p class="ok">{{ check.line }}</p>{% endif %}
   {% else %}
   <p class="error">{{ check.line }}</p>
   <details open class="fine"><summary>What the program said</summary>
     <pre class="code">{{ check.stderr_tail|join('\n') or '(nothing)' }}</pre></details>
   {% endif %}
   {% if check.stray_stdout %}<p class="fine">It also printed text that isn't part of the protocol, which can get in the app's way: {{ check.stray_stdout[0][:160] }}</p>{% endif %}
+  {% if check.ok %}<details class="fine"><summary>Technical details</summary><p>{{ check.line }}</p>{% if target == 'claude' %}<p>{{ look_text }}</p>{% endif %}</details>{% endif %}
   {% if target == 'claude' and check.ok %}
-  <p class="fine">{{ reopen_line }} {{ quit_text }}</p>
-  <p>{{ look_text }}</p>
+  <p class="fine">Not showing in Claude? {{ quit_text }}</p>
   {% endif %}
 {% endif %}
+</div>

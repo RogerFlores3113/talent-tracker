@@ -121,8 +121,8 @@ def test_share_notes_warning_and_preview_data(store):
     assert re.search(r'id="notes-warn" >', shown) or 'id="notes-warn" hidden' not in shown
     pv = json.loads(unescape(re.search(r"data-preview='([^']*)'", html).group(1)))
     mine = pv["jobs"][str(job["id"])]
-    assert mine["out"]["count"] == 2 and "Emily Chen" not in mine["out"]["names"] and mine["out"]["stage"] is True
-    assert mine["in"]["count"] == 3 and "Emily Chen" in mine["in"]["names"]
+    assert mine["out"]["count"] == 1 and "Emily Chen" not in mine["out"]["names"] and mine["out"]["stage"] is True
+    assert mine["in"]["count"] == 2 and "Emily Chen" in mine["in"]["names"]  # the one not in the job stays out
     assert pv["jobs"][""]["out"]["stage"] is False
 
 
@@ -145,9 +145,10 @@ def test_share_preview_matches_the_file(store):
 def test_share_page_with_a_job_shows_the_file_it_makes(store):
     ids = people(store, 3)
     job = store.add_job("Senior Backend Engineer", "Acme")
+    store.add_to_pipeline(ids[0], job["id"], "Interview")
     store.add_to_pipeline(ids[1], job["id"], "Rejected")
     html = local_client(store).get(f"/candidates/share?ids={q(ids)}&job={job['id']}").text
-    assert '<dd id="pv-count">2 of 3' in html
+    assert '<dd id="pv-count">1 of 3' in html and "left out: 1 not in this job, 1 rejected or withdrawn" in html
     assert 'placeholder="Shortlist for Senior Backend Engineer"' in html
     plain = local_client(store).get(f"/candidates/share?ids={q(ids)}").text
     assert 'placeholder="A line for the top of the file"' in plain and "Shortlist for" not in plain

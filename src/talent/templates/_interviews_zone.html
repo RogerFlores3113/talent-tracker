@@ -1,2 +1,2 @@
 {% include "_zone_unset.html" %}
-<p class="fine" id="iv-zone">Times are in {{ local_zone() or "this computer's time zone" }}. <a href="/settings#time-zone">Change time zone</a>. A session with no length saved counts as 45 minutes; write it in the summary, like "Tech screen (30 min)", to set one.</p>
+<p class="fine" id="iv-zone">{% if not user_zone() and computer_on_utc() %}A session{% else %}Times are in {{ local_zone() or "this computer's time zone" }}. <a href="/settings#time-zone">Change time zone</a>. A session{% endif %} with no length saved counts as 45 minutes; write it in the summary, like "Tech screen (30 min)", to set one.</p>

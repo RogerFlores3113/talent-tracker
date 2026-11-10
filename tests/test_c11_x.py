@@ -186,15 +186,14 @@ def test_in_the_pipeline_wording_and_jobs_without_a_client(store):
 
 
 # ------------------------------------------------------------------ 6. Connect page
-def test_connect_plugin_steps_show_once_and_the_plugin_comes_first(store):
+def test_connect_plugin_steps_show_once_and_connect_comes_before_skills(store):
     page = local_client(store).get("/connect").text
     assert page.count('id="plugin-steps"') == 1 and page.count('id="plugin-check"') == 1
-    assert page.index('id="plugin-steps"') < page.index("Claude Code and Codex")
+    assert page.index('id="claude-panel"') < page.index('id="skills-panel"') < page.index('id="try-asking"')
     assert "/plugin install talent-search@talent-tracker" in page
     assert "Check it worked" in page
-    assert "Which one should I pick?" in page
-    assert "Get the Claude plugin for Claude Desktop" in page
-    assert "still needs the Talent Search connection" in page
+    assert "Which one should I pick?" not in page and 'id="skills-other-ways"' in page
+    assert "still needs the connection from Step 1" in page
     assert "works in every app" not in page and "every AI app" not in page
 
 
@@ -391,7 +390,7 @@ def test_plan_loop_says_when_it_skips_an_interviewer_for_working_hours(store):
 # ------------------------------------------------------------------ 14, 18. the tour
 def test_skip_tour_ends_in_one_click_and_never_covers_a_field():
     js = (STATIC / "app.js").read_text()
-    assert 'function skip() { postForm("/tour/skip", {}); }' in js
+    assert 'else postForm("/tour/skip", {}); }' in js and "function skip()" in js
     assert "clearInert(); root.remove();" in js and "ts-tour-ended" in js
     assert "never start over a box that has focus" in js and "focusin" in js and "focusout" in js
     assert 'main h1' in js  # after the tour ends, focus goes to the page's h1

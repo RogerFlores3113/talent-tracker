@@ -24,6 +24,17 @@ jobs:
       - run: uv sync --frozen --all-groups
       - run: uv run pytest -q --tb=short
 
+      - name: Check install.sh syntax
+        if: runner.os != 'Windows'
+        run: bash -n install.sh
+      - name: Check install.ps1 syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
   build:
     name: Build (${{ matrix.os }})
     needs: test
@@ -78,6 +89,40 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: tar -czf TalentSearch-linux.tar.gz -C dist "Talent Search"
+
+      - name: Test the install script against this build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel" "$RUNNER_TEMP/inst"
+          cp TalentSearch-mac.zip "$RUNNER_TEMP/rel/"
+          (cd "$RUNNER_TEMP/rel" && shasum -a 256 TalentSearch-mac.zip > SHA256SUMS.txt)
+          TALENT_INSTALL_FROM="$RUNNER_TEMP/rel" TALENT_INSTALL_DIR="$RUNNER_TEMP/inst" sh install.sh --no-open
+          test -x "$RUNNER_TEMP/inst/Talent Search.app/Contents/MacOS/Talent Search"
+          uv run python packaging/smoke_mcp.py "$RUNNER_TEMP/inst/Talent Search.app/Contents/MacOS/Talent Search"
+      - name: Test the install script against this build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel" "$RUNNER_TEMP/inst"
+          cp TalentSearch-linux.tar.gz "$RUNNER_TEMP/rel/"
+          (cd "$RUNNER_TEMP/rel" && sha256sum TalentSearch-linux.tar.gz > SHA256SUMS.txt)
+          TALENT_INSTALL_FROM="$RUNNER_TEMP/rel" TALENT_INSTALL_DIR="$RUNNER_TEMP/inst" sh install.sh --no-open
+          test -x "$RUNNER_TEMP/inst/Talent Search/talent-search"
+          uv run python packaging/smoke_mcp.py "$RUNNER_TEMP/inst/Talent Search/talent-search"
+      - name: Test the install script against this build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'rel'
+          $inst = Join-Path $env:RUNNER_TEMP 'inst'
+          New-Item -ItemType Directory -Path $rel -Force | Out-Null
+          Copy-Item TalentSearch-windows.zip $rel
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $rel 'TalentSearch-windows.zip')).Hash.ToLower()
+          Set-Content -Path (Join-Path $rel 'SHA256SUMS.txt') -Value "$hash  TalentSearch-windows.zip" -Encoding ascii
+          $env:TALENT_INSTALL_FROM = $rel
+          $env:TALENT_INSTALL_DIR = $inst
+          & .\install.ps1 -NoOpen
+          if (-not (Test-Path (Join-Path $inst 'talent-search-mcp.exe'))) { throw 'installed talent-search-mcp.exe is missing' }
+          uv run python packaging/smoke_mcp.py (Join-Path $inst 'talent-search-mcp.exe')
 
       - uses: actions/upload-artifact@v4
         with:

@@ -280,10 +280,10 @@ def test_share_opt_ins_job_note_and_filename(store):
     assert rows[0] == [f"Shortlist for the backend role, as of {today}"] and rows[1][0] == "Name"
     head = rows[1]
     assert {"Stage", "Email", "Phone", "Notes"} <= set(head)
-    a, b = (dict(zip(head, r)) for r in rows[2:4])
+    a = dict(zip(head, rows[2]))
     assert a["Email"] == "ana@example.com" and a["Phone"] == "555-0101" and a["Stage"] == "Interviewing"
     assert "asks too much money" in a["Notes"]
-    assert b["Stage"] is None  # not in the job: blank
+    assert len(rows) == 3  # Ben is not in the job: a file for the job leaves him out (cycle 17)
     assert book["Candidates"]["freeze"][0] == "2"
 
 
@@ -333,7 +333,7 @@ def test_mcp_tool_writes_a_file_without_private_fields(store, tmp_path, monkeypa
     monkeypatch.setenv("TALENT_DOWNLOADS_DIR", str(tmp_path / "dl"))
     job, ana, ben, cy = seed(store)
     data = data_of(call(build_server(store), "export_candidates_xlsx", candidate_ids=[ana["id"], ben["id"]], job_id=job["id"]))
-    assert data["written"] and data["people"] == 2 and "/candidates/share?" in data["share_url"]
+    assert data["written"] and data["people"] == 1 and "/candidates/share?" in data["share_url"]  # Ben isn't in the job
     f = tmp_path / "dl" / data["file"]
     assert f.exists() and data["file"].startswith("shortlist-acme-senior-backend-engineer-")
     blob = b"".join(zipfile.ZipFile(f).read(n) for n in zipfile.ZipFile(f).namelist())

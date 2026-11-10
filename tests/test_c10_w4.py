@@ -199,14 +199,12 @@ def test_time_zone_bar_shows_only_when_the_computer_zone_looks_unset(store, monk
     store.add_candidate(name="Ana Ruiz")
     monkeypatch.setattr(reports, "computer_on_utc", lambda: True)
     shown = c.get("/").text
-    assert "data-tz-banner" in shown and "Set your time zone" in shown and 'data-tz-saved=""' in shown
-    assert 'data-tz-saved="" hidden' not in shown
+    assert "data-tz-banner" in shown and "Pick another" in shown and "use_zone" in shown and "Keep UTC" in shown
+    assert " hidden>" not in shown.split("data-tz-banner")[1].split(">")[0]
     monkeypatch.setattr(reports, "computer_on_utc", lambda: False)
     assert "data-tz-banner" not in c.get("/").text  # a computer with its own zone and nothing saved: no bar
     reports.save_user_zone(store, "America/Chicago")
-    saved = c.get("/").text  # saved: hidden until the browser says its zone differs
-    assert re.search(r'data-tz-banner data-tz-saved="America/Chicago" hidden', saved)
-    assert "checkZoneBanner" in JS and "longOffset" in JS
+    assert "data-tz-banner" not in c.get("/").text  # a zone the person chose is never questioned again
 
 
 def test_welcome_wording_is_short_and_the_footer_is_clear(store):

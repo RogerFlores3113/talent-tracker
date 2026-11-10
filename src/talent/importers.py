@@ -125,6 +125,23 @@ TARGET_LABELS = {
     "stage_dates": "Stage dates, as exported (one per job)",
     "work_history": "Work history, as exported (Title at Company (2019-2022); ...)",
 }
+# The mapping dropdown's groups, so about 28 choices read in four short lists. Anything not named lands in Other.
+TARGET_GROUPS = (
+    ("Contact", ("name", "first_name", "last_name", "email", "other_emails", "phone", "linkedin_url", "website",
+                 "links", "location")),
+    ("Work", ("current_title", "current_company", "about", "tags", "work_history")),
+    ("Pipeline", ("job_title", "job_company", "stage", "stage_changed_at", "jobs", "stage_dates")),
+)
+
+
+def target_groups() -> list[tuple[str, list[str]]]:
+    """(group name, targets) for the mapping dropdown's optgroups, in IMPORT_TARGETS' terms. "" (skip) is not in one."""
+    named = {t for _, ts in TARGET_GROUPS for t in ts}
+    groups = [(g, [t for t in ts if t in IMPORT_TARGETS]) for g, ts in TARGET_GROUPS]
+    groups.append(("Other", [t for t in IMPORT_TARGETS if t and t not in named]))
+    return [(g, ts) for g, ts in groups if ts]
+
+
 BACKUPS_KEPT = 10
 
 _RELATIVE_DATE = re.compile(
@@ -1128,6 +1145,7 @@ class _Jobs:
         self.keys: dict[str, int] = {}  # what this file matched, for the profile
         self.reopen = reopen  # a closed or on-hold job the file still lists is opened again, instead of left alone
         self.reopened: list[str] = []
+        self.notes: list[str] = []  # a job title that fits several jobs here, said once
 
     def get(self, title: str, company: str, any_status: bool) -> dict[str, Any]:
         """The job, made if there's none by that title and client. A closed or on-hold one is returned as it is
@@ -1145,6 +1163,16 @@ class _Jobs:
                        key=lambda j: rank.get(j["status"], 3))
         if not found and known is not None:
             found = [j for j in self.jobs if j["id"] == known]  # renamed here since the last sync, and not open
+        if not found and not key[1]:  # no client in the file: one job here with that title, whoever the client is
+            same = [j for j in self.jobs if _fold(j["title"]) == key[0]]
+            if len(same) == 1:
+                found = same
+            elif len(same) > 1:
+                line = (f"\"{title}\" fits {len(same)} jobs here ({', '.join(job_label(j) for j in same[:4])}"
+                        f"{', and more' if len(same) > 4 else ''}) and the file names no client, so it is not "
+                        "guessed which one: a new job with no client is made. Name the client to pick one")
+                if line not in self.notes:
+                    self.notes.append(line)
         if found:
             job = found[0]
             if job["status"] != "open" and not any_status and self.reopen:
@@ -1499,12 +1527,11 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
             conflicts += _is_conflict(exc)
             continue
         if merge_why and not created:
-            merges.append({"row": rec["rows"][0], "name": cand["name"], "id": cand["id"], "why": merge_why})
-        if len(rec["rows"]) > 1:
-            merges.append({"row": rec["rows"][0], "name": cand["name"], "id": cand["id"],
-                           "why": f"rows {', '.join(map(str, rec['rows']))} are one person in this file: "
-                                  f"{' and '.join(dict.fromkeys(rec.get('merge_why') or ['the same details']))}. "
-                                  "Saved as one"})
+            if cand["id"] in made_ids:  # made earlier in this same file: a repeat, not someone already here
+                merged_rows.append(f"Row {rec['rows'][0]} is the same person as {cand['name']} earlier in this file "
+                                   f"({merge_why}), so they were saved as one")
+            else:
+                merges.append({"row": rec["rows"][0], "name": cand["name"], "id": cand["id"], "why": merge_why})
         if created:
             made_ids.add(cand["id"])
             if change and change["action"] == "new":
@@ -1571,8 +1598,10 @@ def _import(store: Store, header: list[str], rows: list[list[str]], mapping: lis
                     + ("updated, the new email is now their main one" if c["action"] == "update"
                        else "added as a new person")
                     + (", and the job matches" if c.get("same_job") else "") for c in email_changes]
+    repeats = sum(len(r["rows"]) - 1 for r in records if len(r["rows"]) > 1 and r["data"].get("name"))
     merge_lines = [f"Row {m['row']}: {m['name']} (id {m['id']}): {m['why']}" for m in merges]
-    return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped,
+    return {"added": added, "updated": updated, "unchanged": unchanged, "skipped": skipped, "repeats": repeats,
+            "job_notes": jobs.notes if jobs else [],
             "email_change_lines": change_lines, "merges": merges, "merge_lines": merge_lines,
             "column_lines": column_lines(header, mapping, rows),
             "skipped_rows": skipped_rows, "conflicts": conflicts, "warnings": warned, "notes": notes,
@@ -1899,6 +1928,7 @@ def _guess_openings(store: Store, made: list[dict[str, Any]]) -> None:
     import json
 
     ask = sorted(set(openings_to_ask(store)) | {j["id"] for j in made})
+    store.mark_openings_unset(j["id"] for j in made)  # until then nothing calls these jobs filled
     with store._lock, store._conn:
         store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
                             "value = excluded.value", (OPENINGS_KEY, json.dumps(ask)))
@@ -1989,7 +2019,7 @@ def preview_import(store: Store, header: list[str], rows: list[list[str]], mappi
                    source: str = "CSV import", add_stages: bool = False, **opts: Any) -> dict[str, Any]:
     """What import_rows would do, worked out on a private copy of the database. Nothing here changes.
     opts: import_rows' move_stages and profile."""
-    scratch = Store(":memory:")
+    scratch = Store(":memory:", scratch=True)
     try:
         try:
             with store._lock:
@@ -2015,7 +2045,7 @@ def _preview_on_disk(store: Store, header: list[str], rows: list[list[str]], map
     copy = folder / "preview.db"
     try:
         store.backup_to(copy)
-        scratch = Store(copy)
+        scratch = Store(copy, scratch=True)
         try:
             result = import_rows(scratch, header, rows, mapping, source=source, backup=False, add_stages=add_stages,
                                  **opts)
@@ -2162,8 +2192,37 @@ def diff_lines(result: dict[str, Any], limit: int = 10) -> list[str]:
     return out
 
 
+def nothing_to_do(result: dict[str, Any] | None) -> bool:
+    """A dry run that would change nothing: everyone in the file is already here and up to date."""
+    if not result or not result.get("unchanged"):
+        return False
+    busy = ("added", "updated", "notes", "pipelines_added", "dates_set", "jobs_created", "moved", "reopened",
+            "skipped_rows", "email_changes", "possible_duplicates", "held_back")
+    return not any(result.get(k) for k in busy) and not (result.get("missing_stages") and result.get("stages_added"))
+
+
+def result_headline(result: dict[str, Any], total: int) -> str:
+    """'2,000 rows: 1,960 people added, 40 repeats merged.' Only the parts that apply, with thousands separators."""
+    parts = []
+    if result.get("added"):
+        parts.append(f"{_plural(result['added'], 'person', 'people', ',')} added")
+    if result.get("repeats"):
+        parts.append(f"{_plural(result['repeats'], 'repeat', None, ',')} merged")
+    if result.get("updated"):
+        parts.append(f"{result['updated']:,} updated")
+    if result.get("unchanged"):
+        parts.append(f"{result['unchanged']:,} unchanged")
+    if result.get("skipped_rows"):
+        parts.append(f"{_plural(result['skipped_rows'], 'row', None, ',')} skipped")
+    if result.get("notes"):
+        parts.append(f"{_plural(result['notes'], 'note', None, ',')} added")
+    return f"{_plural(total, 'row', None, ',')}: " + (", ".join(parts) if parts else "nothing to change") + "."
+
+
 def button_label(result: dict[str, Any] | None, total: int) -> str:
     """The import button says what it does: 'Import 3 new people and update 2'."""
+    if nothing_to_do(result):
+        return "Import anyway"
     if result:
         added, updated = result.get("added", 0), result.get("updated", 0)
         if added and updated:
@@ -2175,8 +2234,8 @@ def button_label(result: dict[str, Any] | None, total: int) -> str:
     return f"Import {_plural(total, 'row')}"
 
 
-def _plural(n: int, word: str, many: str | None = None) -> str:
-    return f"{n} {word if n == 1 else many or word + 's'}"
+def _plural(n: int, word: str, many: str | None = None, sep: str = "") -> str:
+    return f"{n:{sep}} {word if n == 1 else many or word + 's'}"
 
 
 def email_skip_line(cols: list[str]) -> str:
@@ -2203,8 +2262,8 @@ def other_tool(store: Store, header: list[str]) -> str | None:
 def preview_lines(result: dict[str, Any]) -> list[str]:
     """What a dry run found, in plain lines. The first line is the headline."""
     fields = _labels(result.get("changed_fields") or {})
-    parts = [f"add {result['added']}",
-             f"update {result['updated']}" + (f" ({fields})" if fields and result["updated"] else "")]
+    parts = [f"add {result['added']:,}",
+             f"update {result['updated']:,}" + (f" ({fields})" if fields and result["updated"] else "")]
     if result.get("moved"):
         parts.append(f"move {_plural(len(result['moved']), 'person', 'people')} to the stage the file shows"
                      + ("" if result.get("moved_backward") else " (all forward)"))
@@ -2220,6 +2279,9 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
         parts.append(f"flag {_plural(n, 'possible duplicate')} (no email or LinkedIn, and the name matches "
                      "someone here)")
     lines = ["Will " + ", ".join(parts) + "."]
+    if nothing_to_do(result):
+        lines = [f"Nothing will change: {_plural(result['unchanged'], 'person is', 'people are', ',')} in this file "
+                 "already up to date."]
     changes = result.get("email_changes") or []
     if changes:
         n = len(changes)
@@ -2229,8 +2291,8 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
                      f"is kept), and {n - upd} will be added as new people. You can change this for each person, "
                      "or for all of them.")
     extra = []
-    if result["unchanged"]:
-        extra.append(f"{result['unchanged']} already up to date")
+    if result["unchanged"] and not nothing_to_do(result):
+        extra.append(f"{result['unchanged']:,} already up to date")
     if result.get("notes"):
         extra.append(f"{_plural(result['notes'], 'note')} to add")
     if result.get("pipelines_added"):
@@ -2249,6 +2311,7 @@ def preview_lines(result: dict[str, Any]) -> list[str]:
         lines.append("Also: " + "; ".join(extra) + ".")
     if result.get("email_columns_skipped"):
         lines.append(email_skip_line(result["email_columns_skipped"]))
+    lines += result.get("job_notes") or []
     lines += result.get("column_lines") or []
     lines += closed_job_lines(result)
     return lines

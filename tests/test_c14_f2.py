@@ -198,7 +198,8 @@ def test_job_pipeline_header_says_both_numbers(store):
     res = call(build_server(store), "job_pipeline", job_id=job)
     d = data(res)
     assert "Sofia Rejected" not in text(res).split("\n\n")[0]
-    assert d["headline"].startswith("2 in the pipeline. 1 counts in the status update (Sourced is left out).")
+    # Cycle 16: the chat status update leaves out what Copy status update leaves out, ended stages too.
+    assert d["headline"].startswith("2 in the pipeline. 1 counts in the status update (Sourced and Rejected are left out).")
     assert "candidate in process" not in d["headline"]
 
 

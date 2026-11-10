@@ -209,6 +209,7 @@ def test_tour_shows_colors_saved_searches_and_skills(store):
     colors = step_of(data, "colors")
     assert colors["target"] == [".colorbar"]
     assert step_of(data, "skills")["target"] == ["#skills-panel"] and step_of(data, "saved")["path"] == "/candidates"
+    store.add_candidate(name="Ana Ruiz")  # an empty list hides the color chips
     page = c.get("/candidates").text
     assert 'class="colorbar"' in page and 'class="savedbar"' in page and 'id="skills-panel"' in c.get("/connect").text
 

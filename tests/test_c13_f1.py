@@ -108,7 +108,7 @@ def test_label_wording_and_no_color_arrow_while_highlighting(store):
     _seed(store)
     c = local_client(store)
     on = c.get("/candidates?hl=python").text
-    assert "Sorted by highlighted skills first, then by label color." in on
+    assert "Highlighted skills first, then by label color." in on
     assert "Sorted by color: red" not in on
     head = on[on.index('class="colorcell"'):]
     head = head[:head.index("</th>")]
@@ -123,7 +123,7 @@ def test_bulk_bar_groups_send_out_actions(store):
     _seed(store)
     html = local_client(store).get("/candidates").text
     bar = re.search(r'<form id="bulk-form".*?</form>', html, re.S).group(0)
-    grp = re.search(r'<div class="bulk-actions bulk-send" role="group" aria-label="Send out">.*?</div>', bar, re.S).group(0)
+    grp = re.search(r'<div class="bulk-actions bulk-send" data-needs-ticks role="group" aria-label="Send out">.*?</div>', bar, re.S).group(0)
     for v in ("compare", "export", "export_xlsx", "share"):
         assert f'name="action" value="{v}"' in grp
     assert 'id="share-xlsx"' in grp and 'value="color"' not in grp

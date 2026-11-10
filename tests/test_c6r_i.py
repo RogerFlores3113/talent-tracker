@@ -86,25 +86,25 @@ def test_today_shows_the_time_zone_banner_until_a_zone_is_saved(store, monkeypat
     monkeypatch.setattr(reports, "computer_on_utc", lambda: True)  # the bar only shows on a computer set to UTC
     c = local_client(store)
     home = c.get("/").text
-    assert "Welcome to Talent Search" in home and "Set your time zone" in home  # the welcome page has it too
-    assert "data-tz-prefill" in home and 'name="next" value="/"' in home and 'action="/settings/time-zone"' in home
+    assert "Welcome to Talent Search" in home and "Pick another" in home  # the welcome page has it too
+    assert 'name="next" value="/"' in home and 'action="/settings/time-zone"' in home
     assert not re.search(r"<script(?![^>]*\bsrc=)", home) and " onclick=" not in home
     store.add_candidate(name="Ana Ruiz")
-    assert "Set your time zone" in c.get("/").text
+    assert "Is that your zone?" in c.get("/").text
     r = c.post("/settings/time-zone", data={"time_zone": "America/Chicago", "next": "/"}, follow_redirects=False)
     assert r.headers["location"] == "/" and flash_of(r) == "Times now show in America/Chicago."
-    assert "Set your time zone" not in c.get("/").text
+    assert "Is that your zone?" not in c.get("/").text
     r = c.post("/settings/time-zone", data={"time_zone": "Not/AZone", "next": "/"}, follow_redirects=False)
     assert r.headers["location"] == "/" and flash_of(r, "flash_error")
     r = c.post("/settings/time-zone", data={"time_zone": "America/Denver"}, follow_redirects=False)
     assert r.headers["location"].startswith("/settings")  # from Settings: back to Settings
     reports.save_user_zone(store, "")
-    assert "Set your time zone" in c.get("/").text
+    assert "Is that your zone?" in c.get("/").text
 
 
 def test_banner_is_not_on_a_search(store):
     store.add_candidate(name="Ana Ruiz", about="rust")
-    assert "Set your time zone" not in local_client(store).get("/?q=rust").text
+    assert "Is that your zone?" not in local_client(store).get("/?q=rust").text
 
 
 def test_app_js_prefills_the_browsers_zone():

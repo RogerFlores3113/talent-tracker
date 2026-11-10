@@ -128,7 +128,7 @@ def test_import_page_survives_a_bad_row(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name,Email,LinkedIn\nX,ana@x.com,linkedin.com/in/bob\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name", "col1": "email", "col2": "linkedin_url"})
-    assert r.status_code == 200 and "skipped 1 row" in r.text
+    assert r.status_code == 200 and "1 row skipped" in r.text
     assert "the email is Ana&#39;s, id 1, and the LinkedIn is Bob&#39;s, id 2), so it was left alone" in r.text
 
 
@@ -192,7 +192,7 @@ def test_import_result_page_mentions_backup(store):
     r = c.post("/import", files={"file": ("p.csv", b"Name\nZed\n")})
     token = re.search(r'name="token" value="(\w+)"', r.text).group(1)
     r = c.post("/import/run", data={"token": token, "col0": "name"})
-    assert "Added 1" in r.text and "backed up before this import" in r.text and "Undo this import" in r.text
+    assert "1 person added" in r.text and "backed up before this import" in r.text and "Undo this import" in r.text
     assert "—" not in r.text
 
 

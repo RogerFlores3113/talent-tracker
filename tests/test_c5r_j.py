@@ -109,7 +109,7 @@ def test_resyncing_an_unchanged_file_has_nothing_to_do(store):
     again = _dry(store, TWICE)
     assert again["moved"] == [] and again["changes"] == [] and again["updated"] == 0 and again["added"] == 0
     assert again["pipelines_added"] == 0 and again["missing_from_file"] == []
-    assert importers.preview_lines(again)[0] == "Will add 0, update 0."
+    assert importers.preview_lines(again)[0] == "Nothing will change: 3 people are in this file already up to date."
     again = _run(store, TWICE)
     assert again["backup"] is None  # nothing changed
 

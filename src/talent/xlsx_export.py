@@ -251,8 +251,10 @@ def _latest_note(store: Store, candidate_id: int) -> str:
 
 
 def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any] | None, include_rejected: bool,
-                 ) -> tuple[list[dict[str, Any]], dict[int, str], int]:
-    """(who goes in the file in file order, their stage in the job, how many rejected people were left out)."""
+                 ) -> tuple[list[dict[str, Any]], dict[int, str], int, int]:
+    """(who goes in the file in file order, their stage in the job, how many rejected or withdrawn people were left
+    out, how many people not in the job were left out). With a job picked the file is that job's people only:
+    someone ticked who isn't in it would go out with a blank Stage, and may be rejected somewhere else."""
     stage_of: dict[int, str] = {}
     info: dict[str, tuple[int, str]] = {}
     if job:
@@ -264,22 +266,56 @@ def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any]
         name = stage_of[cid]
         return info[name.lower()][1] if name.lower() in info else stage_outcome(name)
 
-    left_out = 0
+    left_out = not_in_job = 0
     if job:
+        in_job = [c for c in people if c["id"] in stage_of]
+        not_in_job = len(people) - len(in_job)
+        people = in_job
         if not include_rejected:
-            kept = [c for c in people if c["id"] not in stage_of or outcome(c["id"]) != "lost"]
+            kept = [c for c in people if outcome(c["id"]) != "lost"]
             left_out = len(people) - len(kept)
             people = kept
 
-        def rank(c: dict[str, Any]) -> tuple[int, int]:  # furthest along first; people not in the job, then the rejected
-            cid = c["id"]
-            if cid not in stage_of:
-                return (2, 0)
-            o = outcome(cid)
-            pos = info.get(stage_of[cid].lower(), (0, ""))[0]
+        def rank(c: dict[str, Any]) -> tuple[int, int]:  # furthest along first, hired on top, the rejected last
+            o = outcome(c["id"])
+            pos = info.get(stage_of[c["id"]].lower(), (0, ""))[0]
             return (3, -pos) if o == "lost" else (0, 0) if o == "hired" else (1, -pos)
         people = sorted(people, key=rank)  # a stable sort: ties keep the order the people came in
-    return people, stage_of, left_out
+    return people, stage_of, left_out, not_in_job
+
+
+# Contact details written into About (or work history) are the recruiter's to share, like the Email and Phone
+# columns: a file without contact details has them taken out, so "no email or phone" is true of the whole file.
+_EMAIL_IN_TEXT = re.compile(r"(?:mailto:)?[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+_PHONE_IN_TEXT = re.compile(
+    r"(?<![\w+])(?:tel:)?(?:\+\d{1,3}[\s.-]?(?:\(\d{1,4}\)[\s.-]?)?\d[\d\s.-]{5,}\d"  # +44 20 7946 0958
+    r"|\(\d{3}\)\s?\d{3}[\s.-]?\d{4}"  # (415) 555-0134
+    r"|\d{3}[.-]\d{3}[.-]\d{4}"  # 415-555-0134, 415.555.0134
+    r"|\d{3}\s\d{3}\s\d{4}"  # 415 555 0134
+    r"|\d{3}-\d{4})(?![\w-])")  # 555-0134
+
+
+def strip_contact(text: str) -> tuple[str, int]:
+    """(text with email addresses and phone numbers taken out, how many were taken out). Each one becomes
+    "(email removed)" or "(phone removed)", so the reader sees something was there."""
+    if not text:
+        return text or "", 0
+    n = 0
+
+    def email(_: re.Match[str]) -> str:
+        nonlocal n
+        n += 1
+        return "(email removed)"
+
+    def phone(m: re.Match[str]) -> str:
+        nonlocal n
+        if sum(ch.isdigit() for ch in m.group(0)) < 7:
+            return m.group(0)
+        n += 1
+        return "(phone removed)"
+    out = _EMAIL_IN_TEXT.sub(email, text)
+    out = _PHONE_IN_TEXT.sub(phone, out)
+    return out, n
 
 
 def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
@@ -316,18 +352,24 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
             people.append(store.get_candidate(cid))
         except Exception:  # someone removed since the page was shown: skip them
             continue
-    people, stage_of, left_out = _pick_people(store, people, job, include_rejected)
+    people, stage_of, left_out, not_in_job = _pick_people(store, people, job, include_rejected)
     records = []
+    scrubbed = 0
     for c in people:
         hist = store.work_history(c["id"])
         y = half_years(years_of_experience([(h["start"], h["end"]) for h in hist]))
+        about, history = c.get("about") or "", history_text(hist)
+        if not include_contact:
+            about, n1 = strip_contact(about)
+            history, n2 = strip_contact(history)
+            scrubbed += n1 + n2
         rec = {"Name": c["name"], "Matched picks": matched_picks(c, hl, aliases) if hl else "",
                "Title": c.get("current_title") or "", "Company": c.get("current_company") or "",
                "Location": c.get("location") or "", "Years of experience": y, "Skills": ", ".join(c.get("tags") or []),
                "Stage": stage_of.get(c["id"], "") if job else "",
                "LinkedIn": _link_cell(c.get("linkedin_url")), "Website": _link_cell(c.get("website")),
                "Other links": "\n".join(u for u in (c.get("links") or []) if is_public_link(u)),
-               "About": c.get("about") or "", "Work history": history_text(hist)}
+               "About": about, "Work history": history}
         if include_contact:
             rec["Email"], rec["Phone"] = c.get("email") or "", c.get("phone") or ""
         if c["id"] in no_notes:
@@ -342,6 +384,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
             and (h != "Notes" or notes in ("latest", "all"))]
     headers, rows, widths = _assemble(cols, records, keep=["Name"])
     return {"headers": headers, "rows": rows, "widths": widths, "job": job, "left_out_rejected": left_out,
+            "left_out_not_in_job": not_in_job, "contact_removed": scrubbed,
             "hl": hl, "contact": include_contact, "notes": notes}
 
 
@@ -369,13 +412,24 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
         about.append(("Job", job["title"] + (f" ({job['company']})" if job.get("company") else "")))
     if t["hl"]:
         about.append(("Highlighted picks", hl_words(t["hl"])))
+    gone = []
     if t["left_out_rejected"]:
         n = t["left_out_rejected"]
-        about.append(("People left out", f"{n} {'person' if n == 1 else 'people'} marked rejected in this job"))
+        gone.append(f"{n} {'person' if n == 1 else 'people'} rejected or withdrawn in this job")
+    if t["left_out_not_in_job"]:
+        n = t["left_out_not_in_job"]
+        gone.append(f"{n} {'person' if n == 1 else 'people'} not in this job")
+    if gone:
+        about.append(("People left out", "; ".join(gone)))
+    if t["contact_removed"]:
+        n = t["contact_removed"]
+        about.append(("Contact details", f"{n} email address{'' if n == 1 else 'es'} or phone number"
+                      f"{'' if n == 1 else 's'} taken out of About and work history"))
     about.append(("Included", ", ".join(headers)))
     about.append(("Left out", ", ".join(left_out + ["colors", "internal review marks", "columns with nothing in them"])))
     about.append(("Copied as written", "About, work history" + (", notes" if notes != "none" else "")
-                  + ". Read them before you forward the file."))
+                  + ("" if include_contact else " (email addresses and phone numbers in About and work history are "
+                     "taken out)") + ". Read them before you forward the file."))
     note = " ".join((note or "").split())[:300]
     title = f"{note}, as of {stamp(made)}" if note else ""  # the title row is the note: no note, no title row
     sheet = Sheet("Candidates", headers, body, preamble=[title] if title else [], widths=t["widths"], big_preamble=True)
@@ -404,8 +458,8 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
             continue
 
     def view(job: dict[str, Any] | None, rejected: bool) -> dict[str, Any]:
-        kept, stage_of, _ = _pick_people(store, people, job, rejected)
-        return {"names": [c["name"] for c in kept[:3]], "count": len(kept),
+        kept, stage_of, rej_out, not_in = _pick_people(store, people, job, rejected)
+        return {"names": [c["name"] for c in kept[:3]], "count": len(kept), "not_in_job": not_in, "rejected_out": rej_out,
                 "people": [{"id": c["id"], "name": c["name"]} for c in kept],
                 "stage": bool(job and any(c["id"] in stage_of for c in kept))}
 
@@ -415,8 +469,9 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
     in_jobs = {r["job_id"] for r in store._rows("SELECT DISTINCT job_id, candidate_id FROM applications")
                if r["candidate_id"] in mine}
     for j in store.membership_choices()["job_choices"]:
-        if j["id"] not in in_jobs:  # nobody here is in it: the file is the same as with no job
-            jobs[str(j["id"])] = {"out": plain, "in": plain}
+        if j["id"] not in in_jobs:  # nobody here is in it: a file for that job would have nobody in it
+            empty = {"names": [], "count": 0, "people": [], "stage": False, "not_in_job": len(people), "rejected_out": 0}
+            jobs[str(j["id"])] = {"out": empty, "in": empty}
             continue
         job = store.get_job(j["id"])
         jobs[str(j["id"])] = {"out": view(job, False), "in": view(job, True)}
@@ -426,6 +481,23 @@ def share_preview(store: Store, ids: list[int], *, hl: Iterable[tuple[str, str]]
 def _cut(text: str, limit: int = 80) -> str:
     text = text or ""
     return text if len(text) <= limit else text[:limit] + "..."
+
+
+def about_preview(store: Store, ids: Iterable[int], limit: int = 400) -> dict[int, dict[str, Any]]:
+    """For the Share page: each person's About and work history as the file will hold them, with contact details
+    taken out ("plain") and as written ("full", for a file with email and phone), and how many were taken out."""
+    out: dict[int, dict[str, Any]] = {}
+    for cid in dict.fromkeys(ids):
+        try:
+            c = store.get_candidate(cid)
+        except Exception:
+            continue
+        about, hist = c.get("about") or "", history_text(store.work_history(cid))
+        a2, n1 = strip_contact(about)
+        h2, n2 = strip_contact(hist)
+        out[cid] = {"about": _cut(a2, limit), "about_full": _cut(about, limit), "history": _cut(h2, limit),
+                    "history_full": _cut(hist, limit), "removed": n1 + n2}
+    return out
 
 
 def note_preview(store: Store, ids: Iterable[int], limit: int = 80) -> dict[int, dict[str, str]]:

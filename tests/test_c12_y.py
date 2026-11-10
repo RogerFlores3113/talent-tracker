@@ -91,7 +91,7 @@ def test_bar_colors_and_links(store):
     clear = re.search(r'href="([^"]+)">Clear all \d+ highlights?</a>', bar).group(1)
     q = _qs(clear)
     assert "hl" not in q and q["tag"] == ["python"]
-    assert "People with more of the highlighted skills come first" in html
+    assert "People with more of these skills come first" in html
     assert 'aria-label="Highlighted skills"' not in c.get("/candidates").text
 
 

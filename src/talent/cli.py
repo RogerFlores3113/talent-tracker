@@ -264,36 +264,50 @@ def _install_skills(args: argparse.Namespace) -> None:
         print("No Claude Code or Codex found on this computer, so nothing was installed.\n"
               "Use --claude-code or --codex to install anyway, or --plugin to get the file for the Claude app.")
         return
-    plans = []
+    plans = [skills.plan_install(t) for t in targets]
+
+    def _counts(plan):
+        return {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
+
+    current = bool(plans) and all(not _counts(p)["new"] and not _counts(p)["updated"] for p in plans)
     no_one_to_ask = bool(targets) and not args.yes and not sys.stdin.isatty()
-    if no_one_to_ask:  # an agent or a script has no one to ask: say first that nothing happened
+    if no_one_to_ask and not current:  # an agent or a script has no one to ask: say first that nothing happened
         print("Nothing installed yet. Run again with --yes to install.")
-    for target in targets:
-        plan = skills.plan_install(target)
-        plans.append(plan)
-        counts = {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
+    for plan in plans:
+        counts = _counts(plan)
         print(f"{plan['label']}: {len(plan['items'])} skills in {plan['base']} "
               f"({counts['new']} new files, {counts['updated']} updated, {counts['unchanged']} unchanged, "
               f"{len(plan['edited'])} edited by you and kept)")
+        quiet: dict[str, int] = {}  # unchanged files are one short line per skill, not one line per file
         for f in plan["files"]:
-            print(f"  {plan['labels'].get(f, 'new')} {f}")
+            label = plan["labels"].get(f, "new")
+            if label == "unchanged":
+                folder = f.rsplit("/", 1)[0] + "/"
+                quiet[folder] = quiet.get(folder, 0) + 1
+            else:
+                print(f"  {label} {f}")
+        for folder, n in quiet.items():
+            print(f"  unchanged {folder} ({n} file{'' if n == 1 else 's'})")
         for f in plan["edited"]:
             print(f"  edited by you, kept: {f}")
         for sk in plan["skipped"]:
             print(f"  left alone {sk['path']}: {sk['reason']}")
-    if targets and not args.yes:
+    if current and not any(p["skipped"] for p in plans):
+        print("Already up to date. Nothing to install.")
+    if targets and not args.yes and not current:
         # An agent or a script has no one to ask, so it has to say yes on purpose with --yes.
         if no_one_to_ask:
-            sys.exit(1)
+            sys.exit(1)  # it refused to install without a yes
         if input("Install these? Type yes to go ahead: ").strip().lower() not in ("y", "yes"):
             sys.exit("Nothing installed.")
-    for target, plan in zip(targets, plans):
-        res = skills.install(target)
-        counts = {k: sum(1 for v in plan["labels"].values() if v == k) for k in ("new", "updated", "unchanged")}
-        print(f"{res['label']}: {len(res['items'])} skills ({res['base']}): {counts['new']} files added, "
-              f"{counts['updated']} updated, {counts['unchanged']} unchanged, {len(plan['edited'])} kept because you edited them")
-    if targets:
-        print("Start a new chat (or restart Claude Code) so it picks up the skills.")
+    if not current:
+        for target, plan in zip(targets, plans):
+            res = skills.install(target)
+            counts = _counts(plan)
+            print(f"{res['label']}: {len(res['items'])} skills ({res['base']}): {counts['new']} files added, "
+                  f"{counts['updated']} updated, {counts['unchanged']} unchanged, {len(plan['edited'])} kept because you edited them")
+        if targets:
+            print("Start a new chat (or restart Claude Code) so it picks up the skills.")
     if plugin is not None:
         path = skills.write_plugin(Path(plugin) if plugin else None)
         print(f"Wrote {path}. In Claude: Customize > Plugins > Add > Upload plugin, then pick that file.")
@@ -342,7 +356,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("sample-data", help="load made-up candidates to try the app")
     sub.add_parser("tour-reset", help="forget that the first-run tour ran, so it starts again on an empty database")
     sub.add_parser("reindex", help="rebuild the optional Typesense index from SQLite")
-    sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
+    cc = sub.add_parser("connect-claude", help="add Talent Search to Claude Desktop")
+    cc.add_argument("--restart", action="store_true",
+                    help="then quit Claude Desktop (if open) and open it again so it loads Talent Search (Mac and Windows)")
     sub.add_parser("connect-codex", help="add Talent Search to Codex")
     sub.add_parser("connect-lmstudio", help="add Talent Search to LM Studio")
     sub.add_parser("check-claude", help="check that Claude Desktop can start Talent Search")
@@ -512,15 +528,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Already set up. Talent Search's entry in {result['path']} is correct, so nothing was rewritten.")
         else:
             print(f"Updated {result['path']}.")
-        print("Read it back and it matches what we meant to write.")
         target = cmd.removeprefix("connect-")
-        if target == "claude":
-            print(integrations.REOPEN_LINE)
-        print(result.get("next_step") or "Restart the app to load talent-search.")
-        if result.get("running"):
-            print("Claude Desktop is open right now, so it won't see the change until you quit it completely.")
         if result.get("quarantine"):
             print(result["quarantine"])
+        tested_ok = True
         if target in ("claude", "lmstudio") and result.get("entry"):
             try:
                 test = integrations.test_launch(result["entry"], timeout=45)
@@ -528,13 +539,23 @@ def main(argv: list[str] | None = None) -> None:
                 integrations.log_failure(exc)
                 sys.exit(integrations.friendly_error(exc))
             print(integrations.result_line(test))
-            if test["ok"]:
-                if target == "claude":
-                    print(integrations.HEALTHY_LINE)
-            else:
+            tested_ok = test["ok"]
+            if not tested_ok:
                 for line in test["stderr_tail"][-5:]:
                     print(f"  {line}")
                 sys.exit(1)
+            if target == "claude" and not result.get("already_connected"):
+                print(integrations.HEALTHY_LINE)
+        # The one next step, said once.
+        if target == "claude" and getattr(args, "restart", False):
+            if integrations.restart_supported():
+                print("Restarting Claude Desktop...")
+                print(integrations.restart_claude()["message"])
+            else:
+                print("There is no Claude Desktop to restart on this computer. "
+                      + integrations.quit_instruction())
+        else:
+            print(result.get("next_step") or "Restart the app to load talent-search.")
     elif cmd in ("check-claude", "check-codex", "check-lmstudio"):
         from . import integrations
 

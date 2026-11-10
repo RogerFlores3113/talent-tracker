@@ -1,0 +1,4 @@
+{% macro connected_buttons(restarts, running) %}
+<button class="btn primary" hx-post="/connect/claude/test" hx-target="#claude-result" hx-indicator="#claude-busy">Test connection</button>
+<button class="btn" hx-post="/connect/claude" hx-target="#claude-result" hx-indicator="#claude-busy">Reconnect{% if restarts and running %} (restarts Claude){% endif %}</button>
+{% endmacro %}

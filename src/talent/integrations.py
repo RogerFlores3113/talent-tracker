@@ -105,7 +105,7 @@ def quit_instruction(platform: str | None = None) -> str:
     if platform == "win32":
         return ("Quit Claude Desktop completely (right-click the Claude icon by the clock and choose Quit). Closing "
                 "the window isn't enough, because Claude keeps running in the system tray. Then open it again.")
-    return "Quit Claude Desktop completely, then open it again. Closing the window isn't enough."
+    return "Open Claude and start a new chat. Linux has no restart step."
 
 
 def claude_where_to_look() -> str:
@@ -170,22 +170,123 @@ def quarantine_note(platform: str | None = None, exe: str | None = None) -> str 
             "so macOS lets Claude start it.")
 
 
+# Claude Desktop on Windows lives under one of these folders. The Claude Code command line is also called
+# claude.exe, but it lives elsewhere (npm, ~/.local, a winget folder), so it must never count or be closed.
+_DESKTOP_PATH_MARKERS = ("\\anthropicclaude\\", "\\programs\\claude\\", "\\windowsapps\\")
+_PS_LIST_CLAUDE = ["powershell", "-NoProfile", "-Command",
+                   "Get-Process -Name claude -ErrorAction SilentlyContinue | Select-Object Id,Path | ConvertTo-Json"]
+
+
+def _is_desktop_path(path: Any) -> bool:
+    where = str(path or "").replace("/", "\\").lower()
+    return any(m in where for m in _DESKTOP_PATH_MARKERS)
+
+
+def _powershell_claude_processes() -> str:
+    return subprocess.run(_PS_LIST_CLAUDE, capture_output=True, text=True, timeout=10).stdout
+
+
+def windows_desktop_pids(read=None) -> list[int] | None:
+    """Process ids of Claude Desktop on Windows (by where the program file is, never by name alone), or None when
+    we can't tell. read returns PowerShell's JSON text; injectable for tests."""
+    try:
+        text = (read or _powershell_claude_processes)().strip()
+        if not text:
+            return []
+        data = json.loads(text)
+        rows = data if isinstance(data, list) else [data]
+        return [int(r["Id"]) for r in rows if isinstance(r, dict) and r.get("Id") is not None
+                and _is_desktop_path(r.get("Path"))]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
+        return None
+
+
 def app_running(app: str = "claude") -> bool | None:
     """Is that app running right now? Best effort, never raises. None when we can't tell."""
     try:
         if app != "claude":
             return None
         if sys.platform == "darwin":
-            cmd = ["pgrep", "-x", "Claude"]
-        elif sys.platform == "win32":
-            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Claude.exe", "/NH"], capture_output=True,
-                                 text=True, timeout=5).stdout
-            return "claude.exe" in out.lower()
-        else:
-            return None  # no official Claude Desktop here, and a process called "claude" is usually Claude Code
-        return subprocess.run(cmd, capture_output=True, timeout=5).returncode == 0
+            return subprocess.run(["pgrep", "-x", "Claude"], capture_output=True, timeout=5).returncode == 0
+        if sys.platform == "win32":
+            pids = windows_desktop_pids()
+            return None if pids is None else bool(pids)
+        return None  # no official Claude Desktop here, and a process called "claude" is usually Claude Code
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
+
+
+CLAUDE_DONE = "Done. In Claude, start a new chat and ask: What should I do today in Talent Search?"
+
+
+def restart_supported(platform: str | None = None) -> bool:
+    """Only Mac and Windows have a Claude Desktop we can quit and reopen."""
+    return (platform or sys.platform) in ("darwin", "win32")
+
+
+def _run_quiet(cmd: list[str], timeout: float = 10.0) -> int:
+    return subprocess.run(cmd, capture_output=True, timeout=timeout).returncode
+
+
+def _launch_detached(cmd: list[str]) -> None:
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def restart_claude(*, platform: str | None = None, running=None, run=None, launch=None, command: list[str] | None = None,
+                   sleep=None, clock=None, wait: float | None = None, pids=None) -> dict[str, Any]:
+    """Quit Claude Desktop gracefully (never forced) so it rereads its settings, then open it. Never raises.
+
+    Returns {supported, ok, was_running, quit, opened, message}. ok means Claude is open again. message is the one
+    line to show: CLAUDE_DONE on success, otherwise what to do by hand. Everything that touches a process is
+    injectable (running, run, launch, sleep, clock, pids) so tests never start or stop anything."""
+    platform = platform or sys.platform
+    out: dict[str, Any] = {"supported": restart_supported(platform), "ok": False, "was_running": None, "quit": False,
+                           "opened": False, "message": ""}
+    if not out["supported"]:
+        return out
+    try:
+        from . import skills
+
+        running = running or app_running
+        run = run or _run_quiet
+        launch = launch or _launch_detached
+        sleep = sleep or time.sleep
+        clock = clock or time.monotonic
+        cmd = command if command is not None else skills.claude_app_command(platform)
+        limit = 15.0 if platform == "darwin" else 10.0
+        if wait is not None:
+            limit = wait
+        was = running("claude")
+        out["was_running"] = was
+        if was:
+            if platform == "darwin":
+                quit_cmds = [["osascript", "-e", 'tell application "Claude" to quit']]
+            else:  # by process id, only Claude Desktop's (never the Claude Code command line); no /F: it could lose a draft
+                quit_cmds = [["taskkill", "/PID", str(pid)] for pid in ((pids or windows_desktop_pids)() or [])]
+            for quit_cmd in quit_cmds:
+                try:
+                    run(quit_cmd)
+                except Exception:
+                    pass
+            deadline = clock() + limit
+            while running("claude") and clock() < deadline:
+                sleep(0.5)
+            if running("claude"):
+                out["message"] = "Connected, but Claude is still open. " + quit_instruction(platform)
+                return out
+            out["quit"] = True
+        if not cmd:
+            out["message"] = "Connected. Open Claude Desktop to finish, then start a new chat."
+            return out
+        launch(cmd)
+        out["opened"] = True
+        out["ok"] = True
+        out["message"] = CLAUDE_DONE
+    except Exception as exc:  # whatever happens, the connection itself is already saved
+        log_failure(exc)
+        out["ok"] = False
+        out["message"] = "Connected. " + quit_instruction(platform)
+    return out
 
 
 def _not_installed(path: Path, app_name: str) -> dict[str, Any] | None:
@@ -645,8 +746,9 @@ def test_launch(entry: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
             _stop(proc)
 
 
-HEALTHY_LINE = "Added to Claude Desktop's settings and tested: Talent Search starts and answers."
-REOPEN_LINE = "If Claude Desktop was open, quit it completely and reopen it to finish."
+HEALTHY_LINE = "Claude Desktop is connected to Talent Search, and we tested it: it starts and answers."
+ALREADY_HEALTHY_LINE = "Claude Desktop was already connected to Talent Search, and we tested it again: it starts and answers."
+TEST_OK_LINE = "Talent Search answers. Claude Desktop's settings already point at it."
 
 
 def result_line(result: dict[str, Any]) -> str:

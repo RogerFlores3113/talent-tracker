@@ -10,7 +10,7 @@
 <form method="post" action="/settings" class="stack">
   <section class="panel" id="look">
     <h2>Look</h2>
-    <p class="fine">Pick the colors. The page changes as you choose, and Save keeps it.</p>
+    <p class="fine">Pick the colors. The page changes as you choose, and Save keeps it. The views your AI app shows in Claude use the new colors the next time it shows one. You don't need to quit Claude.</p>
     <p class="fine">Sunset to forest and Classic go dark when your computer is in dark mode.</p>
     <div class="theme-grid" role="radiogroup" aria-label="Color theme">
       {% for value, name, blurb in themes %}
@@ -72,7 +72,7 @@
   <h2>Your time zone</h2>
   <p class="fine">Today, timelines, your AI app's replies and times you type use it. Client updates use each client's own zone. Leave it blank to use this computer's ({{ computer_zone() }}){% if shown_zone_name() and not user_zone() %}; for now times show in your company's zone, {{ shown_zone_name() }}, since this computer is on UTC{% endif %}.</p>
   <form method="post" action="/settings/time-zone" class="inline">
-    <label class="inline-label">Time zone <input type="text" name="time_zone" value="{{ user_zone() or '' }}" list="zone-list" autocomplete="off" placeholder="America/Chicago, or ET, CT, MT, PT"></label>
+    <label class="inline-label">Time zone <input type="text" name="time_zone" value="{{ user_zone() or '' }}" list="zone-list" autocomplete="off" placeholder="e.g. America/Chicago or PT" size="26" style="min-width:20em"></label>
     {{ zone_list() }}
     <button class="btn" type="submit">Save</button>
   </form>
