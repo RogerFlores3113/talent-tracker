@@ -30,7 +30,7 @@ function cmpCell(k,d,p){
  if(k==="jobs"){const js=p.jobs||[];if(!js.length)return el("span",{class:"muted"},"Not in any job");
   return el("ul",{class:"plain"},js.map(j=>el("li",{},j.app_url?linkBtn(j.app_url,j.job,"Open the pipeline for "+j.job):j.job,el("div",{class:"small muted"},"Stage: "+j.stage))))}
  if(k==="source")return p.source||el("span",{class:"muted"},"Not saved");
- if(k==="contacted")return p.last_contacted_at?dateEl(p.last_contacted_at):el("span",{class:"never"},"Never");
+ if(k==="contacted")return p.last_contacted_at?dateEl(p.last_contacted_at):el("span",{class:"never"},"None logged");
  if(k==="links"){const ls=(p.links||[]).filter(l=>safeUrl(l.url));if(!ls.length)return el("span",{class:"muted"},"None saved");
   return el("ul",{class:"plain"},ls.map(l=>el("li",{},linkBtn(l.url,l.label,l.label+" of "+p.name))))}
  if(k==="about")return cmpAbout(p);
