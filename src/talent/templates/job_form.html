@@ -10,7 +10,7 @@
   <label>Location<input type="text" name="location" value="{{ j.location or '' }}" placeholder="Remote, Austin, hybrid NYC"></label>
   <label>Hiring manager<input type="text" name="hiring_manager" value="{{ j.hiring_manager or '' }}" placeholder="Who makes the hiring call"></label>
   <label>Hiring manager email<input type="email" name="hiring_manager_email" value="{{ j.hiring_manager_email or '' }}"></label>
-  <label>Openings<input type="number" name="openings" min="1" step="1" value="{{ j.openings or 1 }}" title="How many people you're hiring for this role"></label>
+  <label>Openings<input type="number" name="openings" min="1" step="1" value="{{ '' if j.openings_unset else (j.openings or 1) }}"{% if j.openings_unset %} placeholder="Not set yet"{% endif %} title="How many people you're hiring for this role"></label>
   <label>Target date<input type="date" name="target_date" value="{{ j.target_date or '' }}" title="Optional. When the role should be filled."></label>
   <label>Active candidates to aim for<input type="number" name="min_active" min="1" step="1" value="{{ j.min_active or '' }}" placeholder="3 per opening" title="Today asks for more people when fewer than this are in play. Leave blank for 3 per opening, up to the number in Settings."></label>
   {% if j.id %}

@@ -1364,12 +1364,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             no_match = xlsx_export.nobody_matches(store, [r["id"] for r in rows], hl_pairs)
         except Exception:
             notes_seen, no_match = {}, False
+        try:
+            about_seen = xlsx_export.about_preview(store, [r["id"] for r in rows])
+        except Exception:
+            about_seen = {}
         return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
                     count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
                     notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
                     rejected=rejected, preview=preview, today=xlsx_export.stamp(),
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
-                    pv=pv, notes_seen=notes_seen, no_match=no_match,
+                    pv=pv, notes_seen=notes_seen, no_match=no_match, about_seen=about_seen,
                     leave_out=leave_out or set(), leave_note=leave_note or set(),
                     rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
                     kept_ids={p["id"] for p in pv.get("people") or []})
@@ -1413,6 +1417,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
                               rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
                               error="Everyone is left out. Untick \"Leave this person out\" for at least one person.")
+        if job and not xlsx_export.share_table(store, ids, job_id=job_id, include_rejected=rejected,
+                                               leave_out=leave_out)["rows"]:
+            return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
+                              rejected=rejected, leave_out=typed_out, leave_note=leave_note, leave_rej=leave_rej,
+                              error=f"Nobody here is still in {job['title']}. Pick another job, or No job.")
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
@@ -1460,7 +1469,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if no_about:
             hidden.add("about")
         if hm:
-            every = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            every = [{**p, "links": compare.public_links(p["links"]),  # no email or phone in a page to forward
+                      "about": xlsx_export.strip_contact(p.get("about") or "")[0]} for p in compare.active_jobs(people)]
             people = [p for p in every if not p["not_in_play"]]
             hm_left_out = compare.left_out_note(every)
             if len(people) < compare.MIN_PEOPLE:
@@ -2662,6 +2672,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         form = await request.form()
         data = {k: str(form.get(k) or "") for k in ("title", "company", "location", "description", "status",
                                                     *JOB_EXTRA_FIELDS) if k in form}
+        if not data.get("openings", "x").strip() and job_id in store.openings_unset_ids():
+            data.pop("openings")  # left blank on an import-made job: still not set, rather than a made-up 1
         try:
             store.update_job(job_id, **data)
         except ValueError as exc:
@@ -2726,7 +2738,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
 
     @app.get("/jobs/{job_id}/edit", response_class=HTMLResponse)
     def edit_job(request: Request, job_id: int):
-        return page(request, "job_form.html", j=job_or_404(job_id), error=None, stages=store.job_stages(job_id),
+        j = {**job_or_404(job_id), "openings_unset": job_id in store.openings_unset_ids()}
+        return page(request, "job_form.html", j=j, error=None, stages=store.job_stages(job_id),
                     outcomes=STAGE_OUTCOMES, statuses=JOB_STATUSES)
 
     @app.post("/jobs/{job_id}/stages", response_class=HTMLResponse)

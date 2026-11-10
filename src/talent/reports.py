@@ -1128,9 +1128,7 @@ def _openings_unset(store: Store, job_ids: list[int]) -> set[int]:
     """The jobs an import made whose openings the recruiter hasn't answered yet (the import's guess stands)."""
     if not job_ids:
         return set()
-    from .importers import openings_to_ask
-
-    return set(openings_to_ask(store)) & set(job_ids)
+    return store.openings_unset_ids() & set(job_ids)
 
 
 def _job_labels(store: Store, jobs: list[dict[str, Any]], own: bool) -> dict[str, str]:

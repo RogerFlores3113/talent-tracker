@@ -1928,6 +1928,7 @@ def _guess_openings(store: Store, made: list[dict[str, Any]]) -> None:
     import json
 
     ask = sorted(set(openings_to_ask(store)) | {j["id"] for j in made})
+    store.mark_openings_unset(j["id"] for j in made)  # until then nothing calls these jobs filled
     with store._lock, store._conn:
         store._conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
                             "value = excluded.value", (OPENINGS_KEY, json.dumps(ask)))
