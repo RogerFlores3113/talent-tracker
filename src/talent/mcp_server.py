@@ -36,7 +36,7 @@ from . import chase, compare, desk, duplicates, opsreview
 from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, trust
 from . import injection, mcp_guard, outreach, plan, wording, xlsx_export
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
-from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, stage_outcome
+from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, saved_theme, stage_outcome
 from .mcp_views import LEGACY_TEMPLATE, MIME, RESOURCE_META, legacy_name, tool_meta, versioned_uris, view_html
 from . import searchquery
 from . import picks as pickmod
@@ -4484,6 +4484,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     _check_arguments(mcp)
     _add_time_zone(mcp)
     _track_session(mcp, store, session, started)
+    _add_theme(mcp, store)  # outermost, so held and guarded results carry it too
     wording.install(mcp, store)  # own-company mode: "you" for "the recruiter" in what the tools say
     return mcp
 
@@ -4571,6 +4572,23 @@ def _add_time_zone(mcp: FastMCP) -> None:
         data = getattr(result, "structuredContent", None)
         if zone and meta.get("resourceUri") and isinstance(data, dict) and "time_zone" not in data:
             result.structuredContent = {**data, "time_zone": zone}
+        return result
+
+    manager.call_tool = call_tool  # type: ignore[method-assign]
+
+
+def _add_theme(mcp: FastMCP, store: Store) -> None:
+    """Every result of a tool with an in-chat view says which color theme the recruiter picked in Settings
+    (_meta["talent/theme"]), so the view wears it. Results of calls made from inside a view come through here too."""
+    manager = mcp._tool_manager
+    inner = manager.call_tool
+
+    async def call_tool(name: str, arguments: dict[str, Any], context: Any = None, convert_result: bool = False):
+        result = await inner(name, arguments, context=context, convert_result=convert_result)
+        tool = manager.get_tool(name)
+        meta = (getattr(tool, "meta", None) or {}).get("ui") or {}
+        if meta.get("resourceUri") and isinstance(result, CallToolResult):
+            result.meta = {**(result.meta or {}), "talent/theme": saved_theme(store)}
         return result
 
     manager.call_tool = call_tool  # type: ignore[method-assign]

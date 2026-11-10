@@ -16,6 +16,10 @@ toolResponseMetadata, theme, callTool, sendFollowUpMessage, and an "openai:set_g
 bridge. Pass --openai-only to answer nothing on the postMessage bridge (only size changes), so the view's
 window.openai fallback can be tried.
 
+Pass --styles-white to make the host send white colors in its style variables (to show the Talent Search theme wins
+over the host's colors), and --theme NAME (sunset, forest-night, ocean, midnight, classic) to save the app theme in
+the data directory before the server starts. The Dark theme checkbox also darkens the host window around the view.
+
 Nothing here ships in the app. Claude's real frame is about 720 px wide inline; the page uses the same.
 """
 from __future__ import annotations
@@ -101,7 +105,7 @@ textarea{height:160px}button{margin-top:6px}.bubble{background:#fff;border-radiu
 <aside id="log"></aside>
 <script>
 const $=id=>document.getElementById(id);let TOOLS={};const log=(...a)=>{$("log").textContent=a.map(x=>typeof x==="string"?x:JSON.stringify(x)).join(" ")+"\n\n"+$("log").textContent};
-window.HOSTLOG=[];window.HOSTREJECTS=[];const STRICT=__STRICT__,OPENAI=__OPENAI__;  // 0 off, 1 beside the bridge, 2 only window.openai
+window.HOSTLOG=[];window.HOSTREJECTS=[];const STRICT=__STRICT__,OPENAI=__OPENAI__,WHITE=__WHITE__;  // 0 off, 1 beside the bridge, 2 only window.openai
 const isObj=x=>x!==null&&typeof x==="object"&&!Array.isArray(x),isStr=x=>typeof x==="string",isNum=x=>typeof x==="number"&&isFinite(x);
 const okBlocks=a=>Array.isArray(a)&&a.every(b=>isObj(b)&&isStr(b.type)&&(b.type!=="text"||isStr(b.text)));
 /* the shapes the MCP Apps spec (2026-01-26) gives each view-to-host message; returns "" when fine, else the reason */
@@ -169,7 +173,8 @@ function mount(html,args,result,toolName){
   switch(m.method){
    case"ui/initialize":rec.inited=1;ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
      hostContext:{theme:$("dark").checked?"dark":"light",displayMode:"inline",availableDisplayModes:modes(),platform:"desktop",locale:"en-US",timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,
-     containerDimensions:{maxHeight:6000,width:$("chat").clientWidth},toolInfo:{tool:TOOLS[toolName]}}});break;
+     containerDimensions:{maxHeight:6000,width:$("chat").clientWidth},toolInfo:{tool:TOOLS[toolName]},
+     styles:WHITE?{variables:{"--color-background-primary":"#ffffff","--color-background-secondary":"#f5f5f5","--color-text-primary":"#000000","--color-text-secondary":"#333333","--color-border-primary":"#cccccc","--font-sans":"Georgia, serif"}}:undefined}});break;
    case"ui/notifications/initialized":if(!rec.inited)break;rec.ready=1;send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
      send({jsonrpc:"2.0",method:"ui/notifications/tool-result",params:result});break;
    case"ui/notifications/size-changed":if(mode==="inline")f.style.height=Math.min(m.params.height,6000)+"px";break;
@@ -189,9 +194,9 @@ function mount(html,args,result,toolName){
 </script></body></html>"""
 
 
-def build(bridge: Bridge, strict: bool = True, openai: int = 0) -> FastAPI:
+def build(bridge: Bridge, strict: bool = True, openai: int = 0, white: bool = False) -> FastAPI:
     app = FastAPI()
-    page = PAGE.replace("__STRICT__", "true" if strict else "false").replace("__OPENAI__", str(openai))
+    page = PAGE.replace("__STRICT__", "true" if strict else "false").replace("__OPENAI__", str(openai)).replace("__WHITE__", "true" if white else "false")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -221,16 +226,25 @@ async def main() -> None:
     ap.add_argument("--lenient", action="store_true", help="accept any view message (the old behavior); the default is a strict host that rejects what the MCP Apps spec does not allow")
     ap.add_argument("--openai", action="store_true", help="also give the view frame a window.openai object (as ChatGPT does), next to the normal bridge")
     ap.add_argument("--openai-only", action="store_true", help="give the view window.openai only: the postMessage bridge answers nothing (tests the fallback)")
+    ap.add_argument("--styles-white", action="store_true", help="the host sends white colors in styles.variables (the view must still wear the Talent Search theme)")
+    ap.add_argument("--theme", default="", help="save this app theme (sunset, forest-night, ocean, midnight, classic) in the data directory before the server starts")
     a = ap.parse_args()
     Path(a.data).mkdir(parents=True, exist_ok=True)
     if a.sample:
         proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "talent", "sample-data",
                                                     env={**os.environ, "TALENT_DATA_DIR": a.data})
         await proc.wait()
+    if a.theme:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "from talent.paths import db_path; from talent.store import Store, THEMES; import sys; "
+            "assert sys.argv[1] in {t[0] for t in THEMES}, 'unknown theme'; Store(db_path()).set_settings(theme=sys.argv[1])",
+            a.theme, env={**os.environ, "TALENT_DATA_DIR": a.data})
+        if await proc.wait():
+            sys.exit("Could not save that theme (sunset, forest-night, ocean, midnight, classic).")
     bridge = Bridge(a.data)
     await bridge.start()
     print(f"View host on http://127.0.0.1:{a.port} (data in {a.data})", flush=True)
-    server = uvicorn.Server(uvicorn.Config(build(bridge, strict=not a.lenient, openai=2 if a.openai_only else 1 if a.openai else 0), host="127.0.0.1", port=a.port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(build(bridge, strict=not a.lenient, openai=2 if a.openai_only else 1 if a.openai else 0, white=a.styles_white), host="127.0.0.1", port=a.port, log_level="warning"))
     try:
         await server.serve()
     finally:
