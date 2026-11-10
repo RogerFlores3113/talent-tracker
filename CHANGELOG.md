@@ -58,6 +58,7 @@ All notable changes to Talent Search. Newest first.
 - The Share form warns when you include notes ("may hold pay, other interviews or private remarks"), and its preview now matches the file exactly: the people and count with rejected people left out (or added back when you tick the box) and the Stage column only when someone is in the job. The note box no longer suggests a job name when no job is picked.
 - The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
 - Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
+- The in-chat cards and tables now start in Claude. They were asking the chat app to begin in a shape Claude refuses, so only text showed. The Connect AI page and README now say where cards show.
 
 ## [0.1.2] - 2026-11-09
 

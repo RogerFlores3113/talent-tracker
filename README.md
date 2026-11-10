@@ -103,6 +103,10 @@ report** copies a report you can paste into a bug report.
 **Codex and LM Studio:** press **Connect Codex** or **Connect LM Studio** on the same
 page, then quit and reopen that app.
 
+### Where the cards show
+
+Cards and tables show in the Claude desktop app and on claude.ai. Claude asks once to display them: choose Always allow. Claude Code and the Codex command line show the same answers as text. After you update Talent Search, quit and reopen Claude (or Developer > Reload MCP Configuration) so it picks up the new views.
+
 ## Skills for your AI app
 
 Talent Search ships six short skills (sourcing, triage, interviews, outreach, pipeline

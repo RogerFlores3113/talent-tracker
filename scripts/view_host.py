@@ -8,6 +8,9 @@ into a sandboxed iframe the way Claude does it, and the page plays the host's si
 ui/initialize (light or dark, inline or fullscreen), the tool result, tools/call back to the server, and a log of
 everything the view asks for (open a link, send a message, update the model context, change display mode).
 
+By default the host is STRICT: it answers any view message that does not match the MCP Apps spec shapes with error
+-32602 and says why in the log panel (and window.HOSTREJECTS). Pass --lenient for the old, forgiving behavior.
+
 Nothing here ships in the app. Claude's real frame is about 720 px wide inline; the page uses the same.
 """
 from __future__ import annotations
@@ -93,7 +96,27 @@ textarea{height:160px}button{margin-top:6px}.bubble{background:#fff;border-radiu
 <aside id="log"></aside>
 <script>
 const $=id=>document.getElementById(id);let TOOLS={};const log=(...a)=>{$("log").textContent=a.map(x=>typeof x==="string"?x:JSON.stringify(x)).join(" ")+"\n\n"+$("log").textContent};
-window.HOSTLOG=[];
+window.HOSTLOG=[];window.HOSTREJECTS=[];const STRICT=__STRICT__;
+const isObj=x=>x!==null&&typeof x==="object"&&!Array.isArray(x),isStr=x=>typeof x==="string",isNum=x=>typeof x==="number"&&isFinite(x);
+const okBlocks=a=>Array.isArray(a)&&a.every(b=>isObj(b)&&isStr(b.type)&&(b.type!=="text"||isStr(b.text)));
+/* the shapes the MCP Apps spec (2026-01-26) gives each view-to-host message; returns "" when fine, else the reason */
+function check(m){const p=m.params,hasId=m.id!=null;
+ switch(m.method){
+  case"ui/initialize":if(!hasId)return"ui/initialize must be a request with an id";if(!isObj(p))return"params missing";
+   if(!isObj(p.appInfo)||!isStr(p.appInfo.name)||!isStr(p.appInfo.version))return"appInfo {name, version} is missing";
+   if(!isObj(p.appCapabilities))return"appCapabilities is missing";if(!isStr(p.protocolVersion))return"protocolVersion is missing";return"";
+  case"ui/notifications/initialized":return hasId?"initialized is a notification, it must not have an id":"";
+  case"ui/message":if(!hasId)return"ui/message must be a request";if(!isObj(p)||p.role!=="user")return"role must be \"user\"";
+   return okBlocks(p.content)&&p.content.length?"":"content must be an array of content blocks";
+  case"ui/open-link":if(!hasId)return"ui/open-link must be a request";return isObj(p)&&isStr(p.url)&&p.url?"":"url must be a string";
+  case"ui/request-display-mode":if(!hasId)return"ui/request-display-mode must be a request";return isObj(p)&&["inline","fullscreen","pip"].includes(p.mode)?"":"mode must be inline, fullscreen or pip";
+  case"ui/update-model-context":if(!hasId)return"ui/update-model-context must be a request";if(!isObj(p))return"params missing";
+   if(p.content!==undefined&&!okBlocks(p.content))return"content must be an array of content blocks";
+   if(p.structuredContent!==undefined&&!isObj(p.structuredContent))return"structuredContent must be an object";return"";
+  case"ui/notifications/size-changed":if(hasId)return"size-changed is a notification";if(!isObj(p))return"params missing";
+   if(p.width!==undefined&&!isNum(p.width))return"width must be a number";if(p.height!==undefined&&!isNum(p.height))return"height must be a number";return"";
+  case"tools/call":if(!hasId)return"tools/call must be a request";return isObj(p)&&isStr(p.name)&&p.name&&(p.arguments===undefined||isObj(p.arguments))?"":"tools/call needs name and arguments {}";
+  default:return"";}}
 fetch("/api/tools").then(r=>r.json()).then(ts=>{for(const t of ts){TOOLS[t.name]=t;const ui=t._meta&&t._meta.ui;$("tool").append(new Option((ui&&ui.resourceUri?"◆ ":"")+t.name+(ui&&ui.visibility&&!ui.visibility.includes("model")?" (app only)":""),t.name))}$("tool").onchange()});
 $("tool").onchange=()=>{const t=TOOLS[$("tool").value];$("desc").textContent=t?(t.description||""):""};
 $("dark").onchange=()=>{document.body.classList.toggle("dark",$("dark").checked);for(const f of FRAMES)f.ctx({theme:$("dark").checked?"dark":"light"})};
@@ -117,12 +140,14 @@ function mount(html,args,result,toolName){
  $("close").onclick=()=>{if(mode==="fullscreen")setMode("inline")};
  rec.onmsg=async ev=>{if(ev.source!==f.contentWindow)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
   window.HOSTLOG.push(m);if(m.method!=="ui/notifications/size-changed")log("view →",m);
+  let reject="";if(STRICT){reject=check(m);if(!reject&&m.method!=="ui/initialize"&&m.method!=="ping"&&m.method!=="ui/notifications/initialized"&&!rec.inited)reject="sent before ui/initialize finished"}
+  if(reject){window.HOSTREJECTS.push({method:m.method,reason:reject});log("REJECTED "+m.method+": "+reject);if(m.id!=null)send({jsonrpc:"2.0",id:m.id,error:{code:-32602,message:"Invalid params: "+reject}});return}
   const ok=r=>send({jsonrpc:"2.0",id:m.id,result:r}),bad=(msg)=>send({jsonrpc:"2.0",id:m.id,error:{code:-32000,message:msg}});
   switch(m.method){
-   case"ui/initialize":ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
+   case"ui/initialize":rec.inited=1;ok({protocolVersion:"2026-01-26",hostInfo:{name:"view-host",version:"1"},hostCapabilities:Object.assign({openLinks:{},serverTools:{},serverResources:{},logging:{}},$("nomsg").checked?{}:{message:{text:{}},updateModelContext:{text:{}}}),
      hostContext:{theme:$("dark").checked?"dark":"light",displayMode:"inline",availableDisplayModes:modes(),platform:"desktop",locale:"en-US",timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,
      containerDimensions:{maxHeight:6000,width:$("chat").clientWidth},toolInfo:{tool:TOOLS[toolName]}}});break;
-   case"ui/notifications/initialized":send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
+   case"ui/notifications/initialized":if(!rec.inited)break;rec.ready=1;send({jsonrpc:"2.0",method:"ui/notifications/tool-input",params:{arguments:args}});
      send({jsonrpc:"2.0",method:"ui/notifications/tool-result",params:result});break;
    case"ui/notifications/size-changed":if(mode==="inline")f.style.height=Math.min(m.params.height,6000)+"px";break;
    case"ui/open-link":if($("nolinks").checked)bad("Policy violation");else{log("OPEN LINK",m.params.url);ok({})}break;
@@ -141,12 +166,13 @@ function mount(html,args,result,toolName){
 </script></body></html>"""
 
 
-def build(bridge: Bridge) -> FastAPI:
+def build(bridge: Bridge, strict: bool = True) -> FastAPI:
     app = FastAPI()
+    page = PAGE.replace("__STRICT__", "true" if strict else "false")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return PAGE
+        return page
 
     @app.get("/api/tools")
     async def tools() -> JSONResponse:
@@ -169,6 +195,7 @@ async def main() -> None:
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--data", default=str(Path.cwd() / "view-host-data"), help="TALENT_DATA_DIR for the server")
     ap.add_argument("--sample", action="store_true", help="load the made-up sample candidates first")
+    ap.add_argument("--lenient", action="store_true", help="accept any view message (the old behavior); the default is a strict host that rejects what the MCP Apps spec does not allow")
     a = ap.parse_args()
     Path(a.data).mkdir(parents=True, exist_ok=True)
     if a.sample:
@@ -178,7 +205,7 @@ async def main() -> None:
     bridge = Bridge(a.data)
     await bridge.start()
     print(f"View host on http://127.0.0.1:{a.port} (data in {a.data})", flush=True)
-    server = uvicorn.Server(uvicorn.Config(build(bridge), host="127.0.0.1", port=a.port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(build(bridge, strict=not a.lenient), host="127.0.0.1", port=a.port, log_level="warning"))
     try:
         await server.serve()
     finally:
