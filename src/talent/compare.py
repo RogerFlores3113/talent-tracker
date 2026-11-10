@@ -297,12 +297,17 @@ def text_lines(d: dict[str, Any]) -> list[str]:
         if p["tags"]:
             shared_keys = {t.lower() for t in d["shared"]}
             parts = []
-            for label, skills in (("shared by all", [t for t in p["tags"] if t.lower() in shared_keys]),
-                                  ("some of them", [f"{t}, {d['counts'][t.lower()]} of {n}" for t in d["rest"][p["id"]]]),
-                                  ("only them", d["only"][p["id"]])):
-                if skills:
-                    parts.append(f"{label}: " + ("; " if label == "some of them" else ", ").join(skills))
-            bits.append("skills (" + " | ".join(parts) + ")")
+            mine_shared = [t for t in p["tags"] if t.lower() in shared_keys]
+            if mine_shared:
+                parts.append("shared: " + ", ".join(mine_shared))
+            some = [f"{t} ({d['counts'][t.lower()]} of {n} have it)" for t in d["rest"][p["id"]]]
+            if some:
+                parts.append("Some of them: " + ", ".join(some))
+            if d["only"][p["id"]]:
+                parts.append("Only them: " + ", ".join(d["only"][p["id"]]))
+            if parts:
+                parts[0] = parts[0][0].upper() + parts[0][1:]
+                bits.append("Skills: " + ". ".join(parts) + ".")
         if p["jobs"]:
             bits.append("jobs: " + "; ".join(f"{j['job']}: {j['stage']}" for j in p["jobs"]))
         bits.append("last contacted " + (_day(p["last_contacted_at"]) if p["last_contacted_at"] else "never"))

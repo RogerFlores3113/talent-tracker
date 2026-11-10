@@ -116,11 +116,11 @@ function linkBtn(url,text,aria,cls){return el("button",{class:cls||"link",type:"
 function appLink(url,label){return url?el("button",{class:"link small",type:"button",onclick:()=>openLink(url,label||"Talent Search")},label||"Open in Talent Search"):null}
 /* Export xlsx for these people (shared by the People table and the Compare view): export_candidates_xlsx makes a file in
    Downloads (no email, phone or notes) or, when you have to choose, gives the Share page link. Text only, no HTML. */
-function exportIds(ids,btn,out,notLoaded){
+function exportIds(ids,btn,out,notLoaded,kind){
  if(!ids.length){out.textContent="There is nobody to export yet.";return}
  const sent=ids.slice(0,200);
  btn.disabled=true;out.textContent="Making the file...";
- callTool("export_candidates_xlsx",{candidate_ids:sent,for_hiring_manager:true}).then(r=>{btn.disabled=false;
+ callTool("export_candidates_xlsx",{candidate_ids:sent,for_hiring_manager:true,kind:kind||"shortlist"}).then(r=>{btn.disabled=false;
   const d=r&&r.structuredContent;
   if(!d||(r&&r.isError)){out.textContent=said(r)||"Couldn't make the file.";return}
   const cut=ids.length>sent.length?" The first 200 of "+ids.length+" are in it.":"";
@@ -180,7 +180,8 @@ function onKeys(node,map){node.addEventListener("keydown",e=>{const t=e.target;i
 
 /* ---- people: avatar, links, card */
 const COLORS=["red","orange","yellow","green","blue","purple"];
-function initials(n){const p=String(n||"?").trim().split(/\s+/).filter(Boolean);return((p[0]||"?")[0]+(p.length>1?p[p.length-1][0]:"")).toUpperCase()}
+function initials(n){const p=String(n||"").split(/\s+/).map(w=>w.replace(/[^\p{L}]/gu,"")).filter(Boolean);
+ if(!p.length)return"?";return(Array.from(p[0])[0]+(p.length>1?Array.from(p[p.length-1])[0]:"")).toUpperCase()}
 function colorCls(c){return COLORS.includes(c)?" c-"+c:""}
 function avatar(c,small){return el("span",{class:"avatar"+(small?" sm":"")+colorCls(c&&c.color),"aria-hidden":"true"},initials(c&&c.name))}
 function firstName(n){return String(n||"").trim().split(/\s+/)[0]||"them"}

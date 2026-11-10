@@ -720,7 +720,8 @@ def _read_only_refusal(name: str, args: dict[str, Any]) -> str:
     job = args.get("job_id")
     url = _share_page_url(ids[:200], job if isinstance(job, int) else None, bool(args.get("include_contact")),
                           bool(args.get("include_notes")))
-    return trust.READ_ONLY_TEXT + f" You can make the file yourself on the Share page: {url}."
+    return (f"This AI app is set to read only in Talent Search, so I didn't save a file. "
+            f"You can make it on the Share page: {url}.")
 
 
 def _plain(sentence: str, data: dict[str, Any]) -> CallToolResult:
@@ -2402,8 +2403,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         """
         ids = list(dict.fromkeys(int(i) for i in candidate_ids))
         if len(ids) < compare.MIN_PEOPLE:
-            raise ValueError(f"Compare {compare.MIN_PEOPLE} to {compare.MAX_PEOPLE} people at a time "
-                             f"(you gave {len(ids)}). Give at least two, or ask for the list in a search instead.")
+            raise ValueError("Compare takes two to six people. Name or tick at least two.")
         d = compare.build(store, ids)  # more than 6: the first 6 are compared and the rest are named as left out
         n = len(d["people"])
         shown_ids = ",".join(str(p["id"]) for p in d["people"])
@@ -3008,7 +3008,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def export_candidates_xlsx(candidate_ids: list[int], for_hiring_manager: bool = True, include_contact: bool = False,
-                               include_notes: bool = False, job_id: int | None = None) -> CallToolResult:
+                               include_notes: bool = False, job_id: int | None = None,
+                               kind: str = "shortlist") -> CallToolResult:
         """Make an Excel file (.xlsx) of these people in the recruiter's Downloads folder, for them to forward to a
         hiring manager. candidate_ids are the people (ids from search_candidates); job_id (optional) adds each
         person's stage in that job. By default the file has no email, phone or notes: the recruiter's private
@@ -3016,7 +3017,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         database. If you ask for email, phone or notes, or Cautious mode is on, no file is made: the reply is a
         link to the Share page in the app, where the recruiter picks what goes in and makes the file. Tell the
         recruiter the path (or the link). for_hiring_manager=False means a copy for the recruiter's own use, which they
-        make on the Share page too. Up to 200 people."""
+        make on the Share page too. kind: "shortlist" (the default, file named shortlist-...) or "list" (a plain
+        list of people, named candidates-...). Up to 200 people."""
         ids = list(dict.fromkeys(int(i) for i in candidate_ids or []))
         if not ids:
             raise ValueError("No file made. Say which people, as candidate_ids (ids from search_candidates).")
@@ -3046,6 +3048,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             return _plain(lost + why, {"written": False, "people": len(found), "share_url": share_url,
                                        "app_url": share_url, "not_found": missing})
         data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id)
+        if (kind or "").lower() == "list":
+            name = "candidates-" + name[len("shortlist-"):] if name.startswith("shortlist-") else name
         path = xlsx_export.save_to_downloads(data, name)
         line = (f"{lost}Made {name} with {n} {'person' if n == 1 else 'people'}, saved in {path.parent} on your "
                 "computer. It has no email, phone or notes. Nothing was sent: forward the file yourself. "

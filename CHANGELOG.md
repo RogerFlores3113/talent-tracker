@@ -46,6 +46,10 @@ All notable changes to Talent Search. Newest first.
 - In Claude, compare takes the first six people if you give more and says who was left out, ends with a link to Open in Talent Search, and the view has Share as xlsx, Export xlsx and a Remove button for each person. The People table says "Export 12 shown" or "Export 2 ticked", reports what it saved, and has Share as xlsx beside Compare.
 - The messages Claude gets back from the xlsx export are plain and clear, a Read only app is given the Share page link, and people not found are listed first.
 
+### In-chat compare and export
+- Compare in chat now reads "Skills: Shared: sql. Some of them: python (3 of 6 have it). Only them: django." and the Compare view says "python, 3 of 6 have it". Comparing one person says "Compare takes two to six people. Name or tick at least two."
+- When an AI app is set to read only, the export refusal now speaks plainly to you and links the Share page. Exporting the People table makes candidates-DATE.xlsx instead of a shortlist file, and a new Load all and export button gets everyone found (up to 200) first. People table initials use letters only.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

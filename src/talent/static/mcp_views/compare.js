@@ -13,7 +13,7 @@ function cmpSkills(d,p){
  const box=el("div",{});
  for(const[k,label,list]of groups){if(!list.length)continue;
   box.append(el("div",{class:"cmp-group","data-group":k},el("span",{class:"cmp-label "+k},label),
-   el("span",{class:"chips"},list.map(c=>el("span",{class:"chip"},c.t,c.n?el("span",{class:"cmp-n"},", "+c.n+" of "+c.of):null)))))}
+   el("span",{class:"chips"},list.map(c=>el("span",{class:"chip"},c.t,c.n?el("span",{class:"cmp-n"},", "+c.n+" of "+c.of+" have it"):null)))))}
  return box.childNodes.length?box:el("span",{class:"muted"},"No skills saved")}
 function cmpAbout(p){
  const t=p.about||"";if(!t)return el("span",{class:"muted"},"Nothing saved");
