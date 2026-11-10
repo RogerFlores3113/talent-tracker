@@ -96,9 +96,9 @@ def test_never_contacted_line(store):
     a, b, c = _people(store)
     store.update_candidate(a, last_contacted_at="2026-11-01T10:00:00+00:00")
     d = compare.build(store, [a, b, c])
-    assert any("Emily and Noah were never contacted." in g for g in d["glance"])
+    assert any("No contact logged with Emily and Noah yet." in g for g in d["glance"])
     allnever = compare.build(store, [b, c])
-    assert any("Nobody here has been contacted yet." in g for g in allnever["glance"])
+    assert any("No contact logged with anyone here yet." in g for g in allnever["glance"])
 
 
 def test_two_people_and_six_people_work_and_seven_is_capped(store):

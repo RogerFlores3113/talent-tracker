@@ -1202,7 +1202,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         try:
             preview = xlsx_export.share_preview(store, [r["id"] for r in rows], hl=hl_pairs)
         except Exception:  # the preview is a nicety: the form still works without it
-            preview = {"cols": [], "names": []}
+            preview = {"cols": [], "names": [], "jobs": {}}
         chosen = None
         if job_id:
             try:
@@ -1213,7 +1213,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
                     notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
                     rejected=rejected, preview=preview, today=xlsx_export.stamp(),
-                    file_name=xlsx_export.share_filename(chosen, None, note))
+                    file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
+                    pv=(preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
+                    or {"names": preview.get("names", []), "count": len(rows), "stage": False})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
     def candidates_share(request: Request, ids: str = "", job: str = "", hl: str = "", contact: str = "",
@@ -1247,13 +1249,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return xlsx_response(data, name)
 
     @app.get("/candidates/compare", response_class=HTMLResponse)
-    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = ""):
+    def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = "",
+                           about: str = ""):
         """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
-        hiring manager view: nothing about the recruiter's own work, no app links, ready to print."""
+        hiring manager view: nothing about the recruiter's own work, no app links, only stages still in play, ready
+        to print. about=0 leaves the About row out of it."""
         hl_pairs = searchquery.parse_hl(hl)  # skill -> color in click order; a color stays with its skill
         hl_list = [h for h, _ in hl_pairs]
         hl_colors = dict(hl_pairs)
         hm = view == "hm"
+        no_about = hm and about == "0"
         asked = compare.parse_ids(ids)
         try:
             d = compare.build(store, asked)
@@ -1267,22 +1272,34 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         def href(path: str, ids_: list[int], **extra: str) -> str:
             q = [("ids", ",".join(map(str, ids_)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
             return path + "?" + urlencode(q + list(extra.items()))
-        removes = ({p["id"]: href("/candidates/compare", [i for i in ids_now if i != p["id"]]) for p in people}
-                   if len(people) > compare.MIN_PEOPLE and not hm else {})
+        removes: dict[int, str] = {}
+        if len(people) > compare.MIN_PEOPLE and not hm:
+            for p in people:
+                left = [i for i in ids_now if i != p["id"]]
+                if len(left) > compare.MIN_PEOPLE:  # the next Remove button, or the one before it for the last person
+                    at = ids_now.index(p["id"])
+                    near = ids_now[at + 1] if at + 1 < len(ids_now) else ids_now[at - 1]
+                    frag = f"#rm-{near}"
+                else:
+                    frag = "#compare-region"  # no Remove buttons left: focus the table
+                removes[p["id"]] = href("/candidates/compare", left) + frag
         hidden = set(d["empty"]) | (set(compare.HM_HIDDEN) if hm else set())
-        rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
+        if no_about:
+            hidden.add("about")
         if hm:
-            people = [{**p, "links": compare.public_links(p["links"])} for p in people]
-            d = {**d, "people": people, "glance": d["glance_hm"]}
-            if "links" not in hidden and not any(p["links"] for p in people):
-                rows = [r for r in rows if r[0] != "links"]
+            people = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
+            d = {**d, "people": people, "glance": d["glance_hm"], "differs": compare.differs(people)}
+            hidden |= set(compare.empty_rows(people))
+        rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
         share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
         return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
                     capped=total > len(people), share_href="/candidates/share?" + urlencode(share_q),
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
                     rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
+                    no_about=no_about,
                     hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
                     hm_href=href("/candidates/compare", ids_now, view="hm"),
+                    about_href=href("/candidates/compare", ids_now, view="hm", **({} if no_about else {"about": "0"})),
                     full_href=href("/candidates/compare", ids_now))
 
     @app.get("/candidates/duplicates", response_class=HTMLResponse)

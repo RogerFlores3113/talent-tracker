@@ -53,6 +53,12 @@ All notable changes to Talent Search. Newest first.
 - Compare in chat now reads "Skills: Shared: sql. Some of them: python (3 of 6 have it). Only them: django." and the Compare view says "python, 3 of 6 have it". Comparing one person says "Compare takes two to six people. Name or tick at least two."
 - When an AI app is set to read only, the export refusal now speaks plainly to you and links the Share page. Exporting the People table makes candidates-DATE.xlsx instead of a shortlist file, and a new Load all and export button gets everyone found (up to 200) first. People table initials use letters only.
 
+### Hiring manager view and share form
+- The Hiring manager view is safer to send: it shows only stages still in play (nothing for Rejected or Withdrawn), says plainly what it hides and that About text is shown as written, and has a Hide About button that stays in its links. It also has a Side by side heading.
+- The Share form warns when you include notes ("may hold pay, other interviews or private remarks"), and its preview now matches the file exactly: the people and count with rejected people left out (or added back when you tick the box) and the Stage column only when someone is in the job. The note box no longer suggests a job name when no job is picked.
+- The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
+- Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
+
 ## [0.1.2] - 2026-11-09
 
 ### Search
