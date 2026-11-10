@@ -349,7 +349,11 @@ def build(store: Any, ids: list[int], today: date | None = None) -> dict[str, An
 
 def text_lines(d: dict[str, Any]) -> list[str]:
     """The comparison as plain lines for the AI (candidate text, so the caller fences it)."""
-    out = list(d["glance"])
+    out = []
+    if d.get("left_out"):  # said first, so nobody misses that the comparison is of the first six
+        out.append("Left out, because compare takes 6 at a time: "
+                   + ", ".join(f"{x['name']} (id {x['id']})" for x in d["left_out"]) + ".")
+    out += list(d["glance"])
     n = len(d["people"])
     for p in d["people"]:
         bits = [p["name"]]
@@ -378,9 +382,6 @@ def text_lines(d: dict[str, Any]) -> list[str]:
             bits.append("jobs: " + "; ".join(f"{j['job']}: {j['stage']}" for j in p["jobs"]))
         bits.append("last contacted " + (_day(p["last_contacted_at"]) if p["last_contacted_at"] else "none logged"))
         out.append("- " + " | ".join(bits))
-    if d.get("left_out"):
-        out.append("Left out, because compare takes 6 at a time: "
-                   + ", ".join(f"{x['name']} (id {x['id']})" for x in d["left_out"]) + ".")
     return out
 
 

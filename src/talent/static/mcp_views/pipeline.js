@@ -35,8 +35,8 @@ function render(d){
  const left=new Set(d.left_out||[]);
  if(per.length){
   wrap.append(el("ul",{class:"chips stagecounts","aria-label":"People in each stage"},per.map(s=>{const t=s.total!=null?s.total:s.candidates.length;
-   return el("li",{class:"chip",title:left.has(s.name)?"Not in the status update":null},s.name,el("span",{class:"sr"},","),"\u00a0"+t+(left.has(s.name)?" *":""))})));
-  if(per.some(s=>left.has(s.name)))wrap.append(el("p",{class:"small muted",style:"margin:2px 0 6px"},"* Not in the status update text: "+per.filter(s=>left.has(s.name)).map(s=>s.name).join(", ")+"."))}
+   return el("li",{class:"chip",title:left.has(s.name)?"Not in the status update text":null},s.name,el("span",{class:"sr"},","),"\u00a0"+t+(left.has(s.name)?" *":""))})));
+  if(per.some(s=>left.has(s.name)))wrap.append(el("p",{class:"small legend",style:"margin:2px 0 6px"},el("b",{},"* "),"A star means the stage is left out of the status update text you paste to a manager: "+per.filter(s=>left.has(s.name)).map(s=>s.name).join(", ")+". The people are still here."))}
  else wrap.append(emptyState("Nobody is in this job's pipeline yet."));
  const board=el("div",{class:"board wrap"});
  for(const s of d.stages){const t=s.total!=null?s.total:s.candidates.length;

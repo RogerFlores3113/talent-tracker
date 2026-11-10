@@ -79,6 +79,13 @@ All notable changes to Talent Search. Newest first.
 - Your AI app can list look-alike skill names (list_skill_lookalikes) but cannot merge them.
 - Keyboard: a Skip to skill highlights link at the top of Candidates, and a Highlight a skill box where you type a skill or "title: ..." and press Enter. Clear now reads "Clear all 3 highlights" and puts focus in that box. Skill chips on a profile add to the highlights you came with. The skill list is sorted ignoring case and shows each skill once.
 
+### In-chat views (cycle 14)
+- Claude can open People and Compare already tiered: search_candidates, run_saved_search and compare_candidates take a highlight list (skills in your order, a job title as "title:Data Engineer"). Picks you make in the view are kept when you press Refresh or Back to the list.
+- The in-chat table fits a chat window: Name, Title, Skills, then Job and Stage, with Company, Location, Updated, Added and Last contacted behind a Columns button. Show as table no longer jumps to full screen (Full screen is its own button), skill chips work in card view too, each row says "Top match: python, red. 2 of 2", the pick bar stays in view, and picked chips are named for screen readers with their color and number.
+- In-chat Compare keeps the order you chose, names anyone left out at the top, colors your picks, fits three people without sideways scrolling, and has a Hiring manager view button.
+- In-chat exports are clearer: "Export for hiring manager" (no contact details or notes) and "Export for me" (opens the Share page with contact and notes ticked). The saved file's full path is shown with a Copy path button, and export_candidates_xlsx with only a job_id exports that job's people.
+- Fixes: the sticky Name cell takes the row tint, the table no longer jumps when you click a chip or export, and Today's list is no longer clipped at the bottom. The pipeline star now has a plain explanation.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

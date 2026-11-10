@@ -133,3 +133,13 @@ input::placeholder{color:var(--muted);opacity:1}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .preview h2 button.link,.preview p button.link,.preview li button.link{display:inline;text-align:left;white-space:normal}
 .preview h2{overflow-wrap:anywhere}
+
+/* highlights (picks): same fixed fills as the Candidates page; the chip keeps its own readable ink. Shared by the People and Compare views */
+.chips.skillchips{margin-top:0;align-items:center}
+button.chip{font:inherit;font-size:.75rem;color:var(--text);border:1px solid var(--line);cursor:pointer;text-decoration:none}
+button.chip:hover{border-color:var(--accent)}
+.chip.hl{font-weight:600;border-color:var(--text);background:var(--bub);color:var(--bub-ink)}
+.chip[data-hl=red]{--bub:#c62828;--bub-ink:#fff}.chip[data-hl=yellow]{--bub:#f6d53d;--bub-ink:#1a1a1a}.chip[data-hl=green]{--bub:#1f7a3d;--bub-ink:#fff}
+.chip[data-hl=blue]{--bub:#2563c9;--bub-ink:#fff}.chip[data-hl=purple]{--bub:#7b3fc4;--bub-ink:#fff}.chip[data-hl=orange]{--bub:#f59a23;--bub-ink:#1a1a1a}
+.chip.hl.removable{cursor:pointer}
+@media (forced-colors:active){.chip.hl{border:2px solid Highlight}}
