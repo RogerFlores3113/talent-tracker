@@ -59,7 +59,11 @@ function announce(t){const l=document.getElementById("live");if(!l)return;l.text
 function setStatus(n,t){if(n)n.textContent=t||"";if(t)announce(t)}
 
 /* ---- host context: theme, host style variables, display mode */
-const VARMAP={"--color-background-primary":"--surface","--color-text-primary":"--text","--color-text-secondary":"--muted","--color-border-primary":"--line","--color-background-secondary":"--chip","--font-sans":"--font"};
+/* The look is the recruiter's Talent Search theme (the server says which in _meta["talent/theme"]), never the host's colors:
+   only the host's font is taken from its style variables. Until a result says, the view wears Sunset. */
+const VARMAP={"--font-sans":"--font"};
+const THEMES=["sunset","forest-night","ocean","midnight","classic"];
+function applyTheme(meta){const t=meta&&typeof meta==="object"?meta["talent/theme"]:null;if(typeof t==="string"&&THEMES.includes(t))document.documentElement.dataset.tt=t}
 function applyCtx(){const d=document.documentElement;
  if(CTX.theme)d.dataset.theme=CTX.theme;
  const vars=(CTX.styles&&CTX.styles.variables)||{};
@@ -164,7 +168,7 @@ function confirmSend(anchor,question,text,status,url,label,after,yesLabel,only){
  anchor.hidden=true;anchor.after(row);yes.focus();return row}
 function tellClaude(obj,text){if(FAILED.tell||!hostCan("tell"))return Promise.resolve(false);
  return req("ui/update-model-context",{content:[{type:"text",text}],structuredContent:obj}).then(r=>{if(r&&r.isError){FAILED.tell=1;return false}return true})}
-function callTool(name,args){return req("tools/call",{name,arguments:args||{}})}
+function callTool(name,args){return req("tools/call",{name,arguments:args||{}}).then(r=>{if(r)applyTheme(r._meta);return r})}
 function canCall(){return !!(HOST&&HOST.serverTools)}
 
 /* ---- dates */
@@ -325,7 +329,7 @@ function refresh(btn){if(btn)btn.disabled=true;announce("Refreshing.");
  const args=typeof window.refreshArgs==="function"?window.refreshArgs(ARGS):ARGS;
  callTool(TOOL,args).then(r=>{if(btn)btn.disabled=false;const d=r&&r.structuredContent;if(r&&r.isError||!d){announce(said(r)||"Couldn't refresh.");return}
   REFRESHING=true;try{showResult(d,r._meta)}finally{REFRESHING=false}})}
-function showResult(d,meta){DATA=d;if(meta)META=meta;ALIASES=(d&&d.skill_aliases&&typeof d.skill_aliases==="object")?d.skill_aliases:{};let n;useZone(d);ABS_USED=false;setNotice("");
+function showResult(d,meta){DATA=d;if(meta)META=meta;applyTheme(meta);ALIASES=(d&&d.skill_aliases&&typeof d.skill_aliases==="object")?d.skill_aliases:{};let n;useZone(d);ABS_USED=false;setNotice("");
  try{n=render(d)}catch(e){n=errorState("Couldn't show this.")}
  const m=document.getElementById("main");m.replaceChildren(n||emptyState("Nothing to show."));
  if(ABS_USED&&ZONE_SAID&&ZONE){const h=m.querySelector(".vhead");const t=el("p",{class:"small muted zonenote",style:"margin:-4px 0 6px"},"Times in "+zoneShort());if(h)h.after(t);else m.prepend(t)}
@@ -341,7 +345,7 @@ window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const
   if(DATA){setNotice("Claude stopped that request. What you see is from before.");announce("Claude stopped that request. What you see is from before.")}
   else document.getElementById("main").replaceChildren(emptyState("That was cancelled, so there is nothing to show."))}
  else if(m.method==="ui/notifications/tool-result"){GOT=true;if(OAI){OAI=false}  // the bridge delivered after all: it wins from here on
-  META=p._meta||{};const d=p.structuredContent||null;
+  META=p._meta||{};applyTheme(META);const d=p.structuredContent||null;
   if(d&&OAI_SHOWN&&OAI_SHOWN===JSON.stringify(d)){OAI_SHOWN="";return}  // same result the fallback already drew: not twice
   OAI_SHOWN="";
   if(d)showResult(d,p._meta);else document.getElementById("main").replaceChildren(p.isError?errorState(said(p)||"That didn't work."):emptyState("Nothing to show."))}
@@ -371,6 +375,7 @@ function oaiShow(){const o=oai();if(!o||GOT)return;
  if(!HOSTCTX){const c={};if(typeof o.theme==="string")c.theme=o.theme;if(typeof o.displayMode==="string")c.displayMode=o.displayMode;
   c.availableDisplayModes=typeof o.requestDisplayMode==="function"?["inline","fullscreen"]:["inline"];mergeCtx(c)}
  if(o.toolInput&&typeof o.toolInput==="object")ARGS=o.toolInput;
+ if(o.toolResponseMetadata&&typeof o.toolResponseMetadata==="object")applyTheme(o.toolResponseMetadata);
  const d=o.toolOutput;if(d&&typeof d==="object"){const key=JSON.stringify(d);if(key!==OAI_SHOWN){OAI_SHOWN=key;showResult(d,o.toolResponseMetadata&&typeof o.toolResponseMetadata==="object"?o.toolResponseMetadata:{})}}}
 window.addEventListener("openai:set_globals",()=>{if(OAI)oaiShow()});
 if(oai())setTimeout(()=>{if(!INIT&&!GOT)oaiShow()},2500);  // ui/initialize never answered

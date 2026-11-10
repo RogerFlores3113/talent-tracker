@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from . import __version__
@@ -53,13 +54,57 @@ def _read(name: str) -> str:
     return (_DIR / name).read_text(encoding="utf-8")
 
 
+# The app's theme token each view token takes (the rest are passed through under their own names).
+THEME_MAP = (("--page", "--bg"), ("--surface", "--surface"), ("--text", "--text"), ("--muted", "--muted"),
+             ("--line", "--line"), ("--accent", "--accent"), ("--on-accent", "--accent-text"), ("--chip", "--surface-2"),
+             ("--focus", "--accent"), ("--ok", "--ok"), ("--danger", "--bad"), ("--mark", "--mark"),
+             ("--head-from", "--head-from"), ("--head-mid", "--head-mid"), ("--head-to", "--head-to"),
+             ("--head-end", "--head-end"), ("--btn-from", "--btn-from"), ("--btn-to", "--btn-to"),
+             ("--btn-text", "--btn-text"), ("--rule-from", "--rule-from"), ("--rule-to", "--rule-to"),
+             ("--tint", "--tint"), ("--shadow-rgb", "--shadow-rgb"), ("color-scheme", "color-scheme"))
+THEME_NAMES = ("sunset", "forest-night", "ocean", "midnight", "classic")
+
+
+def theme_blocks() -> dict[str, dict[str, str]]:
+    """{'sunset': {token: value}, 'sunset-dark': ...} read from the '/* theme: name */' blocks of the app's style.css."""
+    css = (_DIR.parent / "style.css").read_text(encoding="utf-8")
+    out = {}
+    for name, body in re.findall(r"/\* theme: (\S+) \*/[^{]*\{([^}]*)\}", css):
+        out[name] = {k: v.strip() for k, v in re.findall(r"(--[\w-]+|color-scheme):\s*([^;]+);", body)}
+    return out
+
+
+def theme_css() -> str:
+    """The view's colors, one rule set per Talent Search theme, generated from style.css so they can't drift.
+
+    The theme name is in data-tt on <html> (the server says it in _meta["talent/theme"]); none yet means sunset.
+    Sunset and Classic follow the chat app's light or dark: data-theme=dark or light (what the host said), and
+    with no word from the host, the computer's setting. Forest night and Midnight are always dark, Ocean always light.
+    """
+    blocks = theme_blocks()
+
+    def body(key: str) -> str:
+        tokens = blocks[key]
+        return ";".join(f"{mine}:{tokens[theirs]}" for mine, theirs in THEME_MAP) + ";"
+
+    out = [f":root,:root[data-tt=sunset]{{{body('sunset')}}}"]
+    out.append(f":root[data-theme=dark]:not([data-tt]),:root[data-tt=sunset][data-theme=dark]{{{body('sunset-dark')}}}")
+    out.append(f"@media (prefers-color-scheme:dark){{:root:not([data-theme]):not([data-tt]),:root[data-tt=sunset]:not([data-theme]){{{body('sunset-dark')}}}}}")
+    out.append(f":root[data-tt=classic]{{{body('classic')}}}")
+    out.append(f":root[data-tt=classic][data-theme=dark]{{{body('classic-dark')}}}")
+    out.append(f"@media (prefers-color-scheme:dark){{:root[data-tt=classic]:not([data-theme]){{{body('classic-dark')}}}}}")
+    for fixed in ("forest-night", "ocean", "midnight"):
+        out.append(f":root[data-tt={fixed}]{{{body(fixed)}}}")
+    return "/* theme (generated from style.css) */\n" + "\n".join(out) + "\n"
+
+
 def view_html(name: str) -> str:
     name = ALIASES.get(name, name)
     if name not in URIS:
         raise KeyError(name)
     own = _DIR / (name + ".css")  # a view may bring its own styles (interviews.css ...)
     table = name in WITH_TABLE or name == "searches"  # these show the People card or table, so they need people.css
-    css = (_read("kit.css") + ("\n" + _read("people.css") if table else "")
+    css = (theme_css() + _read("kit.css") + ("\n" + _read("people.css") if table else "")
            + ("\n" + own.read_text(encoding="utf-8") if own.exists() and own.name != "people.css" else "")
            + ("\n" + _read("compare.css") if name in WITH_COMPARE else ""))
     kit = (_read("kit.js").replace("__VERSION__", json.dumps(__version__))

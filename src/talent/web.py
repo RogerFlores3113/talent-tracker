@@ -44,7 +44,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     HL_END, HL_START, Store, _labels, dropped_text, fold_name, interview_label, interview_note, snippet_html,
                     join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
-from .store import BATCH_KINDS, DEFAULT_THEME, THEMES
+from .store import BATCH_KINDS, DEFAULT_THEME, THEMES, saved_theme
 from .store import COLORS, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
@@ -288,8 +288,7 @@ def _history_to_text(entries: list[dict[str, Any]]) -> str:
 
 def current_theme(store: Store) -> str:
     """The saved color theme, or the default when nothing valid is saved."""
-    value = store.setting("theme")
-    return value if value in {t[0] for t in THEMES} else DEFAULT_THEME
+    return saved_theme(store)
 
 
 def key_cookie_name(key: str) -> str:

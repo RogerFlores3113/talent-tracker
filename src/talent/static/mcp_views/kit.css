@@ -1,13 +1,14 @@
 /* Talent Search in-chat view kit: one calm visual language. 8px grid, rem text, light and dark, forced colors. */
-:root{--bg:transparent;--surface:#fff;--text:#1c1c1a;--muted:#5c5c57;--line:#dcdbd5;--accent:#2347b8;--on-accent:#fff;--mark:#fff1a8;--chip:#f0efe9;--focus:#1a56db;--ok:#1f6b3a;--danger:#a32020;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+:root{--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
 --c-red:#d64545;--c-orange:#e07b22;--c-yellow:#c9a400;--c-green:#2f9e5b;--c-blue:#2f6fe0;--c-purple:#8a4fd1;--c-none:#9a998f}
-:root[data-theme=dark]{--surface:#1f1f1d;--text:#ecebe6;--muted:#b4b3ab;--line:#3a3935;--accent:#9db4ff;--on-accent:#101830;--mark:#5a4b00;--chip:#2c2c29;--focus:#8fb0ff;--ok:#7fd49c;--danger:#ff9b9b}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--surface:#1f1f1d;--text:#ecebe6;--muted:#b4b3ab;--line:#3a3935;--accent:#9db4ff;--on-accent:#101830;--mark:#5a4b00;--chip:#2c2c29;--focus:#8fb0ff;--ok:#7fd49c;--danger:#ff9b9b}}
+/* the colors (--page, --surface, --text, --muted, --line, --accent, --on-accent, --chip, --focus, --ok, --danger, --mark, --head-*, --btn-*, --rule-*, --tint, --shadow-rgb) come from the Talent Search theme: mcp_views.theme_css() prepends them, read from style.css */
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html{font-size:16px}
-body{margin:0;padding:4px;min-height:96px;background:var(--bg);color:var(--text);font:.875rem/1.45 var(--font)}
-html[data-mode=fullscreen] body{min-height:100vh;padding:12px;background:var(--surface)}
+html{background:transparent}
+body{margin:4px;padding:12px;min-height:96px;background:var(--page);color:var(--text);font:.875rem/1.45 var(--font);border-radius:12px}
+html[data-mode=fullscreen] body{margin:0;min-height:100vh;border-radius:0}
+main::before{content:"";display:block;height:3px;border-radius:3px;background:linear-gradient(90deg,var(--rule-from),var(--rule-to));margin:0 0 10px}
 main{display:block}
 .sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:8px}
@@ -36,9 +37,11 @@ ul.plain{list-style:none;padding:0;margin:0}
 .contact{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:.8125rem}
 .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
 .btn{font:inherit;font-size:.8125rem;border:1px solid var(--line);background:var(--chip);color:var(--text);border-radius:7px;padding:3px 10px;cursor:pointer;min-height:28px;text-decoration:none;display:inline-flex;align-items:center;gap:4px}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn:hover:not(:disabled):not([aria-disabled=true]){border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 25%,transparent)}
+.btn.primary{background:linear-gradient(100deg,var(--btn-from),var(--btn-to));border-color:transparent;color:var(--btn-text);font-weight:600;box-shadow:0 1px 2px rgba(var(--shadow-rgb),.2)}
+.btn.primary:hover:not(:disabled):not([aria-disabled=true]){border-color:transparent;filter:brightness(1.1) saturate(1.05);box-shadow:0 0 0 3px color-mix(in srgb,var(--btn-from) 30%,transparent),0 4px 14px rgba(var(--shadow-rgb),.25)}
 .btn:disabled,.btn[aria-disabled=true]{opacity:.55;cursor:default}
-.btn[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.btn[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:color-mix(in srgb,var(--accent) 16%,var(--chip));font-weight:600}
 input.reason,input.field{font:inherit;font-size:.8125rem;border:1px solid var(--line);border-radius:7px;padding:3px 8px;background:var(--surface);color:var(--text);min-width:180px;flex:1;min-height:28px}
 .status{font-size:.75rem;margin-top:6px;min-height:1em}
 .badge{display:inline-block;margin-left:8px;background:var(--chip);color:var(--muted);border-radius:999px;padding:1px 8px;font-size:.75rem;font-weight:600;vertical-align:middle}
@@ -94,7 +97,8 @@ input.reason,input.field{font:inherit;font-size:.8125rem;border:1px solid var(--
 .fu{border-top:1px solid var(--line);padding:8px 0}
 .fu:first-child{border-top:0}
 .fu pre{white-space:pre-wrap;font:inherit;font-size:.8125rem;margin:6px 0 0;padding:6px 8px;background:var(--chip);border-radius:6px;overflow-wrap:anywhere}
-.preview{background:#fff;color:#1c1c1a;border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-bottom:10px}
+/* the client update is a sheet of paper: it stays white with dark ink on every theme */
+.preview{background:#fff;color:#1c1c1a;border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin-bottom:10px;box-shadow:0 1px 3px rgba(var(--shadow-rgb),.25)}
 .preview h2{font-size:1rem;color:#1c1c1a;text-transform:none;letter-spacing:0;margin:14px 0 4px}
 .preview h2:first-child{margin-top:0}
 .preview p{margin:4px 0}.preview ul{margin:4px 0}

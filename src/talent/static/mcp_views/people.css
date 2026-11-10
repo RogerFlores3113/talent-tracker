@@ -64,10 +64,8 @@ table.ptable th[scope=row] button.link{text-align:left}
 .tablebox{position:relative}
 .tablebox .tablewrap{overflow-x:auto}
 .tablebox .edge{position:absolute;top:0;bottom:0;width:18px;pointer-events:none;opacity:0;transition:opacity .15s}
-.tablebox .edge.l{left:0;background:linear-gradient(to right,rgba(0,0,0,.28),transparent)}
-.tablebox .edge.r{right:0;background:linear-gradient(to left,rgba(0,0,0,.28),transparent)}
-:root[data-theme=dark] .tablebox .edge.l{background:linear-gradient(to right,rgba(0,0,0,.7),transparent)}
-:root[data-theme=dark] .tablebox .edge.r{background:linear-gradient(to left,rgba(0,0,0,.7),transparent)}
+.tablebox .edge.l{left:0;background:linear-gradient(to right,rgba(var(--shadow-rgb),.28),transparent)}
+.tablebox .edge.r{right:0;background:linear-gradient(to left,rgba(var(--shadow-rgb),.28),transparent)}
 .tablebox .edge.on{opacity:1}
 table.ptable td.k-email .chk{color:var(--ok);font-weight:700}
 html[data-mode=fullscreen] table.ptable td.k-email .chk{display:none}

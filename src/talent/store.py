@@ -2026,6 +2026,12 @@ THEMES: tuple[tuple[str, str, str], ...] = (
 DEFAULT_THEME = THEMES[0][0]
 
 
+def saved_theme(store: "Store") -> str:
+    """The saved color theme, or the default when nothing valid is saved (the app and the in-chat views both ask)."""
+    value = store.setting("theme")
+    return value if value in {t[0] for t in THEMES} else DEFAULT_THEME
+
+
 JOB_FIELD_LABELS = {"hiring_manager_email": "hiring manager email", "min_active": "active target",
                     "target_date": "target date", "hiring_manager": "hiring manager"}
 JOB_STATUS_LABELS = {"open": "Open", "on_hold": "On hold", "closed": "Closed"}
