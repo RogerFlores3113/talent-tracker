@@ -204,7 +204,7 @@ def test_table_export_says_when_cut_off(store):
         web.BULK_MAX = cap
     assert len(names_of(book)) == 3
     note = " ".join(str(r[1]) for r in book["About this export"]["rows"] if len(r) > 1)
-    assert "5 people matched" in note
+    assert "first 3 of 5 people" in note
 
 
 def test_downloads_are_not_for_other_sites(store):
@@ -237,7 +237,7 @@ def test_client_pipeline_xlsx(store):
     res = client.get("/clients/acme/pipeline.xlsx")
     assert res.status_code == 200
     book = read_xlsx(res.content)
-    assert book["Pipeline"]["rows"][0][:2] == ["Job", "Candidate"]
+    assert book["Pipeline"]["rows"][1][:2] == ["Job", "Candidate"]  # the title line comes first
 
 
 # ------------------------------------------------------------------ sharing
@@ -249,7 +249,7 @@ def test_share_defaults_leave_out_contact_and_notes(store):
     job, ana, ben, cy = seed(store)
     res = share(local_client(store), [ana["id"], ben["id"]])
     assert res.status_code == 200
-    assert "candidates-" in res.headers["content-disposition"] and res.headers["content-disposition"].endswith('.xlsx"')
+    assert "shortlist-" in res.headers["content-disposition"] and res.headers["content-disposition"].endswith('.xlsx"')
     raw = zipfile.ZipFile(io.BytesIO(res.content))
     blob = b"".join(raw.read(n) for n in raw.namelist())
     for secret in (b"ana@example.com", b"ben@example.com", b"555-0101", b"asks too much money", b"127.0.0.1", b"localhost"):
@@ -274,7 +274,7 @@ def test_share_opt_ins_job_note_and_filename(store):
     res = share(local_client(store), [ana["id"], ben["id"]], include_contact="1", include_notes="1",
                 job_id=str(job["id"]), note="Shortlist for the backend role")
     today = datetime.now().strftime("%Y-%m-%d")
-    assert f'filename="candidates-for-senior-backend-engineer-{today}.xlsx"' in res.headers["content-disposition"]
+    assert f'filename="shortlist-senior-backend-engineer-{today}.xlsx"' in res.headers["content-disposition"]
     book = read_xlsx(res.content)
     rows = book["Candidates"]["rows"]
     assert rows[0] == ["Shortlist for the backend role"] and rows[1][0] == "Name"
@@ -283,7 +283,7 @@ def test_share_opt_ins_job_note_and_filename(store):
     a, b = (dict(zip(head, r)) for r in rows[2:4])
     assert a["Email"] == "ana@example.com" and a["Phone"] == "555-0101" and a["Stage"] == "Interviewing"
     assert "asks too much money" in a["Notes"]
-    assert b["Stage"] == "Not in this job"
+    assert b["Stage"] is None  # not in the job: blank
     assert book["Candidates"]["freeze"][0] == "2"
 
 
@@ -334,7 +334,7 @@ def test_mcp_tool_writes_a_file_without_private_fields(store, tmp_path, monkeypa
     data = data_of(call(build_server(store), "export_candidates_xlsx", candidate_ids=[ana["id"], ben["id"]], job_id=job["id"]))
     assert data["written"] and data["people"] == 2 and "/candidates/share?" in data["share_url"]
     f = tmp_path / "dl" / data["file"]
-    assert f.exists() and data["file"].startswith("candidates-for-senior-backend-engineer-")
+    assert f.exists() and data["file"].startswith("shortlist-senior-backend-engineer-")
     blob = b"".join(zipfile.ZipFile(f).read(n) for n in zipfile.ZipFile(f).namelist())
     assert b"ana@example.com" not in blob and b"asks too much money" not in blob
     again = data_of(call(build_server(store), "export_candidates_xlsx", candidate_ids=[ana["id"]]))

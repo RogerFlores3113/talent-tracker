@@ -16,7 +16,7 @@ import io
 import json
 import re
 import statistics
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -1382,26 +1382,47 @@ def _num(v: float) -> str:
     return str(int(v)) if float(v).is_integer() else str(v)
 
 
-def pipeline_table(rep: dict[str, Any], with_out: bool = False) -> tuple[list[str], list[list[Any]]]:
+def pipeline_table(rep: dict[str, Any], with_out: bool = False, typed: bool = False) -> tuple[list[str], list[list[Any]]]:
     """(header, rows) of the per-candidate pipeline behind the report. Left-out stages aren't in it, nor (unless
-    with_out) people who are out, like Not a Fit or Withdrew."""
+    with_out) people who are out, like Not a Fit or Withdrew. With typed=True (the spreadsheet), dates are real
+    dates and the next interview a real date and time in the client's time zone, named in the header."""
     tz = rep["client"].get("time_zone")
     own = rep.get("inhouse")
     labels = INHOUSE_LABELS if own else GROUP_LABELS
     head = ["Job", "Candidate", "Current title", "Current company", "Stage", "Stage group", "In stage since",
-            "Days in stage", *([] if own else ["Last submitted"]), "Next interview"]
+            "Days in stage", *([] if own else ["Last submitted"]),
+            f"Next interview ({tz or 'time zone of this computer'})" if typed else "Next interview"]
     nxt: dict[tuple[int, str], str] = {}
     for u in rep["upcoming"]:
-        nxt.setdefault((u["candidate_id"], u["job"]), u["at_client"])
+        nxt.setdefault((u["candidate_id"], u["job"]), u["at"] if typed else u["at_client"])
+
+    def day(iso: str | None) -> Any:
+        text = in_zone(iso, tz, "%Y-%m-%d") if iso else ""
+        if not typed or not text:
+            return text
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return text
+
+    def when(iso: str | None) -> Any:
+        if not typed or not iso:
+            return iso or ""
+        text = in_zone(iso, tz, "%Y-%m-%d %H:%M")
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return text
+
     people = [p for p in rep["people"] if with_out or p["group"] != "out"]
     rows = []
     for p in sorted(people, key=lambda p: (p["job"].lower(), [g for g, _ in GROUPS].index(p["group"]),
                                            p["name"].lower())):
-        sub = [] if own else [in_zone(p["submitted_at"], tz, "%Y-%m-%d") if p["submitted_at"] else ""]
+        sub = [] if own else [day(p["submitted_at"])]
         rows.append([
             p["job"], p["name"], p.get("title") or "", p.get("company") or "", p["stage"], labels[p["group"]],
-            "imported" if p["imported"] else in_zone(p["since"], tz, "%Y-%m-%d"), "" if p["imported"] else p["days"],
-            *sub, nxt.get((p["candidate_id"], p["job"]), "")])
+            "imported" if p["imported"] else day(p["since"]), "" if p["imported"] else p["days"],
+            *sub, when(nxt.get((p["candidate_id"], p["job"]))) if typed else nxt.get((p["candidate_id"], p["job"]), "")])
     return head, rows
 
 

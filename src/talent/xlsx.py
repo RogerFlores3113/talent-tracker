@@ -33,6 +33,21 @@ class Link:
 
 
 @dataclass
+class Colored:
+    """A text cell filled in one of the app's six highlight colors (red, yellow, green, blue, purple, orange)."""
+    text: str
+    hue: str
+
+
+# fill, text color: the same six hues as the app's chips, with text that reads on each
+HUES: dict[str, tuple[str, str]] = {
+    "red": ("C62828", "FFFFFF"), "yellow": ("F6D53D", "1A1A1A"), "green": ("1F7A3D", "FFFFFF"),
+    "blue": ("2563C9", "FFFFFF"), "purple": ("7B3FC4", "FFFFFF"), "orange": ("F59A23", "1A1A1A"),
+}
+_HUE_NAMES = list(HUES)
+
+
+@dataclass
 class Sheet:
     name: str
     headers: Sequence[str]
@@ -41,6 +56,7 @@ class Sheet:
     widths: Sequence[float] | None = None
     freeze: bool = True                   # keep the header row in view
     autofilter: bool = True               # filter buttons on the header row
+    big_preamble: bool = False            # preamble lines bold 12 pt, merged across the table and wrapped
 
 
 def clean_text(value: Any) -> str:
@@ -83,38 +99,60 @@ def _serial(d: date | datetime) -> float:
 
 # Cell formats (the cellXfs list in styles.xml). Keep these numbers in step with _STYLES.
 S_PLAIN, S_HEAD, S_WRAP, S_DATE, S_LINK, S_NOTE, S_TEXTFIRST, S_NUM = 0, 1, 2, 3, 4, 5, 6, 7
+S_DATETIME, S_BIGNOTE = 8, 9
+S_HUE0 = 10  # then one style per hue, in HUES order
 
-_STYLES = (
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-    '<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy\\-mm\\-dd"/></numFmts>'
-    '<fonts count="4">'
-    '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
-    '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font>'
-    '<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/></font>'
-    '<font><i/><sz val="11"/><color rgb="FF595959"/><name val="Calibri"/><family val="2"/></font>'
-    '</fonts>'
-    '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
-    '<fill><patternFill patternType="solid"><fgColor rgb="FF2F4F6F"/><bgColor indexed="64"/></patternFill></fill></fills>'
-    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
-    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="8">'
-    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-    '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
-    '<alignment vertical="center" wrapText="1"/></xf>'
-    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
-    '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1">'
-    '<alignment horizontal="left" vertical="top"/></xf>'
-    '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
-    '<alignment vertical="top" wrapText="1"/></xf>'
-    '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
-    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" quotePrefix="1" applyAlignment="1">'
-    '<alignment vertical="top" wrapText="1"/></xf>'
-    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right" vertical="top"/></xf>'
-    '</cellXfs>'
-    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
-    '</styleSheet>'
-)
+def _styles() -> str:
+    hue_fills = "".join(f'<fill><patternFill patternType="solid"><fgColor rgb="FF{bg}"/><bgColor indexed="64"/>'
+                        f'</patternFill></fill>' for bg, _ in HUES.values())
+    hue_fonts = "".join(f'<font><sz val="11"/><color rgb="FF{fg}"/><name val="Calibri"/><family val="2"/></font>'
+                        for _, fg in HUES.values())
+    hue_xfs = "".join(f'<xf numFmtId="0" fontId="{5 + i}" fillId="{3 + i}" borderId="0" xfId="0" applyFont="1" '
+                      'applyFill="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+                      for i in range(len(HUES)))
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy\\-mm\\-dd"/>'
+        '<numFmt numFmtId="165" formatCode="yyyy\\-mm\\-dd\\ hh:mm"/></numFmts>'
+        f'<fonts count="{5 + len(HUES)}">'
+        '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
+        '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font>'
+        '<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/></font>'
+        '<font><i/><sz val="11"/><color rgb="FF595959"/><name val="Calibri"/><family val="2"/></font>'
+        '<font><b/><sz val="12"/><name val="Calibri"/><family val="2"/></font>'
+        f'{hue_fonts}</fonts>'
+        f'<fills count="{3 + len(HUES)}"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF2F4F6F"/><bgColor indexed="64"/></patternFill></fill>'
+        f'{hue_fills}</fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        f'<cellXfs count="{10 + len(HUES)}">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+        '<alignment vertical="center" wrapText="1"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+        '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1">'
+        '<alignment horizontal="left" vertical="top"/></xf>'
+        '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+        '<alignment vertical="top" wrapText="1"/></xf>'
+        '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" quotePrefix="1" applyAlignment="1">'
+        '<alignment vertical="top" wrapText="1"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="top"/></xf>'
+        '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1">'
+        '<alignment horizontal="left" vertical="top"/></xf>'
+        '<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+        '<alignment vertical="top" wrapText="1"/></xf>'
+        f'{hue_xfs}'
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+
+
+_STYLES = _styles()
 
 
 def _text_cell(ref: str, text: str, style: int) -> str:
@@ -134,6 +172,9 @@ def _cell(ref: str, value: Any, links: list[tuple[str, str]]) -> str:
             links.append((ref, url))
             return _text_cell(ref, text, S_LINK)
         return _text_cell(ref, text, S_WRAP)
+    if isinstance(value, Colored):
+        hue = _HUE_NAMES.index(value.hue) if value.hue in HUES else None
+        return _text_cell(ref, clean_text(value.text), S_WRAP if hue is None else S_HUE0 + hue)
     if isinstance(value, bool):
         return _text_cell(ref, "Yes" if value else "No", S_WRAP)
     if isinstance(value, (int, float)):
@@ -141,7 +182,8 @@ def _cell(ref: str, value: Any, links: list[tuple[str, str]]) -> str:
             return ""
         return f'<c r="{ref}" s="{S_NUM}"><v>{value!r}</v></c>'
     if isinstance(value, (date, datetime)):
-        return f'<c r="{ref}" s="{S_DATE}"><v>{_serial(value)!r}</v></c>'
+        style = S_DATETIME if isinstance(value, datetime) else S_DATE
+        return f'<c r="{ref}" s="{style}"><v>{_serial(value)!r}</v></c>'
     text = clean_text(value)
     return _text_cell(ref, text, S_TEXTFIRST if text[:1] in ("=", "+", "-", "@", "\t") else S_WRAP)
 
@@ -154,9 +196,9 @@ def _widths(sheet: Sheet) -> list[float]:
         longest = len(clean_text(h)) + 2
         for r in list(sheet.rows)[:300]:
             if i < len(r) and r[i] is not None:
-                v = r[i].text or r[i].url if isinstance(r[i], Link) else r[i]
+                v = r[i].text or r[i].url if isinstance(r[i], Link) else r[i].text if isinstance(r[i], Colored) else r[i]
                 if isinstance(v, (date, datetime)):
-                    n = 10
+                    n = 16 if isinstance(v, datetime) else 10
                 else:
                     n = max((len(p) for p in clean_text(v).split("\n")), default=0)
                 longest = max(longest, n)
@@ -169,10 +211,21 @@ def _sheet_xml(sheet: Sheet) -> tuple[str, list[str]]:
     ncols = max(1, len(sheet.headers))
     rows_xml: list[str] = []
     links: list[tuple[str, str]] = []
+    merges: list[str] = []
+    widths = _widths(sheet)
     r = 0
     for line in sheet.preamble:
         r += 1
-        rows_xml.append(f'<row r="{r}">{_text_cell(f"A{r}", clean_text(line), S_NOTE)}</row>')
+        text = clean_text(line)
+        if sheet.big_preamble:  # a note people read first: bold, merged across the table, tall enough for every line
+            per_line = max(20.0, sum(widths) * 0.85)
+            lines = sum(max(1, -(-len(p) // int(per_line))) for p in text.split("\n"))
+            if ncols > 1:
+                merges.append(f"A{r}:{col_letter(ncols)}{r}")
+            rows_xml.append(f'<row r="{r}" ht="{max(20, 17 * lines + 3)}" customHeight="1">'
+                            f'{_text_cell(f"A{r}", text, S_BIGNOTE)}</row>')
+        else:
+            rows_xml.append(f'<row r="{r}">{_text_cell(f"A{r}", text, S_NOTE)}</row>')
     r += 1
     head_row = r
     cells = "".join(_text_cell(f"{col_letter(i + 1)}{r}", clean_text(h), S_HEAD) for i, h in enumerate(sheet.headers))
@@ -184,7 +237,7 @@ def _sheet_xml(sheet: Sheet) -> tuple[str, list[str]]:
         rows_xml.append(f'<row r="{r}">{cells}</row>')
     last = col_letter(ncols)
     cols = "".join(f'<col min="{i + 1}" max="{i + 1}" width="{w:.1f}" customWidth="1"/>'
-                   for i, w in enumerate(_widths(sheet)))
+                   for i, w in enumerate(widths))
     pane = ""
     if sheet.freeze:
         pane = (f'<pane ySplit="{head_row}" topLeftCell="A{head_row + 1}" activePane="bottomLeft" state="frozen"/>'
@@ -192,16 +245,22 @@ def _sheet_xml(sheet: Sheet) -> tuple[str, list[str]]:
     xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+           '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
            f'<dimension ref="A1:{last}{max(r, 1)}"/>'
            f'<sheetViews><sheetView workbookViewId="0">{pane}</sheetView></sheetViews>'
            '<sheetFormatPr defaultRowHeight="15"/>'
            f'<cols>{cols}</cols><sheetData>{"".join(rows_xml)}</sheetData>')
     if sheet.autofilter and sheet.headers:
         xml += f'<autoFilter ref="A{head_row}:{last}{max(r, head_row)}"/>'
+    if merges:
+        xml += f'<mergeCells count="{len(merges)}">' + "".join(f'<mergeCell ref="{m}"/>' for m in merges) + "</mergeCells>"
     if links:
         xml += "<hyperlinks>" + "".join(f'<hyperlink ref="{ref}" r:id="rId{i + 1}"/>'
                                         for i, (ref, _) in enumerate(links)) + "</hyperlinks>"
-    xml += '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>'
+    # print setup: landscape, one page wide however many pages tall, narrow margins, a page number at the foot
+    xml += ('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.6" header="0.3" footer="0.3"/>'
+            '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+            '<headerFooter><oddFooter>&amp;CPage &amp;P of &amp;N</oddFooter></headerFooter></worksheet>')
     return xml, [u for _, u in links]
 
 
@@ -249,6 +308,11 @@ def build_workbook(sheets: Sequence[Sheet], *, title: str = "", created: datetim
                        'relationships/styles" Target="styles.xml"/>')
         defined = []
         for i, (sheet, name) in enumerate(zip(sheets, names)):
+            quoted = escape(chr(39) + name.replace(chr(39), chr(39) * 2) + chr(39))
+            if sheet.headers:  # the header row repeats at the top of every printed page
+                head_row = len(sheet.preamble) + 1
+                defined.append(f'<definedName name="_xlnm.Print_Titles" localSheetId="{i}">'
+                               f"{quoted}!${head_row}:${head_row}</definedName>")
             if sheet.autofilter and sheet.headers:  # Excel wants the filter named too, or it may drop the buttons
                 head_row = len(sheet.preamble) + 1
                 defined.append(f'<definedName name="_xlnm._FilterDatabase" localSheetId="{i}" hidden="1">'

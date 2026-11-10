@@ -27,6 +27,16 @@ All notable changes to Talent Search. Newest first.
 - Tick two to six people on Candidates and press Compare to see them side by side: title, location, years of experience, skills, jobs and stages, source, last contacted, links and about. An "At a glance" list says in plain words what they share and where they differ ("Only Maya has rust and payments", "Noah has the most experience"). Skills everyone has are marked shared, skills only one person has are marked only them, and highlighted skills keep their colors. Remove anyone from the comparison, or go back to the list with the same people ticked.
 - In Claude, the People table has a Compare button for two to six selected people, and Claude can compare people for you (it only reads).
 
+### Spreadsheets, ready to forward
+- Every xlsx prints on landscape pages one page wide, repeats its header row on each page, and has narrow margins. Skills and About wrap in wide columns.
+- The file for a hiring manager leaves out columns nobody has anything in, keeps people in the order you picked them (or furthest along first when you pick a job), and opens with your note in bold across the top. With a job picked, people not in it have no stage, and people marked rejected stay out unless you tick "Include people marked rejected".
+- Highlighted skills come with you: Export xlsx and Share add a Matched skills column after Name ("python, data engineer (2 of 2)"), filled in the color of the first skill that matches. The About sheet lists filters in words ("Location: Boston", "Highlighted skills: python (red)").
+- Dates are real dates (yyyy-mm-dd), years of experience are rounded to half years, and the empty Color column is now Label color and only appears when someone has one.
+- The Share page has three notes choices (No notes, Latest note only, All notes and timeline), reminds you that About and work history go out as written, and previews the file name, columns and first names. It says when the file is downloading. Files are named shortlist-<job or note>-date.xlsx.
+- Exports and bulk exports that hit the 5,000 cap say "first 5,000 of N" on the About sheet and beside the Export buttons. Settings says "Export all N people as xlsx".
+- Export CSV on the Candidates table now follows your filters and order, like Export xlsx. The whole-list CSV stays in Settings.
+- A client's pipeline xlsx has a title line ("Acme pipeline, as of 2026-11-10"), real dates, and the next interview as a real date and time with its time zone named in the header.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search
