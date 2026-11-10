@@ -794,3 +794,70 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();
+
+// Candidates table, cycle 14: a live "3 people ticked" count by the bulk bar, the bulk panel stays folded until
+// someone is ticked, Compare / Export / Share with nothing ticked says so beside the buttons (no reload, no jump to
+// the top, focus on the message), and a download says "Your spreadsheet is downloading" and keeps focus put.
+(function () {
+  function start() {
+    const form = document.getElementById("bulk-form");
+    const count = document.getElementById("bulk-count");
+    const panel = document.getElementById("bulk-panel");
+    const msg = document.getElementById("bulk-msg");
+    const status = document.getElementById("export-status");
+    function ticked() {
+      if (!form) return 0;
+      const all = form.querySelector("input[name=select_all]");
+      if (all && all.checked) return parseInt(count && count.dataset.total || "0", 10) || 1;
+      return document.querySelectorAll("input[type=checkbox][name='candidate_ids']:checked").length;
+    }
+    function refresh() {
+      const n = ticked();
+      if (count) count.textContent = n + (n === 1 ? " person" : " people") + " ticked";
+      if (panel) panel.hidden = n === 0;
+      if (msg && n > 0 && !msg.hidden) msg.hidden = true;
+    }
+    function later() { window.setTimeout(refresh, 0); }
+    document.addEventListener("change", later);
+    document.addEventListener("click", e => { if (e.target.closest && e.target.closest("input[name='candidate_ids']")) later(); });
+    refresh();
+    if (form) {
+      form.addEventListener("submit", e => {
+        const act = e.submitter && e.submitter.value;
+        if (!["compare", "export", "export_xlsx", "share"].includes(act)) return;
+        const n = ticked();
+        const bad = n === 0 ? "Tick at least one person first." : (act === "compare" && n < 2 ? "Tick two to six people to compare." : "");
+        if (bad && msg) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          msg.textContent = bad;
+          msg.hidden = false;
+          try { msg.focus({preventScroll: true}); } catch (err) { msg.focus(); }
+          return;
+        }
+        if (status && (act === "export" || act === "export_xlsx")) {
+          status.textContent = "";
+          window.setTimeout(() => { status.textContent = "Your spreadsheet is downloading. Look in your Downloads folder."; }, 50);
+        }
+      }, true);
+    }
+    // Export links: the file comes down by itself, the page and the focus stay where they are.
+    const notes = document.getElementById("export-csv-notes");
+    const csv = document.getElementById("export-csv");
+    function csvHref() {
+      if (!csv) return;
+      const url = new URL(csv.getAttribute("href"), location.href);
+      if (notes && notes.checked) url.searchParams.set("notes", "1"); else url.searchParams.delete("notes");
+      csv.setAttribute("href", url.pathname + url.search);
+    }
+    if (notes) { notes.addEventListener("change", csvHref); csvHref(); }
+    document.addEventListener("click", e => {
+      const a = e.target.closest && e.target.closest("a[data-download]");
+      if (!a || !status) return;
+      status.textContent = "";
+      window.setTimeout(() => { status.textContent = "Your spreadsheet is downloading. Look in your Downloads folder."; }, 50);
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();

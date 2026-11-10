@@ -39,12 +39,13 @@ def test_hm_view_shows_active_stages_only(store):
     assert "Rejected" in full and "Designer" in full  # the recruiter still sees everything
 
 
-def test_hm_view_with_only_lost_stages_has_no_jobs_row(store):
+def test_hm_view_with_only_lost_stages_says_not_in_play(store):
     ids = people(store)
     lost = store.add_job("Designer", "Acme")
     store.add_to_pipeline(ids[0], lost["id"], "Rejected")
     html = local_client(store).get(f"/candidates/compare?ids={q(ids)}&view=hm").text
-    assert "Jobs and stages" not in html and "Not in any job" not in html and "Designer" not in html
+    # cycle 14: a blank cell read like an error, so the row says "Not in play" (and never the job or stage)
+    assert "Not in play" in html and "Not in any job" not in html and "Designer" not in html and "Rejected" not in html
 
 
 def test_hm_view_words_headings_and_about_toggle(store):

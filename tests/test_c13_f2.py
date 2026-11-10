@@ -170,7 +170,7 @@ def test_share_form_wording_radios_preview_and_live_line(store):
     assert "Your spreadsheet is downloading. Look in your Downloads folder." in js
     assert "fetch(" not in js and "XMLHttpRequest" not in js and "innerHTML" not in js
     job_html = local_client(store).get(f"/candidates/share?ids={ana['id']}&job={job['id']}").text
-    assert "shortlist-senior-backend-engineer-" in job_html
+    assert "shortlist-acme-senior-backend-engineer-" in job_html
 
 
 def test_share_filename_rules():

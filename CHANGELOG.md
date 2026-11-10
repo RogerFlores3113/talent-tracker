@@ -59,6 +59,13 @@ All notable changes to Talent Search. Newest first.
 - The shared file is named shortlist-<job>-date.xlsx, or shortlist-date.xlsx with no job. What you type in the note is never used in the name.
 - Compare: after Remove (x), keyboard focus lands on the next Remove button; with four or more people the page uses the full window width and says "Scroll sideways to see all N people." when the table is wider than the window; At a glance says "No contact logged with anyone here yet." instead of "Nobody here has been contacted yet."
 
+### Privacy, files and web polish
+- Share form: a red line says notes can hold pay talk and private remarks and go into the file as written. When notes are on, the preview shows each person's note (first 80 characters, as it will appear) with "Leave this note out" and "Leave this person out" ticks that the file honors. It says so when nobody has the highlighted skills, starts on the Candidates job filter, and names the company in the file name (shortlist-company-job-date.xlsx). The title row says "as of" the date.
+- Hiring manager view: tick "Hide About" for one person at a time, see "Not in play" instead of a blank stage, read a line when someone was left out, and a proper heading, page title and landmarks. Focus starts on the heading.
+- The client status text on a job leaves out Rejected, Withdrawn and other ended stages by default, like Sourced and Contacted, and a "Names that will be sent" line lists exactly who is in it.
+- Export CSV uses plain dates (2026-11-10) and leaves out private notes and the timeline unless you tick "Include notes". Dates in the table spreadsheet are real date cells. Exports say "Your spreadsheet is downloading" and keep focus on the button.
+- Candidates: a live "3 people ticked" count, the bulk actions stay folded until someone is ticked, and Compare, Export or Share with nobody ticked says so beside the buttons without reloading the page. The job Board lays stages out side by side again, the "I hire for my own company" switch has its own space on Jobs, and /today goes to the front page.
+
 ## [0.1.2] - 2026-11-09
 
 ### Search

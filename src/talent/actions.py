@@ -1219,6 +1219,28 @@ def default_omit(store: Store, job_id: int) -> list[str]:
     return name_hidden(store, job_id)
 
 
+def page_omit(store: Store, job_id: int) -> list[str]:
+    """What the job page's status update leaves out until the recruiter chooses: the default_omit stages and the
+    stages that ended badly (Rejected, Withdrawn, Client passed: outcome lost), so the text a recruiter copies does
+    not name someone who was turned down. Once they save their own choice, that choice is used as saved."""
+    if has_saved_omit(store, job_id):
+        return saved_omit(store, job_id)
+    out = default_omit(store, job_id)
+    return out + [s["name"] for s in store.job_stages(job_id) if s["outcome"] == "lost" and s["name"] not in out]
+
+
+def status_names(store: Store, job_id: int, text: str) -> list[str]:
+    """The people in this job's pipeline whose names are in `text` (the status update), in pipeline order: exactly
+    who a pasted copy of it would name."""
+    seen: list[str] = []
+    for g in store.pipeline_by_stage(job_id):
+        for a in g["candidates"]:
+            n = a["candidate_name"]
+            if n and n in text and n not in seen:
+                seen.append(n)
+    return seen
+
+
 def has_saved_omit(store: Store, job_id: int) -> bool:
     return bool(store.setting(_omit_key(job_id)))
 

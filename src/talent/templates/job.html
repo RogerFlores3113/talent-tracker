@@ -72,8 +72,8 @@
 </section>
 {% include "_sequence.html" %}
 <details class="panel" id="status" {{ 'open' if omit or request.query_params.get('status') }}><summary>{{ 'Status update' if inhouse() else 'Status update for the client' }}</summary>
-  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages are internal: their people aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
-  {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't {{ 'put forward' if inhouse() else 'presented' }} yet.</p>{% endif %}
+  <p class="fine">The same text the Copy status update button copies. Names and days in each stage, what changed in the last week, and the next interviews in your time zone. Left-out stages (your own work, and people who were turned down or withdrew) aren't named or counted. What you leave out is remembered for this job, on the Jobs page and for your AI app too.</p>
+  {% if omit_default and omit %}<p class="fine">Left out until you choose: {{ omit | join(', ') }}, so nobody sees people you haven't {{ 'put forward' if inhouse() else 'presented' }} yet or people who were turned down.</p>{% endif %}
   <form method="post" action="/jobs/{{ job.id }}/omit" class="inline omit-stages">
     <span class="fine">Leave out:</span>
     {% set omitted = omit | map('lower') | list %}
@@ -81,6 +81,7 @@
     <button class="btn small" type="submit">Save and update the text</button>
   </form>
   <pre class="code status-text">{{ status_text }}</pre>
+  <p class="fine" id="status-names">{% if status_names %}Names that will be sent ({{ status_names | length }}): {{ status_names | join(', ') }}.{% else %}Names that will be sent: nobody.{% endif %}</p>
   {% if hidden_note %}<p class="fine">Only you see this: {{ hidden_note[0] | lower }}{{ hidden_note[1:] }}. It isn't in the copied text.</p>{% endif %}
 </details>
 <form method="post" action="/jobs/{{ job.id }}/delete" data-confirm="Delete {{ job_label(job.title, job.company) }}? This removes the job and its pipeline. The candidates stay saved.">

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -907,7 +907,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if action == "export":
             stamp = datetime.now().strftime("%Y-%m-%d")
             # the order the boxes came in (the screen's order), the same people and order as the xlsx
-            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs), media_type="text/csv; charset=utf-8",
+            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs,
+                                                     include_notes=form.get("include_notes") == "1"),
+                            media_type="text/csv; charset=utf-8",
                             headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
         if action == "export_xlsx":
             rows = people_rows(ids)
@@ -915,7 +917,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                                                             hl=hl_pairs, drop_empty=True),
                                  f"talent-search-selected-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
         if action == "share":
-            return share_page(request, ids, hl=searchquery.join_hl(hl_pairs))
+            job_now = str(form.get("f_job") or "").strip()  # the Candidates job filter, when one is on
+            return share_page(request, ids, hl=searchquery.join_hl(hl_pairs), job=job_now if job_now.isdigit() else "")
         if action == "color":
             try:
                 shade = clean_color(str(form.get("color") or ""))
@@ -1173,7 +1176,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def candidates_export_csv(request: Request):
         """The same people in the same order as export.xlsx, as the CSV this app can import again."""
         rows, _, args = table_export_rows(request)
-        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", ""))),
+        with_notes = request.query_params.get("notes") == "1"
+        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", "")),
+                                                 include_notes=with_notes),
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition":
                                  f'attachment; filename="talent-search-candidates-{datetime.now().strftime("%Y-%m-%d")}.csv"'})
@@ -1195,7 +1200,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return value if value in xlsx_export.NOTES_MODES else ("all" if legacy else "none")
 
     def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: str = "none",
-                   note: str = "", error: str = "", hl: str = "", rejected: bool = False) -> HTMLResponse:
+                   note: str = "", error: str = "", hl: str = "", rejected: bool = False,
+                   leave_out: set[int] | None = None, leave_note: set[int] | None = None) -> HTMLResponse:
         rows = people_rows(ids)
         hl_pairs = searchquery.parse_hl(hl)
         job_id = int(job) if str(job).isdigit() else None
@@ -1209,13 +1215,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 chosen = store.get_job(job_id)
             except NotFound:
                 chosen = None
+        pv = ((preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
+              or {"names": preview.get("names", []), "count": len(rows), "stage": False,
+                  "people": [{"id": r["id"], "name": r["name"]} for r in rows]})
+        try:
+            notes_seen = xlsx_export.note_preview(store, [r["id"] for r in rows])
+            no_match = xlsx_export.nobody_matches(store, [r["id"] for r in rows], hl_pairs)
+        except Exception:
+            notes_seen, no_match = {}, False
         return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
                     count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
                     notes=notes, note=note, error=error, hl=searchquery.join_hl(hl_pairs), hl_words=xlsx_export.hl_words(hl_pairs),
                     rejected=rejected, preview=preview, today=xlsx_export.stamp(),
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
-                    pv=(preview.get("jobs") or {}).get(str(chosen["id"]) if chosen else "", {}).get("in" if rejected else "out")
-                    or {"names": preview.get("names", []), "count": len(rows), "stage": False})
+                    pv=pv, notes_seen=notes_seen, no_match=no_match,
+                    leave_out=leave_out or set(), leave_note=leave_note or set(),
+                    kept_ids={p["id"] for p in pv.get("people") or []})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
     def candidates_share(request: Request, ids: str = "", job: str = "", hl: str = "", contact: str = "",
@@ -1237,20 +1252,28 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         note = str(form.get("note") or "")
         hl = searchquery.join_hl(searchquery.parse_hl(str(form.get("hl") or "")))
         rejected = form.get("include_rejected") == "1"
+        leave_out = {int(v) for v in form.getlist("leave_out") if str(v).isdigit()}
+        leave_note = {int(v) for v in form.getlist("leave_note") if str(v).isdigit()}
         try:
             job = store.get_job(job_id) if job_id else None
         except NotFound:
             return share_page(request, ids, contact=contact, notes=notes, note=note, hl=hl, rejected=rejected,
+                              leave_out=leave_out, leave_note=leave_note,
                               error="That job isn't there any more. Pick another or leave it empty.")
+        if not [i for i in ids if i not in leave_out]:
+            return share_page(request, ids, job=raw_job, contact=contact, notes=notes, note=note, hl=hl,
+                              rejected=rejected, leave_out=leave_out, leave_note=leave_note,
+                              error="Everyone is left out. Untick \"Leave this person out\" for at least one person.")
         if job and not note.strip():
             note = f"Shortlist for {job['title']}"
         data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, notes=notes, job_id=job_id,
-                                                    note=note, hl=searchquery.parse_hl(hl), include_rejected=rejected)
+                                                    note=note, hl=searchquery.parse_hl(hl), include_rejected=rejected,
+                                                    leave_out=leave_out, skip_notes=leave_note)
         return xlsx_response(data, name)
 
     @app.get("/candidates/compare", response_class=HTMLResponse)
     def candidates_compare(request: Request, ids: str = "", hl: str = "", of: str = "", view: str = "",
-                           about: str = ""):
+                           about: str = "", noabout: list[str] = Query(default=[])):
         """Two to six people side by side, with what is the same and what is different. Read-only. view=hm is the
         hiring manager view: nothing about the recruiter's own work, no app links, only stages still in play, ready
         to print. about=0 leaves the About row out of it."""
@@ -1259,6 +1282,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         hl_colors = dict(hl_pairs)
         hm = view == "hm"
         no_about = hm and about == "0"
+        hide_about_ids = {int(x) for v in noabout for x in v.split(",") if x.strip().isdigit()} if hm else set()
         asked = compare.parse_ids(ids)
         try:
             d = compare.build(store, asked)
@@ -1290,13 +1314,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             people = [{**p, "links": compare.public_links(p["links"])} for p in compare.active_jobs(people)]
             d = {**d, "people": people, "glance": d["glance_hm"], "differs": compare.differs(people)}
             hidden |= set(compare.empty_rows(people))
+        hm_left_out = compare.left_out_note(people) if hm else ""
         rows = [(k, label) for k, label in compare.ROWS if k not in hidden]
         share_q = [("ids", ",".join(map(str, ids_now)))] + ([("hl", searchquery.join_hl(hl_pairs))] if hl_pairs else [])
         return page(request, "compare.html", d=d, message="", hl=hl_list, hl_colors=hl_colors, total=total,
                     capped=total > len(people), share_href="/candidates/share?" + urlencode(share_q),
                     removes=removes, back_href=href("/candidates", ids_now), names=compare.short_names(people),
                     rows=rows, skill_groups=compare.skill_groups(d, hl_list), hm=hm, hide_chrome=hm,
-                    no_about=no_about,
+                    no_about=no_about, hide_about_ids=hide_about_ids, hm_left_out=hm_left_out,
+                    hm_form_ids=",".join(map(str, ids_now)), hm_form_hl=searchquery.join_hl(hl_pairs),
+                    hm_head="Hiring manager comparison" if hm else "",
                     hl_have=compare.hl_counts(people, hl_list) if hl_list else {},
                     hm_href=href("/candidates/compare", ids_now, view="hm"),
                     about_href=href("/candidates/compare", ids_now, view="hm", **({} if no_about else {"about": "0"})),
@@ -2298,11 +2325,16 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse(f"/jobs/{job['id']}?{urlencode({'notice': ' '.join(notes)})}", status_code=303)
         return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
 
+    @app.get("/today")
+    def today_redirect():
+        """Today is the front page: /today is only a way people guess at it."""
+        return RedirectResponse("/", status_code=307)
+
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_detail(request: Request, job_id: int, view: str = "", q: str = "", show: str = "", ask_cancel: str = ""):
         job = job_or_404(job_id)
         # ?omit= previews a choice without saving it; otherwise the job's remembered Leave out choice applies.
-        omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.saved_omit(store, job_id)
+        omit = [o for o in request.query_params.getlist("omit") if o.strip()] or actions.page_omit(store, job_id)
         if view in ("board", "table"):
             store.set_settings(pipeline_view=view)
         view = view if view in ("board", "table") else store.setting("pipeline_view")
@@ -2310,11 +2342,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if q.strip():
             in_pipe = {a["candidate_id"] for a in store.pipeline(job_id)}
             add_results = [h.candidate for h in search.search(q, limit=8).hits if h.candidate["id"] not in in_pipe]
+        status_text = actions.job_status_text(store, job_id, omit_stages=omit)
         ctx = dict(job=job, groups=store.pipeline_by_stage(job_id), stages=store.job_stages(job_id), view=view,
+                   status_names=actions.status_names(store, job_id, status_text),
                    inject_warnings=injection.job_warnings(job),
                    q=q, add_results=add_results, prompt=recipes.source_for_job(job, guard=site_guard.enabled(store)),
                    next_iv=actions.next_interviews(store, job_id), omit=omit,
-                   status_text=actions.job_status_text(store, job_id, omit_stages=omit),
+                   status_text=status_text,
                    hidden_note=actions.hidden_note(store, job_id, omit),
                    nums=actions.job_numbers(store, job_id), todos=_todos(job_id), show=show,
                    omit_default=not actions.has_saved_omit(store, job_id) and not request.query_params.getlist("omit"),
