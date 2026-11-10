@@ -35,7 +35,7 @@ from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import chase, desk, duplicates, opsreview, tour
-from . import searchquery
+from . import searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -56,7 +56,7 @@ BULK_MAX = 5000  # people a bulk action on the Candidates table covers when "all
 PREVIEW_MAX_ROWS = 20000  # bigger files import without the "what will change" preview
 BIG_IMPORT_ROWS = 1000  # from here on the import page says it takes a minute, and shows it's working
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-DOWNLOADS = {"/backup", "/export.csv"}  # whole-database downloads: never for another site's page
+DOWNLOADS = {"/backup", "/export.csv", "/export.xlsx", "/candidates/export.xlsx"}  # whole-database downloads: never for another site's page
 OPEN_PATHS = {"/launch", "/api/health"}  # everything else needs the app window's key
 KEY_HEADER = "x-talent-key"
 KEY_MAX_AGE = 400 * 24 * 3600  # browsers cap cookie lifetimes at 400 days
@@ -657,16 +657,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["hl_href"] = hl_href
     env.globals["hl_first"] = hl_first
 
-    @app.get("/candidates", response_class=HTMLResponse)
-    def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
+    def _table_build(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
               sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
               client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
               color_pick: str = "", cf: str = "",
               title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
               exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
               added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
-              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
-        per = 100
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = "", per: int = 100, rows_only: bool = False):
+        pool = COLORED_FIRST_POOL if per <= 100 else max(COLORED_FIRST_POOL, per)  # the export ranks everyone it keeps
         hl_list = searchquery.split_hl(hl)  # skills to highlight and sort by, in click order (never filters)
         # /candidates?ids=1,2,3 (from the in-chat table): exactly these people, ticked.
         id_list = list(dict.fromkeys(int(x) for x in ids.replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
@@ -704,7 +703,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             member["color"] = color or None
             if colored_first:  # best matches, grouped by colour (red first), best match first inside each colour
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 ranked = sorted(result.hits, key=lambda h: (COLORS.index(h.candidate["color"])
                                                             if h.candidate.get("color") in COLORS else len(COLORS)))
                 ranked = hl_rank_hits(ranked, hl_list)
@@ -712,7 +711,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows = [h.candidate for h in ranked[start:start + per]]
             elif qsort in QSORTS:  # the person picked a column to sort the search by; best match is the default
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 _attach_jobs([h.candidate for h in result.hits])
                 key, desc_first = QSORTS[qsort]
                 reverse = (qdir != "asc") if desc_first else (qdir == "desc")
@@ -721,7 +720,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 rows = [h.candidate for h in ranked[start:start + per]]
             elif hl_list:  # best match first inside each highlight group, so rank a pool of the best matches
                 result = search.search(q, tag=tag or None, location=location or None, source=source or None,
-                                       limit=COLORED_FIRST_POOL, offset=0, **member)
+                                       limit=pool, offset=0, **member)
                 ranked = hl_rank_hits(list(result.hits), hl_list)
                 start = (page_no - 1) * per
                 rows = [h.candidate for h in ranked[start:start + per]]
@@ -747,6 +746,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 f"SELECT c.* FROM candidates c {where} ORDER BY {hl_sql}{order} LIMIT ? OFFSET ?",
                 (*params, *hl_params, per, (page_no - 1) * per))]
         _attach_jobs(rows)
+        if rows_only:  # the export: exactly these rows, in this order
+            return rows, total
         how_read = how_read_line(q, result if q.strip() else None)  # "How we read your search", built from the parser
         range_note = ""
         if "exp_min" in more_params and "exp_max" in more_params and int(more_params["exp_min"]) > int(more_params["exp_max"]):
@@ -777,6 +778,19 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return page(request, "table.html", **ctx, tags=store.list_tags(5000), sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
+
+    @app.get("/candidates", response_class=HTMLResponse)
+    def table(request: Request, q: str = "", tag: str = "", location: str = "", source: str = "",
+              sort: str = "color", dir: str = "", page_no: int = 1, more: int = 0, job: str = "",
+              client: str = "", stage: str = "", pipe: str = "", days: str = "", color: str = "",
+              color_pick: str = "", cf: str = "",
+              title: str = "", company: str = "", skills: str = "", skill_mode: str = "", remote: str = "",
+              exp_min: str = "", exp_max: str = "", contacted: str = "", contacted_days: str = "",
+              added_days: str = "", has_email: str = "", has_linkedin: str = "", new_after: str = "",
+              ids: str = "", qsort: str = "", qdir: str = "", hl: str = ""):
+        names = table.__code__.co_varnames[1:table.__code__.co_argcount]
+        values = locals()
+        return _table_build(request, **{k: values[k] for k in names})
 
     def _matching_ids(raw: dict[str, str]) -> list[int]:
         """Everyone the Candidates table shows for these filters (the same ones its address carries), not only the
@@ -826,6 +840,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             stamp = datetime.now().strftime("%Y-%m-%d")
             return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
                             headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
+        if action == "export_xlsx":
+            rows = people_rows(ids)
+            return xlsx_response(xlsx_export.table_workbook(store, rows, len(rows), cap=BULK_MAX),
+                                 f"talent-search-selected-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+        if action == "share":
+            return share_page(request, ids)
         if action == "color":
             try:
                 shade = clean_color(str(form.get("color") or ""))
@@ -1016,6 +1036,88 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             raise HTTPException(404, "That saved search isn't there any more.")
         return back(request, "/candidates", notice=f"Deleted the saved search “{row['name']}”.")
     # ------------------------------------------------------- duplicates
+    # ------------------------------------------------------------- spreadsheets (.xlsx)
+    TABLE_QUERY = ("q", "tag", "location", "source", "sort", "dir", "job", "client", "stage", "pipe", "days", "color",
+                   "color_pick", "cf", "title", "company", "skills", "skill_mode", "remote", "exp_min", "exp_max",
+                   "contacted", "contacted_days", "added_days", "has_email", "has_linkedin", "new_after", "ids",
+                   "qsort", "qdir", "hl")
+
+    def xlsx_response(data: bytes, name: str) -> Response:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name) or "talent-search.xlsx"
+        return Response(data, media_type=xlsx.MIME, headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+
+    def people_rows(ids: list[int]) -> list[dict[str, Any]]:
+        """These people as table rows (with their main job), in the order given."""
+        ids = list(dict.fromkeys(ids))[:BULK_MAX]
+        found: dict[int, dict[str, Any]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in store._rows(f"SELECT c.* FROM candidates c WHERE c.id IN ({marks})", tuple(chunk)):
+                found[r["id"]] = store._hydrate(r)
+        rows = [found[i] for i in ids if i in found]
+        _attach_jobs(rows)
+        return rows
+
+    def parse_ids(raw: str) -> list[int]:
+        return list(dict.fromkeys(int(x) for x in (raw or "").replace(" ", "").split(",") if x.isdigit()))[:BULK_MAX]
+
+    @app.get("/candidates/export.xlsx")
+    def candidates_export_xlsx(request: Request):
+        """The Candidates table as a spreadsheet: the same address parameters as /candidates, every page of it."""
+        args = {k: request.query_params[k] for k in TABLE_QUERY if k in request.query_params}
+        rows, total = _table_build(request, per=BULK_MAX, rows_only=True, **args)
+        shown = [f"{k}: {args[k]}" for k in ("q", "tag", "location", "source", "client", "stage", "color", "hl")
+                 if args.get(k)]
+        data = xlsx_export.table_workbook(store, rows, total, filters="; ".join(shown), cap=BULK_MAX)
+        return xlsx_response(data, f"talent-search-candidates-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+    @app.get("/export.xlsx")
+    def export_xlsx_all():
+        rows, total = _table_build_all()
+        return xlsx_response(xlsx_export.table_workbook(store, rows, total),
+                             f"talent-search-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+    def _table_build_all() -> tuple[list[dict[str, Any]], int]:
+        everyone = [r["id"] for r in store._rows("SELECT id FROM candidates ORDER BY lower(name), id")]
+        rows: list[dict[str, Any]] = []
+        for i in range(0, len(everyone), 5000):
+            rows += people_rows(everyone[i:i + 5000])
+        return rows, len(rows)
+
+    def share_page(request: Request, ids: list[int], job: str = "", contact: bool = False, notes: bool = False,
+                   note: str = "", error: str = "") -> HTMLResponse:
+        rows = people_rows(ids)
+        return page(request, "share.html", people=rows, ids=",".join(str(r["id"]) for r in rows),
+                    count=len(rows), jobs=store.membership_choices()["job_choices"], job=job, contact=contact,
+                    notes=notes, note=note, error=error)
+
+    @app.get("/candidates/share", response_class=HTMLResponse)
+    def candidates_share(request: Request, ids: str = "", job: str = ""):
+        """The options for the spreadsheet a recruiter forwards to a hiring manager. /candidates/share?ids=1,2,3"""
+        return share_page(request, parse_ids(ids), job=job.strip())
+
+    @app.post("/candidates/share")
+    async def candidates_share_file(request: Request):
+        form = await request.form()
+        ids = parse_ids(str(form.get("ids") or ""))
+        if not ids:
+            return back(request, "/candidates", error="Tick at least one person first.")
+        raw_job = str(form.get("job_id") or "").strip()
+        job_id = int(raw_job) if raw_job.isdigit() else None
+        contact, notes = form.get("include_contact") == "1", form.get("include_notes") == "1"
+        note = str(form.get("note") or "")
+        try:
+            job = store.get_job(job_id) if job_id else None
+        except NotFound:
+            return share_page(request, ids, contact=contact, notes=notes, note=note,
+                              error="That job isn't there any more. Pick another or leave it empty.")
+        if job and not note.strip():
+            note = f"Shortlist for {job['title']}"
+        data, name, _ = xlsx_export.share_workbook(store, ids, include_contact=contact, include_notes=notes,
+                                                    job_id=job_id, note=note)
+        return xlsx_response(data, name)
+
     @app.get("/candidates/duplicates", response_class=HTMLResponse)
     def duplicates_page(request: Request, shown: int = 50, reason: str = ""):
         shown = max(50, min(shown, 2000))
@@ -2700,6 +2802,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
         return Response(reports.pipeline_csv(rep, with_out=out == "1"), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}-pipeline-{stamp}.csv"'})
+
+    @app.get("/clients/{slug}/pipeline.xlsx")
+    def client_xlsx(slug: str, since: str = "", until: str = "", out: str = ""):
+        c = client_or_404(slug)
+        rep, _ = client_report_or_error(c, since, until)
+        head, rows = reports.pipeline_table(rep, with_out=out == "1")
+        name = re.sub(r"[^A-Za-z0-9-]+", "-", c["slug"]).strip("-") or "client"
+        return xlsx_response(xlsx_export.pipeline_workbook(head, rows),
+                             f"{name}-pipeline-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
     # ------------------------------------------------------- dashboard acts
     @app.post("/actions/interviews/out")

@@ -1382,29 +1382,39 @@ def _num(v: float) -> str:
     return str(int(v)) if float(v).is_integer() else str(v)
 
 
-def pipeline_csv(rep: dict[str, Any], with_out: bool = False) -> str:
-    """The per-candidate pipeline behind the report, for a spreadsheet. Left-out stages aren't in it, nor (unless
+def pipeline_table(rep: dict[str, Any], with_out: bool = False) -> tuple[list[str], list[list[Any]]]:
+    """(header, rows) of the per-candidate pipeline behind the report. Left-out stages aren't in it, nor (unless
     with_out) people who are out, like Not a Fit or Withdrew."""
-    from .importers import _safe_cell
-
     tz = rep["client"].get("time_zone")
-    buf = io.StringIO()
-    w = csv.writer(buf)
     own = rep.get("inhouse")
     labels = INHOUSE_LABELS if own else GROUP_LABELS
-    w.writerow(["Job", "Candidate", "Current title", "Current company", "Stage", "Stage group", "In stage since",
-                "Days in stage", *([] if own else ["Last submitted"]), "Next interview"])
+    head = ["Job", "Candidate", "Current title", "Current company", "Stage", "Stage group", "In stage since",
+            "Days in stage", *([] if own else ["Last submitted"]), "Next interview"]
     nxt: dict[tuple[int, str], str] = {}
     for u in rep["upcoming"]:
         nxt.setdefault((u["candidate_id"], u["job"]), u["at_client"])
     people = [p for p in rep["people"] if with_out or p["group"] != "out"]
+    rows = []
     for p in sorted(people, key=lambda p: (p["job"].lower(), [g for g, _ in GROUPS].index(p["group"]),
                                            p["name"].lower())):
         sub = [] if own else [in_zone(p["submitted_at"], tz, "%Y-%m-%d") if p["submitted_at"] else ""]
-        w.writerow([_safe_cell(v) for v in (
+        rows.append([
             p["job"], p["name"], p.get("title") or "", p.get("company") or "", p["stage"], labels[p["group"]],
             "imported" if p["imported"] else in_zone(p["since"], tz, "%Y-%m-%d"), "" if p["imported"] else p["days"],
-            *sub, nxt.get((p["candidate_id"], p["job"]), ""))])
+            *sub, nxt.get((p["candidate_id"], p["job"]), "")])
+    return head, rows
+
+
+def pipeline_csv(rep: dict[str, Any], with_out: bool = False) -> str:
+    """The pipeline as CSV, for a spreadsheet."""
+    from .importers import _safe_cell
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    head, rows = pipeline_table(rep, with_out)
+    w.writerow(head)
+    for r in rows:
+        w.writerow([_safe_cell(v) for v in r])
     return buf.getvalue()
 
 
@@ -1824,5 +1834,5 @@ def submittal_note(store: Store, candidate_id: int, job_id: int, now: datetime |
 
 
 __all__ = ["GROUPS", "client", "ensure_client", "find_clients", "find_manager", "is_submittal", "mailto", "managers",
-           "mark_sent", "overview", "pipeline_csv", "recruiter_notes", "report", "report_text", "reports_for",
+           "mark_sent", "overview", "pipeline_csv", "pipeline_table", "recruiter_notes", "report", "report_text", "reports_for",
            "save_client", "stage_group", "submittal_note", "submittals", "undo_sent", "updates"]
