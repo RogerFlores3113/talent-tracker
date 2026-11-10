@@ -32,9 +32,10 @@ def test_skills_lose_trailing_emoji_and_symbol_only_skills_are_dropped(store):
     r = _run(store, text)
     assert r["added"] == 1
     tags = store.find_duplicate("ana@x.com")["tags"]
-    assert tags == ["python", "c++", "@cmd", "go", "c#"]
+    assert tags == ["python", "c++", "go", "c#"]
     assert any("-2+3" in w and "letters" in w for w in r["warnings"])
     assert len([w for w in r["warnings"] if "a skill needs some letters" in w]) == 3
+    assert any("@cmd" in w and "can't start with" in w for w in r["warnings"])
 
 
 def test_a_row_with_no_name_is_still_skipped_with_a_reason(store):

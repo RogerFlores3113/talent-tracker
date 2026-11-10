@@ -653,8 +653,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if skill is not None:
             k = " ".join(str(skill).split()).lower()
             if k in cur:
+                keys = list(cur)
+                at = keys.index(k)
                 del cur[k]
-                frag = f"#chip-{rid}-{hl_slug(k)}" if rid is not None else "#removed-" + quote(k, safe="")
+                left = list(cur)  # after a remove from the bar, focus goes to the next chip, else the one before it
+                near = left[at] if at < len(left) else left[at - 1] if left else ""
+                frag = (f"#chip-{rid}-{hl_slug(k)}" if rid is not None else
+                        "#removed-" + quote(k, safe="") + (quote("@hlbar-" + hl_slug(near), safe="@") if near else ""))
             elif len(cur) < searchquery.HL_MAX:
                 cur[k] = next(c for c in searchquery.HL_PALETTE if c not in cur.values())
                 frag = f"#chip-{rid}-{hl_slug(k)}" if rid is not None else f"#hlbar-{hl_slug(k)}"
@@ -901,12 +906,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return RedirectResponse("/candidates/compare?" + urlencode(q), status_code=303)
         if action == "export":
             stamp = datetime.now().strftime("%Y-%m-%d")
-            return Response(importers.export_csv_bytes(store, ids), media_type="text/csv; charset=utf-8",
+            # the order the boxes came in (the screen's order), the same people and order as the xlsx
+            return Response(xlsx_export.csv_in_order(store, ids[:BULK_MAX], hl_pairs), media_type="text/csv; charset=utf-8",
                             headers={"Content-Disposition": f'attachment; filename="talent-search-selected-{stamp}.csv"'})
         if action == "export_xlsx":
             rows = people_rows(ids)
             return xlsx_response(xlsx_export.table_workbook(store, rows, max(matched_total or 0, len(rows)), cap=BULK_MAX,
-                                                            hl=hl_pairs),
+                                                            hl=hl_pairs, drop_empty=True),
                                  f"talent-search-selected-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
         if action == "share":
             return share_page(request, ids, hl=searchquery.join_hl(hl_pairs))
@@ -1160,14 +1166,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         """The Candidates table as a spreadsheet: the same address parameters as /candidates, every page of it."""
         rows, total, args = table_export_rows(request)
         data = xlsx_export.table_workbook(store, rows, total, filters=filter_lines(args), cap=BULK_MAX,
-                                          hl=searchquery.parse_hl(args.get("hl", "")))
+                                          hl=searchquery.parse_hl(args.get("hl", "")), drop_empty=True)
         return xlsx_response(data, f"talent-search-candidates-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
     @app.get("/candidates/export.csv")
     def candidates_export_csv(request: Request):
         """The same people in the same order as export.xlsx, as the CSV this app can import again."""
-        rows, _, _ = table_export_rows(request)
-        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows]), media_type="text/csv; charset=utf-8",
+        rows, _, args = table_export_rows(request)
+        return Response(xlsx_export.csv_in_order(store, [r["id"] for r in rows], searchquery.parse_hl(args.get("hl", ""))),
+                        media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition":
                                  f'attachment; filename="talent-search-candidates-{datetime.now().strftime("%Y-%m-%d")}.csv"'})
 

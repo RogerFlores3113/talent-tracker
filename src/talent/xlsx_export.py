@@ -101,10 +101,11 @@ TABLE_HEADERS = [h for h, _ in TABLE_COLS]
 
 
 def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filters: Any = (), cap: int | None = None,
-                   hl: Iterable[tuple[str, str]] = (), now: datetime | None = None) -> bytes:
+                   hl: Iterable[tuple[str, str]] = (), now: datetime | None = None, drop_empty: bool = False) -> bytes:
     """The rows the Candidates table shows, in the order it shows them (rows come with main_job, main_stage and
     more_jobs, as the table has them). `total` is how many matched, so a cut-off list says so. `filters` is a list
-    of (what, value) pairs in words, or one line of text. `hl` adds a Matched skills column."""
+    of (what, value) pairs in words, or one line of text. `hl` adds a Matched skills column. `drop_empty` leaves out
+    the columns nothing is in for anyone in the file (Name stays), like the file for a hiring manager."""
     years = store.experience_years()
     hl = list(hl)
     records = []
@@ -119,7 +120,8 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
             "Years of experience": half_years(years.get(c["id"])), "Skills": ", ".join(c.get("tags") or []),
             "Last contacted": _day(c.get("last_contacted_at")), "Updated": _day(c.get("updated_at")),
             "Added": _day(c.get("created_at")), "Label color": c.get("color") or ""})
-    keep = [h for h, _ in TABLE_COLS if h not in ("Matched skills", "Label color")]  # a plain dump keeps its columns
+    keep = ["Name"] if drop_empty else [h for h, _ in TABLE_COLS if h not in ("Matched skills", "Label color")]
+    # (a plain dump keeps its columns)
     headers, body, widths = _assemble(TABLE_COLS, records, keep)
     made = now or datetime.now()
     about = [("Made on", made.strftime("%Y-%m-%d %H:%M")), ("People in this file", f"{len(rows):,}")]
@@ -137,22 +139,32 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
                            _about_sheet(about, "About this export")], title="Talent Search candidates", created=made)
 
 
-def csv_in_order(store: Store, ids: list[int]) -> bytes:
+def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = ()) -> bytes:
     """The importer's CSV for these people, in the order of `ids` (the CSV export itself lists people by id).
-    Cells that look like formulas keep their leading apostrophe."""
+    Cells that look like formulas keep their leading apostrophe. With `hl`, a "Matched skills" column follows
+    Name, with the same words as the xlsx ("python, sql (2 of 2)"); the importer skips a column it doesn't know."""
     wanted = list(dict.fromkeys(ids))
+    hl = list(hl)
     raw = importers.export_csv(store, wanted)
     parsed = list(csv.reader(io.StringIO(raw)))
     head, body = parsed[0], parsed[1:]
     asked = set(wanted)
-    found = [c["id"] for c in store.all_candidates() if c["id"] in asked]  # the order the rows came out in
-    by_id = dict(zip(found, body))
+    mine = [c for c in store.all_candidates() if c["id"] in asked]  # the order the rows came out in
+    by_id = dict(zip((c["id"] for c in mine), body))
+    tags = {c["id"]: c.get("tags") or [] for c in mine}
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(head)
+    if hl:
+        w.writerow([head[0], "Matched skills", *head[1:]])
+    else:
+        w.writerow(head)
     for i in wanted:
         if i in by_id:
-            w.writerow(by_id[i])
+            row = by_id[i]
+            if hl:
+                m = matched_skills(tags[i], hl)
+                row = [row[0], importers._safe_cell(m.text if isinstance(m, Colored) else m), *row[1:]]
+            w.writerow(row)
     return b"\xef\xbb\xbf" + out.getvalue().encode("utf-8")
 
 

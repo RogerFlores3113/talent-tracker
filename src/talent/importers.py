@@ -426,7 +426,8 @@ _SKILL_TAIL = {"So", "Sk", "Cf", "Mn", "Me", "Zs"}  # emoji, modifiers, joiners 
 
 def _clean_skills(skills: list[str], col_name: str, warnings: list[str]) -> list[str]:
     """A skill with emoji or symbols on its end loses them ("python 🚀" is "python"). A skill with no letters at all
-    ("-2+3", "+1+1", "🚀") is left out and said so."""
+    ("-2+3", "+1+1", "🚀") is left out and said so; so is one that starts with = + - or @ ("@cmd"), which a
+    spreadsheet could run as a formula."""
     out: list[str] = []
     for t in skills:
         c = t
@@ -435,6 +436,9 @@ def _clean_skills(skills: list[str], col_name: str, warnings: list[str]) -> list
         c = c.strip()
         if not any(ch.isalpha() for ch in c):
             warnings.append(f"left {t[:30]!r} out of {col_name}, a skill needs some letters")
+            continue
+        if c[0] in "=+-@":
+            warnings.append(f"left {t[:30]!r} out of {col_name}, a skill can't start with = + - or @")
             continue
         out.append(c)
     return out

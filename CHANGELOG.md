@@ -45,6 +45,9 @@ All notable changes to Talent Search. Newest first.
 - A Hiring manager view (link on the compare page, also what Print gives) shows names, title, company, location, years, skills, stage in a job, public links and About, and leaves out your own notes on contact, source, dates, labels and app links.
 - In Claude, compare takes the first six people if you give more and says who was left out, ends with a link to Open in Talent Search, and the view has Share as xlsx, Export xlsx and a Remove button for each person. The People table says "Export 12 shown" or "Export 2 ticked", reports what it saved, and has Share as xlsx beside Compare.
 - The messages Claude gets back from the xlsx export are plain and clear, a Read only app is given the Share page link, and people not found are listed first.
+- Candidates table: Compare, Share and both exports keep the order of the people you ticked, and Export as CSV lists the same people in the same order as the xlsx, with a "Matched skills" column when skills are highlighted.
+- Candidates table: the highlight message says "1 person has it" and, after a second pick, how the order works. Removing a pick moves focus to the next pick, there is a "Skip to highlighted skills" link, and the table caption names the highlight order.
+- Candidates xlsx exports leave out columns that are empty for everyone, like the Share file. Importing skips skills that start with @ = + - and lists them in the warnings.
 
 ## [0.1.2] - 2026-11-09
 
