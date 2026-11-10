@@ -1,4 +1,5 @@
 """Cycle 4 re-review, fixer Y: import speed (an indexed LinkedIn key), resubmit warnings on add, import busy notes."""
+import os
 import random
 import sqlite3
 import time
@@ -145,7 +146,11 @@ def test_a_big_import_stays_quick_with_many_people_saved(store):
     assert done["added"] + done["updated"] + done["unchanged"] == 1500
     assert store.count_candidates() == 1500 + done["added"]
     assert calls == 0  # no saved link is normalised again inside a query
-    assert took < 25, f"preview and import of 1,500 rows took {took:.1f}s"
+    # About 5s on a Linux laptop. GitHub's Windows runners run this whole suite at about a fifth of that speed
+    # (26.6s here once), so they get a wider bound. The old O(rows x people) code took about 40s on a fast machine,
+    # which is several times either bound, and calls == 0 above is the exact guard against it coming back.
+    bound = 45 if os.name == "nt" else 25
+    assert took < bound, f"preview and import of 1,500 rows took {took:.1f}s (bound {bound}s)"
 
 
 # --------------------------------------------------- 2. resubmit warning on add
