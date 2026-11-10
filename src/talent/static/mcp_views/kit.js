@@ -31,6 +31,7 @@
    Helpers: el(tag, attrs, ...kids), marked("a **b**"), safeUrl, copyText(text, nodeToSelect), appOrigin(url), hostLabel(url), onKeys(node, map)
 */
 const V=__VERSION__;let nid=1;const pend={};let HOST={},CTX={},META={},ARGS=null,TOOL=null,DATA=null,FAILED={};
+let OAI=false,GOT=false,INIT=false,HOSTCTX=false,OAI_SHOWN="";  // see the window.openai fallback below
 const PCARDS={};let ZONE=undefined,ZONE_SAID=false,ABS_USED=false;
 /* what the chat app says it can do: a host that lists its abilities and leaves "message" or "updateModelContext" out can't do it */
 function hostCan(what){const k=what==="message"?"message":what==="tell"?"updateModelContext":what;
@@ -39,7 +40,10 @@ function goodZone(z){if(!z||typeof z!=="string")return undefined;try{new Intl.Da
 function zoneShort(){try{const p=new Intl.DateTimeFormat("en-US",{timeZone:ZONE,timeZoneName:"short"}).formatToParts(new Date()).find(x=>x.type==="timeZoneName");return p?p.value:ZONE}catch(e){return ZONE||""}}
 function useZone(d){ZONE=goodZone(d&&(d.time_zone||d.tz))||goodZone(CTX&&CTX.timeZone);ZONE_SAID=!!goodZone(d&&(d.time_zone||d.tz))}
 function post(m){window.parent.postMessage(m,"*")}
-function req(method,params){const id=nid++;return new Promise(r=>{pend[id]=r;post({jsonrpc:"2.0",id,method,params})})}
+function req(method,params){if(OAI)return oaiReq(method,params);const id=nid++;
+ return new Promise(r=>{pend[id]=r;post({jsonrpc:"2.0",id,method,params})}).then(res=>{
+  // the bridge refused a tool call (a protocol error, not a tool's own error) but ChatGPT's own call exists: use it
+  if(method==="tools/call"&&res&&res.bridgeError&&oai()&&typeof oai().callTool==="function")return oaiReq(method,params);return res})}
 function note(method,params){post({jsonrpc:"2.0",method,params:params||{}})}
 function el(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(v==null||v===false)continue;if(k==="needs"){if(!hostCan(v))e.hidden=true;continue}
   if(k==="class")e.className=v;else if(k==="onclick")e.addEventListener("click",v);else e.setAttribute(k,v===true?"":v)}
@@ -329,18 +333,47 @@ function showResult(d,meta){DATA=d;if(meta)META=meta;ALIASES=(d&&d.skill_aliases
  if(typeof sendSize==="function"){sendSize(true);setTimeout(()=>{try{sendSize(false)}catch(e){}},250)}}
 
 window.addEventListener("message",ev=>{if(ev.source!==window.parent)return;const m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
- if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
+ if(m.id!=null&&!m.method&&pend[m.id]){pend[m.id](m.error?{isError:true,bridgeError:true,content:[{type:"text",text:String(m.error.message||"That didn't work.")}]}:(m.result||{}));delete pend[m.id];return}
  const p=m.params||{};
  if(m.method==="ui/notifications/tool-input"){ARGS=p.arguments||{};setNotice("");if(!DATA)document.getElementById("main").replaceChildren(loadingState("Working on it..."))}
  else if(m.method==="ui/notifications/tool-input-partial"){if(!DATA)document.getElementById("main").replaceChildren(loadingState("Working on it..."))}
  else if(m.method==="ui/notifications/tool-cancelled"){
   if(DATA){setNotice("Claude stopped that request. What you see is from before.");announce("Claude stopped that request. What you see is from before.")}
   else document.getElementById("main").replaceChildren(emptyState("That was cancelled, so there is nothing to show."))}
- else if(m.method==="ui/notifications/tool-result"){META=p._meta||{};const d=p.structuredContent||null;
+ else if(m.method==="ui/notifications/tool-result"){GOT=true;if(OAI){OAI=false}  // the bridge delivered after all: it wins from here on
+  META=p._meta||{};const d=p.structuredContent||null;
+  if(d&&OAI_SHOWN&&OAI_SHOWN===JSON.stringify(d)){OAI_SHOWN="";return}  // same result the fallback already drew: not twice
+  OAI_SHOWN="";
   if(d)showResult(d,p._meta);else document.getElementById("main").replaceChildren(p.isError?errorState(said(p)||"That didn't work."):emptyState("Nothing to show."))}
  else if(m.method==="ui/notifications/host-context-changed")mergeCtx(p);
  else if(m.method==="ui/resource-teardown"&&m.id!=null)post({jsonrpc:"2.0",id:m.id,result:{}});
 });
+
+/* ---- window.openai fallback (ChatGPT). ChatGPT renders views through the same MCP Apps bridge above, and that always
+   wins. window.openai is only a backup for when the bridge gives nothing: ui/initialize fails twice, never answers
+   (about 2.5 s), or no tool-result comes about 2 s after initialized. Then the view is drawn from
+   window.openai.toolOutput (the structuredContent), toolResponseMetadata (META) and toolInput (ARGS), and drawn again
+   when "openai:set_globals" says they changed. Actions use window.openai.callTool / sendFollowUpMessage / openExternal /
+   requestDisplayMode where they exist. Nothing here changes a message the bridge sends. */
+function oai(){const o=window.openai;return o&&typeof o==="object"?o:null}
+function oaiBad(t){return{isError:true,content:[{type:"text",text:t}]}}
+function oaiRun(f){const bad=e=>oaiBad(String(e&&e.message||"That didn't work."));
+ try{return Promise.resolve(f()).then(r=>r&&typeof r==="object"?r:{},bad)}catch(e){return Promise.resolve(bad(e))}}
+function oaiReq(method,params){const o=oai();params=params||{};
+ if(o&&method==="tools/call"&&typeof o.callTool==="function")return oaiRun(()=>o.callTool(params.name,params.arguments||{}));
+ if(o&&method==="ui/message"&&typeof o.sendFollowUpMessage==="function")return oaiRun(()=>o.sendFollowUpMessage({prompt:(params.content||[]).map(c=>c&&c.text||"").join("\n")}));
+ if(o&&method==="ui/open-link"&&typeof o.openExternal==="function")return oaiRun(()=>o.openExternal({href:params.url}));
+ if(o&&method==="ui/request-display-mode"&&typeof o.requestDisplayMode==="function")return oaiRun(()=>Promise.resolve(o.requestDisplayMode({mode:params.mode})).then(r=>({mode:(r&&r.mode)||params.mode})));
+ return Promise.resolve(oaiBad("This chat app can't do that from here."))}
+function oaiShow(){const o=oai();if(!o||GOT)return;
+ if(!OAI){OAI=true;HOST={};if(typeof o.callTool==="function")HOST.serverTools={};if(typeof o.sendFollowUpMessage==="function")HOST.message={text:{}};
+  if(typeof o.openExternal==="function")HOST.openLinks={};if(!Object.keys(HOST).length)HOST={none:false}}
+ if(!HOSTCTX){const c={};if(typeof o.theme==="string")c.theme=o.theme;if(typeof o.displayMode==="string")c.displayMode=o.displayMode;
+  c.availableDisplayModes=typeof o.requestDisplayMode==="function"?["inline","fullscreen"]:["inline"];mergeCtx(c)}
+ if(o.toolInput&&typeof o.toolInput==="object")ARGS=o.toolInput;
+ const d=o.toolOutput;if(d&&typeof d==="object"){const key=JSON.stringify(d);if(key!==OAI_SHOWN){OAI_SHOWN=key;showResult(d,o.toolResponseMetadata&&typeof o.toolResponseMetadata==="object"?o.toolResponseMetadata:{})}}}
+window.addEventListener("openai:set_globals",()=>{if(OAI)oaiShow()});
+if(oai())setTimeout(()=>{if(!INIT&&!GOT)oaiShow()},2500);  // ui/initialize never answered
 let lastW=0,lastH=0;
 /* the height the view needs: whichever is larger, the page or the bottom of the last thing on it, so the last block is never clipped */
 function viewHeight(){const de=document.documentElement,b=document.body;const cs=getComputedStyle(b);
@@ -353,9 +386,10 @@ function sendSize(force){const w=Math.max(1,Math.ceil(document.documentElement.s
 function startFailed(){document.getElementById("main").replaceChildren(emptyState("This chat app couldn't start the view. The answer is in the text above."));sendSize(true)}
 /* The handshake, in the shape the MCP Apps spec (2026-01-26) wants: appInfo, appCapabilities, protocolVersion.
    clientInfo is kept for older hosts (extra keys are ignored). If a host still refuses, ask once more with only the spec fields. */
-function handshake(r){HOST=(r&&r.hostCapabilities)||{};mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{});sendSize(true)}
+function handshake(r){INIT=true;HOST=(r&&r.hostCapabilities)||{};HOSTCTX=!!(r&&r.hostContext&&Object.keys(r.hostContext).length);mergeCtx(r&&r.hostContext);note("ui/notifications/initialized",{});sendSize(true);
+ if(oai())setTimeout(()=>{if(!GOT)oaiShow()},2000)}  // no tool-result within about 2 s of initialized: try window.openai
 req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},clientInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r=>{
- if(r&&r.isError)return req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r2=>{if(r2&&r2.isError)startFailed();else handshake(r2)});
+ if(r&&r.isError)return req("ui/initialize",{protocolVersion:"2026-01-26",appInfo:{name:"talent-search",version:V},appCapabilities:{availableDisplayModes:["inline","fullscreen"]}}).then(r2=>{if(r2&&r2.isError){if(oai())oaiShow();else startFailed()}else handshake(r2)});
  handshake(r)});
 
 /* ---- people table: peopleTable(rows, st, h)

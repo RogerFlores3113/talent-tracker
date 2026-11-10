@@ -7,7 +7,7 @@ from mcp.types import CallToolResult
 
 from conftest import local_client
 from talent.mcp_server import build_server
-from talent.mcp_views import RESOURCE_META, URIS, tool_meta, view_html
+from talent.mcp_views import RESOURCE_META, URIS, tool_meta, versioned_uri, view_html
 
 
 def call(server, tool, **args):
@@ -47,8 +47,8 @@ def test_the_kit_is_in_files_and_documented():
 
 def test_aliases_serve_the_people_view():
     assert view_html("candidate") == view_html("people") == view_html("results")
-    assert tool_meta("people")["ui"]["resourceUri"] == URIS["people"]
-    assert tool_meta("people")["ui/resourceUri"] == URIS["people"]  # the older flat key
+    assert tool_meta("people")["ui"]["resourceUri"] == versioned_uri("people")
+    assert tool_meta("people")["ui/resourceUri"] == versioned_uri("people")  # the older flat key
     assert RESOURCE_META["ui"]["prefersBorder"] is True
 
 
@@ -57,7 +57,7 @@ def test_every_view_tool_points_at_its_view(store):
     for name, uri in (("search_candidates", "people"), ("run_saved_search", "people"), ("get_candidate", "people"),
                       ("save_candidate", "people"), ("job_pipeline", "pipeline"), ("list_action_items", "today"),
                       ("save_candidates", "saved"), ("propose_candidates", "shortlist")):
-        assert t[name].meta["ui"]["resourceUri"] == URIS[uri], name
+        assert t[name].meta["ui"]["resourceUri"] == versioned_uri(uri), name
 
 
 def test_resources_ask_for_a_border(store):

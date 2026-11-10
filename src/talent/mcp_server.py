@@ -37,7 +37,7 @@ from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, 
 from . import injection, mcp_guard, outreach, plan, wording, xlsx_export
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, stage_outcome
-from .mcp_views import MIME, RESOURCE_META, URIS, tool_meta, view_html
+from .mcp_views import LEGACY_TEMPLATE, MIME, RESOURCE_META, legacy_name, tool_meta, versioned_uris, view_html
 from . import searchquery
 from . import picks as pickmod
 from .paths import app_url
@@ -1151,11 +1151,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     reports.apply_zone(store)  # times in replies, and times the AI types, are in the recruiter's own zone
 
     # ---------------------------------------------------------- UI resources
-    for name, uri in URIS.items():
+    for name, uri in versioned_uris().items():  # the current, versioned addresses are the ones listed
         def make(n: str = name):
             return lambda: view_html(n)
         mcp.resource(uri, name=f"{name}-view", mime_type=MIME, description=f"Talent Search {name} view",
                      meta=RESOURCE_META)(make())
+
+    # The older unversioned addresses still read (saved chats, older chat apps). A template is not in resources/list.
+    @mcp.resource(LEGACY_TEMPLATE, name="view-by-old-address", mime_type=MIME,
+                  description="Talent Search views by their older, unversioned address", meta=RESOURCE_META)
+    def old_view(page: str) -> str:
+        name = legacy_name(f"ui://talent-search/{page}.html")
+        if name is None:
+            raise ValueError("No such view.")
+        return view_html(name)
 
     # ------------------------------------------------------------ candidates
     @mcp.tool(annotations=READ, meta=tool_meta("people"))

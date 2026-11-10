@@ -11,6 +11,7 @@ can't inject markup. Hosts without MCP Apps just show the tool's text content.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -79,8 +80,36 @@ def view_html(name: str) -> str:
     )
 
 
+def versioned_uri(name: str) -> str:
+    """The current address of a view: ui://talent-search/v-<8 hex of the built page>/<file>.html.
+
+    The hash is of the page as built, so it changes whenever the HTML, JS, CSS or app version changes, and a chat app
+    that caches views by address picks up the new one after an update (OpenAI advises exactly this). The version is
+    in the path, not a query, so no host can drop it. It is only a name: nothing is fetched from it.
+    """
+    old = URIS[name]
+    digest = hashlib.sha256(view_html(name).encode("utf-8")).hexdigest()[:8]
+    head, _, tail = old.rpartition("/")
+    return f"{head}/v-{digest}/{tail}"
+
+
+def versioned_uris() -> dict[str, str]:
+    return {name: versioned_uri(name) for name in URIS}
+
+
+# Older, unversioned addresses stay readable (saved chats and older hosts); they are not listed.
+LEGACY_TEMPLATE = "ui://talent-search/{page}.html"
+
+
+def legacy_name(uri: str) -> str | None:
+    for name, old in URIS.items():
+        if old == uri:
+            return name
+    return None
+
+
 def tool_meta(name: str) -> dict:
-    uri = URIS[name]
+    uri = versioned_uri(name)
     # "ui/resourceUri" is the older flat key some hosts still read.
     # "openai/outputTemplate" is the alias ChatGPT reads; other hosts ignore it.
     return {"ui": {"resourceUri": uri}, "ui/resourceUri": uri, "openai/outputTemplate": uri}

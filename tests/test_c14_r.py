@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from talent.mcp_views import URIS, tool_meta, view_html
+from talent.mcp_views import URIS, tool_meta, versioned_uri, view_html
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -25,14 +25,15 @@ def test_every_view_sends_the_spec_handshake(name):
 
 
 def test_tool_meta_has_the_chatgpt_alias():
-    for name, uri in URIS.items():
+    for name in URIS:
+        uri = versioned_uri(name)  # cycle 14 G1: the tool points at the versioned address
         m = tool_meta(name)
         assert m["ui"]["resourceUri"] == uri and m["openai/outputTemplate"] == uri
 
 
 def test_connect_page_and_readme_say_where_cards_show():
     page = (ROOT / "src/talent/templates/connect.html").read_text(encoding="utf-8")
-    assert "Always allow" in page and "quit and reopen Claude" in page and "Claude Code" in page  # no jargon on the page
+    assert "Always allow" in page and "quit and reopen the app" in page and "Claude Code" in page  # no jargon on the page
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "Always allow" in readme and "Reload MCP Configuration" in readme and "Claude Code" in readme
 

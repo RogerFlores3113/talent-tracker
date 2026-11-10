@@ -11,7 +11,7 @@ from mcp.types import CallToolResult
 from conftest import local_client
 from talent import compare
 from talent.mcp_server import build_server
-from talent.mcp_views import URIS, WITH_COMPARE, view_html
+from talent.mcp_views import URIS, WITH_COMPARE, versioned_uri, view_html
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -217,7 +217,7 @@ def test_compare_candidates_is_read_only_and_has_a_view(store):
     t = anyio.run(tools)["compare_candidates"]
     assert t.annotations.readOnlyHint is True
     assert "compare" in URIS and URIS["compare"] == "ui://talent-search/compare.html"
-    assert t.meta["ui"]["resourceUri"] == URIS["compare"]
+    assert t.meta["ui"]["resourceUri"] == versioned_uri("compare")
     html = view_html("compare")
     assert "renderCompare" in html and "At a glance" in html and "Open in Talent Search" in html
     assert "innerHTML" not in html

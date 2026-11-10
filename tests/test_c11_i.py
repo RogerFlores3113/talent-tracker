@@ -8,7 +8,7 @@ from mcp.types import CallToolResult
 
 from talent import actions, interviews
 from talent.mcp_server import build_server
-from talent.mcp_views import RESOURCE_META, URIS, tool_meta, view_html
+from talent.mcp_views import RESOURCE_META, URIS, tool_meta, versioned_uri, view_html
 
 INHOUSE = list(actions.STAGE_SETS["inhouse"][1])
 VIEWS = {"interviews": "list_interviews", "owed": "list_feedback_owed", "duplicates": "find_duplicates"}
@@ -51,7 +51,7 @@ def test_each_tool_has_its_view_and_the_views_are_clean():
         assert "fetch(" not in html and "XMLHttpRequest" not in html, name
         assert "—" not in html and "–" not in html, name
         assert "function render(" in html and uri.startswith("ui://talent-search/")
-        assert tool_meta(name)["ui"]["resourceUri"] == uri
+        assert tool_meta(name)["ui"]["resourceUri"] == versioned_uri(name)
     assert RESOURCE_META["ui"]["prefersBorder"]
 
 
@@ -59,9 +59,9 @@ def test_tools_carry_the_resource_uri_and_resources_are_registered(store):
     server = build_server(store)
     tools = {t.name: t for t in anyio.run(server.list_tools)}
     for name, tool in VIEWS.items():
-        assert tools[tool].meta["ui"]["resourceUri"] == URIS[name]
+        assert tools[tool].meta["ui"]["resourceUri"] == versioned_uri(name)
     uris = {str(r.uri) for r in anyio.run(server.list_resources)}
-    assert {URIS[n] for n in VIEWS} <= uris
+    assert {versioned_uri(n) for n in VIEWS} <= uris
 
 
 def test_list_interviews_carries_what_the_agenda_needs(store):
