@@ -325,7 +325,7 @@ def split_headline(headline: str) -> tuple[str, str | None]:
 
 def _slim(c: dict[str, Any]) -> dict[str, Any]:
     """Drop empty fields so results stay short in the model's context."""
-    return {k: v for k, v in c.items() if v not in (None, "", [])}
+    return {k: v for k, v in c.items() if v not in (None, "", []) and k != "private_tags"}
 
 
 CARDS_PER_CALL = 20
@@ -1518,6 +1518,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def candidate_view(candidate_id: int) -> dict[str, Any]:
         """One candidate as get_candidate and save_candidate show it (and the in-chat candidate view reads)."""
         c = store.candidate_detail(candidate_id, timeline_limit=15)
+        c.pop("private_tags", None)  # the recruiter's private tags never go to an AI app
         c["pipelines"] = [_slim({"job_id": a["job_id"], "job_title": a["job_title"], "job_company": a.get("job_company"),
                                  "stage": a["stage"], "stage_changed_at": a["stage_changed_at"]}) for a in c["pipelines"]]
         c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "at_local": _local(t["at"]),
@@ -1747,8 +1748,21 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if created and guarded:
             site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
-        status = "Saved" if created else ("Updated: " + _labels(changed) if changed else "Already saved, nothing new")
+        cand.pop("private_tags", None)  # a skill on the recruiter's private list was saved there; it is never named
+        cand.pop("_private_changed", None)
+        # Same rule as update_candidate: a save that includes skills never echoes the skill list or "skills changed",
+        # so the reply shape is the same whether or not a name was diverted to Private tags. (The get_candidate
+        # read-back can't be fully closed.)
+        wrote_skills = "tags" in data
+        if wrote_skills:
+            store.note_ai_private(cand["id"], data["tags"])
+            cand.pop("tags", None)
+            changed = [k for k in changed if k != "tags"]
+        status = ("Saved" if created else "Updated: " + _labels(changed) + (". Skills saved" if wrote_skills else "") if changed
+                  else "Skills saved" if wrote_skills else "Already saved, nothing new")
         view = candidate_view(cand["id"])
+        if wrote_skills:
+            view.pop("tags", None)
         out: dict[str, Any] = {**view, "created": created, "saved_status": status, "data_note": DATA_NOTE,
                                "candidate": _slim(cand)}
         notes = []
@@ -1891,8 +1905,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError("No change made. " + _budget_text(current["name"]))
         if over and not store.ai_overwrites_left(len(over)):
             raise ValueError(_cap_text())
+        # An AI write that includes skills never gets the resulting skill list or a "skills changed" back, for every such
+        # write, so the reply gives no sign that a name was diverted to Private tags. (Reading the person back with
+        # get_candidate still shows a missing skill; that read-back can't be fully closed.)
+        wrote_skills = "tags" in data
         cand = store.update_candidate(candidate_id, work_history=history, by="ai", **data)
+        if wrote_skills:
+            store.note_ai_private(candidate_id, data["tags"])
         changed = cand.pop("_changed", [])
+        cand.pop("private_tags", None)  # a skill that is on the recruiter's private list was saved there; not named
+        cand.pop("_private_changed", None)
+        if wrote_skills:
+            cand.pop("tags", None)
+            changed = [k for k in changed if k != "tags"]
         links_skipped: list[str] = []
         if link_list:  # links only ever get added; not a replaced value, so no edit budget is used
             more_links = store.add_links(candidate_id, link_list, by="ai")
@@ -1903,11 +1928,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         who = f"{quoted(cand['name'])} (id {candidate_id})"
         if not changed:
             sentence = (f"Nothing changed on {who} yet." if waiting
+                        else f"Skills saved on {who}." if wrote_skills
                         else f"Nothing to change on {who}; those values were already saved.")
         else:
             cleared = [k for k in changed if k in clearing]
             bits = [_labels([k]) + (" cleared" if k in cleared else "") for k in changed]
-            sentence = f"Updated {who}: {', '.join(bits)}."
+            sentence = f"Updated {who}: {', '.join(bits)}." + (" Skills saved." if wrote_skills else "")
         if waiting:
             sentence += " " + _wait_text(waiting, part=bool(changed))
         out: dict[str, Any] = {**_slim(cand), "changed": changed}
@@ -2022,6 +2048,11 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         _check_note_cap(store, candidate_id)
         if job_id is None and what_kind in outreach.OUTREACH_KINDS:  # the one job they're in play on
             job_id = outreach.job_for(store, candidate_id)
+        defaulted_job = None
+        if job_id is None and what_kind == "interview":  # an interview with no job shows in no client update
+            mine = store.candidate_pipelines(candidate_id)
+            if len(mine) == 1:
+                job_id = defaulted_job = mine[0]["job_id"]
         if what_kind in TIMELINE_KINDS and what_kind != "stage" and review.cautious(store):
             body = (summary or "").strip()
             if duration is not None and what_kind == "interview":
@@ -2080,19 +2111,22 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                               "replaces it, call update_interview on the old one with cancel=true, or move the old "
                               "one with update_interview instead of logging a new one.")
         if what_kind == "interview" and job_id is None:
-            live = [p for p in store.candidate_pipelines(candidate_id)
-                    if store.get_job(p["job_id"])["status"] == "open"]
+            live = store.candidate_pipelines(candidate_id)
             if len(live) > 1:
                 ids = ", ".join(f"{_job_name({'title': p['job_title'], 'company': p.get('job_company')})} (job id "
                                 f"{p['job_id']})" for p in live[:5])
-                out["warning"] = (f"Logged with no job, but {cand['name']} is on {len(live)} open jobs: {ids}. It stays "
-                                  "out of every client update until it has one. Ask the recruiter which job it's for "
-                                  "and log it again with job_id, or they can pick the job in the app.")
+                out["warning"] = (f"Logged with no job, but {cand['name']} is on {len(live)} jobs: {ids}. It won't "
+                                  "show in any job's client updates until it has one. Ask the recruiter which job it's "
+                                  "for and log it again with that job_id, or they can pick the job in the app.")
         if job_id is not None and all(p["job_id"] != job_id for p in store.candidate_pipelines(candidate_id)):
             out["warning"] = (f"Logged, but this candidate isn't in the pipeline for {store.get_job(job_id)['title']}. "
                               "Use add_to_pipeline if they should be.")
         if job_skipped:  # said plainly: the reply never names a job that wasn't saved
             out["warning"] = job_skipped
+        elif defaulted_job is not None and job_id == defaulted_job:
+            dn = (f"No job was given, so it is logged under {_job_name(store.get_job(job_id))}, the only job "
+                  f"{cand['name']} is in.")
+            out["note"] = f"{out['note']} {dn}" if out.get("note") else dn
         elif fixed["set"]:
             set_note = (f"It was already logged with no job, so its job is now {_job_name(store.get_job(job_id))}. "
                         "The recruiter can undo that on Changes.")
@@ -3260,7 +3294,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def export_candidates_xlsx(candidate_ids: list[int] | None = None, for_hiring_manager: bool = True,
                                include_contact: bool = False,
                                include_notes: bool = False, job_id: int | None = None,
-                               kind: str = "shortlist") -> CallToolResult:
+                               kind: str = "shortlist", include_rejected: bool = False) -> CallToolResult:
         """Make an Excel file (.xlsx) of these people in the recruiter's Downloads folder, for them to forward to a
         hiring manager. candidate_ids are the people (ids from search_candidates); job_id (optional) adds each
         person's stage in that job. By default the file has no email, phone or notes: the recruiter's private
@@ -3270,7 +3304,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         recruiter the path (or the link). for_hiring_manager=False means a copy for the recruiter's own use, which they
         make on the Share page too. kind: "shortlist" (the default, file named shortlist-...) or "list" (a plain
         list of people, named candidates-...). Up to 200 people. With job_id and no candidate_ids, the file has
-        everyone still in that job's pipeline (not the people who are out)."""
+        everyone still in that job's pipeline (not the people who are out). Like the Share page, the file leaves
+        out anyone rejected or withdrawn (in that job, or in any job when no job_id is given) and says how many;
+        include_rejected=True keeps them in, only when the recruiter asked for that."""
         ids = list(dict.fromkeys(int(i) for i in candidate_ids or []))
         if not ids and job_id:
             ids = [a["candidate_id"] for s in store.pipeline_by_stage(int(job_id)) if s["outcome"] != "lost"
@@ -3308,19 +3344,31 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        f"page, where you pick what goes in: {share_url}.")
             return _plain(lost + why, {"written": False, "people": len(found), "share_url": share_url,
                                        "app_url": share_url, "for_me_url": for_me_url, "not_found": missing})
-        if job and not xlsx_export.share_table(store, found, job_id=job_id)["rows"]:
+        leave_out: set[int] = set()
+        if not job and not include_rejected:  # the Share page's rule with no job picked: exits stay out
+            leave_out = set(xlsx_export.exits_in(store, found)) & set(found)
+        if job and not xlsx_export.share_table(store, found, job_id=job_id, include_rejected=include_rejected)["rows"]:
             raise ValueError(f"No file made. None of those people is still in {_job_name(job)}: the file for a job "
                              "lists only its own people who are in play or hired. Leave job_id out, or pick its people.")
-        data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id)
+        if not job and not [i for i in found if i not in leave_out]:
+            raise ValueError(f"No file made. {'Everyone' if len(found) > 1 else 'That person'} is rejected or "
+                             "withdrawn in a job, and a file for a hiring manager leaves those people out. Pick other "
+                             "people, or say include_rejected=true if the recruiter wants them in.")
+        data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id, include_rejected=include_rejected,
+                                                    leave_out=leave_out)
         if job and n < len(found):
             lost += (f"Left out {len(found) - n} {'person' if len(found) - n == 1 else 'people'} not in "
                      f"{_job_name(job)} or out of it (rejected or withdrawn).\n")
+        elif leave_out:
+            k = len(leave_out)
+            lost += (f"Left out {k} {'person' if k == 1 else 'people'} rejected or withdrawn in a job "
+                     f"({n} of {len(found)} are in the file). Say include_rejected=true to put them in.\n")
         if (kind or "").lower() == "list":
             name = "candidates-" + name[len("shortlist-"):] if name.startswith("shortlist-") else name
         path = xlsx_export.save_to_downloads(data, name)
         line = (f"{lost}Made {name} with {n} {'person' if n == 1 else 'people'}, saved at {path} on your "
-                "computer. It has no email, phone or notes, and email addresses and phone numbers written in About "
-                "or work history are taken out. Nothing was sent: forward the file yourself. "
+                "computer. It has no email, phone or notes, and email addresses, phone numbers and profile links written "
+                "in About or work history are taken out. Nothing was sent: forward the file yourself. "
                 f"To change what is in it: {share_url}")
         return _plain(line, {"written": True, "path": str(path), "file": path.name, "people": n,
                              "job": _slim({k: job.get(k) for k in ("id", "title", "company")}) if job else None,
@@ -4132,17 +4180,24 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def submit_to_client(candidate_id: int, job_id: int, why_fit: str | None = None,
-                         note: str | None = None) -> CallToolResult:
+                         note: str | None = None, include_notes: bool = False,
+                         include_contact: bool = False) -> CallToolResult:
         """Submit someone to the job's client: move them into the job's Submitted stage (dated now) and draft a
-        short submittal write-up (profile, about, skills, the recruiter's newest screen notes on this job, comp and
-        availability when a note says them) with who to email. why_fit is one line on why they fit this job, and
+        short submittal write-up (profile, about, skills) with who to email. Like the Share file, it has no
+        private notes, no comp or availability taken from them, and no email or phone (also taken out of About and
+        work history) unless the recruiter asked: include_notes=True adds their newest screen notes and any comp or
+        availability a note says, include_contact=True adds the person's email and phone. Someone rejected or
+        withdrawn in the job is refused: there is nothing to send. why_fit is one line on why they fit this job, and
         note is an optional personal note: both go into the write-up, so ask the recruiter for the fit line. If the
-        job has no Submitted stage it adds "Submitted to client", and if the person isn't on the job it adds them
-        first; the reply says so. Nothing is sent: the recruiter sends the write-up from their own mail. Use it
+        job has no Submitted stage it adds "Submitted to client". Someone who isn't on the job is refused too (add
+        them to the job first, if they should be in it). Nothing is sent: the recruiter sends the write-up from their own mail. Use it
         only when the recruiter says to submit them. A heads up comes back when the person was submitted to this
         client in the last 12 months, or is in play at another client."""
         job = store.get_job(job_id)
         store.get_candidate(candidate_id)
+        gone = chase.out_of_job(store, candidate_id, job_id)
+        if gone:  # not in the job, rejected or withdrawn: nothing moves and nothing is added, as on the web page
+            raise ValueError(f"Nothing submitted. {gone} Add them to the job first if they should be in it.")
         fixes: list[str] = []
         held_stage = None
         if chase.submit_stage(store, job_id) is None:
@@ -4153,11 +4208,6 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                 _check_cap(store, 1)
                 store.edit_job_stages(job_id, by="ai", add=[edit])
                 fixes.append(f"The job had no Submitted stage, so I added {chase.SUBMITTED_STAGE}.")
-        if held_stage is None and not any(p["job_id"] == job_id for p in store.candidate_pipelines(candidate_id)):
-            _check_cap(store, 1)
-            store.add_to_pipeline(candidate_id, job_id, None, None, by="ai")
-            store.mark_ai_stage(candidate_id, job_id, None)
-            fixes.append(f"{quoted(store.get_candidate(candidate_id)['name'])} wasn't on the job yet, so I added them.")
         before = next((p["stage"] for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
         target = chase.submit_stage(store, job_id)
         if before and target and before.lower() != target["name"].lower():
@@ -4168,13 +4218,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if held_stage is not None or held is not None:
             # Cautious mode holds the change: the write-up still comes back
             got = {"moved": False, "stage": before, "at": None,
-                   "writeup": chase.writeup(store, candidate_id, job_id, why_fit, note),
+                   "writeup": chase.writeup(store, candidate_id, job_id, why_fit, note, include_notes, include_contact),
                    "warning": chase.earlier_to_client(store, candidate_id, job_id),
                    "elsewhere": chase.other_clients(store, candidate_id, job_id)}
             if held is None:
                 held = held_stage
         else:
-            got = chase.submit(store, candidate_id, job_id, by="ai", why_fit=why_fit, note=note)
+            got = chase.submit(store, candidate_id, job_id, by="ai", why_fit=why_fit, note=note,
+                               include_notes=include_notes, include_contact=include_contact)
             if got["moved"]:
                 review.mark_submit(store, candidate_id, job_id)
         name = store.get_candidate(candidate_id)["name"]
@@ -4190,6 +4241,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                                              for e in got["elsewhere"][:3]) + ".")
         if warnings:
             data["warning"] = " ".join(warnings)
+        inc, out_l = w["included"], w["left_out"]
+        data["included"], data["left_out"] = inc, out_l
+        shown = f" Included: {', '.join(inc)}. Left out: {'; '.join(out_l) or 'nothing private'}."
         if not w["to"]:
             data["note"] = "No email saved for this job's hiring manager or client: ask the recruiter who gets it."
         if held_stage is not None:
@@ -4209,6 +4263,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         else:
             sentence = (f"{quoted(name)} is already in {got['stage']} on {_job_name(job)}, so nothing moved. The "
                         "write-up is below.")
+        sentence += shown
         if fixes:
             data["also_did"] = fixes
             sentence = " ".join(fixes) + " " + sentence

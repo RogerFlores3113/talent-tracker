@@ -103,6 +103,8 @@ def test_the_migration_fills_other_emails_from_the_importers_notes(tmp_path):
     for col in ("pinned", "seen_max_id"):  # v10n, after v9a, is rewound too
         con.execute(f"ALTER TABLE saved_searches DROP COLUMN {col}")
     con.execute("ALTER TABLE candidates DROP COLUMN links")  # v11l, after v9a, is rewound too
+    con.execute("DROP TABLE candidate_private_tags")  # v14, after this step, is rewound too
+    con.execute("ALTER TABLE candidates DROP COLUMN private_tags")
     con.execute(f"PRAGMA user_version = {version_before}")
     con.commit()
     con.close()

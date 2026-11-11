@@ -557,14 +557,14 @@ def _exit_title(store: Store, g: dict[str, Any]) -> str:
 
 def next_interview_days(store: Store, job_id: int, now: datetime | None = None) -> dict[int, list[dict[str, Any]]]:
     """{candidate_id: [interviews]}: everything scheduled on the day of each in-the-running candidate's next
-    interview for this job (or with no job), so an onsite loop shows as its sessions, in time order."""
+    interview for this job (one with no job never counts), so an onsite loop shows as its sessions, in time order."""
     now = now or datetime.now(timezone.utc)
     start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
     rows = store._rows(
         f"""SELECT t.id, t.candidate_id, t.at, t.body, t.data FROM timeline t
            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = ?
            JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
-           WHERE t.kind = 'interview' AND t.at >= ? AND (t.job_id = ? OR t.job_id IS NULL)
+           WHERE t.kind = 'interview' AND t.at >= ? AND t.job_id = ?
              AND s.outcome = 'open' AND {LIVE_INTERVIEW}
            ORDER BY t.at, t.id""", (job_id, start, job_id))
     out: dict[int, list[dict[str, Any]]] = {}
@@ -592,14 +592,14 @@ def interview_line(name: str, ivs: list[dict[str, Any]]) -> str:
 
 def next_interviews(store: Store, job_id: int, now: datetime | None = None) -> dict[int, str]:
     """{candidate_id: ISO time} of the next scheduled interview for each candidate still in the running for
-    this job (interviews for this job or with no job). Cancelled ones and ones with an outcome don't count."""
+    this job (interviews logged for this job only: one with no job never counts). Cancelled ones and ones with an outcome don't count."""
     now = now or datetime.now(timezone.utc)
     start = (now - timedelta(hours=2)).replace(microsecond=0).isoformat()
     rows = store._rows(
         f"""SELECT t.candidate_id, min(t.at) AS at FROM timeline t
            JOIN applications a ON a.candidate_id = t.candidate_id AND a.job_id = ?
            JOIN job_stages s ON s.job_id = a.job_id AND lower(s.name) = lower(a.stage)
-           WHERE t.kind = 'interview' AND t.at >= ? AND (t.job_id = ? OR t.job_id IS NULL)
+           WHERE t.kind = 'interview' AND t.at >= ? AND t.job_id = ?
              AND s.outcome = 'open' AND {LIVE_INTERVIEW}
            GROUP BY t.candidate_id""", (job_id, start, job_id))
     return {r["candidate_id"]: r["at"] for r in rows}

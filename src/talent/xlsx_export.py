@@ -65,6 +65,13 @@ def half_years(y: float | None) -> float | None:
     return None if y is None else round(y * 2) / 2
 
 
+def public_picks(store: Store, hl: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Highlight picks for a file that may be sent on: a pick named like a private tag is dropped, since it can never
+    match a skill and its name must not be printed."""
+    names = {n.casefold() for n in store.private_tag_names()}
+    return [(n, c) for n, c in hl if n.casefold() not in names] if names else list(hl)
+
+
 def hl_words(hl: Iterable[tuple[str, str]]) -> str:
     """[('python', 'red'), ('title:data engineer', 'yellow')] -> 'python (red), title: Data Engineer (yellow)'."""
     return ", ".join(f"{picks.label(n)} ({c})" for n, c in hl)
@@ -119,7 +126,7 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
     the columns nothing is in for anyone in the file (Name stays), like the file for a hiring manager."""
     years = store.experience_years()
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     records = []
     for c in rows:
         records.append({
@@ -162,7 +169,7 @@ def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (
     Name, with the same words as the xlsx ("python, sql (2 of 2)"); the importer skips a column it doesn't know."""
     wanted = list(dict.fromkeys(ids))
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     raw = importers.export_csv(store, wanted)
     parsed = list(csv.reader(io.StringIO(raw)))
     head, body = parsed[0], parsed[1:]
@@ -286,18 +293,40 @@ def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any]
 
 # Contact details written into About (or work history) are the recruiter's to share, like the Email and Phone
 # columns: a file without contact details has them taken out, so "no email or phone" is true of the whole file.
+# That covers email addresses (also spelled "ben [at] x.com" or "ben at x dot com"), phone numbers in common
+# layouts, and profile links (any http(s) address, www. address, or LinkedIn / GitHub style address).
 _EMAIL_IN_TEXT = re.compile(r"(?:mailto:)?[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
-_PHONE_IN_TEXT = re.compile(
-    r"(?<![\w+])(?:tel:)?(?:\+\d{1,3}[\s.-]?(?:\(\d{1,4}\)[\s.-]?)?\d[\d\s.-]{5,}\d"  # +44 20 7946 0958
-    r"|\(\d{3}\)\s?\d{3}[\s.-]?\d{4}"  # (415) 555-0134
-    r"|\d{3}[.-]\d{3}[.-]\d{4}"  # 415-555-0134, 415.555.0134
-    r"|\d{3}\s\d{3}\s\d{4}"  # 415 555 0134
-    r"|\d{3}-\d{4})(?![\w-])")  # 555-0134
+_EMAIL_SPELLED = re.compile(
+    r"[A-Za-z0-9._%+-]+\s*[\[({<]\s*at\s*[\])}>]\s*[A-Za-z0-9-]+(?:(?:\s*[\[({<]\s*dot\s*[\])}>]\s*|\.|\s+dot\s+)[A-Za-z0-9-]+)+"
+    r"|(?<![\w.@-])[A-Za-z0-9._%+-]+\s+at\s+[A-Za-z0-9-]+(?:\s+dot\s+[A-Za-z0-9-]+)+(?![\w-])", re.I)
+_LINK_IN_TEXT = re.compile(
+    r"(?:\b(?:https?://|www\.)|(?<![\w@.-])(?:[a-z0-9-]+\.)*(?:linkedin|github|gitlab|twitter|x|facebook|instagram|behance|"
+    r"dribbble|medium|bsky)\.(?:com|app|social)/)[^\s<>\"']*", re.I)
+# A run of digits with spaces, dots, dashes or brackets between them; _looks_like_phone decides if it is a number.
+_PHONE_RUN = re.compile(
+    r"(?<![\w$\u20ac\u00a3.])\+?(?:\(\d{1,4}\)|\d+)(?:[ \t\u00a0.\-]*(?:\(\d{1,4}\)|\d+))*(?![\w%])")
+
+
+def _looks_like_phone(run: str) -> bool:
+    groups = re.findall(r"\d+", run)
+    digits = sum(len(g) for g in groups)
+    if digits < 7 or digits > 15:
+        return False
+    if all(len(g) == 4 and g[:2] in ("19", "20") for g in groups):
+        return False  # years and year ranges: 2019 - 2023
+    if len(groups) == 1:
+        return digits >= 10 or run.lstrip().startswith("+")  # 4155550100
+    if run.lstrip().startswith("+") or "(" in run:
+        return True
+    if len(groups) == 2:  # 555-0134 only; "5000-7000" and "2019-2023" are ranges
+        return len(groups[0]) == 3 and len(groups[1]) == 4
+    return sum(len(g) >= 3 for g in groups) >= 2
 
 
 def strip_contact(text: str) -> tuple[str, int]:
-    """(text with email addresses and phone numbers taken out, how many were taken out). Each one becomes
-    "(email removed)" or "(phone removed)", so the reader sees something was there."""
+    """(text with contact details taken out, how many were taken out). Email addresses (spelled out ones too), phone
+    numbers and profile links become "(email removed)", "(phone removed)" or "(link removed)", so the reader sees
+    something was there. Years, date ranges and short numbers are left alone."""
     if not text:
         return text or "", 0
     n = 0
@@ -307,25 +336,34 @@ def strip_contact(text: str) -> tuple[str, int]:
         n += 1
         return "(email removed)"
 
+    def link(m: re.Match[str]) -> str:
+        nonlocal n
+        n += 1
+        tail = re.search(r"[.,;:!?)\]]+$", m.group(0))
+        return "(link removed)" + (tail.group(0) if tail else "")
+
     def phone(m: re.Match[str]) -> str:
         nonlocal n
-        if sum(ch.isdigit() for ch in m.group(0)) < 7:
-            return m.group(0)
+        run = m.group(0)
+        if not _looks_like_phone(run):
+            return run
         n += 1
         return "(phone removed)"
-    out = _EMAIL_IN_TEXT.sub(email, text)
-    out = _PHONE_IN_TEXT.sub(phone, out)
+    out = _EMAIL_SPELLED.sub(email, text)
+    out = _EMAIL_IN_TEXT.sub(email, out)
+    out = _LINK_IN_TEXT.sub(link, out)
+    out = _PHONE_RUN.sub(phone, out)
     return out, n
 
 
-def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
-    """For the Share page: the jobs (by title) where each of these people is marked rejected."""
-    out: dict[int, list[str]] = {}
+def exits_in(store: Store, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]:
+    """The jobs (title, "rejected" or "withdrawn") where each of these people is out. The one rule for who stays
+    out of a file when no job is picked: the Share page and the chat export both use it."""
+    out: dict[int, list[tuple[str, str]]] = {}
     mine = set(ids)
     if not mine:
         return out
     stages: dict[int, dict[str, str]] = {}
-    titles: dict[int, str] = {}
     for r in store._rows("SELECT a.candidate_id, a.job_id, a.stage, j.title FROM applications a JOIN jobs j ON j.id = a.job_id"):
         if r["candidate_id"] not in mine:
             continue
@@ -333,8 +371,20 @@ def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
             stages[r["job_id"]] = {s["name"].lower(): s["outcome"] for s in store.job_stages(r["job_id"])}
         o = stages[r["job_id"]].get(str(r["stage"]).lower()) or stage_outcome(r["stage"])
         if o == "lost":
-            out.setdefault(r["candidate_id"], []).append(r["title"])
+            word = "withdrawn" if re.sub(r"[\W_]+", " ", str(r["stage"])).strip().lower().startswith("withdr") else "rejected"
+            out.setdefault(r["candidate_id"], []).append((r["title"], word))
     return out
+
+
+def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
+    """For the Share page: the jobs (by title) where each of these people is rejected or withdrawn."""
+    return {cid: [t for t, _ in rows] for cid, rows in exits_in(store, ids).items()}
+
+
+def exit_word(rows: list[tuple[str, str]]) -> str:
+    """"rejected", "withdrawn" or "rejected or withdrawn", for what these exits are."""
+    words = {w for _, w in rows}
+    return next(iter(words)) if len(words) == 1 else "rejected or withdrawn"
 
 
 def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",
@@ -344,7 +394,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
     `leave_out` names people who stay out of the file; `skip_notes` names people whose note stays out of it."""
     job = store.get_job(job_id) if job_id else None
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     out_ids, no_notes = set(leave_out), set(skip_notes)
     people = []
     for cid in dict.fromkeys(i for i in ids if i not in out_ids):
@@ -423,13 +473,13 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
         about.append(("People left out", "; ".join(gone)))
     if t["contact_removed"]:
         n = t["contact_removed"]
-        about.append(("Contact details", f"{n} email address{'' if n == 1 else 'es'} or phone number"
-                      f"{'' if n == 1 else 's'} taken out of About and work history"))
+        about.append(("Contact details", f"{n} email address{'' if n == 1 else 'es'}, phone number{'' if n == 1 else 's'} or profile "
+                      f"link{'' if n == 1 else 's'} taken out of About and work history"))
     about.append(("Included", ", ".join(headers)))
     about.append(("Left out", ", ".join(left_out + ["colors", "internal review marks", "columns with nothing in them"])))
     about.append(("Copied as written", "About, work history" + (", notes" if notes != "none" else "")
-                  + ("" if include_contact else " (email addresses and phone numbers in About and work history are "
-                     "taken out)") + ". Read them before you forward the file."))
+                  + ("" if include_contact else " (email addresses, phone numbers and profile links in About and work "
+                     "history are taken out)") + ". Read them before you forward the file."))
     note = " ".join((note or "").split())[:300]
     title = f"{note}, as of {stamp(made)}" if note else ""  # the title row is the note: no note, no title row
     sheet = Sheet("Candidates", headers, body, preamble=[title] if title else [], widths=t["widths"], big_preamble=True)
@@ -516,7 +566,7 @@ def note_preview(store: Store, ids: Iterable[int], limit: int = 80) -> dict[int,
 def nobody_matches(store: Store, ids: Iterable[int], hl: Iterable[tuple[str, str]]) -> bool:
     """True when picks are highlighted but nobody in `ids` matches any of them (the Matched picks column would be empty)."""
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     if not hl:
         return False
     for cid in dict.fromkeys(ids):

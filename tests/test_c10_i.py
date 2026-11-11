@@ -1,3 +1,4 @@
+import html
 """Cycle 10 fixer I: time zones per person, DST gaps and fall-backs, all-day interviews, unique .ics titles, the week's
 .ics, clash text, Decide's finalists, merged feedback cards, saved interviewer emails and loop holidays."""
 import re
@@ -67,7 +68,7 @@ def test_the_web_form_refuses_a_gap_time_with_a_friendly_message(store):
     c = local_client(store)
     r = c.post(f"/candidates/{cid}/log", data={"kind": "interview", "body": "Screen", "at": "2027-03-14T02:30"},
                follow_redirects=False)
-    assert "doesn't exist on Mar 14" in flash_of(r, "error")
+    assert r.status_code == 400 and "doesn't exist on Mar 14" in html.unescape(r.text)  # shown on the page, announced
     assert _ivs(store, cid) == []
 
 
@@ -104,7 +105,7 @@ def test_the_web_form_needs_a_time_for_an_interview(store):
     _jid, cid = _job(store)
     c = local_client(store)
     r = c.post(f"/candidates/{cid}/log", data={"kind": "interview", "body": "Screen", "at": ""}, follow_redirects=False)
-    assert "Pick the date and time" in flash_of(r, "error")
+    assert r.status_code == 400 and "Pick the date and time" in html.unescape(r.text)
     assert _ivs(store, cid) == []
     r = c.post(f"/candidates/{cid}/log", data={"kind": "note", "body": "hello", "at": ""}, follow_redirects=False)
     assert any(t["kind"] == "note" for t in store.timeline(cid))  # other kinds still default to now
@@ -185,7 +186,7 @@ def test_the_log_form_takes_zones_an_interviewer_length_and_an_email(store):
     bad = c.post(f"/candidates/{cid}/log", data={"kind": "interview", "body": "x", "at": "2026-11-11T10:00",
                                                  "interviewer": "Dana Lee", "interviewer_email": "nope"},
                  follow_redirects=False)
-    assert "doesn't look like an email" in flash_of(bad, "error")
+    assert bad.status_code == 400 and "doesn't look like an email" in html.unescape(bad.text)
     assert len(_ivs(store, cid)) == 1
 
 

@@ -71,6 +71,13 @@ the Talent Search window that just opened. **Connect Claude** links the app to C
 and **Add skills** adds the Talent Search skills. You do not need to edit any
 configuration files yourself.
 
+Be plain about **Add skills**: for Claude Code and Codex it is one click. For the Claude
+app it is one click, which saves `talent-search.plugin` to Downloads, shows it and opens
+Claude, and then one upload that only the person can do in Claude: **Customize >
+Plugins > Add > Upload plugin**, pick that file. Claude has no link or folder that
+installs a plugin for another app. The installer's closing text says that **Connect
+Claude** quits and reopens Claude Desktop on Mac and Windows.
+
 Before they press **Connect Claude**, warn them: on Mac and Windows it quits and reopens
 Claude Desktop (it never forces it), so this chat may close, and they can come back to
 it afterwards. Linux has no restart. Save anything they are typing in Claude first.

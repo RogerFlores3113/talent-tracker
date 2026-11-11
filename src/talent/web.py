@@ -36,7 +36,7 @@ from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import bulkmove, chase, compare, desk, duplicates, opsreview, tour
-from . import picks, searchquery, xlsx, xlsx_export
+from . import picks, private_tags, searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -45,12 +45,12 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES, saved_theme
-from .store import COLORS, clean_color, next_color
+from .store import COLORS, DIVERTED, LOCAL_VIEW, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
-ONE_SHOT_PARAMS = {"skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
+ONE_SHOT_PARAMS = {"skill_notice", "private_notice", "private_undo", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
 COMPARE_TICK = "Tick two to six people to compare."
@@ -72,7 +72,7 @@ LOCKED_PAGE = "Open Talent Search from its app icon to unlock this window."  # t
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
-FLASH_KEYS = ("skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
+FLASH_KEYS = ("skill_notice", "private_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
 FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
@@ -443,7 +443,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             # always send at least one of them on a cross-site request, so this can't be CSRF.
         elif request.url.path in DOWNLOADS and fetch_site in ("cross-site", "same-site"):
             return PlainTextResponse("Forbidden", status_code=403)
-        response = await call_next(request)
+        local = LOCAL_VIEW.set(True)  # this window may filter by private tags; an AI app's server never can
+        try:
+            response = await call_next(request)
+        finally:
+            LOCAL_VIEW.reset(local)
         flash_to_cookie(request, response)
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -953,10 +957,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    colored_first=colored_first and bool(q.strip()),
                    qsort=qsort if q.strip() and qsort in QSORTS and not colored_first else "",
                    qdir=qdir if qdir in ("asc", "desc") else "",
-                   color_counts=color_counts_here(q, tag, location, source, member, total, color))
+                   color_counts=color_counts_here(q, tag, location, source, member, total, color),
+                   private_hint=private_tags.search_hint(store, q, total) if not tag and LOCAL_VIEW.get() else "")
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.skill_names_sorted(5000), sources=store.list_sources(),
+        return page(request, "table.html", **ctx,
+                    tags=[*store.skill_names_sorted(5000), *(t for t in store.list_private_tags() if t["count"])], sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
 
@@ -1278,6 +1284,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def filter_lines(args: dict[str, str]) -> list[tuple[str, str]]:
         """The Candidates filters in words for an About sheet: ('Location', 'Boston'). Highlights are listed apart."""
         out = [(label, " ".join(str(args[k]).split())) for k, label in FILTER_WORDS if args.get(k, "").strip()]
+        out = [(label, private_tags.redact_filter(store, label, v)) for label, v in out]  # never print a private tag name
         job = str(args.get("job") or "").strip()
         if job.isdigit():
             try:
@@ -1339,9 +1346,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    leave_rej: set[int] | None = None, for_me: bool = False) -> HTMLResponse:
         rows = people_rows(ids)
         try:
-            rej_in = xlsx_export.rejected_in(store, [r["id"] for r in rows])
+            rej_exits = xlsx_export.exits_in(store, [r["id"] for r in rows])
+            rej_in = {k: [t for t, _ in v] for k, v in rej_exits.items()}
+            rej_word = {k: xlsx_export.exit_word(v) for k, v in rej_exits.items()}
         except Exception:
-            rej_in = {}
+            rej_in, rej_word = {}, {}
         if leave_rej is None:  # first visit: people rejected in a job are left out unless the recruiter unticks them
             leave_rej = set(rej_in)
         hl_pairs = hl_pairs_of(hl)
@@ -1375,7 +1384,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
                     pv=pv, notes_seen=notes_seen, no_match=no_match, about_seen=about_seen,
                     leave_out=leave_out or set(), leave_note=leave_note or set(),
-                    rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
+                    rej_in=rej_in, rej_word=rej_word, leave_rej=leave_rej, for_me=for_me,
                     kept_ids={p["id"] for p in pv.get("people") or []})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
@@ -1738,6 +1747,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def new_candidate(request: Request, job_id: int | None = None):
         return page(request, "candidate_form.html", c={}, history_text="", error=None, job_id=job_id)
 
+    def _moved_line(n: int) -> str:
+        return f"{n} {'label went' if n == 1 else 'labels went'} to Private tags."
+
     @app.post("/candidates", response_class=HTMLResponse)
     async def create_candidate_form(request: Request):
         form = await request.form()
@@ -1763,6 +1775,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                             error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job,
                             same_exact=same_exact, fill_fields=FILL_FIELDS)
+        counter: list[int] = []
+        token = DIVERTED.set(counter)
         try:
             data.pop("other_emails", None)
             cand, created = store.upsert_candidate(work_history=history or None, other_emails=other_emails, **data)
@@ -1773,7 +1787,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return page(request, "candidate_form.html", c={**data, "other_emails": "\n".join(other_emails)},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=form.get("job_id"))
-        dest = f"/candidates/{cand['id']}" + ("" if created else "?merged=1")
+        finally:
+            DIVERTED.reset(token)
+        params: dict[str, str] = {"merged": "1"} if not created else {}
+        if sum(counter):
+            params.update(notice=_moved_line(sum(counter)), notice_href="/settings#private-tags",
+                          notice_href_text="Private tags in Settings")
+        dest = f"/candidates/{cand['id']}" + ("?" + urlencode(params) if params else "")
         return RedirectResponse(dest, status_code=303)
 
     @app.get("/candidates/{candidate_id}", response_class=HTMLResponse)
@@ -1790,6 +1810,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if edit:
             return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
                         error=None, job_id=None)
+        return candidate_page(request, candidate_id, c, hl, merged=merged)
+
+    def candidate_page(request: Request, candidate_id: int, c: dict[str, Any], hl: str = "",
+                       merged: bool = False, log_error: str = "", log_form: dict[str, str] | None = None, status_code: int = 200):
+        """The candidate page. log_error and log_form: a log entry that failed, with the error and what was typed,
+        so the form keeps it and the error is announced (see log_entry)."""
         in_jobs = {p["job_id"] for p in c["pipelines"]}
         open_jobs = store.list_jobs("open")
         hints = actions.twin_hints(open_jobs)
@@ -1800,7 +1826,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
-                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)))
+                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)),
+                    log_error=log_error, log_form=log_form or {}, status_code=status_code)
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
@@ -1815,15 +1842,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error="Nothing was saved. " + " ".join(bad.values()),
                         field_errors=bad, job_id=None, status_code=400)
+        counter: list[int] = []
+        token = DIVERTED.set(counter)
+        make_private = str(form.get("make_private") or "").strip()  # the per-skill button: save the edits, then move it
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
             if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
                 store.set_other_emails(candidate_id, _split_emails(form.get("other_emails")))
+            if make_private:
+                store.make_private_for(candidate_id, make_private)
         except ValueError as exc:
             return page(request, "candidate_form.html",
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        finally:
+            DIVERTED.reset(token)
+        notes = []
+        if make_private:
+            notes.append(f"Saved. {make_private} is now one of their private tags.")
+        moved = sum(counter)
+        if moved:
+            notes.append(_moved_line(moved))
+        if not notes:
+            return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}?" + urlencode(
+            {"notice": " ".join(notes), "notice_href": "/settings#private-tags", "notice_href_text": "Private tags in Settings"}),
+            status_code=303)
 
     @app.post("/candidates/{candidate_id}/color")
     async def set_candidate_color(request: Request, candidate_id: int):
@@ -1935,6 +1979,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 at_text, tz = str(form.get("at") or "").strip(), str(form.get("tz") or "").strip()
                 iv = interviews.form_fields(form) if kind == "interview" else {}
                 if kind == "interview":
+                    if job == "":  # no silent "No job": an interview with no job shows in no job's client update
+                        mine = store.candidate_pipelines(candidate_id)
+                        if len(mine) == 1:
+                            job_id = mine[0]["job_id"]
+                        elif len(mine) > 1:
+                            raise ValueError("Pick which job this interview is for. Choose No job only if it should "
+                                             "not show in any job's updates.")
                     all_day = str(form.get("all_day") or "") == "1"
                     if not at_text:  # a blank time would log the interview "now"
                         raise ValueError("Pick the day of the interview." if all_day else
@@ -1974,6 +2025,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 actions.schedule_followup(store, candidate_id, day, job_id=job_id, note=body.strip() or None)
                 notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
         except (ValueError, NotFound) as exc:
+            if not logged:  # show the page again with the error announced and what they typed still in the form
+                typed = {k: str(form.get(k) or "") for k in (
+                    "kind", "body", "at", "tz", "job_id", "follow_up", "interviewer", "interviewer_email", "minutes",
+                    "interviewer_tz", "interviewer_hours", "candidate_tz")}
+                return candidate_page(request, candidate_id, store.candidate_detail(candidate_id), log_error=str(exc),
+                                      log_form=typed, status_code=400)
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
                                     status_code=303)
         if day_error:  # keep what they wrote, and say what was wrong with the date
@@ -2272,6 +2329,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
         pairs_before = {tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)}
+        counter: list[int] = []
+        div_token = DIVERTED.set(counter)
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
@@ -2282,6 +2341,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
+            DIVERTED.reset(div_token)
             path.unlink(missing_ok=True)  # our own private copy of the upload
         importers.save_sync_profile(store, header, mapping, result, file_name=filename, source=source,
                                     add_stages=add_stages, move_stages=move_stages, client=client,
@@ -2293,7 +2353,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ask = set(importers.openings_to_ask(store))
         new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
                     for i in result.get("new_job_ids") or [] if i in ask]
-        return page(request, "import.html", step="done", result=result, token=token,
+        return page(request, "import.html", step="done", result=result, token=token, private_moved=sum(counter),
                     headline=importers.result_headline(result, len(rows)),
                     line_note=importers.line_note(file_text, len(rows)),
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
@@ -2374,7 +2434,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 "That import can't be undone here any more. Its backup may still be in the list below.")})
                 + "#backups", status_code=303)
         try:
-            _, saved = restore_backup(name)
+            _, saved, _kept = restore_backup(name)
         except ValueError as exc:
             return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
         return RedirectResponse("/candidates?" + urlencode({"notice": (
@@ -2394,7 +2454,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/export.csv")
     def export_csv():
         stamp = datetime.now().strftime("%Y-%m-%d")
-        return Response(importers.export_csv_bytes(store), media_type="text/csv; charset=utf-8",
+        return Response(importers.export_csv_bytes(store, include_private=True), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="talent-search-{stamp}.csv"'})
 
     @app.get("/backup")
@@ -2877,17 +2937,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return back(request, "/changes", notice=notice)
 
     @app.get("/jobs/{job_id}/submit/{candidate_id}", response_class=HTMLResponse)
-    def submit_page(request: Request, job_id: int, candidate_id: int):
-        """Submit to client: what happens, any heads up, and the write-up draft to send from their own mail."""
+    def submit_page(request: Request, job_id: int, candidate_id: int, notes: str = "", contact: str = ""):
+        """Submit to client: what happens, any heads up, and the write-up draft to send from their own mail. The
+        write-up has no private notes and no email or phone unless the recruiter ticks them (notes=1, contact=1)."""
         job = job_or_404(job_id)
         cand = cand_or_404(candidate_id)
-        app_row = next((p for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
-        if app_row is None:
-            raise HTTPException(404, "That person isn't on this job.")
+        gone = chase.out_of_job(store, candidate_id, job_id)
+        if gone:  # rejected, withdrawn or not in this job: no write-up, nothing to send
+            return page(request, "submit.html", job=job, cand=cand, gone=gone)
+        app_row = next(p for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id)
         target = chase.submit_stage(store, job_id)
         done = bool(target) and app_row["stage"].lower() == target["name"].lower()
-        return page(request, "submit.html", job=job, cand=cand, stage=app_row["stage"], target=target, done=done,
-                    since=app_row["stage_changed_at"], draft=chase.writeup(store, candidate_id, job_id),
+        with_notes, with_contact = notes == "1", contact == "1"
+        return page(request, "submit.html", job=job, cand=cand, gone=None, stage=app_row["stage"], target=target,
+                    done=done, since=app_row["stage_changed_at"], with_notes=with_notes, with_contact=with_contact,
+                    draft=chase.writeup(store, candidate_id, job_id, include_notes=with_notes,
+                                        include_contact=with_contact),
                     warning=None if done else chase.earlier_to_client(store, candidate_id, job_id),
                     elsewhere=chase.other_clients(store, candidate_id, job_id))
 
@@ -4212,6 +4277,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         # the #fragment names the message itself: a fragment that names the whole section would make the browser drop focus
         return RedirectResponse("/settings?" + urlencode({key: msg}) + "#skill-result", status_code=303)
 
+    # ---------------------------------------------------------- private tags (never leave this computer)
+    def _private_back(msg: str, tag: str = "", error: bool = False) -> RedirectResponse:
+        """Back to Settings: the message sits in its own status line inside Private tags, with Undo when a tag moved."""
+        params = {"flash_error": msg} if error else {"private_notice": msg}
+        if tag and not error:
+            params["private_undo"] = tag
+        return RedirectResponse("/settings?" + urlencode(params) + "#private-result", status_code=303)
+
+    @app.post("/settings/private-tags/make")
+    async def private_tags_make(request: Request):
+        """'Make private': move one tag out of everyone's Skills into their Private tags, and remember the name."""
+        form = await request.form()
+        try:
+            r = store.make_tag_private(str(form.get("tag") or ""))
+        except ValueError as exc:
+            return _private_back(str(exc), error=True)
+        n = r["changed"]
+        return _private_back(f"Made {r['tag']} private. {n} {'person' if n == 1 else 'people'} changed. It is no longer "
+                             "in their Skills, and new saves of it go to Private tags too.", r["tag"])
+
+    @app.post("/settings/private-tags/undo")
+    async def private_tags_undo(request: Request):
+        """'Make a skill again' (and Undo after Make private): move it back for everyone and drop it from the list."""
+        form = await request.form()
+        try:
+            r = store.make_tag_skill(str(form.get("tag") or ""))
+        except ValueError as exc:
+            return _private_back(str(exc), error=True)
+        n = r["changed"]
+        return _private_back(f"{r['tag']} is a skill again. {n} {'person' if n == 1 else 'people'} changed.")
+
+    @app.post("/candidates/{candidate_id}/private-tags")
+    async def candidate_private_tag(request: Request, candidate_id: int):
+        """'Make private' on one person's skill: moves it for this person only."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        tag = str(form.get("tag") or "")
+        try:
+            store.make_private_for(candidate_id, tag, private=str(form.get("to") or "private") != "skill")
+        except ValueError as exc:
+            return back(request, default=f"/candidates/{candidate_id}?edit=1", error=str(exc))
+        word = "skill" if str(form.get("to") or "") == "skill" else "private tag"
+        return back(request, default=f"/candidates/{candidate_id}?edit=1", notice=f"{tag} is now one of their {word}s.")
+
     @app.post("/settings/skill-names/merge")
     async def skill_names_merge(request: Request):
         """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed. From
@@ -4320,12 +4429,15 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
                     new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN,
                     skill_rows=store.skill_lookalike_groups(30), skill_groups=store.skill_alias_groups(),
-                    skill_hidden=store.hidden_skill_pairs())
+                    skill_hidden=store.hidden_skill_pairs(),
+                    private=private_tags.settings_view(store, request.query_params.get("private_q", ""),
+                                                       int(request.query_params.get("private_page", "1") or 1)
+                                                       if request.query_params.get("private_page", "1").isdigit() else 1))
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
 
-    def restore_backup(name: str) -> tuple[dict[str, Any], Path]:
+    def restore_backup(name: str) -> tuple[dict[str, Any], Path, int]:
         """Restore a backup (a fresh one is taken first), then let Typesense catch up if it's in use."""
         r = backups.restore(store, name)
         if search.index is not None:
@@ -4333,14 +4445,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 search.index.rebuild(store)
             except Exception as exc:  # built-in search already has the restored data
                 log.warning("Typesense rebuild after a restore failed: %s", exc)
-        return r["restored"], r["saved"]
+        return r["restored"], r["saved"], r.get("private_kept", 0)
 
     @app.post("/settings/backups/restore")
     async def restore_from_settings(request: Request):
         """App window only (the AI has no restore tool). Saves the data as it is now, then swaps the backup in."""
         form = await request.form()
         try:
-            info, saved = restore_backup(str(form.get("name") or ""))
+            info, saved, kept = restore_backup(str(form.get("name") or ""))
         except ValueError as exc:
             return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
         people, jobs = info["people"], info["jobs"]
@@ -4348,6 +4460,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                f"{'person' if people == 1 else 'people'} and {jobs} job{'' if jobs == 1 else 's'}. Your data from "
                f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it. "
                "Your Cautious mode and AI app settings stayed as they are now.")
+        if kept:
+            msg += f" {kept} {'label' if kept == 1 else 'labels'} kept in Private tags."
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#backups", status_code=303)
 
     @app.post("/settings/backups/delete")
@@ -4530,9 +4644,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             shown = skills.reveal(path)
         except Exception as exc:
             integrations.log_failure(exc)
-            return HTMLResponse(f'<span class="error">{html_escape(integrations.friendly_error(exc))}</span>')
-        return HTMLResponse('<span class="ok">Shown in your file manager.</span>' if shown else
-                            f'<span class="fine">The file is in {html_escape(str(path.parent))}.</span>')
+            return HTMLResponse(f'<span class="error" role="alert">{html_escape(integrations.friendly_error(exc))}</span>')
+        return HTMLResponse('<span class="ok" role="status">Shown in your file manager.</span>' if shown else
+                            f'<span class="fine" role="status">The file is in {html_escape(str(path.parent))}.</span>')
 
     @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
     def skills_plugin_save(request: Request):

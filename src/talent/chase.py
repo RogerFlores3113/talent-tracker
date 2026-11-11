@@ -14,8 +14,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
-from . import actions, reports
-from .store import NotFound, Store, now_iso, to_dt
+from . import actions, reports, xlsx_export
+from .store import NotFound, Store, now_iso, stage_outcome, to_dt
 
 DAYS_KEY = "chase_days"
 DEFAULT_DAYS = 5
@@ -329,6 +329,9 @@ def _lines(text: str | None) -> list[str]:
     return [x.strip(" -*•\t") for x in re.split(r"[\r\n]+|(?<=[.;])\s+", text or "") if x.strip(" -*•\t")]
 
 
+_LABEL = re.compile(r"^\s*(comp(ensation)?|salary|availability|available|notice)\s*[:=-]\s*", re.I)
+
+
 def _found(texts: list[str], pattern: re.Pattern[str]) -> str | None:
     for t in texts:
         for line in _lines(t):
@@ -409,14 +412,35 @@ def missing_stage_edit(store: Store, job_id: int) -> dict[str, Any]:
     return {"name": SUBMITTED_STAGE, "after": after} if after else {"name": SUBMITTED_STAGE}
 
 
+def out_of_job(store: Store, candidate_id: int, job_id: int) -> str | None:
+    """Why there is no write-up for this person and job, or None when there can be one: "isn't in this job" or
+    "is rejected" / "is withdrawn" in it. The same people a Share file for the job leaves out."""
+    name = store.get_candidate(candidate_id)["name"]
+    job = store.get_job(job_id)
+    app = store._row("SELECT stage FROM applications WHERE candidate_id = ? AND job_id = ?", (candidate_id, job_id))
+    if app is None:
+        return f"{name} isn't in {job['title']}, so there is nothing to send."
+    here = next((x for x in store.job_stages(job_id) if x["name"].lower() == app["stage"].lower()), None)
+    outcome = here["outcome"] if here else stage_outcome(app["stage"])
+    if outcome == "lost":
+        word = "withdrawn" if re.sub(r"[\W_]+", " ", app["stage"]).strip().lower().startswith("withdr") else "rejected"
+        return f"{name} is {word} in {job['title']}, so they are out of this job and there is nothing to send."
+    return None
+
+
 def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = None,
-            note: str | None = None) -> dict[str, Any]:
+            note: str | None = None, include_notes: bool = False, include_contact: bool = False) -> dict[str, Any]:
     """The submittal draft for one person and job: {"subject", "body", "to", "email", "client", "manager"}. Built from
     their profile, the newest screen notes on this job, and comp and availability when a note or the profile says
     them. why_fit and note are the recruiter's own words for this write-up. The recruiter reads and sends it from
-    their own mail."""
+    their own mail. Like the Share file: no email, phone or profile link unless include_contact, and email, phone and
+    profile links written in About or work history taken out unless include_contact, and no private notes and no comp or availability taken from
+    them unless include_notes. Raises ValueError for someone out of the job (not in it, rejected or withdrawn)."""
     cand = store.get_candidate(candidate_id)
     job = store.get_job(job_id)
+    out = out_of_job(store, candidate_id, job_id)
+    if out:
+        raise ValueError(out)
     own = actions.inhouse(store)
     company = (job.get("company") or "").strip()
     c = reports.client(store, company) if company else {"contacts": None, "name": "", "key": "", "slug": ""}
@@ -430,8 +454,15 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     if app and (app.get("notes") or "").strip() and app["notes"].strip() not in notes:
         notes.insert(0, app["notes"].strip())
     notes = list(dict.fromkeys(n for n in (screen_note(x) for x in notes) if n))[:WRITEUP_NOTES]
-    texts = [*notes, cand.get("about") or ""]
-    comp, avail = _found(texts, _COMP), _found(texts, _AVAIL)
+    if not include_notes:
+        notes = []
+    about_text = cand.get("about") or ""
+    if not include_contact:
+        about_text = xlsx_export.strip_contact(about_text)[0]
+    comp = avail = None
+    if include_notes:
+        texts = [*notes, about_text]
+        comp, avail = _found(texts, _COMP), _found(texts, _AVAIL)
     hist = store.work_history(candidate_id)[:3]
     lines = [f"Hi {_first(manager) or _first(reports.contact_name(c.get('contacts'))) or 'there'},", "",
              f"I'd like to put {cand['name']} forward for {job['title']}.", ""]
@@ -440,17 +471,20 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     if now_role:
         lines.append(f"{'Now' if cand.get('current_title') or cand.get('current_company') else 'Based in'}: {now_role}")
     if hist:
-        lines.append("Before: " + "; ".join(
-            " at ".join(x for x in (h.get("title"), h.get("company")) if x) for h in hist if h.get("title") or h.get("company")))
+        before = "; ".join(
+            " at ".join(x for x in (h.get("title"), h.get("company")) if x) for h in hist if h.get("title") or h.get("company"))
+        lines.append("Before: " + (before if include_contact else xlsx_export.strip_contact(before)[0]))
     tags = cand.get("tags")
     tags = ", ".join(tags) if isinstance(tags, (list, tuple)) else (tags or "").strip()
     if tags:
         lines.append(f"Skills: {tags[:200]}")
-    about = " ".join((cand.get("about") or "").split())
+    about = " ".join(about_text.split())
     if about:
         lines.append(f"About: {about[:ABOUT_CHARS].rstrip()}{'...' if len(about) > ABOUT_CHARS else ''}")
-    if cand.get("linkedin_url"):
+    if include_contact and cand.get("linkedin_url"):
         lines.append(f"Profile: {cand['linkedin_url']}")
+    if include_contact and (cand.get("email") or cand.get("phone")):
+        lines.append("Contact: " + ", ".join(x for x in (cand.get("email"), cand.get("phone")) if x))
     if (why_fit or "").strip():
         lines += ["", f"Why they fit: {' '.join(why_fit.split())}"]
     if (note or "").strip():
@@ -461,26 +495,47 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     if comp or avail:
         lines.append("")
         if comp:
-            lines.append(f"Comp: {comp}")
+            lines.append(f"Comp: {_LABEL.sub('', comp, count=1)}")
         if avail:
-            lines.append(f"Availability: {avail}")
+            lines.append(f"Availability: {_LABEL.sub('', avail, count=1)}")
     lines += ["", "Let me know if you'd like to meet them, and when works.", "", "Thanks"]
     subject = f"{cand['name']} for {job['title']}"
     to = manager_email(c, [job], manager or None, own) if company or job.get("hiring_manager_email") else None
     body = "\n".join(lines)
-    return {"subject": subject, "body": body, "to": to, "email": _mailto(to, subject, body), "client": c.get("name"),
-            "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail)}
+    contact = [w for w, v in (("email", cand.get("email")), ("phone", cand.get("phone")),
+                              ("profile link", cand.get("linkedin_url"))) if v] if include_contact else []
+    included = [x for x, on in (
+        ("name", True),
+        ("current role", bool(cand.get("current_title") or cand.get("current_company"))),
+        ("location", bool(cand.get("location"))),
+        ("earlier jobs", bool(hist)),
+        ("skills (never your private tags)", bool(tags)),
+        ("About", bool(about)),
+        (" and ".join(", ".join(contact).rsplit(", ", 1)) if contact else "", bool(contact)),
+        ("your newest notes on this job", bool(notes)),
+        ("comp", bool(comp)),
+        ("availability", bool(avail))) if on]
+    left_out = [x for x, on in (
+        ("email, phone and profile link (also taken out of About and work history)", not include_contact),
+        ("your private notes and any comp or availability taken from them", not include_notes)) if on]
+    return {"subject": subject, "body": body, "included": included, "left_out": left_out, "to": to, "email": _mailto(to, subject, body), "client": c.get("name"),
+            "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail),
+            "include_notes": include_notes, "include_contact": include_contact,
+            "has_about": bool(about), "has_notes": bool(notes)}
 
 
 def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fit: str | None = None,
-           note: str | None = None) -> dict[str, Any]:
+           note: str | None = None, include_notes: bool = False, include_contact: bool = False) -> dict[str, Any]:
     """Move someone into the job's Submitted stage and draft their write-up. {"moved", "stage", "before", "at",
     "writeup", "warning", "elsewhere"}. A second submit while they're already there moves nothing. Raises
     ValueError when they aren't on the job, are hired or out, or the job has no Submitted stage."""
     job = store.get_job(job_id)
+    name = store.get_candidate(candidate_id)["name"]
+    out = out_of_job(store, candidate_id, job_id)  # first, so nobody is moved and then refused
+    if out:
+        raise ValueError(out)
     app = store._row("SELECT stage, stage_changed_at FROM applications WHERE candidate_id = ? AND job_id = ?",
                      (candidate_id, job_id))
-    name = store.get_candidate(candidate_id)["name"]
     if app is None:
         raise ValueError(f"{name} isn't on {job['title']} yet. Add them to the job first.")
     target = submit_stage(store, job_id)
@@ -505,7 +560,7 @@ def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fi
         warning = None  # already there: nothing new to warn about
     return {"moved": moved, "stage": target["name"], "before": app["stage"], "at": at, "warning": warning,
             "elsewhere": other_clients(store, candidate_id, job_id),
-            "writeup": writeup(store, candidate_id, job_id, why_fit, note)}
+            "writeup": writeup(store, candidate_id, job_id, why_fit, note, include_notes, include_contact)}
 
 
 # ------------------------------------------------------------------ the chase

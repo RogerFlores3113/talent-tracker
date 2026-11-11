@@ -96,7 +96,7 @@ def test_share_file_without_contact_takes_emails_and_phones_out_of_about(store):
     assert "dana.private@gmail.com" not in text and "555-0134" not in text and "7946" not in text
     assert "(email removed)" in text and "(phone removed)" in text
     assert "Led a team of 12 from 2019-2023" in text  # numbers that are not phone numbers stay
-    assert "3 email addresses or phone numbers taken out" in _about_sheet(book)["Contact details"]
+    assert "3 email addresses, phone numbers or profile links taken out" in _about_sheet(book)["Contact details"]
 
 
 def test_share_file_with_contact_ticked_keeps_about_as_written(store):
@@ -122,7 +122,7 @@ def test_share_preview_shows_about_and_work_history_as_the_file_will(store):
     html = local_client(store).get(f"/candidates/share?ids={dana['id']}").text
     assert "About as it will appear:" in html and "Work history:" in html
     assert "Reach me at (email removed) or (phone removed)." in html
-    assert "3 email addresses or phone numbers taken out." in html
+    assert "3 contact details (email, phone or profile link) taken out." in html
 
 
 def test_hiring_manager_compare_view_takes_contact_out_of_about(store):

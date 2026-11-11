@@ -129,8 +129,8 @@ def test_routes(store, home, tmp_path, monkeypatch):
     monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
     c = local_client(store)
     page = c.get("/connect").text
-    assert "Add skills" in page and "Save the Claude plugin file" in page and "Not found on this computer" in page
-    assert "Install anyway" in page and "Older way: upload skills one at a time" in page
+    assert "Add skills" in page and "Save the Claude plugin file" in page and "Not on this computer" in page
+    assert " anyway</button>" in page and "Older way: upload skills one at a time" in page
     assert "/plugin marketplace add RogerFlores3113/talent-tracker" in page and "/plugin install talent-search@talent-tracker" in page
     assert "talent-search@talent-tracker" in page and "Customize" in page
     r = c.get("/connect/skills.plugin")

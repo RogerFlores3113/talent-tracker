@@ -159,7 +159,7 @@ def test_share_notes_choices(store):
 def test_share_form_wording_radios_preview_and_live_line(store):
     job, ana, ben, cy = seed(store)
     html = local_client(store).get(f"/candidates/share?ids={ana['id']},{ben['id']}&hl=python:red").text
-    assert "About and work history go in as written, except that email addresses and phone numbers in them are taken out" in html
+    assert "About and work history go in as written, except that email addresses, phone numbers and profile links in them are taken out" in html
     assert 'type="radio" name="notes" value="none" checked' in html
     assert 'value="latest"' in html and 'value="all"' in html and "Latest note only" in html
     assert "All notes and timeline" in html and "No notes" in html and "Notes go out word for word and may hold pay" in html

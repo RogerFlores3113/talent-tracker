@@ -1,4 +1,5 @@
 """Cycle 3, fixer H: restore backups in the app, import undo, and security hardening."""
+import html
 import logging
 import os
 import re
@@ -222,7 +223,7 @@ def test_timeline_entries_have_a_length_cap(store):
                                                             "summary": "y" * 200000}))
     r = local_client(store).post(f"/candidates/{cand['id']}/log", data={"kind": "note", "body": "z" * 30000},
                                  follow_redirects=False)
-    assert "too long" in flash_of(r, "error")
+    assert r.status_code == 400 and "too long" in html.unescape(r.text)
     assert len(store.timeline(cand["id"])) == 1
 
 

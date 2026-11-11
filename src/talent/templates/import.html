@@ -110,6 +110,7 @@
 {% elif step != 'openings' %}
 {% if line_note %}<p class="fine" id="line-note">{{ line_note }}</p>{% endif %}
 <p class="flash">{{ headline }}</p>
+{% if private_moved %}<p class="fine" role="status" id="private-moved">{{ private_moved }} {{ 'label went' if private_moved == 1 else 'labels went' }} to Private tags. <a href="/settings#private-tags">Open Private tags in Settings</a></p>{% endif %}
 {% for line in result.job_notes or [] %}<p class="fine">{{ line }}</p>{% endfor %}
 {% if result.backup_name %}<form class="actions-inline" method="post" action="/import/undo" data-confirm="Undo this import? Your data goes back to how it was just before it. A copy with the import in it is backed up first.">
   <input type="hidden" name="backup" value="{{ result.backup_name }}">

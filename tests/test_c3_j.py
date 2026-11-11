@@ -280,9 +280,10 @@ def test_dates_without_a_year_are_the_next_one_coming():
 def test_tags_given_as_a_list_keep_their_commas(store):
     server = build_server(store)
     out = structured(call(server, "save_candidate", name="Bo", email="bo@x.com", tags=["B2B, enterprise sales", "Go"]))
-    assert out["candidate"]["tags"] == ["B2B, enterprise sales", "Go"]
+    assert "tags" not in out["candidate"]  # a write that includes skills never echoes the skill list
+    assert store.get_candidate(out["id"])["tags"] == ["B2B, enterprise sales", "Go"]
     one = store.add_candidate(name="Cy", tags=["Sales, SMB"])
     assert store.get_candidate(one["id"])["tags"] == ["Sales, SMB"]
     merged = structured(call(server, "save_candidate", name="Bo", email="bo@x.com", tags=["Rust"]))
-    assert merged["candidate"]["tags"] == ["B2B, enterprise sales", "Go", "Rust"]
+    assert store.get_candidate(merged["id"])["tags"] == ["B2B, enterprise sales", "Go", "Rust"]
     assert store.add_candidate(name="Di", tags="python, sql")["tags"] == ["python", "sql"]  # typed text still splits

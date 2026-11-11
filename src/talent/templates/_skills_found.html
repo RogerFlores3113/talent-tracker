@@ -1,6 +1,9 @@
 <ul class="plain" id="skills-found"{% if oob %} hx-swap-oob="true"{% endif %}>
-    {% for s in skill_status %}<li><strong>{{ s.label }}</strong>:
-      {% if s.target in detected %}found.{% if s.count %} <span class="{{ 'ok' if s.current and not s.skipped else 'fine' }}">{{ s.count }} of {{ s.total }} skills added{% if s.versions %} (version {{ s.versions|join(', ') }}){% endif %}.</span>{% else %} <span class="fine">No skills yet.</span>{% endif %}
-      {% else %}<span class="fine">Not found on this computer.</span> <button class="btn link" type="button" hx-post="/connect/skills/all/preview-install" hx-vals='{"targets": "{{ s.target }}"}' hx-target="#skills-all-result">Install anyway</button>{% endif %}
+    {% for s in skill_status if s.target in detected %}<li><strong>{{ s.label }}</strong>:
+      {% if s.count %}<span class="{{ 'ok' if s.current and not s.skipped else 'fine' }}">{{ s.count }} of {{ s.total }} skills added{% if s.versions %} (version {{ s.versions|join(', ') }}){% endif %}.</span>{% else %}<span class="fine">No skills yet.</span>{% endif %}
     </li>{% endfor %}
+    {% set absent = skill_status|rejectattr('target', 'in', detected)|list %}
+    {% if absent %}<li class="fine" id="skills-not-here">Not on this computer: {{ absent|map(attribute='label')|join(', ') }}.
+      {% for s in absent %}<button class="btn link" type="button" hx-post="/connect/skills/all/preview-install" hx-vals='{"targets": "{{ s.target }}"}' hx-target="#skills-all-result" aria-label="Install the skills for {{ s.label }} anyway">Install for {{ s.label }} anyway</button>{% endfor %}
+    </li>{% endif %}
   </ul>

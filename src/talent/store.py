@@ -114,7 +114,7 @@ CHANGE_KIND = "change"
 ALL_TIMELINE_KINDS = (*TIMELINE_KINDS, CHANGE_KIND)
 FIELD_LABELS = {
     "current_title": "title", "current_company": "company", "linkedin_url": "LinkedIn",
-    "last_contacted_at": "last contacted", "tags": "skills", "work_history": "work history",
+    "last_contacted_at": "last contacted", "tags": "skills", "private_tags": "private tags", "work_history": "work history",
     "links": "other links",
 }
 # Who made a change -> the timeline entry's source ("from AI app", "from CSV import").
@@ -127,6 +127,7 @@ FIELD_LIMITS = {
     "name": 200, "email": 320, "phone": 50, "linkedin_url": 500, "website": 500, "current_title": 200,
     "current_company": 200, "location": 200, "about": 5000, "source": 200, "last_contacted_at": 100,
     "tags": 3000,  # all skills joined into one text
+    "private_tags": 3000,
     "links": 6000,  # the JSON list of other links (10 links of up to 500 characters)
 }
 # Longest timeline entry (a note, a call summary, an email summary) one log call takes.
@@ -146,6 +147,7 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "location",
     "about",
     "tags",
+    "private_tags",
     "source",
     "last_contacted_at",
     "color",
@@ -823,6 +825,18 @@ _MIGRATIONS: tuple[Any, ...] = (
         names     TEXT NOT NULL,
         undone_at TEXT
     );
+    """,
+    # v14: private tags (the recruiter's own labels, like "Recruiter: Priya" or "dnc"). They live beside the skills and
+    # never leave this computer: not in shares, exports, write-ups, reports or anything an AI app is sent. Same text
+    # format as candidates.tags, mirrored in candidate_private_tags for filters. Not in the search index (FTS).
+    """
+    ALTER TABLE candidates ADD COLUMN private_tags TEXT;
+    CREATE TABLE candidate_private_tags (
+        candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+        tag          TEXT NOT NULL COLLATE NOCASE,
+        PRIMARY KEY (candidate_id, tag)
+    );
+    CREATE INDEX candidate_private_tags_tag_idx ON candidate_private_tags(tag);
     """,
 )
 # Kinds of AI action and how each is listed on Changes.
@@ -1553,6 +1567,15 @@ def stored_tags(text: str | None) -> list[str]:
     return split_tags(text)
 
 
+PRIVATE_NAMES_KEY = "private_tag_names"
+# True while the app window itself is answering (set in web.py): its tag filter then also matches private tags, which
+# are the recruiter's working labels. The AI app's server never sets it, so it can't search them.
+LOCAL_VIEW: ContextVar[bool] = ContextVar("talent_local_view", default=False)
+# A web save or import sets this to a list; each write then adds how many labels newly went to Private tags by the
+# remembered list, so the page can say "N labels went to Private tags".
+DIVERTED: ContextVar[list[int] | None] = ContextVar("talent_diverted", default=None)
+AI_PRIVATE_LINE = "Private tags changed by the AI app"  # the timeline line for an AI app write: it names no tag
+
 LINKEDIN_RULE_KEY = "linkedin_key_rule"
 # Saved email equals ?, ignoring case. The blank checks let SQLite use candidates_email_uq (a partial index).
 _EMAIL_MATCH = "lower(email) = lower(?) AND email IS NOT NULL AND email <> ''"
@@ -2013,6 +2036,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "tour_loaded": "0",
     "tour_loaded_at": "",  # when the tour added the demo people: saved searches made after it are offered for removal
     "tour_seen": "0",
+    "private_tag_names": "",  # tags that always go to Private tags, whoever writes them (stored like candidates.tags)
 }
 
 # The color themes on the Settings page: (value, name, one-line description). The first is the default.
@@ -2452,6 +2476,8 @@ class Store:
     def _hydrate(row: dict[str, Any] | None) -> dict[str, Any] | None:
         if row is not None:
             row["tags"] = stored_tags(row.get("tags"))
+            if "private_tags" in row:
+                row["private_tags"] = stored_tags(row.get("private_tags"))
             if "links" in row:
                 row["links"] = stored_links(row.get("links"))
             row.pop("history_text", None)
@@ -2471,8 +2497,18 @@ class Store:
             out["links"] = json.dumps(clean_links(out["links"], exclude=keep)) if out["links"] else None
             if out["links"] == "[]":
                 out["links"] = None
-        if "tags" in out:
-            out["tags"] = join_tags(split_tags(out["tags"]))
+        if "tags" in out or "private_tags" in out:
+            # A skill whose name is on the private list is kept as a private tag instead, whoever writes it.
+            skills = split_tags(out["tags"]) if "tags" in out else None
+            private = split_tags(out["private_tags"]) if "private_tags" in out else None
+            if skills is not None:
+                skills, moved = self._split_private(skills)
+                out["tags"] = join_tags(skills)
+                if moved:
+                    base = private if private is not None else stored_tags((existing or {}).get("private_tags"))
+                    private = split_tags(base + moved)
+            if private is not None:
+                out["private_tags"] = join_tags(private)
         if "email" in out and out["email"]:
             out["email"] = out["email"].lower()
         if "color" in out:
@@ -2480,7 +2516,7 @@ class Store:
         for k, v in out.items():
             limit = FIELD_LIMITS.get(k)
             if limit and isinstance(v, str) and len(v) > limit:
-                label = {"tags": "the skills list"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
+                label = {"tags": "the skills list", "private_tags": "The private tags"}.get(k) or FIELD_LABELS.get(k, k.replace("_", " "))
                 raise ValueError(f"{label[:1].upper() + label[1:]} is too long ({len(v):,} characters). "
                                  f"The limit is {limit:,}, so nothing was saved.")
         if out.get("website"):
@@ -2506,6 +2542,41 @@ class Store:
             [(candidate_id, t) for t in tags],
         )
 
+    def _private_routed(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str) -> None:
+        """After a write that changed a person's private tags: count the labels the remembered list newly moved there
+        (for the web's "N labels went to Private tags"). Call inside the write transaction."""
+        if not new.get("private_tags"):
+            return
+        before = {t.casefold() for t in stored_tags(old.get("private_tags"))}
+        names = {n.casefold() for n in self.private_tag_names()}
+        gained = [t for t in stored_tags(new["private_tags"]) if t.casefold() in names and t.casefold() not in before]
+        counter = DIVERTED.get()
+        if counter is not None:
+            counter.append(len(gained))
+
+    def note_ai_private(self, candidate_id: int, tags: Any) -> bool:
+        """An AI app write that included a skill whose name is private leaves one timeline line, "Private tags changed
+        by the AI app", with no tag name, so the recruiter can see it happened. Returns whether it did."""
+        _, moved = self._split_private(split_tags(tags))
+        if not moved:
+            return False
+        ts = now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, 'note', ?, ?, ?, ?, NULL)",
+                (candidate_id, AI_PRIVATE_LINE, ts, ts, CHANGE_SOURCES["ai"]))
+        return True
+
+    def _sync_private_tags(self, candidate_id: int, text: str | None) -> None:
+        """The same as _sync_tags for the private tags (the filter table; they are never in the search index)."""
+        tags = stored_tags(text)
+        joined = join_tags(tags)
+        if joined != text:
+            self._conn.execute("UPDATE candidates SET private_tags = ? WHERE id = ?", (joined, candidate_id))
+        self._conn.execute("DELETE FROM candidate_private_tags WHERE candidate_id = ?", (candidate_id,))
+        self._conn.executemany("INSERT OR IGNORE INTO candidate_private_tags(candidate_id, tag) VALUES (?, ?)",
+                               [(candidate_id, t) for t in tags])
+
     def add_candidate(self, work_history: list[dict[str, Any]] | None = None, *, by: str = "app",
                       other_emails: Iterable[str] | None = None, **data: Any) -> dict[str, Any]:
         """by="ai" also logs the add, so the recruiter can take the person out again from Changes.
@@ -2528,12 +2599,15 @@ class Store:
                 f"INSERT INTO candidates (id, {cols}) VALUES (?, {marks})", (new_id, *fields.values())
             )
             self._sync_tags(new_id, fields.get("tags"))
+            if fields.get("private_tags"):
+                self._sync_private_tags(new_id, fields["private_tags"])
             if work_history:
                 self._write_history(new_id, work_history)
             if other_emails:
                 self.add_other_emails(new_id, other_emails, strict=False)
             if by == "ai":
                 self._log_ai("candidate", candidate_id=new_id)
+            self._private_routed(new_id, {}, fields, by)
         return self.get_candidate(new_id)
 
     def find_duplicate(self, email: str | None = None, linkedin_url: str | None = None) -> dict[str, Any] | None:
@@ -2781,8 +2855,10 @@ class Store:
             if v in (None, ""):
                 continue
             cur = row.get(k)
-            if k == "tags":
-                merged[k] = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
+            if k in ("tags", "private_tags"):
+                both = join_tags(split_tags(stored_tags(cur) + stored_tags(v)))
+                if both != cur:
+                    merged[k] = both
             elif k == "links":  # saved again: new links are added, none are ever dropped
                 both = merge_links(stored_links(cur), stored_links(v),
                                    exclude=(row.get("linkedin_url"), incoming.get("linkedin_url") or None,
@@ -2872,7 +2948,7 @@ class Store:
         be undone. `by` is who did it: "app" (the recruiter) or "ai". The returned candidate
         carries "_changed", the fields that actually changed. via="claude": the recruiter did it with a button in
         Claude (Changes says so)."""
-        row = self._row("SELECT linkedin_url, website FROM candidates WHERE id = ?", (candidate_id,))
+        row = self._row("SELECT linkedin_url, website, private_tags FROM candidates WHERE id = ?", (candidate_id,))
         fields = self._prepare(data, row)
         if "name" in fields and not fields["name"]:
             raise ValueError("A candidate needs a name.")
@@ -2947,11 +3023,19 @@ class Store:
                 raise clash
             if new:
                 self._apply(candidate_id, new)
-                body = _change_body(old, new) + (" (saved again with new details)" if merge else "")
-                self._record_change(candidate_id, old, new, by, body,
-                                    derived=tuple(k for k in derived if k in new), via=via)
+                self._private_routed(candidate_id, old, new, by)
+                # Private tags are the recruiter's own: a change to them is saved but never written to the timeline
+                # (whose entries an AI app can read), so Undo does not cover it.
+                shown_new = {k: v for k, v in new.items() if k != "private_tags"}
+                if shown_new:
+                    shown_old = {k: v for k, v in old.items() if k != "private_tags"}
+                    body = _change_body(shown_old, shown_new) + (" (saved again with new details)" if merge else "")
+                    self._record_change(candidate_id, shown_old, shown_new, by, body,
+                                        derived=tuple(k for k in derived if k in shown_new), via=via)
         cand = self.get_candidate(candidate_id)
-        cand["_changed"] = list(new)
+        cand["_changed"] = [k for k in new if k != "private_tags"]
+        if "private_tags" in new:
+            cand["_private_changed"] = True
         return cand
 
     def _diff(self, candidate_id: int, fields: dict[str, Any],
@@ -2979,6 +3063,8 @@ class Store:
         self._conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*cols.values(), candidate_id))
         if "tags" in cols:
             self._sync_tags(candidate_id, cols["tags"])
+        if "private_tags" in cols:
+            self._sync_private_tags(candidate_id, cols["private_tags"])
         if cols.get("email"):  # an address that becomes the main one is no longer an "other"
             self._conn.execute("DELETE FROM candidate_emails WHERE candidate_id = ? AND email = lower(?)",
                                (candidate_id, cols["email"]))
@@ -3497,8 +3583,9 @@ class Store:
     def ai_overwrites(self, candidate_id: int, data: dict[str, Any],
                       work_history: list[dict[str, Any]] | None = None) -> list[str]:
         """The saved (non-empty) fields this update would clear or replace."""
-        old, _new = self._diff(candidate_id, self._prepare(data), work_history)
-        return [k for k, v in old.items() if v not in (None, "", [])]
+        row = self._row("SELECT private_tags FROM candidates WHERE id = ?", (candidate_id,))
+        old, _new = self._diff(candidate_id, self._prepare(data, row), work_history)
+        return [k for k, v in old.items() if v not in (None, "", []) and k != "private_tags"]
 
     def ai_edit_budget_left(self, candidate_id: int, overwrites: Iterable[str]) -> bool:
         """Whether the AI app may also clear or replace these saved values on this person now. The first
@@ -3821,7 +3908,7 @@ class Store:
             dropped: dict[str, Any] = {}
             for k in CANDIDATE_FIELDS:
                 kv, ov = krow.get(k), orow.get(k)
-                if k == "tags":
+                if k in ("tags", "private_tags"):
                     tags = join_tags(split_tags(stored_tags(kv) + stored_tags(ov)))
                     if tags != kv:
                         fields[k] = tags
@@ -3871,9 +3958,10 @@ class Store:
             created = min(krow["created_at"], orow["created_at"])
             if created != krow["created_at"]:
                 self._conn.execute("UPDATE candidates SET created_at = ? WHERE id = ?", (created, keep_id))
-            old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields}
+            old = {k: (mine if k == "work_history" else krow.get(k)) for k in fields if k != "private_tags"}
             if fields:
                 self._apply(keep_id, fields)
+            fields = {k: v for k, v in fields.items() if k != "private_tags"}  # never written to the timeline
             filled = [k for k in fields if k not in ("tags", "work_history", "links")]
             kept_emails = self.add_other_emails(keep_id, their_emails, strict=False)
             new_main = self._promote_email(keep_id, want) if want else None
@@ -4215,6 +4303,149 @@ class Store:
             out.append(g)
         out.sort(key=lambda g: g["tag"].lower())
         return out[:limit]
+
+    # ------------------------------------------------------------ private tags
+    def private_tag_names(self) -> list[str]:
+        """The remembered list: any skill with one of these names goes to Private tags, whoever writes it."""
+        row = self._conn.execute("SELECT value FROM settings WHERE key = ?", (PRIVATE_NAMES_KEY,)).fetchone()
+        return stored_tags(row[0] if row else None)
+
+    def _save_private_names(self, names: list[str]) -> None:
+        self._conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (PRIVATE_NAMES_KEY, join_tags(names) or ""))
+
+    def _split_private(self, tags: list[str]) -> tuple[list[str], list[str]]:
+        """(skills to keep, tags that go to Private tags) by the remembered list, ignoring case."""
+        names = {n.casefold() for n in self.private_tag_names()}
+        if not names:
+            return tags, []
+        return [t for t in tags if t.casefold() not in names], [t for t in tags if t.casefold() in names]
+
+    def list_private_tags(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """Every private tag in use with how many people have it, most used first, plus the names on the remembered
+        list that nobody has right now (count 0), so they can be taken off it."""
+        rows = self._rows(
+            "SELECT (SELECT t2.tag FROM candidate_private_tags t2 WHERE t2.tag = t.tag COLLATE NOCASE GROUP BY t2.tag"
+            " COLLATE BINARY ORDER BY count(*) DESC, min(t2.rowid) LIMIT 1) AS tag, count(*) AS count"
+            " FROM candidate_private_tags t GROUP BY t.tag COLLATE NOCASE ORDER BY count DESC, tag COLLATE NOCASE LIMIT ?",
+            (limit,))
+        have = {r["tag"].casefold() for r in rows}
+        rows += [{"tag": n, "count": 0} for n in self.private_tag_names() if n.casefold() not in have]
+        return rows
+
+    def _move_tag(self, tag: str, *, to_private: bool, only: int | None = None) -> int:
+        """Move one tag (ignoring case) between Skills and Private tags for everyone, or just `only`. Quiet like the
+        colour bubble: no timeline entry and no new updated date. Call inside a write transaction. Returns how many
+        people changed."""
+        want = tag.casefold()
+        src, dst = ("tags", "private_tags") if to_private else ("private_tags", "tags")
+        tbl = "candidate_tags" if to_private else "candidate_private_tags"
+        sql = f"SELECT candidate_id FROM {tbl} WHERE tag = ? COLLATE NOCASE"
+        params: list[Any] = [tag]
+        if only is not None:
+            sql += " AND candidate_id = ?"
+            params.append(only)
+        done = 0
+        for r in self._rows(sql, params):
+            cid = r["candidate_id"]
+            row = self._row("SELECT tags, private_tags FROM candidates WHERE id = ?", (cid,))
+            mine = stored_tags(row[src])
+            moved = [t for t in mine if t.casefold() == want]
+            if not moved:
+                continue
+            keep = [t for t in mine if t.casefold() != want]
+            there = split_tags(stored_tags(row[dst]) + moved)
+            new = {src: join_tags(keep), dst: join_tags(there)}
+            self._conn.execute(f"UPDATE candidates SET {src} = ?, {dst} = ? WHERE id = ?", (new[src], new[dst], cid))
+            self._sync_tags(cid, new["tags"] if "tags" in new else None)
+            self._sync_private_tags(cid, new["private_tags"])
+            done += 1
+        return done
+
+    def _scrub_history(self, tag: str, candidate_id: int | None = None) -> None:
+        """Take a tag out of the saved old and new skill lists of earlier "change" entries, so the timeline (which an
+        AI app can read) no longer holds a name that is now private."""
+        want = tag.casefold()
+        sql, params = "SELECT id, data FROM timeline WHERE kind = ? AND data LIKE '%\"tags\"%'", [CHANGE_KIND]
+        if candidate_id is not None:
+            sql, params = sql + " AND candidate_id = ?", [*params, candidate_id]
+        for r in self._rows(sql, params):
+            try:
+                data = json.loads(r["data"])
+            except (TypeError, ValueError):
+                continue
+            changed = False
+            for side in ("old", "new"):
+                part = data.get(side) if isinstance(data, dict) else None
+                if isinstance(part, dict) and isinstance(part.get("tags"), str):
+                    kept = [t for t in stored_tags(part["tags"]) if t.casefold() != want]
+                    text = join_tags(kept)
+                    if text != part["tags"]:
+                        part["tags"] = text
+                        changed = True
+            if changed:
+                self._conn.execute("UPDATE timeline SET data = ? WHERE id = ?", (json.dumps(data), r["id"]))
+
+    def make_tag_private(self, tag: str) -> dict[str, Any]:
+        """Move a tag out of everyone's Skills into their Private tags, and remember it so later writes of it (an
+        import, an AI app) land there too. {"tag", "changed"}: how many people had it."""
+        name = split_tags(tag)[:1]
+        if not name:
+            raise ValueError("Pick a tag to make private.")
+        name = name[0]
+        with self._lock, self._conn:
+            names = self.private_tag_names()
+            if name.casefold() not in {n.casefold() for n in names}:
+                self._save_private_names([*names, name])
+            changed = self._move_tag(name, to_private=True)
+            self._scrub_history(name)
+        self._saved_counts.clear()
+        return {"tag": name, "changed": changed}
+
+    def keep_private_names(self, names: Iterable[str]) -> int:
+        """After a restore: add `names` to the remembered list (union, ignoring case) and move every skill that
+        matches the list into Private tags for everyone. Returns how many (person, label) pairs moved."""
+        with self._lock, self._conn:
+            have = self.private_tag_names()
+            seen = {n.casefold() for n in have}
+            extra = [n for n in split_tags(list(names)) if n.casefold() not in seen]
+            allnames = [*have, *extra]
+            if extra:
+                self._save_private_names(allnames)
+            moved = 0
+            for n in allnames:
+                moved += self._move_tag(n, to_private=True)
+                self._scrub_history(n)
+        self._saved_counts.clear()
+        return moved
+
+    def make_tag_skill(self, tag: str) -> dict[str, Any]:
+        """The undo of make_tag_private: move the tag back into everyone's Skills and drop it from the list."""
+        name = (split_tags(tag) or [""])[0]
+        if not name:
+            raise ValueError("Pick a tag to make a skill again.")
+        with self._lock, self._conn:
+            self._save_private_names([n for n in self.private_tag_names() if n.casefold() != name.casefold()])
+            changed = self._move_tag(name, to_private=False)
+        self._saved_counts.clear()
+        return {"tag": name, "changed": changed}
+
+    def make_private_for(self, candidate_id: int, tag: str, *, private: bool = True) -> dict[str, Any]:
+        """Move one skill into this person's Private tags (or back) without touching anyone else or the list. A tag
+        that is on the remembered list can't be moved back for one person, since the next save would move it again."""
+        self.get_candidate(candidate_id)
+        name = (split_tags(tag) or [""])[0]
+        if not name:
+            raise ValueError("Pick a tag.")
+        if not private and name.casefold() in {n.casefold() for n in self.private_tag_names()}:
+            raise ValueError(f"{name} is on your private list, so it stays private for everyone. "
+                             "Make it a skill again from Settings.")
+        with self._lock, self._conn:
+            self._move_tag(name, to_private=private, only=candidate_id)
+            if private:
+                self._scrub_history(name, candidate_id)
+        return self.get_candidate(candidate_id)
 
     def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._rows(
@@ -4607,8 +4838,14 @@ class Store:
                 filters[{"current_title": "title", "current_company": "company"}.get(col, col)] = value
         if tag and tag.strip():
             names = self.skill_group_names(tag)
-            where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({', '.join('?' for _ in names)}) COLLATE NOCASE)")
-            params += names
+            marks = ", ".join("?" for _ in names)
+            if LOCAL_VIEW.get():  # the app window: a private tag is found by the same filter
+                where.append(f"(c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)"
+                             f" OR c.id IN (SELECT candidate_id FROM candidate_private_tags WHERE tag IN ({marks}) COLLATE NOCASE))")
+                params += names + names
+            else:
+                where.append(f"c.id IN (SELECT candidate_id FROM candidate_tags WHERE tag IN ({marks}) COLLATE NOCASE)")
+                params += names
             filters["tag"] = tag
         if source and source.strip():
             where.append("lower(trim(c.source)) = lower(?)")

@@ -163,12 +163,13 @@ def test_add_skills_installs_saves_reveals_opens_and_is_idempotent(store, env, m
     assert (env["dl"] / "talent-search.plugin").is_file() and len(shown) == 1 and opened == [1]
     t = r.text
     assert "Claude Code</strong>: added 6 skills to your Claude Code skills folder (~/.claude/skills)" in t
-    assert "Codex</strong>: not found" in t
-    assert "In Claude, open Customize &gt; Plugins" in t and "Press Add, then Upload plugin" in t
-    assert "Pick talent-search.plugin" in t and "Show in folder" in t and "Already up to date" not in t
+    shown_text = t.split('id="skills-found"', 1)[0]
+    assert "Codex" not in shown_text and "not found" not in shown_text  # an app that isn't here is left out
+    assert "Last step in Claude: Customize &gt; Plugins &gt; Add &gt; Upload plugin, then pick talent-search.plugin" in t
+    assert "Show in folder" in t and "Already up to date" not in t and "Done." not in t
     again = c.post("/connect/skills/add").text
-    assert "Already up to date" in again and "is still in" in again
-    assert "Upload plugin" not in again and "selected in the window" not in again
+    assert "Already up to date" in again and "is already saved in" in again and "is still in" not in again
+    assert "selected in the window" not in again
     assert len(shown) == 1 and opened == [1]  # a repeat press shows and opens nothing again
 
 

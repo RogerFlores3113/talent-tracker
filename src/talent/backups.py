@@ -105,13 +105,15 @@ def restore(store: Store, name: str) -> dict[str, Any]:
     if not info["ok"]:
         raise ValueError("That backup file can't be read, so nothing was changed. Pick another one.")
     saved = backup_before_import(store, reason="restore")
+    kept_names = store.private_tag_names()  # the recruiter's private labels stay private across a restore
     mine = _ai_options(store)  # how the recruiter wants the AI app held now, not as it was in the old backup
     try:
         store.restore_from(path)
     except sqlite3.Error as exc:
         raise ValueError(f"Couldn't restore that backup, so your data wasn't changed ({exc}).") from exc
     _put_ai_options(store, mine)
-    return {"restored": info, "saved": saved}
+    kept = store.keep_private_names(kept_names)  # union with any list in the backup, then re-route matching skills
+    return {"restored": info, "saved": saved, "private_kept": kept}
 
 
 # Settings rows that say how far the AI app is held: kept as they are now when an older backup comes back.
