@@ -1749,10 +1749,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
         cand.pop("private_tags", None)  # a skill on the recruiter's private list was saved there; it is never named
-        quiet_save = bool(cand.pop("_private_changed", None))
-        status = ("Saved" if created else "Updated: " + _labels(changed) if changed
-                  else "Updated" if quiet_save else "Already saved, nothing new")
+        cand.pop("_private_changed", None)
+        # Same rule as update_candidate: a save that includes skills never echoes the skill list or "skills changed",
+        # so the reply shape is the same whether or not a name was diverted to Private tags. (The get_candidate
+        # read-back can't be fully closed.)
+        wrote_skills = "tags" in data
+        if wrote_skills:
+            store.note_ai_private(cand["id"], data["tags"])
+            cand.pop("tags", None)
+            changed = [k for k in changed if k != "tags"]
+        status = ("Saved" if created else "Updated: " + _labels(changed) + (". Skills saved" if wrote_skills else "") if changed
+                  else "Skills saved" if wrote_skills else "Already saved, nothing new")
         view = candidate_view(cand["id"])
+        if wrote_skills:
+            view.pop("tags", None)
         out: dict[str, Any] = {**view, "created": created, "saved_status": status, "data_note": DATA_NOTE,
                                "candidate": _slim(cand)}
         notes = []
@@ -1895,10 +1905,19 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError("No change made. " + _budget_text(current["name"]))
         if over and not store.ai_overwrites_left(len(over)):
             raise ValueError(_cap_text())
+        # An AI write that includes skills never gets the resulting skill list or a "skills changed" back, for every such
+        # write, so the reply gives no sign that a name was diverted to Private tags. (Reading the person back with
+        # get_candidate still shows a missing skill; that read-back can't be fully closed.)
+        wrote_skills = "tags" in data
         cand = store.update_candidate(candidate_id, work_history=history, by="ai", **data)
+        if wrote_skills:
+            store.note_ai_private(candidate_id, data["tags"])
         changed = cand.pop("_changed", [])
         cand.pop("private_tags", None)  # a skill that is on the recruiter's private list was saved there; not named
         cand.pop("_private_changed", None)
+        if wrote_skills:
+            cand.pop("tags", None)
+            changed = [k for k in changed if k != "tags"]
         links_skipped: list[str] = []
         if link_list:  # links only ever get added; not a replaced value, so no edit budget is used
             more_links = store.add_links(candidate_id, link_list, by="ai")
@@ -1909,11 +1928,12 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         who = f"{quoted(cand['name'])} (id {candidate_id})"
         if not changed:
             sentence = (f"Nothing changed on {who} yet." if waiting
+                        else f"Skills saved on {who}." if wrote_skills
                         else f"Nothing to change on {who}; those values were already saved.")
         else:
             cleared = [k for k in changed if k in clearing]
             bits = [_labels([k]) + (" cleared" if k in cleared else "") for k in changed]
-            sentence = f"Updated {who}: {', '.join(bits)}."
+            sentence = f"Updated {who}: {', '.join(bits)}." + (" Skills saved." if wrote_skills else "")
         if waiting:
             sentence += " " + _wait_text(waiting, part=bool(changed))
         out: dict[str, Any] = {**_slim(cand), "changed": changed}

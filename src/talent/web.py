@@ -45,7 +45,7 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES, saved_theme
-from .store import COLORS, LOCAL_VIEW, clean_color, next_color
+from .store import COLORS, DIVERTED, LOCAL_VIEW, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -957,7 +957,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    colored_first=colored_first and bool(q.strip()),
                    qsort=qsort if q.strip() and qsort in QSORTS and not colored_first else "",
                    qdir=qdir if qdir in ("asc", "desc") else "",
-                   color_counts=color_counts_here(q, tag, location, source, member, total, color))
+                   color_counts=color_counts_here(q, tag, location, source, member, total, color),
+                   private_hint=private_tags.search_hint(store, q, total) if not tag and LOCAL_VIEW.get() else "")
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
         return page(request, "table.html", **ctx,
@@ -1283,6 +1284,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def filter_lines(args: dict[str, str]) -> list[tuple[str, str]]:
         """The Candidates filters in words for an About sheet: ('Location', 'Boston'). Highlights are listed apart."""
         out = [(label, " ".join(str(args[k]).split())) for k, label in FILTER_WORDS if args.get(k, "").strip()]
+        out = [(label, private_tags.redact_filter(store, label, v)) for label, v in out]  # never print a private tag name
         job = str(args.get("job") or "").strip()
         if job.isdigit():
             try:
@@ -1745,6 +1747,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def new_candidate(request: Request, job_id: int | None = None):
         return page(request, "candidate_form.html", c={}, history_text="", error=None, job_id=job_id)
 
+    def _moved_line(n: int) -> str:
+        return f"{n} {'label went' if n == 1 else 'labels went'} to Private tags."
+
     @app.post("/candidates", response_class=HTMLResponse)
     async def create_candidate_form(request: Request):
         form = await request.form()
@@ -1770,6 +1775,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 return page(request, "candidate_form.html", c=data, history_text=str(form.get("work_history", "")),
                             error=None, job_id=job_id if job_id.isdigit() else None, same_name=same_name, in_job=in_job,
                             same_exact=same_exact, fill_fields=FILL_FIELDS)
+        counter: list[int] = []
+        token = DIVERTED.set(counter)
         try:
             data.pop("other_emails", None)
             cand, created = store.upsert_candidate(work_history=history or None, other_emails=other_emails, **data)
@@ -1780,7 +1787,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:
             return page(request, "candidate_form.html", c={**data, "other_emails": "\n".join(other_emails)},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=form.get("job_id"))
-        dest = f"/candidates/{cand['id']}" + ("" if created else "?merged=1")
+        finally:
+            DIVERTED.reset(token)
+        params: dict[str, str] = {"merged": "1"} if not created else {}
+        if sum(counter):
+            params.update(notice=_moved_line(sum(counter)), notice_href="/settings#private-tags",
+                          notice_href_text="Private tags in Settings")
+        dest = f"/candidates/{cand['id']}" + ("?" + urlencode(params) if params else "")
         return RedirectResponse(dest, status_code=303)
 
     @app.get("/candidates/{candidate_id}", response_class=HTMLResponse)
@@ -1829,15 +1842,32 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error="Nothing was saved. " + " ".join(bad.values()),
                         field_errors=bad, job_id=None, status_code=400)
+        counter: list[int] = []
+        token = DIVERTED.set(counter)
+        make_private = str(form.get("make_private") or "").strip()  # the per-skill button: save the edits, then move it
         try:
             store.update_candidate(candidate_id, work_history=history, **data)
             if "other_emails" in form:  # the box is the whole list: a deleted line is a removed address
                 store.set_other_emails(candidate_id, _split_emails(form.get("other_emails")))
+            if make_private:
+                store.make_private_for(candidate_id, make_private)
         except ValueError as exc:
             return page(request, "candidate_form.html",
                         c={"id": candidate_id, **data, "other_emails": str(form.get("other_emails", ""))},
                         history_text=str(form.get("work_history", "")), error=str(exc), job_id=None)
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        finally:
+            DIVERTED.reset(token)
+        notes = []
+        if make_private:
+            notes.append(f"Saved. {make_private} is now one of their private tags.")
+        moved = sum(counter)
+        if moved:
+            notes.append(_moved_line(moved))
+        if not notes:
+            return RedirectResponse(f"/candidates/{candidate_id}", status_code=303)
+        return RedirectResponse(f"/candidates/{candidate_id}?" + urlencode(
+            {"notice": " ".join(notes), "notice_href": "/settings#private-tags", "notice_href_text": "Private tags in Settings"}),
+            status_code=303)
 
     @app.post("/candidates/{candidate_id}/color")
     async def set_candidate_color(request: Request, candidate_id: int):
@@ -2299,6 +2329,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                             replace_stages=replace_stages, allow_backward=allow_backward)
         prof = importers.sync_profile(store, header) or {}
         pairs_before = {tuple(sorted((x["a"].lower(), x["b"].lower()))) for x in store.skill_lookalikes(1000)}
+        counter: list[int] = []
+        div_token = DIVERTED.set(counter)
         try:
             result = importers.import_rows(store, header, rows, mapping, source=source, add_stages=add_stages,
                                            file_name=filename or None, move_stages=move_stages,
@@ -2309,6 +2341,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         except ValueError as exc:  # the backup before importing failed, so nothing changed
             return page(request, "import.html", step="upload", error=str(exc))
         finally:
+            DIVERTED.reset(div_token)
             path.unlink(missing_ok=True)  # our own private copy of the upload
         importers.save_sync_profile(store, header, mapping, result, file_name=filename, source=source,
                                     add_stages=add_stages, move_stages=move_stages, client=client,
@@ -2320,7 +2353,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         ask = set(importers.openings_to_ask(store))
         new_jobs = [{**store.get_job(i), "hired": actions.job_numbers(store, i)["hired_all"]}
                     for i in result.get("new_job_ids") or [] if i in ask]
-        return page(request, "import.html", step="done", result=result, token=token,
+        return page(request, "import.html", step="done", result=result, token=token, private_moved=sum(counter),
                     headline=importers.result_headline(result, len(rows)),
                     line_note=importers.line_note(file_text, len(rows)),
                     panels=importers.result_panels(result), new_jobs=new_jobs[:30],
@@ -2401,7 +2434,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 "That import can't be undone here any more. Its backup may still be in the list below.")})
                 + "#backups", status_code=303)
         try:
-            _, saved = restore_backup(name)
+            _, saved, _kept = restore_backup(name)
         except ValueError as exc:
             return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
         return RedirectResponse("/candidates?" + urlencode({"notice": (
@@ -4404,7 +4437,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]
 
-    def restore_backup(name: str) -> tuple[dict[str, Any], Path]:
+    def restore_backup(name: str) -> tuple[dict[str, Any], Path, int]:
         """Restore a backup (a fresh one is taken first), then let Typesense catch up if it's in use."""
         r = backups.restore(store, name)
         if search.index is not None:
@@ -4412,14 +4445,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 search.index.rebuild(store)
             except Exception as exc:  # built-in search already has the restored data
                 log.warning("Typesense rebuild after a restore failed: %s", exc)
-        return r["restored"], r["saved"]
+        return r["restored"], r["saved"], r.get("private_kept", 0)
 
     @app.post("/settings/backups/restore")
     async def restore_from_settings(request: Request):
         """App window only (the AI has no restore tool). Saves the data as it is now, then swaps the backup in."""
         form = await request.form()
         try:
-            info, saved = restore_backup(str(form.get("name") or ""))
+            info, saved, kept = restore_backup(str(form.get("name") or ""))
         except ValueError as exc:
             return RedirectResponse("/settings?" + urlencode({"flash_error": str(exc)}) + "#backups", status_code=303)
         people, jobs = info["people"], info["jobs"]
@@ -4427,6 +4460,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                f"{'person' if people == 1 else 'people'} and {jobs} job{'' if jobs == 1 else 's'}. Your data from "
                f"just before was saved first as {saved.name}, at the top of the list below, so you can go back to it. "
                "Your Cautious mode and AI app settings stayed as they are now.")
+        if kept:
+            msg += f" {kept} {'label' if kept == 1 else 'labels'} kept in Private tags."
         return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#backups", status_code=303)
 
     @app.post("/settings/backups/delete")

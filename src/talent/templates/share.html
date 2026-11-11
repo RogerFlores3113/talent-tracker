@@ -30,7 +30,7 @@
   {% if hl_words %}{% if no_match %}<p class="fine" id="no-match">Nobody here has the highlighted picks, so that column is left out.</p>{% else %}<p class="fine">Highlighted picks go in as a Matched picks column: {{ hl_words }}.</p>{% endif %}{% endif %}
   <fieldset>
     <legend>What goes in the file</legend>
-    <p class="fine">Always in: name, title, company, location, years of experience, skills (never your private tags), links, summary and work history. Columns nobody has anything in are left out. Never in: colors, review marks or links to this app.</p>
+    <p class="fine">Always in: name, title, company, location, years of experience, skills (never your private tags; <a href="/settings#private-tags">see Private tags in Settings</a>), links, summary and work history. Columns nobody has anything in are left out. Never in: colors, review marks or links to this app.</p>
     <p class="fine"><strong>About and work history go in as written, except that email addresses, phone numbers and profile links in them are taken out unless you include email and phone. Read them in the preview before you send the file.</strong></p>
     <label class="check"><input type="checkbox" name="include_contact" value="1" {{ 'checked' if contact }}> <span>Include email and phone</span></label>
   </fieldset>

@@ -1571,6 +1571,10 @@ PRIVATE_NAMES_KEY = "private_tag_names"
 # True while the app window itself is answering (set in web.py): its tag filter then also matches private tags, which
 # are the recruiter's working labels. The AI app's server never sets it, so it can't search them.
 LOCAL_VIEW: ContextVar[bool] = ContextVar("talent_local_view", default=False)
+# A web save or import sets this to a list; each write then adds how many labels newly went to Private tags by the
+# remembered list, so the page can say "N labels went to Private tags".
+DIVERTED: ContextVar[list[int] | None] = ContextVar("talent_diverted", default=None)
+AI_PRIVATE_LINE = "Private tags changed by the AI app"  # the timeline line for an AI app write: it names no tag
 
 LINKEDIN_RULE_KEY = "linkedin_key_rule"
 # Saved email equals ?, ignoring case. The blank checks let SQLite use candidates_email_uq (a partial index).
@@ -2538,6 +2542,31 @@ class Store:
             [(candidate_id, t) for t in tags],
         )
 
+    def _private_routed(self, candidate_id: int, old: dict[str, Any], new: dict[str, Any], by: str) -> None:
+        """After a write that changed a person's private tags: count the labels the remembered list newly moved there
+        (for the web's "N labels went to Private tags"). Call inside the write transaction."""
+        if not new.get("private_tags"):
+            return
+        before = {t.casefold() for t in stored_tags(old.get("private_tags"))}
+        names = {n.casefold() for n in self.private_tag_names()}
+        gained = [t for t in stored_tags(new["private_tags"]) if t.casefold() in names and t.casefold() not in before]
+        counter = DIVERTED.get()
+        if counter is not None:
+            counter.append(len(gained))
+
+    def note_ai_private(self, candidate_id: int, tags: Any) -> bool:
+        """An AI app write that included a skill whose name is private leaves one timeline line, "Private tags changed
+        by the AI app", with no tag name, so the recruiter can see it happened. Returns whether it did."""
+        _, moved = self._split_private(split_tags(tags))
+        if not moved:
+            return False
+        ts = now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO timeline(candidate_id, kind, body, at, created_at, source, data) VALUES (?, 'note', ?, ?, ?, ?, NULL)",
+                (candidate_id, AI_PRIVATE_LINE, ts, ts, CHANGE_SOURCES["ai"]))
+        return True
+
     def _sync_private_tags(self, candidate_id: int, text: str | None) -> None:
         """The same as _sync_tags for the private tags (the filter table; they are never in the search index)."""
         tags = stored_tags(text)
@@ -2578,6 +2607,7 @@ class Store:
                 self.add_other_emails(new_id, other_emails, strict=False)
             if by == "ai":
                 self._log_ai("candidate", candidate_id=new_id)
+            self._private_routed(new_id, {}, fields, by)
         return self.get_candidate(new_id)
 
     def find_duplicate(self, email: str | None = None, linkedin_url: str | None = None) -> dict[str, Any] | None:
@@ -2993,6 +3023,7 @@ class Store:
                 raise clash
             if new:
                 self._apply(candidate_id, new)
+                self._private_routed(candidate_id, old, new, by)
                 # Private tags are the recruiter's own: a change to them is saved but never written to the timeline
                 # (whose entries an AI app can read), so Undo does not cover it.
                 shown_new = {k: v for k, v in new.items() if k != "private_tags"}
@@ -4371,6 +4402,23 @@ class Store:
             self._scrub_history(name)
         self._saved_counts.clear()
         return {"tag": name, "changed": changed}
+
+    def keep_private_names(self, names: Iterable[str]) -> int:
+        """After a restore: add `names` to the remembered list (union, ignoring case) and move every skill that
+        matches the list into Private tags for everyone. Returns how many (person, label) pairs moved."""
+        with self._lock, self._conn:
+            have = self.private_tag_names()
+            seen = {n.casefold() for n in have}
+            extra = [n for n in split_tags(list(names)) if n.casefold() not in seen]
+            allnames = [*have, *extra]
+            if extra:
+                self._save_private_names(allnames)
+            moved = 0
+            for n in allnames:
+                moved += self._move_tag(n, to_private=True)
+                self._scrub_history(n)
+        self._saved_counts.clear()
+        return moved
 
     def make_tag_skill(self, tag: str) -> dict[str, Any]:
         """The undo of make_tag_private: move the tag back into everyone's Skills and drop it from the list."""

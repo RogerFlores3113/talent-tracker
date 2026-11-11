@@ -46,3 +46,34 @@ def settings_view(store: Store, q: str = "", page: int = 1) -> dict[str, Any]:
         "others": rest[(page - 1) * PAGE_SIZE: page * PAGE_SIZE], "others_total": len(rest), "q": q,
         "page": page, "pages": pages, "mine": store.list_private_tags(),
     }
+
+
+PRIVATE_WORDS = "a private tag"
+
+
+def redact_filter(store: Store, label: str, value: str) -> str:
+    """The text of a filter line for a file that may be sent on: a private tag name is never printed, so the
+    filter's value becomes "a private tag" when it is one (the Skill filter, or any piece of the Skills filter)."""
+    if label not in ("Skill", "Skills"):
+        return value
+    names = {n.casefold() for n in store.private_tag_names()}
+    if not names:
+        return value
+    if label == "Skill":
+        group = {n.casefold() for n in store.skill_group_names(value)} | {value.casefold()}
+        return PRIVATE_WORDS if group & names else value
+    parts = re.split(r"( and | or |,)", value)
+    return "".join(PRIVATE_WORDS if p.strip().casefold() in names else p for p in parts)
+
+
+def search_hint(store: Store, q: str, total: int) -> str:
+    """When a plain search finds nobody and its words match the name of a private tag in use, that tag's name (the
+    page then points at the tag filter, which is where private tags are found). Local window only."""
+    words = " ".join((q or "").split()).casefold()
+    if total or not words:
+        return ""
+    for t in store.list_private_tags():
+        name = t["tag"].casefold()
+        if t["count"] and (words in name or name in words):
+            return t["tag"]
+    return ""

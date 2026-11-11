@@ -4,7 +4,7 @@
 {% block body %}
 <h1>Settings</h1>
 <nav class="fine" aria-label="Jump to">Jump to:
-  <a href="#look">Look</a> · <a href="#today">Today</a> · <a href="#hiring-for">Who you hire for</a> · <a href="#site-guards">Site guards</a> · <a href="#time-zone">Your time zone</a> · <a href="#skill-names">Skill names</a> · <a href="#backups">Backups</a> · <a href="#cautious">Cautious mode</a> · <a href="#ai-apps">AI apps</a> · <a href="#tour">Tour</a></nav>
+  <a href="#look">Look</a> · <a href="#today">Today</a> · <a href="#hiring-for">Who you hire for</a> · <a href="#site-guards">Site guards</a> · <a href="#time-zone">Your time zone</a> · <a href="#skill-names">Skill names</a> · <a href="#private-tags">Private tags</a> · <a href="#backups">Backups</a> · <a href="#cautious">Cautious mode</a> · <a href="#ai-apps">AI apps</a> · <a href="#tour">Tour</a></nav>
 {% if saved %}<p class="flash" role="status">Saved.</p>{% endif %}
 {% if errors %}<p class="flash warn" role="alert">Nothing was saved. Fix the highlighted number{{ 's' if errors | length > 1 }} and save again.</p>{% endif %}
 <form method="post" action="/settings" class="stack">
@@ -64,7 +64,8 @@
   <h2>Your data</h2>
   <p>Everything is in one file on this computer:</p>
   <pre class="code">{{ db_file }}</pre>
-  <p class="actions-inline"><a class="btn" href="/backup">Download a backup</a> <a class="btn" href="/export.csv">Export candidates as CSV</a> <a class="btn" href="/export.xlsx">Export all {{ "{:,}".format(candidate_count) }} {{ "person" if candidate_count == 1 else "people" }} as xlsx</a> <a class="btn" href="/import">Import a CSV</a> <a class="btn" href="/candidates/duplicates">Find duplicates</a></p>
+  <p class="actions-inline"><a class="btn" href="/backup">Download a backup</a> <a class="btn" href="/export.csv" aria-describedby="full-csv-note">Full CSV for your own records (includes private tags and notes)</a> <a class="btn" href="/export.xlsx">Export all {{ "{:,}".format(candidate_count) }} {{ "person" if candidate_count == 1 else "people" }} as xlsx</a> <a class="btn" href="/import">Import a CSV</a> <a class="btn" href="/candidates/duplicates">Find duplicates</a></p>
+  <p class="fine" id="full-csv-note">The full CSV is your own copy of everything, so it includes your private tags and your notes. Keep it to yourself and do not send it to anyone. To share people, use Share on the Candidates page.</p>
   <p class="fine">To move to a new computer, copy the backup file into the same folder there and rename it to {{ db_file.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}.</p>
 </section>
 
