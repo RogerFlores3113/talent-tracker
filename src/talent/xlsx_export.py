@@ -65,6 +65,13 @@ def half_years(y: float | None) -> float | None:
     return None if y is None else round(y * 2) / 2
 
 
+def public_picks(store: Store, hl: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Highlight picks for a file that may be sent on: a pick named like a private tag is dropped, since it can never
+    match a skill and its name must not be printed."""
+    names = {n.casefold() for n in store.private_tag_names()}
+    return [(n, c) for n, c in hl if n.casefold() not in names] if names else list(hl)
+
+
 def hl_words(hl: Iterable[tuple[str, str]]) -> str:
     """[('python', 'red'), ('title:data engineer', 'yellow')] -> 'python (red), title: Data Engineer (yellow)'."""
     return ", ".join(f"{picks.label(n)} ({c})" for n, c in hl)
@@ -119,7 +126,7 @@ def table_workbook(store: Store, rows: list[dict[str, Any]], total: int, *, filt
     the columns nothing is in for anyone in the file (Name stays), like the file for a hiring manager."""
     years = store.experience_years()
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     records = []
     for c in rows:
         records.append({
@@ -162,7 +169,7 @@ def csv_in_order(store: Store, ids: list[int], hl: Iterable[tuple[str, str]] = (
     Name, with the same words as the xlsx ("python, sql (2 of 2)"); the importer skips a column it doesn't know."""
     wanted = list(dict.fromkeys(ids))
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     raw = importers.export_csv(store, wanted)
     parsed = list(csv.reader(io.StringIO(raw)))
     head, body = parsed[0], parsed[1:]
@@ -387,7 +394,7 @@ def share_table(store: Store, ids: list[int], *, include_contact: bool = False, 
     `leave_out` names people who stay out of the file; `skip_notes` names people whose note stays out of it."""
     job = store.get_job(job_id) if job_id else None
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     out_ids, no_notes = set(leave_out), set(skip_notes)
     people = []
     for cid in dict.fromkeys(i for i in ids if i not in out_ids):
@@ -559,7 +566,7 @@ def note_preview(store: Store, ids: Iterable[int], limit: int = 80) -> dict[int,
 def nobody_matches(store: Store, ids: Iterable[int], hl: Iterable[tuple[str, str]]) -> bool:
     """True when picks are highlighted but nobody in `ids` matches any of them (the Matched picks column would be empty)."""
     aliases = store.skill_alias_map()
-    hl = picks.canon_pairs(hl, aliases)
+    hl = picks.canon_pairs(public_picks(store, hl), aliases)
     if not hl:
         return False
     for cid in dict.fromkeys(ids):

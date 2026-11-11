@@ -183,3 +183,21 @@ def test_make_private_on_the_edit_form_keeps_unsaved_edits(ready):
     assert got["current_title"] == "Principal Engineer"  # the unsaved edit was kept
     assert "Chase Friday" not in got["tags"] and "Chase Friday" in got["private_tags"]
     assert "private tag" in flash_of(r)
+
+
+def test_private_highlight_pick_is_never_printed_in_a_file(tmp_path):
+    """A highlight pick named like a private tag is dropped from files that may be sent on."""
+    import io
+    import zipfile
+    from talent import xlsx_export
+    from talent.store import Store
+    s = Store(tmp_path / "p.db")
+    c = s.add_candidate(name="Pat Lee", tags=["python", "sourced-nov"])
+    s.make_tag_private("sourced-nov")
+    hl = [("python", "red"), ("sourced-nov", "yellow")]
+    for data in (xlsx_export.share_workbook(s, [c["id"]], hl=hl)[0],
+                 xlsx_export.table_workbook(s, [s.get_candidate(c["id"])], 1, hl=hl)):
+        z = zipfile.ZipFile(io.BytesIO(data))
+        text = "".join(z.read(n).decode("utf-8", "ignore") for n in z.namelist() if n.endswith(".xml"))
+        assert "sourced-nov" not in text and "python (red)" in text
+    assert "sourced-nov" not in xlsx_export.csv_in_order(s, [c["id"]], hl=hl).decode()
