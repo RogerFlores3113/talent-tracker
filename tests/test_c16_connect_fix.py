@@ -76,13 +76,13 @@ def test_each_press_clears_the_other_result_areas(store, monkeypatch):
     _ok_check(monkeypatch)
     c = local_client(store)
     connect = c.post("/connect/claude").text
-    assert 'id="skills-add-result" aria-live="polite" hx-swap-oob="true"></div>' in connect
-    assert 'id="claude-result" aria-live="polite" hx-swap-oob="true"' not in connect
+    assert 'id="skills-add-result" hx-swap-oob="true"></div>' in connect
+    assert 'id="claude-result" hx-swap-oob="true"' not in connect
     add = c.post("/connect/skills/add").text
-    assert 'id="claude-result" aria-live="polite" hx-swap-oob="true"></div>' in add
-    assert 'id="skills-add-result" aria-live="polite" hx-swap-oob="true"' not in add
+    assert 'id="claude-result" hx-swap-oob="true"></div>' in add
+    assert 'id="skills-add-result" hx-swap-oob="true"' not in add
     test = c.post("/connect/claude/test").text
-    assert 'id="skills-add-result" aria-live="polite" hx-swap-oob="true"></div>' in test
+    assert 'id="skills-add-result" hx-swap-oob="true"></div>' in test
 
 
 # ---------------------------------------------------------------- D: the command line says each thing once
@@ -126,7 +126,7 @@ def test_add_skills_names_the_codex_folder_and_only_mentions_a_window_that_opene
     monkeypatch.setattr(sys, "platform", "linux")
     t = local_client(store).post("/connect/skills/add").text
     assert "added 6 skills to your Codex skills folder (~/.agents/skills)" in t and "Folder:" not in t
-    assert "window that just opened" not in t and "showed it in your file manager" not in t
+    assert "window that just opened" not in t and "opened that folder" not in t
     (env["dl"] / skills.PLUGIN_FILE).unlink()
     r = skills.add_everywhere(reveal_fn=lambda p: True, platform="linux")
     assert r["shown"] and not r["selected"]

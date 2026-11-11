@@ -1339,9 +1339,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    leave_rej: set[int] | None = None, for_me: bool = False) -> HTMLResponse:
         rows = people_rows(ids)
         try:
-            rej_in = xlsx_export.rejected_in(store, [r["id"] for r in rows])
+            rej_exits = xlsx_export.exits_in(store, [r["id"] for r in rows])
+            rej_in = {k: [t for t, _ in v] for k, v in rej_exits.items()}
+            rej_word = {k: xlsx_export.exit_word(v) for k, v in rej_exits.items()}
         except Exception:
-            rej_in = {}
+            rej_in, rej_word = {}, {}
         if leave_rej is None:  # first visit: people rejected in a job are left out unless the recruiter unticks them
             leave_rej = set(rej_in)
         hl_pairs = hl_pairs_of(hl)
@@ -1375,7 +1377,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     file_name=xlsx_export.share_filename(chosen, None), job_title=(chosen or {}).get("title") or "",
                     pv=pv, notes_seen=notes_seen, no_match=no_match, about_seen=about_seen,
                     leave_out=leave_out or set(), leave_note=leave_note or set(),
-                    rej_in=rej_in, leave_rej=leave_rej, for_me=for_me,
+                    rej_in=rej_in, rej_word=rej_word, leave_rej=leave_rej, for_me=for_me,
                     kept_ids={p["id"] for p in pv.get("people") or []})
 
     @app.get("/candidates/share", response_class=HTMLResponse)
@@ -1935,6 +1937,13 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 at_text, tz = str(form.get("at") or "").strip(), str(form.get("tz") or "").strip()
                 iv = interviews.form_fields(form) if kind == "interview" else {}
                 if kind == "interview":
+                    if job == "":  # no silent "No job": an interview with no job shows in no job's client update
+                        mine = store.candidate_pipelines(candidate_id)
+                        if len(mine) == 1:
+                            job_id = mine[0]["job_id"]
+                        elif len(mine) > 1:
+                            raise ValueError("Pick which job this interview is for. Choose No job only if it should "
+                                             "not show in any job's updates.")
                     all_day = str(form.get("all_day") or "") == "1"
                     if not at_text:  # a blank time would log the interview "now"
                         raise ValueError("Pick the day of the interview." if all_day else
@@ -2877,17 +2886,22 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         return back(request, "/changes", notice=notice)
 
     @app.get("/jobs/{job_id}/submit/{candidate_id}", response_class=HTMLResponse)
-    def submit_page(request: Request, job_id: int, candidate_id: int):
-        """Submit to client: what happens, any heads up, and the write-up draft to send from their own mail."""
+    def submit_page(request: Request, job_id: int, candidate_id: int, notes: str = "", contact: str = ""):
+        """Submit to client: what happens, any heads up, and the write-up draft to send from their own mail. The
+        write-up has no private notes and no email or phone unless the recruiter ticks them (notes=1, contact=1)."""
         job = job_or_404(job_id)
         cand = cand_or_404(candidate_id)
-        app_row = next((p for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id), None)
-        if app_row is None:
-            raise HTTPException(404, "That person isn't on this job.")
+        gone = chase.out_of_job(store, candidate_id, job_id)
+        if gone:  # rejected, withdrawn or not in this job: no write-up, nothing to send
+            return page(request, "submit.html", job=job, cand=cand, gone=gone)
+        app_row = next(p for p in store.candidate_pipelines(candidate_id) if p["job_id"] == job_id)
         target = chase.submit_stage(store, job_id)
         done = bool(target) and app_row["stage"].lower() == target["name"].lower()
-        return page(request, "submit.html", job=job, cand=cand, stage=app_row["stage"], target=target, done=done,
-                    since=app_row["stage_changed_at"], draft=chase.writeup(store, candidate_id, job_id),
+        with_notes, with_contact = notes == "1", contact == "1"
+        return page(request, "submit.html", job=job, cand=cand, gone=None, stage=app_row["stage"], target=target,
+                    done=done, since=app_row["stage_changed_at"], with_notes=with_notes, with_contact=with_contact,
+                    draft=chase.writeup(store, candidate_id, job_id, include_notes=with_notes,
+                                        include_contact=with_contact),
                     warning=None if done else chase.earlier_to_client(store, candidate_id, job_id),
                     elsewhere=chase.other_clients(store, candidate_id, job_id))
 
@@ -4530,9 +4544,9 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             shown = skills.reveal(path)
         except Exception as exc:
             integrations.log_failure(exc)
-            return HTMLResponse(f'<span class="error">{html_escape(integrations.friendly_error(exc))}</span>')
-        return HTMLResponse('<span class="ok">Shown in your file manager.</span>' if shown else
-                            f'<span class="fine">The file is in {html_escape(str(path.parent))}.</span>')
+            return HTMLResponse(f'<span class="error" role="alert">{html_escape(integrations.friendly_error(exc))}</span>')
+        return HTMLResponse('<span class="ok" role="status">Shown in your file manager.</span>' if shown else
+                            f'<span class="fine" role="status">The file is in {html_escape(str(path.parent))}.</span>')
 
     @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
     def skills_plugin_save(request: Request):

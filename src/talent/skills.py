@@ -519,7 +519,7 @@ def add_everywhere(*, reveal_fn=None, open_fn=None, platform: str | None = None)
         opened = bool(open_fn()) if can_open else False
     return {"apps": apps, "up_to_date": current, "skipped": done["skipped"], "edited": done["edited"],
             "plugin_path": str(path), "plugin_file": PLUGIN_FILE, "shown": shown, "can_open_claude": can_open,
-            "opened": opened, "plugin_dir": str(path.parent), "plugin_repeat": repeat,
+            "opened": opened, "last_step": PLUGIN_LAST_STEP, "plugin_dir": str(path.parent), "plugin_repeat": repeat,
             # Mac and Windows select the file in the window; Linux can only open the folder
             "selected": shown and platform in ("darwin", "win32")}
 
@@ -563,10 +563,14 @@ Easier: use talent-search.plugin instead. One upload under Customize > Plugins >
 """
 
 PLUGIN_STEPS = (
-    "Open Claude.",
-    "Go to Customize, then Plugins, then Add, then Upload plugin.",
+    "In Claude, open Customize, then Plugins.",
+    "Press Add, then Upload plugin.",
     f"Pick {PLUGIN_FILE}.",
 )
+
+# What is left in Claude after Add skills. Claude has no link, folder or double-click that installs a plugin for
+# another app, so this one upload is always the person's.
+PLUGIN_LAST_STEP = f"Customize > Plugins > Add > Upload plugin, then pick {PLUGIN_FILE}."
 
 DESKTOP_STEPS = (
     "Claude Desktop reads skills from an upload, not from a folder on this computer. Download the zip, unzip it "

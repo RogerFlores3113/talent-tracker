@@ -6,6 +6,6 @@
 {% else %}
 <p class="ok" role="status" tabindex="-1" autofocus>Saved <code>{{ plugin_file }}</code> in <code>{{ path }}</code>.{% if shown %} It is shown in your file manager.{% endif %}</p>
 <p class="fine">Now follow the steps above: Customize, Plugins, Add, Upload plugin, and pick this file.</p>
-{% if can_open_claude %}<p><button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result">Open Claude</button> <span id="claude-open-result" aria-live="polite"></span></p>{% endif %}
+{% if can_open_claude %}<p><button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result">Open Claude</button> <span id="claude-open-result"></span></p>{% endif %}
 <p class="fine">Then start a new chat so Claude picks up the skills.</p>
 {% endif %}

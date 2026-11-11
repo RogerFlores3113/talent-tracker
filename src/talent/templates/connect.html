@@ -33,7 +33,7 @@
     {% endif %}
     {% if claude.config_error %}<p class="flash warn">{{ claude.config_error }}</p>{% endif %}
     <span class="checking" id="claude-busy">Working...</span>
-    <div id="claude-result" aria-live="polite"></div>
+    <div id="claude-result"></div>
   </section>
 {% endmacro %}
 {% macro codex_panel() %}
@@ -50,7 +50,7 @@
     {% endif %}
     <p class="fine">Skills: Step 2 above adds them to Codex too.</p>
     <span class="checking" id="codex-busy">Checking...</span>
-    <div id="codex-result" aria-live="polite"></div>
+    <div id="codex-result"></div>
   </section>
 {% endmacro %}
 {% macro lmstudio_panel() %}
@@ -65,12 +65,12 @@
     {% if lmstudio_on %}<button class="btn" hx-post="/connect/lmstudio/test" hx-target="#lmstudio-result" hx-indicator="#lmstudio-busy">Test connection</button>{% endif %}
   {% endif %}
   <span class="checking" id="lmstudio-busy">Checking...</span>
-  <div id="lmstudio-result" aria-live="polite"></div>
+  <div id="lmstudio-result"></div>
 </section>
 {% endmacro %}
 
 <h1>Connect your AI app</h1>
-<p class="lead">Two steps, one click each. Then ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
+<p class="lead">Two steps. Connect is one click. Add skills is one click for Claude Code and Codex, and one click plus one upload in the Claude app. Then ask your AI app to find, save and update candidates here, in plain English. It can't delete anything.</p>
 {% include "_site_note.html" %}
 
 <h2 class="step" id="step-connect">Step 1. Connect your AI app</h2>
@@ -83,22 +83,29 @@
   <p><strong>A skill is a short page of written instructions that your AI app reads so it does a job well here.</strong> {{ skill_names|length }} skills: sourcing, comparing people, scheduling interviews, writing outreach, status updates and decisions. They add nothing that runs.</p>
   <p><button class="btn primary" id="install-skills-btn" hx-post="/connect/skills/add" hx-target="#skills-add-result" hx-indicator="#skills-busy">Add skills</button>
     <span class="checking" id="skills-busy">Working...</span></p>
-  <p class="fine">Adds them to Claude Code and Codex if they are here, and gets the file for the Claude app ready.</p>
-  <div id="skills-add-result" aria-live="polite"></div>
+  <p class="fine" id="skills-promise">Claude Code and Codex: one click, nothing else. The Claude app: one click here, then one upload in Claude. The click adds the skills to Claude Code and Codex if they are here, saves <code>{{ plugin_file }}</code> to {{ plugin_where }}, shows it in your file manager{% if can_open_claude %} and opens Claude{% endif %}. Claude has no way for another app to add a plugin for you, so the upload is yours.</p>
+  <div id="skills-add-result"></div>
+
+  <h3 id="claude-plugin">Claude app: the last step, in Claude</h3>
+  <ol id="plugin-steps">{% for st in plugin_steps %}<li>{{ st }}</li>{% endfor %}</ol>
+  <p class="fine">The file is in {{ plugin_where }}.{% if plugin_saved %} <span class="ok">It is already saved there.</span>{% else %} Press Add skills first to save it.{% endif %} The skills only: the Claude app still needs the connection from Step 1.</p>
+  <p id="plugin-check" class="fine"><strong>Check it worked:</strong> start a new chat in Claude and ask “What Talent Search skills do you have?” It should name them.</p>
+
+  <h3 id="claude-marketplace">Or add the marketplace (gets updates)</h3>
+  <p>In Claude, open Customize &gt; Plugins, press Add, then Add marketplace, and paste this:</p>
+  <pre class="code wrap" id="marketplace-text">{{ marketplace_repo }}</pre>
+  <p><button class="btn" type="button" data-copy-from="marketplace-text" aria-label="Copy the marketplace name">Copy</button>
+    Then install talent-search from it. When Talent Search has a new version, Claude can update it for you.</p>
   <p id="where-cards-show" class="fine"><strong>Where the cards show:</strong> Cards and tables show in the Claude desktop app and the ChatGPT desktop app. Claude asks once to display them: choose Always allow. Claude Code, the Codex command line and claude.ai in a browser show the same answers as text. After you update Talent Search, quit and reopen the app so it picks up the new views.</p>
 
   <details class="fine" id="skills-other-ways">
     <summary>Other ways to add skills</summary>
 
-    <h3 id="claude-plugin">Claude app: upload the plugin file yourself</h3>
-    <p>The plugin adds the {{ skill_names|length }} skills to the Claude app (desktop or claude.ai). It adds the skills only: the Claude app still needs the connection from Step 1.</p>
-    {% if plugin_saved %}<p class="ok">Already saved: {{ plugin_file }} is in {{ plugin_where }}. Upload it in Claude if you haven't yet.</p>{% endif %}
+    <h3 id="plugin-save-again">Save or download the plugin file again</h3>
     <p><button class="btn" hx-post="/connect/skills/plugin/save" hx-target="#plugin-result">Save the Claude plugin file</button>
-      {% if can_open_claude %}<button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result-top">Open Claude</button> <span id="claude-open-result-top" aria-live="polite"></span>{% endif %}
+      {% if can_open_claude %}<button class="btn" hx-post="/connect/skills/claude-app/open" hx-target="#claude-open-result-top">Open Claude</button> <span id="claude-open-result-top"></span>{% endif %}
       <a href="/connect/skills.plugin" download>Or download {{ plugin_file }} here</a></p>
-    <div id="plugin-result" aria-live="polite"></div>
-    <ol id="plugin-steps">{% for st in plugin_steps %}<li>{{ st }}</li>{% endfor %}</ol>
-    <p id="plugin-check"><strong>Check it worked:</strong> start a new chat in Claude and ask “What Talent Search skills do you have?” It should name them.</p>
+    <div id="plugin-result"></div>
 
     <h3 id="plugin-claude-code">Claude Code: get the plugin with updates</h3>
     <p>Only if you already work in Claude Code. Type these two commands there, one after the other:</p>
@@ -112,7 +119,7 @@
     <p>What each skill does:</p>
     <ul class="plain" id="skill-list">{% for k in skill_info %}<li><strong>{{ k.title }}</strong>: {{ k.line }} <code>{{ k.folder }}</code></li>{% endfor %}</ul>
     {% include "_skills_found.html" %}
-    <div id="skills-all-result" aria-live="polite"></div>
+    <div id="skills-all-result"></div>
     <div class="connect-grid">
     {% for s in skill_status %}
     <div>
@@ -120,7 +127,7 @@
       <p class="fine">{% if s.count %}{% if s.current and not s.skipped %}<span class="ok">Installed ({{ s.count }} skills, version {{ s.versions|join(', ') }}).</span>{% else %}Installed: {{ s.count }} of {{ s.total }} skills{% if s.versions %}, version {{ s.versions|join(', ') }}{% endif %}.{% if s.skipped %} {{ s.skipped }} left alone because you have your own.{% else %} Add again to update.{% endif %}{% endif %}{% else %}{% if s.skipped %}{{ s.skipped }} left alone because you have your own. {% endif %}Not added yet.{% endif %}{% if s.edited %} {{ s.edited }} file{{ '' if s.edited == 1 else 's' }} edited by you will be kept.{% endif %} Folder: <code>{{ s.base }}</code></p>
       <button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-install" hx-target="#skills-{{ s.target }}-result">{{ 'Update' if s.count else 'Add' }} Talent Search skills for {{ s.label }}</button>
       {% if s.count %}<button class="btn" hx-post="/connect/skills/{{ s.target }}/preview-remove" hx-target="#skills-{{ s.target }}-result">Remove Talent Search skills</button>{% endif %}
-      <div id="skills-{{ s.target }}-result" aria-live="polite"></div>
+      <div id="skills-{{ s.target }}-result"></div>
     </div>
     {% endfor %}
     </div>
@@ -195,7 +202,7 @@
   <h3>Claude Desktop report</h3>
   <p class="fine">Settings file: <code>{{ claude.config_path }}</code></p>
   <p><button class="btn" hx-post="/connect/claude/report" hx-target="#claude-report" hx-indicator="#claude-busy">Show full report</button></p>
-  <div id="claude-report" aria-live="polite"></div>
+  <div id="claude-report"></div>
   {% if claude.entry %}
   <details class="fine">
     <summary>What was written</summary>

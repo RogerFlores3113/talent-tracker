@@ -125,7 +125,7 @@ def test_writeup_leaves_out_shortlist_notes_and_a_missing_title(store):
     other = store.add_candidate(name="Aisha Khan", current_title="Controls Engineer")["id"]
     store.add_to_pipeline(other, job["id"], "Screened", "Kept from the Shortlist. Why they fit: 6 years of ROS")
     store.log(other, "note", "Great call. Expecting $180k base.", job_id=job["id"])
-    body = chase.writeup(store, other, job["id"])["body"]
+    body = chase.writeup(store, other, job["id"], include_notes=True)["body"]  # notes are opt-in (cycle 18)
     assert "- 6 years of ROS" in body and "- Great call" in body and "Kept from" not in body
     assert "Now: Controls Engineer" in body and "Comp: Expecting $180k base" in body
     assert chase.screen_note("Sales Navigator link (it only opens inside Sales Navigator, so x): y") is None

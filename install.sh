@@ -212,3 +212,6 @@ elif [ "$OPEN_APP" = "1" ]; then
 else
   say "Next: open Talent Search, then press \"Connect Claude\" and \"Add skills\"."
 fi
+if [ "$OS" = "Darwin" ]; then
+  say "Connect Claude quits and reopens Claude Desktop (never by force), so save anything you are typing there first."
+fi

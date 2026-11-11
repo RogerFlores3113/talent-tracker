@@ -3260,7 +3260,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def export_candidates_xlsx(candidate_ids: list[int] | None = None, for_hiring_manager: bool = True,
                                include_contact: bool = False,
                                include_notes: bool = False, job_id: int | None = None,
-                               kind: str = "shortlist") -> CallToolResult:
+                               kind: str = "shortlist", include_rejected: bool = False) -> CallToolResult:
         """Make an Excel file (.xlsx) of these people in the recruiter's Downloads folder, for them to forward to a
         hiring manager. candidate_ids are the people (ids from search_candidates); job_id (optional) adds each
         person's stage in that job. By default the file has no email, phone or notes: the recruiter's private
@@ -3270,7 +3270,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         recruiter the path (or the link). for_hiring_manager=False means a copy for the recruiter's own use, which they
         make on the Share page too. kind: "shortlist" (the default, file named shortlist-...) or "list" (a plain
         list of people, named candidates-...). Up to 200 people. With job_id and no candidate_ids, the file has
-        everyone still in that job's pipeline (not the people who are out)."""
+        everyone still in that job's pipeline (not the people who are out). Like the Share page, the file leaves
+        out anyone rejected or withdrawn (in that job, or in any job when no job_id is given) and says how many;
+        include_rejected=True keeps them in, only when the recruiter asked for that."""
         ids = list(dict.fromkeys(int(i) for i in candidate_ids or []))
         if not ids and job_id:
             ids = [a["candidate_id"] for s in store.pipeline_by_stage(int(job_id)) if s["outcome"] != "lost"
@@ -3308,13 +3310,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                        f"page, where you pick what goes in: {share_url}.")
             return _plain(lost + why, {"written": False, "people": len(found), "share_url": share_url,
                                        "app_url": share_url, "for_me_url": for_me_url, "not_found": missing})
-        if job and not xlsx_export.share_table(store, found, job_id=job_id)["rows"]:
+        leave_out: set[int] = set()
+        if not job and not include_rejected:  # the Share page's rule with no job picked: exits stay out
+            leave_out = set(xlsx_export.exits_in(store, found)) & set(found)
+        if job and not xlsx_export.share_table(store, found, job_id=job_id, include_rejected=include_rejected)["rows"]:
             raise ValueError(f"No file made. None of those people is still in {_job_name(job)}: the file for a job "
                              "lists only its own people who are in play or hired. Leave job_id out, or pick its people.")
-        data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id)
+        if not job and not [i for i in found if i not in leave_out]:
+            raise ValueError(f"No file made. {'Everyone' if len(found) > 1 else 'That person'} is rejected or "
+                             "withdrawn in a job, and a file for a hiring manager leaves those people out. Pick other "
+                             "people, or say include_rejected=true if the recruiter wants them in.")
+        data, name, n = xlsx_export.share_workbook(store, found, job_id=job_id, include_rejected=include_rejected,
+                                                    leave_out=leave_out)
         if job and n < len(found):
             lost += (f"Left out {len(found) - n} {'person' if len(found) - n == 1 else 'people'} not in "
                      f"{_job_name(job)} or out of it (rejected or withdrawn).\n")
+        elif leave_out:
+            k = len(leave_out)
+            lost += (f"Left out {k} {'person' if k == 1 else 'people'} rejected or withdrawn in a job "
+                     f"({n} of {len(found)} are in the file). Say include_rejected=true to put them in.\n")
         if (kind or "").lower() == "list":
             name = "candidates-" + name[len("shortlist-"):] if name.startswith("shortlist-") else name
         path = xlsx_export.save_to_downloads(data, name)
@@ -4132,10 +4146,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     def submit_to_client(candidate_id: int, job_id: int, why_fit: str | None = None,
-                         note: str | None = None) -> CallToolResult:
+                         note: str | None = None, include_notes: bool = False,
+                         include_contact: bool = False) -> CallToolResult:
         """Submit someone to the job's client: move them into the job's Submitted stage (dated now) and draft a
-        short submittal write-up (profile, about, skills, the recruiter's newest screen notes on this job, comp and
-        availability when a note says them) with who to email. why_fit is one line on why they fit this job, and
+        short submittal write-up (profile, about, skills) with who to email. Like the Share file, it has no
+        private notes, no comp or availability taken from them, and no email or phone (also taken out of About and
+        work history) unless the recruiter asked: include_notes=True adds their newest screen notes and any comp or
+        availability a note says, include_contact=True adds the person's email and phone. Someone rejected or
+        withdrawn in the job is refused: there is nothing to send. why_fit is one line on why they fit this job, and
         note is an optional personal note: both go into the write-up, so ask the recruiter for the fit line. If the
         job has no Submitted stage it adds "Submitted to client", and if the person isn't on the job it adds them
         first; the reply says so. Nothing is sent: the recruiter sends the write-up from their own mail. Use it
@@ -4143,6 +4161,9 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         client in the last 12 months, or is in play at another client."""
         job = store.get_job(job_id)
         store.get_candidate(candidate_id)
+        gone = chase.out_of_job(store, candidate_id, job_id)
+        if gone and "isn't in" not in gone:
+            raise ValueError(f"Nothing submitted. {gone}")
         fixes: list[str] = []
         held_stage = None
         if chase.submit_stage(store, job_id) is None:
@@ -4168,13 +4189,14 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if held_stage is not None or held is not None:
             # Cautious mode holds the change: the write-up still comes back
             got = {"moved": False, "stage": before, "at": None,
-                   "writeup": chase.writeup(store, candidate_id, job_id, why_fit, note),
+                   "writeup": chase.writeup(store, candidate_id, job_id, why_fit, note, include_notes, include_contact),
                    "warning": chase.earlier_to_client(store, candidate_id, job_id),
                    "elsewhere": chase.other_clients(store, candidate_id, job_id)}
             if held is None:
                 held = held_stage
         else:
-            got = chase.submit(store, candidate_id, job_id, by="ai", why_fit=why_fit, note=note)
+            got = chase.submit(store, candidate_id, job_id, by="ai", why_fit=why_fit, note=note,
+                               include_notes=include_notes, include_contact=include_contact)
             if got["moved"]:
                 review.mark_submit(store, candidate_id, job_id)
         name = store.get_candidate(candidate_id)["name"]

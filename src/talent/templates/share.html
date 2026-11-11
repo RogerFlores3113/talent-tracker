@@ -65,8 +65,8 @@
         <strong>{{ p.name }}</strong>
         <label class="check"><input type="checkbox" name="leave_out" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_out }}> <span>Leave this person out <span class="sr-only">({{ p.name }})</span></span></label>
         {% if p.id in rej_in %}<div class="pv-rej" data-rej{{ ' hidden' if job }}>
-          <p class="share-warn">{{ p.name }} is marked rejected in {{ rej_in[p.id] | join(', ') }}.</p>
-          <label class="check"><input type="checkbox" name="leave_rej" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_rej }}{{ ' disabled' if job }}> <span>Leave {{ p.name }} out because they are rejected</span></label>
+          <p class="share-warn">{{ p.name }} is marked {{ rej_word.get(p.id, 'rejected') }} in {{ rej_in[p.id] | join(', ') }}.</p>
+          <label class="check"><input type="checkbox" name="leave_rej" value="{{ p.id }}" data-name="{{ p.name }}" {{ 'checked' if p.id in leave_rej }}{{ ' disabled' if job }}> <span>Leave {{ p.name }} out because they are {{ rej_word.get(p.id, 'rejected') }}</span></label>
         </div>{% endif %}
         {% set ab = about_seen.get(p.id, {}) %}<div class="pv-about">
           <p class="fine">About as it will appear:</p>

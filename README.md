@@ -99,11 +99,12 @@ Talent Search opens in your web browser. Two buttons there finish the setup:
    Windows it quits and reopens Claude Desktop for you so the link takes effect (never by
    force, so save your work there first). Linux has no restart: reopen Claude Desktop
    yourself.
-2. Press **Add skills**. This puts the Talent Search skills into Claude Code and Codex,
-   whichever you have. For the Claude app, it also saves `talent-search.plugin` and shows
-   you where it is: in Claude, open **Customize > Plugins > Add > Upload plugin** and pick
-   that file. To get updates, add the marketplace `RogerFlores3113/talent-tracker` in
-   **Customize > Plugins** instead.
+2. Press **Add skills**. For Claude Code and Codex (whichever you have) that is the
+   whole job. For the Claude app it is one click here, then one upload in Claude: the
+   click saves `talent-search.plugin`, shows it and opens Claude, and you open
+   **Customize > Plugins > Add > Upload plugin** and pick that file. Claude has no way
+   for another app to do that upload. For updates, use **Add > Add marketplace** with
+   `RogerFlores3113/talent-tracker` instead.
 
 More detail, Codex and LM Studio, and other ways in are under
 [Connect Claude Desktop](#connect-claude-desktop) and
@@ -159,9 +160,9 @@ Connect AI page, press **Add skills**. In one go it:
   named `talent-search-*` that the app made are ever updated, and a skill file you edited
   is kept);
 - saves `talent-search.plugin` in your Downloads folder, shows it in Finder or Explorer and
-  opens Claude. In Claude, open **Customize > Plugins**, press **Add**, then **Upload
-  plugin**, and pick that file. Claude has no way for another app to add skills for you,
-  so this last step is yours.
+  opens Claude (apps that are not on your computer are not mentioned). Last step, in
+  Claude: **Customize > Plugins > Add > Upload plugin**, pick that file. Claude has no
+  way for another app to add skills for you, so this one upload is yours.
 
 Want updates instead? Add the marketplace `RogerFlores3113/talent-tracker` in
 **Customize > Plugins > Add marketplace** (in Claude Code:

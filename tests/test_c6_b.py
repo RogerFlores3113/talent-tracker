@@ -282,6 +282,8 @@ def test_submit_to_client_from_the_board(store):
     board = c.get(f"/jobs/{job['id']}?view=board").text
     assert f"/jobs/{job['id']}/submit/{cid}" in board and "Submit to client" in board
     page = c.get(f"/jobs/{job['id']}/submit/{cid}").text
+    assert "Move to Submitted" in page and "Comp:" not in page  # notes and comp are opt-in (cycle 18)
+    page = c.get(f"/jobs/{job['id']}/submit/{cid}?notes=1").text
     assert "Move to Submitted" in page and "Strong ROS" in page and "Comp: Expecting $210k base" in page
     assert "Availability: Available in 4 weeks" in page and "mailto:dana@hfl.com" in page
     r = c.post(f"/jobs/{job['id']}/submit/{cid}", follow_redirects=False)

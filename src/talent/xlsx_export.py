@@ -318,14 +318,14 @@ def strip_contact(text: str) -> tuple[str, int]:
     return out, n
 
 
-def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
-    """For the Share page: the jobs (by title) where each of these people is marked rejected."""
-    out: dict[int, list[str]] = {}
+def exits_in(store: Store, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]:
+    """The jobs (title, "rejected" or "withdrawn") where each of these people is out. The one rule for who stays
+    out of a file when no job is picked: the Share page and the chat export both use it."""
+    out: dict[int, list[tuple[str, str]]] = {}
     mine = set(ids)
     if not mine:
         return out
     stages: dict[int, dict[str, str]] = {}
-    titles: dict[int, str] = {}
     for r in store._rows("SELECT a.candidate_id, a.job_id, a.stage, j.title FROM applications a JOIN jobs j ON j.id = a.job_id"):
         if r["candidate_id"] not in mine:
             continue
@@ -333,8 +333,20 @@ def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
             stages[r["job_id"]] = {s["name"].lower(): s["outcome"] for s in store.job_stages(r["job_id"])}
         o = stages[r["job_id"]].get(str(r["stage"]).lower()) or stage_outcome(r["stage"])
         if o == "lost":
-            out.setdefault(r["candidate_id"], []).append(r["title"])
+            word = "withdrawn" if re.sub(r"[\W_]+", " ", str(r["stage"])).strip().lower().startswith("withdr") else "rejected"
+            out.setdefault(r["candidate_id"], []).append((r["title"], word))
     return out
+
+
+def rejected_in(store: Store, ids: Iterable[int]) -> dict[int, list[str]]:
+    """For the Share page: the jobs (by title) where each of these people is rejected or withdrawn."""
+    return {cid: [t for t, _ in rows] for cid, rows in exits_in(store, ids).items()}
+
+
+def exit_word(rows: list[tuple[str, str]]) -> str:
+    """"rejected", "withdrawn" or "rejected or withdrawn", for what these exits are."""
+    words = {w for _, w in rows}
+    return next(iter(words)) if len(words) == 1 else "rejected or withdrawn"
 
 
 def share_table(store: Store, ids: list[int], *, include_contact: bool = False, notes: str = "none",
