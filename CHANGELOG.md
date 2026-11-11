@@ -4,6 +4,25 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-11
+
+### Private tags
+- New private tags: your own labels for a person (like "Recruiter: Priya" or "dnc") that stay on this computer. They never go out in shares, exports, write-ups, client reports or anything an AI app sees.
+- Settings has a Private tags section with suggested labels, Make private (with Undo) and Make a skill again. The candidate page and edit form show and edit them, and the Candidates tag filter finds them.
+- Imports, saves and AI app writes put a listed name in private tags and say how many went private. Restoring a backup keeps your private list.
+
+### Sharing and client write-ups
+- The submit-to-client write-up leaves out notes, pay, email and phone by default, takes contact details out of About and work history, and lists only what it holds. You can opt back in to each.
+- Submitting someone who isn't in the job is refused, in the app and from chat.
+- A chat export with no job leaves out people rejected or withdrawn, the same as the Share page, and says who it left out.
+- Interviews with no job no longer pull a person into a client update or report. The interview form picks the person's only job or asks for one.
+- Contact details in shared text are caught in more forms: international numbers, spelled-out emails and profile links.
+- Share and write-up pages say plainly that skills include your own tags.
+
+### Connect and Add skills
+- Add skills says up front that it is one click plus one upload in the Claude app, shows that step first, and hides apps you don't have.
+- Connect folds apps that aren't installed into one quiet line.
+
 ## [0.1.5] - 2026-11-10
 
 ### Install and connect
