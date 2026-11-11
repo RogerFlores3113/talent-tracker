@@ -4215,22 +4215,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                                                              for e in got["elsewhere"][:3]) + ".")
         if warnings:
             data["warning"] = " ".join(warnings)
-        inc = ["name", "current role", "location", "earlier jobs", "skills"]
-        if w["has_about"]:
-            inc.append("About")
-        if include_contact:
-            inc.append("email, phone and profile link")
-        if include_notes and w["has_notes"]:
-            inc.append("newest notes on this job")
-        if include_notes and w["has_comp"]:
-            inc.append("comp")
-        if include_notes and w["has_availability"]:
-            inc.append("availability")
-        out_l = []
-        if not include_contact:
-            out_l.append("email, phone and profile link (also taken out of About and work history)")
-        if not include_notes:
-            out_l.append("private notes and any comp or availability taken from them")
+        inc, out_l = w["included"], w["left_out"]
         data["included"], data["left_out"] = inc, out_l
         shown = f" Included: {', '.join(inc)}. Left out: {'; '.join(out_l) or 'nothing private'}."
         if not w["to"]:

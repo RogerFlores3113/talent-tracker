@@ -329,6 +329,9 @@ def _lines(text: str | None) -> list[str]:
     return [x.strip(" -*•\t") for x in re.split(r"[\r\n]+|(?<=[.;])\s+", text or "") if x.strip(" -*•\t")]
 
 
+_LABEL = re.compile(r"^\s*(comp(ensation)?|salary|availability|available|notice)\s*[:=-]\s*", re.I)
+
+
 def _found(texts: list[str], pattern: re.Pattern[str]) -> str | None:
     for t in texts:
         for line in _lines(t):
@@ -492,14 +495,30 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     if comp or avail:
         lines.append("")
         if comp:
-            lines.append(f"Comp: {comp}")
+            lines.append(f"Comp: {_LABEL.sub('', comp, count=1)}")
         if avail:
-            lines.append(f"Availability: {avail}")
+            lines.append(f"Availability: {_LABEL.sub('', avail, count=1)}")
     lines += ["", "Let me know if you'd like to meet them, and when works.", "", "Thanks"]
     subject = f"{cand['name']} for {job['title']}"
     to = manager_email(c, [job], manager or None, own) if company or job.get("hiring_manager_email") else None
     body = "\n".join(lines)
-    return {"subject": subject, "body": body, "to": to, "email": _mailto(to, subject, body), "client": c.get("name"),
+    contact = [w for w, v in (("email", cand.get("email")), ("phone", cand.get("phone")),
+                              ("profile link", cand.get("linkedin_url"))) if v] if include_contact else []
+    included = [x for x, on in (
+        ("name", True),
+        ("current role", bool(cand.get("current_title") or cand.get("current_company"))),
+        ("location", bool(cand.get("location"))),
+        ("earlier jobs", bool(hist)),
+        ("skills (the whole tag list, including tags you added yourself)", bool(tags)),
+        ("About", bool(about)),
+        (" and ".join(", ".join(contact).rsplit(", ", 1)) if contact else "", bool(contact)),
+        ("your newest notes on this job", bool(notes)),
+        ("comp", bool(comp)),
+        ("availability", bool(avail))) if on]
+    left_out = [x for x, on in (
+        ("email, phone and profile link (also taken out of About and work history)", not include_contact),
+        ("your private notes and any comp or availability taken from them", not include_notes)) if on]
+    return {"subject": subject, "body": body, "included": included, "left_out": left_out, "to": to, "email": _mailto(to, subject, body), "client": c.get("name"),
             "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail),
             "include_notes": include_notes, "include_contact": include_contact,
             "has_about": bool(about), "has_notes": bool(notes)}

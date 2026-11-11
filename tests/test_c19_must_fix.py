@@ -223,3 +223,18 @@ def test_share_and_writeup_say_skills_are_the_whole_tag_list(store):
 def test_strip_contact_does_not_swallow_a_year_next_to_a_phone():
     assert strip_contact("Beta (call +44 20 7946 0958) (2019 to 2023)") == ("Beta (call (phone removed)) (2019 to 2023)", 1)
     assert strip_contact("(2019-2023) and (415) 555-0134.") == ("(2019-2023) and (phone removed).", 1)
+
+
+def test_writeup_included_lists_only_what_the_person_has(store):
+    """The Included list names only what the write-up holds, and a labelled comp note isn't doubled."""
+    job = store.add_job("Platform Engineer", "Acme", stages=STAGES)
+    gina = store.add_candidate(name="Gina Bare", email="gina@x.com")
+    store.add_to_pipeline(gina["id"], job["id"], "Screening")
+    w = chase.writeup(store, gina["id"], job["id"])
+    assert w["included"] == ["name"]
+    assert w["left_out"][0].startswith("email, phone and profile link")
+    store.move_stage(gina["id"], job["id"], "Screening", notes="Comp: 185k base")
+    w = chase.writeup(store, gina["id"], job["id"], include_notes=True, include_contact=True)
+    assert "Comp: 185k base" in w["body"] and "Comp: Comp:" not in w["body"]
+    assert w["left_out"] == [] and "comp" in w["included"] and "email" in w["included"]
+    assert not any("phone" in x for x in w["included"])
