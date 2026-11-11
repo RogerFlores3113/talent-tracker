@@ -21,13 +21,14 @@
 <section class="panel report" id="draft">
   <h2>Read it over</h2>
   <p class="fine">Read it over before you send it. Nothing is sent from here.</p>
+  <p class="fine">About and work history are copied as written, apart from contact details.</p>
   <ul class="fine" id="writeup-included">
-    <li>Included: name, current role, location, earlier jobs, skills, About{% if with_contact %}, and the email and phone{% endif %}{% if with_notes %}, your newest notes on this job{% if draft.has_comp %}, comp{% endif %}{% if draft.has_availability %}, availability{% endif %}{% endif %}.</li>
-    <li>Left out: {% if not with_contact %}email and phone (also taken out of About and work history){% endif %}{% if not with_contact and not with_notes %}; {% endif %}{% if not with_notes %}your private notes and any comp or availability taken from them{% endif %}{% if with_contact and with_notes %}nothing private{% endif %}.</li>
+    <li>Included: name, current role, location, earlier jobs, skills (the whole tag list, including tags you added yourself){% if draft.has_about %}, About{% endif %}{% if with_contact %}, and the email, phone and profile link{% endif %}{% if with_notes and draft.has_notes %}, your newest notes on this job{% endif %}{% if with_notes %}{% if draft.has_comp %}, comp{% endif %}{% if draft.has_availability %}, availability{% endif %}{% endif %}.</li>
+    <li>Left out: {% if not with_contact %}email, phone and profile link (also taken out of About and work history){% endif %}{% if not with_contact and not with_notes %}; {% endif %}{% if not with_notes %}your private notes and any comp or availability taken from them{% endif %}{% if with_contact and with_notes %}nothing private{% endif %}.</li>
   </ul>
   <form method="get" action="/jobs/{{ job.id }}/submit/{{ cand.id }}#draft" class="actions-inline">
     <label class="check"><input type="checkbox" name="notes" value="1" {{ 'checked' if with_notes }}> <span>Include my notes</span></label>
-    <label class="check"><input type="checkbox" name="contact" value="1" {{ 'checked' if with_contact }}> <span>Include contact details (email and phone)</span></label>
+    <label class="check"><input type="checkbox" name="contact" value="1" {{ 'checked' if with_contact }}> <span>Include contact details (email, phone and profile link)</span></label>
     <button class="btn small" type="submit">Update write-up</button>
   </form>
   <div class="sec-head"><h2>Write-up</h2>

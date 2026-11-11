@@ -163,7 +163,7 @@ def test_add_skills_installs_saves_reveals_opens_and_is_idempotent(store, env, m
     assert (env["dl"] / "talent-search.plugin").is_file() and len(shown) == 1 and opened == [1]
     t = r.text
     assert "Claude Code</strong>: added 6 skills to your Claude Code skills folder (~/.claude/skills)" in t
-    shown_text = t.split('id="skills-found"', 1)[0]  # the rest is the panel's own found list, refreshed in place
+    shown_text = t.split('id="skills-found"', 1)[0]
     assert "Codex" not in shown_text and "not found" not in shown_text  # an app that isn't here is left out
     assert "Last step in Claude: Customize &gt; Plugins &gt; Add &gt; Upload plugin, then pick talent-search.plugin" in t
     assert "Show in folder" in t and "Already up to date" not in t and "Done." not in t

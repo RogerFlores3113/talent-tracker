@@ -3,6 +3,7 @@ tool, and small client wording bugs."""
 from datetime import datetime, timedelta, timezone
 
 import anyio
+import pytest
 from mcp.types import CallToolResult
 
 from talent import actions, desk, offers, outreach, reports
@@ -40,18 +41,22 @@ def test_new_jobs_for_an_agency_get_a_submitted_stage(store):
     assert "Submitted" in job["stages"]
 
 
-def test_submit_to_client_adds_the_stage_and_the_person_and_says_so(store):
+def test_submit_to_client_adds_the_stage_and_says_so_but_refuses_someone_not_on_the_job(store):
     job = store.add_job("Staff Backend", company="Pinecrest Capital", hiring_manager="Sam Lee",
                         hiring_manager_email="sam@pinecrest.com")
     cid = store.add_candidate(name="Lena Fox", current_title="Backend Engineer", current_company="Stripe",
                               about="Ten years of payments systems work.", tags="go, postgres")["id"]
     server = build_server(store)
+    with pytest.raises(Exception, match="isn't in Staff Backend"):  # cycle 19: refused, not added and moved in one call
+        call(server, "submit_to_client", candidate_id=cid, job_id=job["id"])
+    assert not store.candidate_pipelines(cid)
+    store.add_to_pipeline(cid, job["id"], None)
     res = call(server, "submit_to_client", candidate_id=cid, job_id=job["id"],
                why_fit="Ran payments at scale", note="Happy to talk Friday")
     t = text(res)
-    assert "added Submitted to client" in t and "wasn't on the job yet" in t
+    assert "added Submitted to client" in t
     d = data(res)
-    assert d["moved"] and d["stage"] == "Submitted to client" and len(d["also_did"]) == 2
+    assert d["moved"] and d["stage"] == "Submitted to client" and len(d["also_did"]) == 1
     body = d["writeup"]
     for bit in ("Why they fit: Ran payments at scale", "Happy to talk Friday", "About: Ten years of payments",
                 "Backend Engineer at Stripe", "go"):
@@ -149,7 +154,9 @@ def test_submit_to_client_in_cautious_mode_holds_the_new_stage(store):
     review.set_cautious(store, True)
     job = store.add_job("Controller", company="Pinecrest Capital")
     cid = store.add_candidate(name="Lena Fox")["id"]
+    store.add_to_pipeline(cid, job["id"], None)  # cycle 19: someone not on the job is refused, so they are on it
+    before = store.candidate_pipelines(cid)[0]["stage"]
     res = call(build_server(store), "submit_to_client", candidate_id=cid, job_id=job["id"])
     assert "Cautious mode" in text(res) and data(res)["pending_review"]
     assert "Submitted to client" not in [s["name"] for s in store.job_stages(job["id"])]
-    assert not store.candidate_pipelines(cid)  # nothing else landed
+    assert store.candidate_pipelines(cid)[0]["stage"] == before  # nothing else landed

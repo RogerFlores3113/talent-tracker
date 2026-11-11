@@ -107,3 +107,15 @@ def test_installer_closing_text_mentions_the_restart():
 def test_no_dashes_in_new_text(store):
     for t in (local_client(store).get("/connect").text, _add(store)):
         assert "—" not in t and "–" not in t
+
+
+def test_found_list_collapses_missing_apps_into_one_quiet_line(store, env):
+    c = local_client(store)
+    for t in (c.get("/connect").text, c.post("/connect/skills/add").text):
+        assert "Not found" not in t and "found." not in t
+        assert t.count('id="skills-not-here"') == 1
+        assert "Not on this computer: Claude Code, Codex." in t
+        assert 'aria-label="Install the skills for Codex anyway"' in t
+    (env["home"] / ".claude").mkdir()
+    t = c.get("/connect").text
+    assert "Not on this computer: Codex." in t and "Claude Code</strong>:" in t

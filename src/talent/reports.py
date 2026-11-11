@@ -548,22 +548,12 @@ def find_manager(store: Store, key: str, query: str | None) -> list[str]:
 
 def _upcoming(store: Store, job_ids: set[int], app_pairs: set[tuple[int, int]], days: int,
               now: datetime) -> list[dict[str, Any]]:
-    """Live interviews in the next `days` for people on these jobs. One logged with no job counts only when the
-    person is in play on exactly one open job anywhere, and it's one of these: with two, nobody can tell whose
-    interview it is, so it stays out of every client's update (see loose_interviews)."""
+    """Live interviews in the next `days` for people on these jobs. One logged with no job never counts, whatever
+    jobs the person is in: nobody can tell whose interview it is, so it stays out of every client's update and
+    desk (see loose_interviews, which tells the recruiter)."""
     jobs = {j["id"]: j for j in store._rows("SELECT * FROM jobs")}
     rows = actions._live_interviews(store, store.upcoming_interviews(days=days, now=now), jobs)
-    loose = {r["candidate_id"] for r in rows if r.get("job_id") is None}
-    where = _open_jobs_of(store, loose)
-    out = []
-    for r in rows:
-        if r.get("job_id") in job_ids:
-            out.append(r)
-        elif r.get("job_id") is None and len(where.get(r["candidate_id"], ())) == 1:
-            jid = next(iter(where[r["candidate_id"]]))
-            if jid in job_ids and (r["candidate_id"], jid) in app_pairs:
-                out.append({**r, "job_id": jid, "job_title": jobs[jid]["title"]})
-    return out
+    return [r for r in rows if r.get("job_id") in job_ids]
 
 
 def _open_jobs_of(store: Store, candidate_ids: set[int]) -> dict[int, set[int]]:
@@ -584,8 +574,8 @@ def _open_jobs_of(store: Store, candidate_ids: set[int]) -> dict[int, set[int]]:
 def loose_interviews(store: Store, job_ids: set[int], days: int = INTERVIEW_DAYS,
                      now: datetime | None = None) -> list[dict[str, Any]]:
     """Upcoming interviews logged with no job for people in play on these jobs that no update can carry, since
-    the person is in play on more than one open job: [{"interview_id", "candidate_id", "name", "at", "href"}].
-    The recruiter picks the job (/interviews/{id}/job) and the interview joins that client's update."""
+    an interview with no job never goes in client-facing text: [{"interview_id", "candidate_id", "name", "at",
+    "href"}]. The recruiter picks the job (/interviews/{id}/job) and the interview joins that client's update."""
     now = now or datetime.now(timezone.utc)
     jobs = {j["id"]: j for j in store._rows("SELECT * FROM jobs")}
     rows = [r for r in actions._live_interviews(store, store.upcoming_interviews(days=days, now=now), jobs)
@@ -593,7 +583,7 @@ def loose_interviews(store: Store, job_ids: set[int], days: int = INTERVIEW_DAYS
     where = _open_jobs_of(store, {r["candidate_id"] for r in rows})
     return [{"interview_id": r["id"], "candidate_id": r["candidate_id"], "name": r["candidate_name"], "at": r["at"],
              "href": f"/interviews/{r['id']}/job"}
-            for r in rows if len(where.get(r["candidate_id"], ())) > 1 and where[r["candidate_id"]] & job_ids]
+            for r in rows if where.get(r["candidate_id"], set()) & job_ids]
 
 
 def _in_play_pairs(store: Store, job_ids: list[int]) -> set[tuple[int, int]]:
@@ -1240,7 +1230,7 @@ def recruiter_notes(rep: dict[str, Any]) -> list[str]:
                      "lists it as open until you review that hire")
     loose = rep.get("loose_interviews") or []
     if loose:
-        notes.append("Left out, since no job is set and they're in play on more than one: " + ", ".join(
+        notes.append("Left out, since no job is set on them: " + ", ".join(
             f"{x['name']}'s interview {in_zone(x['at'], rep['client'].get('time_zone'), '%a %b %-d')}" for x in loose[:5])
             + (f" and {len(loose) - 5} more" if len(loose) > 5 else "") + ". Pick the job on Interviews to add it")
     if rep.get("openings_unset"):

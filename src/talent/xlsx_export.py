@@ -286,18 +286,40 @@ def _pick_people(store: Store, people: list[dict[str, Any]], job: dict[str, Any]
 
 # Contact details written into About (or work history) are the recruiter's to share, like the Email and Phone
 # columns: a file without contact details has them taken out, so "no email or phone" is true of the whole file.
+# That covers email addresses (also spelled "ben [at] x.com" or "ben at x dot com"), phone numbers in common
+# layouts, and profile links (any http(s) address, www. address, or LinkedIn / GitHub style address).
 _EMAIL_IN_TEXT = re.compile(r"(?:mailto:)?[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
-_PHONE_IN_TEXT = re.compile(
-    r"(?<![\w+])(?:tel:)?(?:\+\d{1,3}[\s.-]?(?:\(\d{1,4}\)[\s.-]?)?\d[\d\s.-]{5,}\d"  # +44 20 7946 0958
-    r"|\(\d{3}\)\s?\d{3}[\s.-]?\d{4}"  # (415) 555-0134
-    r"|\d{3}[.-]\d{3}[.-]\d{4}"  # 415-555-0134, 415.555.0134
-    r"|\d{3}\s\d{3}\s\d{4}"  # 415 555 0134
-    r"|\d{3}-\d{4})(?![\w-])")  # 555-0134
+_EMAIL_SPELLED = re.compile(
+    r"[A-Za-z0-9._%+-]+\s*[\[({<]\s*at\s*[\])}>]\s*[A-Za-z0-9-]+(?:(?:\s*[\[({<]\s*dot\s*[\])}>]\s*|\.|\s+dot\s+)[A-Za-z0-9-]+)+"
+    r"|(?<![\w.@-])[A-Za-z0-9._%+-]+\s+at\s+[A-Za-z0-9-]+(?:\s+dot\s+[A-Za-z0-9-]+)+(?![\w-])", re.I)
+_LINK_IN_TEXT = re.compile(
+    r"(?:\b(?:https?://|www\.)|(?<![\w@.-])(?:[a-z0-9-]+\.)*(?:linkedin|github|gitlab|twitter|x|facebook|instagram|behance|"
+    r"dribbble|medium|bsky)\.(?:com|app|social)/)[^\s<>\"']*", re.I)
+# A run of digits with spaces, dots, dashes or brackets between them; _looks_like_phone decides if it is a number.
+_PHONE_RUN = re.compile(
+    r"(?<![\w$\u20ac\u00a3.])\+?(?:\(\d{1,4}\)|\d+)(?:[ \t\u00a0.\-]*(?:\(\d{1,4}\)|\d+))*(?![\w%])")
+
+
+def _looks_like_phone(run: str) -> bool:
+    groups = re.findall(r"\d+", run)
+    digits = sum(len(g) for g in groups)
+    if digits < 7 or digits > 15:
+        return False
+    if all(len(g) == 4 and g[:2] in ("19", "20") for g in groups):
+        return False  # years and year ranges: 2019 - 2023
+    if len(groups) == 1:
+        return digits >= 10 or run.lstrip().startswith("+")  # 4155550100
+    if run.lstrip().startswith("+") or "(" in run:
+        return True
+    if len(groups) == 2:  # 555-0134 only; "5000-7000" and "2019-2023" are ranges
+        return len(groups[0]) == 3 and len(groups[1]) == 4
+    return sum(len(g) >= 3 for g in groups) >= 2
 
 
 def strip_contact(text: str) -> tuple[str, int]:
-    """(text with email addresses and phone numbers taken out, how many were taken out). Each one becomes
-    "(email removed)" or "(phone removed)", so the reader sees something was there."""
+    """(text with contact details taken out, how many were taken out). Email addresses (spelled out ones too), phone
+    numbers and profile links become "(email removed)", "(phone removed)" or "(link removed)", so the reader sees
+    something was there. Years, date ranges and short numbers are left alone."""
     if not text:
         return text or "", 0
     n = 0
@@ -307,14 +329,23 @@ def strip_contact(text: str) -> tuple[str, int]:
         n += 1
         return "(email removed)"
 
+    def link(m: re.Match[str]) -> str:
+        nonlocal n
+        n += 1
+        tail = re.search(r"[.,;:!?)\]]+$", m.group(0))
+        return "(link removed)" + (tail.group(0) if tail else "")
+
     def phone(m: re.Match[str]) -> str:
         nonlocal n
-        if sum(ch.isdigit() for ch in m.group(0)) < 7:
-            return m.group(0)
+        run = m.group(0)
+        if not _looks_like_phone(run):
+            return run
         n += 1
         return "(phone removed)"
-    out = _EMAIL_IN_TEXT.sub(email, text)
-    out = _PHONE_IN_TEXT.sub(phone, out)
+    out = _EMAIL_SPELLED.sub(email, text)
+    out = _EMAIL_IN_TEXT.sub(email, out)
+    out = _LINK_IN_TEXT.sub(link, out)
+    out = _PHONE_RUN.sub(phone, out)
     return out, n
 
 
@@ -435,13 +466,13 @@ def share_workbook(store: Store, ids: list[int], *, include_contact: bool = Fals
         about.append(("People left out", "; ".join(gone)))
     if t["contact_removed"]:
         n = t["contact_removed"]
-        about.append(("Contact details", f"{n} email address{'' if n == 1 else 'es'} or phone number"
-                      f"{'' if n == 1 else 's'} taken out of About and work history"))
+        about.append(("Contact details", f"{n} email address{'' if n == 1 else 'es'}, phone number{'' if n == 1 else 's'} or profile "
+                      f"link{'' if n == 1 else 's'} taken out of About and work history"))
     about.append(("Included", ", ".join(headers)))
     about.append(("Left out", ", ".join(left_out + ["colors", "internal review marks", "columns with nothing in them"])))
     about.append(("Copied as written", "About, work history" + (", notes" if notes != "none" else "")
-                  + ("" if include_contact else " (email addresses and phone numbers in About and work history are "
-                     "taken out)") + ". Read them before you forward the file."))
+                  + ("" if include_contact else " (email addresses, phone numbers and profile links in About and work "
+                     "history are taken out)") + ". Read them before you forward the file."))
     note = " ".join((note or "").split())[:300]
     title = f"{note}, as of {stamp(made)}" if note else ""  # the title row is the note: no note, no title row
     sheet = Sheet("Candidates", headers, body, preamble=[title] if title else [], widths=t["widths"], big_preamble=True)

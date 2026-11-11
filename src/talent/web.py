@@ -1792,6 +1792,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if edit:
             return page(request, "candidate_form.html", c=c, history_text=_history_to_text(c["work_history"]),
                         error=None, job_id=None)
+        return candidate_page(request, candidate_id, c, hl, merged=merged)
+
+    def candidate_page(request: Request, candidate_id: int, c: dict[str, Any], hl: str = "",
+                       merged: bool = False, log_error: str = "", log_form: dict[str, str] | None = None, status_code: int = 200):
+        """The candidate page. log_error and log_form: a log entry that failed, with the error and what was typed,
+        so the form keeps it and the error is announced (see log_entry)."""
         in_jobs = {p["job_id"] for p in c["pipelines"]}
         open_jobs = store.list_jobs("open")
         hints = actions.twin_hints(open_jobs)
@@ -1802,7 +1808,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     inject_warnings=injection.candidate_warnings(c),
                     dupes=duplicates.plausible_for(store, c, store.possible_duplicates(candidate_id)),
                     kinds=[*(k for k in TIMELINE_KINDS if k != "stage"), outreach.REPLY_KIND],
-                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)))
+                    refresh_prompt=recipes.refresh_candidate(c, guard=site_guard.enabled(store)),
+                    log_error=log_error, log_form=log_form or {}, status_code=status_code)
 
     @app.post("/candidates/{candidate_id}", response_class=HTMLResponse)
     async def update_candidate_form(request: Request, candidate_id: int):
@@ -1983,6 +1990,12 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 actions.schedule_followup(store, candidate_id, day, job_id=job_id, note=body.strip() or None)
                 notice = f"Follow-up added. It shows on Today from {actions.local_time(day.isoformat() + 'T12:00:00', '%a %b %-d')}."
         except (ValueError, NotFound) as exc:
+            if not logged:  # show the page again with the error announced and what they typed still in the form
+                typed = {k: str(form.get(k) or "") for k in (
+                    "kind", "body", "at", "tz", "job_id", "follow_up", "interviewer", "interviewer_email", "minutes",
+                    "interviewer_tz", "interviewer_hours", "candidate_tz")}
+                return candidate_page(request, candidate_id, store.candidate_detail(candidate_id), log_error=str(exc),
+                                      log_form=typed, status_code=400)
             return RedirectResponse(f"/candidates/{candidate_id}?{urlencode({'error': str(exc)})}#timeline",
                                     status_code=303)
         if day_error:  # keep what they wrote, and say what was wrong with the date

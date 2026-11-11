@@ -3,6 +3,7 @@ notes from the AI app, feedback from someone not on a session, working hours and
 and "Add tag" / "Move stage" on the Candidates bulk bar."""
 from __future__ import annotations
 
+import html
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -214,7 +215,7 @@ def test_the_log_form_saves_working_hours_with_the_interviewer(store):
     base = {"kind": "interview", "body": "Screen", "at": "2026-11-20T12:00", "tz": "America/Los_Angeles",
             "job_id": str(jid), "interviewer": "Dana Lee"}
     bad = c.post(f"/candidates/{cid}/log", data={**base, "interviewer_hours": "late"}, follow_redirects=False)
-    assert "working hours look like 9-17" in flash_of(bad, "flash_error") or "working hours" in flash_of(bad, "error")
+    assert bad.status_code == 400 and "working hours" in html.unescape(bad.text)  # shown on the page, announced
     r = c.post(f"/candidates/{cid}/log", data={**base, "interviewer_hours": "10-15"}, follow_redirects=False)
     assert r.status_code == 303
     assert loops.person_hours(loops.person_hours_book(store), "Dana Lee") == (10, 15)

@@ -430,13 +430,13 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     """The submittal draft for one person and job: {"subject", "body", "to", "email", "client", "manager"}. Built from
     their profile, the newest screen notes on this job, and comp and availability when a note or the profile says
     them. why_fit and note are the recruiter's own words for this write-up. The recruiter reads and sends it from
-    their own mail. Like the Share file: no email or phone unless include_contact, email and phone written in About
-    or work history taken out unless include_contact, and no private notes and no comp or availability taken from
-    them unless include_notes. Raises ValueError for someone out of the job (rejected or withdrawn)."""
+    their own mail. Like the Share file: no email, phone or profile link unless include_contact, and email, phone and
+    profile links written in About or work history taken out unless include_contact, and no private notes and no comp or availability taken from
+    them unless include_notes. Raises ValueError for someone out of the job (not in it, rejected or withdrawn)."""
     cand = store.get_candidate(candidate_id)
     job = store.get_job(job_id)
     out = out_of_job(store, candidate_id, job_id)
-    if out and "isn't in" not in out:
+    if out:
         raise ValueError(out)
     own = actions.inhouse(store)
     company = (job.get("company") or "").strip()
@@ -478,7 +478,7 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     about = " ".join(about_text.split())
     if about:
         lines.append(f"About: {about[:ABOUT_CHARS].rstrip()}{'...' if len(about) > ABOUT_CHARS else ''}")
-    if cand.get("linkedin_url"):
+    if include_contact and cand.get("linkedin_url"):
         lines.append(f"Profile: {cand['linkedin_url']}")
     if include_contact and (cand.get("email") or cand.get("phone")):
         lines.append("Contact: " + ", ".join(x for x in (cand.get("email"), cand.get("phone")) if x))
@@ -501,7 +501,8 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
     body = "\n".join(lines)
     return {"subject": subject, "body": body, "to": to, "email": _mailto(to, subject, body), "client": c.get("name"),
             "client_slug": c.get("slug"), "manager": manager or None, "has_comp": bool(comp), "has_availability": bool(avail),
-            "include_notes": include_notes, "include_contact": include_contact}
+            "include_notes": include_notes, "include_contact": include_contact,
+            "has_about": bool(about), "has_notes": bool(notes)}
 
 
 def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fit: str | None = None,
@@ -510,9 +511,12 @@ def submit(store: Store, candidate_id: int, job_id: int, by: str = "app", why_fi
     "writeup", "warning", "elsewhere"}. A second submit while they're already there moves nothing. Raises
     ValueError when they aren't on the job, are hired or out, or the job has no Submitted stage."""
     job = store.get_job(job_id)
+    name = store.get_candidate(candidate_id)["name"]
+    out = out_of_job(store, candidate_id, job_id)  # first, so nobody is moved and then refused
+    if out:
+        raise ValueError(out)
     app = store._row("SELECT stage, stage_changed_at FROM applications WHERE candidate_id = ? AND job_id = ?",
                      (candidate_id, job_id))
-    name = store.get_candidate(candidate_id)["name"]
     if app is None:
         raise ValueError(f"{name} isn't on {job['title']} yet. Add them to the job first.")
     target = submit_stage(store, job_id)

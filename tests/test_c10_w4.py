@@ -284,7 +284,7 @@ def test_the_web_form_can_log_an_all_day_interview(store):
     month = c.get("/interviews?view=month&month=2027-05").text
     assert "Onsite day" not in month or "All day" in month
     r = c.post(f"/candidates/{cid}/log", data={"kind": "interview", "body": "Nope", "at": "", "all_day": "1"})
-    assert r.status_code in (200, 303)
+    assert r.status_code == 400 and "Pick the day of the interview" in r.text  # the form comes back with the error
     assert not [x for x in store.candidate_detail(cid)["timeline"] if x["body"] == "Nope"]
 
 

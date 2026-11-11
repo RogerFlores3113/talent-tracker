@@ -91,11 +91,13 @@ def test_a_jobless_interview_for_someone_on_two_clients_goes_in_neither_update(s
     assert "Pick one of the jobs" in flash_of(r, "flash_error")
 
 
-def test_a_jobless_interview_on_one_open_job_still_counts(store):
+def test_a_jobless_interview_never_shows_in_the_client_update_but_one_with_a_job_does(store):
     job = _agency(store, "Acme", "Backend")
     ana = store.add_candidate(name="Ana Ruiz")["id"]
     store.add_to_pipeline(ana, job["id"], "Submitted")
-    store.log(ana, "interview", "Client interview", at=_at(2))
+    store.log(ana, "interview", "Client interview", at=_at(2))  # cycle 19: no job, so never client-facing text
+    assert "Upcoming interviews:" not in reports.report_text(reports.report(store, "acme"))
+    store.log(ana, "interview", "Client interview", at=_at(3), job_id=job["id"])
     assert "Upcoming interviews:" in reports.report_text(reports.report(store, "acme"))
 
 
@@ -111,7 +113,7 @@ def test_log_activity_asks_for_the_job_when_on_two(store):
     _hfl, _acme, lena = _two_clients(store)
     res = call(build_server(store), "log_activity", candidate_id=lena, kind="interview", summary="Client interview",
                when=_at(3))
-    assert "is on 2 open jobs" in text(res) and "job_id" in text(res)
+    assert "is on 2 jobs" in text(res) and "job_id" in text(res)
 
 
 # ------------------------------------------------- 2. a client before its first job
