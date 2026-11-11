@@ -36,7 +36,7 @@ from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
 from . import bulkmove, chase, compare, desk, duplicates, opsreview, tour
-from . import picks, searchquery, xlsx, xlsx_export
+from . import picks, private_tags, searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
                     INTERVIEW_FORM_CHOICES, INTERVIEW_OUTCOME_LABELS, INTERVIEW_RESULT_CHOICES,
@@ -45,12 +45,12 @@ from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTI
                     join_tags, split_tags, to_dt)
 from .store import as_local, parse_when, same_person_name
 from .store import BATCH_KINDS, DEFAULT_THEME, THEMES, saved_theme
-from .store import COLORS, clean_color, next_color
+from .store import COLORS, LOCAL_VIEW, clean_color, next_color
 from .typesense_index import SearchService, TypesenseIndex, env_status
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 MAX_UPLOAD = 10 * 1024 * 1024
-ONE_SHOT_PARAMS = {"skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
+ONE_SHOT_PARAMS = {"skill_notice", "private_notice", "private_undo", "notice", "flash_error", "error", "notice_href", "notice_href_text", "saved", "sample", "deleted", "merged"}  # messages, not state
 UPLOAD_TTL = 3600  # seconds an upload waits between column matching and the import
 REVIEW_MAX = 2000  # pairs shown on the "Merge ticked pairs" review page; a longer list goes in a second round
 COMPARE_TICK = "Tick two to six people to compare."
@@ -72,7 +72,7 @@ LOCKED_PAGE = "Open Talent Search from its app icon to unlock this window."  # t
 LOCKED_LOG = "A browser window asked for a page while locked. To unlock it, open Talent Search from its app icon or run: talent open"
 # One-line messages after a form (notice, flash_error, error) travel in a short-lived cookie, not the
 # address, so names never land in browser history or logs. The cookie is signed with the app key.
-FLASH_KEYS = ("skill_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
+FLASH_KEYS = ("skill_notice", "private_notice", "notice", "flash_error", "error", "notice_href", "notice_href_text")  # the last two: a link after the notice
 FLASH_MAX_AGE = 120  # seconds
 FLASH_CHARS = 700  # longest message kept
 FLASH_COOKIE_CHARS = 3000  # a browser drops a cookie over about 4 KB, and with it the whole message
@@ -443,7 +443,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             # always send at least one of them on a cross-site request, so this can't be CSRF.
         elif request.url.path in DOWNLOADS and fetch_site in ("cross-site", "same-site"):
             return PlainTextResponse("Forbidden", status_code=403)
-        response = await call_next(request)
+        local = LOCAL_VIEW.set(True)  # this window may filter by private tags; an AI app's server never can
+        try:
+            response = await call_next(request)
+        finally:
+            LOCAL_VIEW.reset(local)
         flash_to_cookie(request, response)
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -956,7 +960,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                    color_counts=color_counts_here(q, tag, location, source, member, total, color))
         if more and is_htmx(request):  # "Show more": just the next rows, which replace the button's row
             return page(request, "_table_rows.html", **ctx)
-        return page(request, "table.html", **ctx, tags=store.skill_names_sorted(5000), sources=store.list_sources(),
+        return page(request, "table.html", **ctx,
+                    tags=[*store.skill_names_sorted(5000), *(t for t in store.list_private_tags() if t["count"])], sources=store.list_sources(),
                     dup_count=duplicates.count(store),
                     **store.membership_choices(job_id))
 
@@ -2416,7 +2421,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     @app.get("/export.csv")
     def export_csv():
         stamp = datetime.now().strftime("%Y-%m-%d")
-        return Response(importers.export_csv_bytes(store), media_type="text/csv; charset=utf-8",
+        return Response(importers.export_csv_bytes(store, include_private=True), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="talent-search-{stamp}.csv"'})
 
     @app.get("/backup")
@@ -4239,6 +4244,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         # the #fragment names the message itself: a fragment that names the whole section would make the browser drop focus
         return RedirectResponse("/settings?" + urlencode({key: msg}) + "#skill-result", status_code=303)
 
+    # ---------------------------------------------------------- private tags (never leave this computer)
+    def _private_back(msg: str, tag: str = "", error: bool = False) -> RedirectResponse:
+        """Back to Settings: the message sits in its own status line inside Private tags, with Undo when a tag moved."""
+        params = {"flash_error": msg} if error else {"private_notice": msg}
+        if tag and not error:
+            params["private_undo"] = tag
+        return RedirectResponse("/settings?" + urlencode(params) + "#private-result", status_code=303)
+
+    @app.post("/settings/private-tags/make")
+    async def private_tags_make(request: Request):
+        """'Make private': move one tag out of everyone's Skills into their Private tags, and remember the name."""
+        form = await request.form()
+        try:
+            r = store.make_tag_private(str(form.get("tag") or ""))
+        except ValueError as exc:
+            return _private_back(str(exc), error=True)
+        n = r["changed"]
+        return _private_back(f"Made {r['tag']} private. {n} {'person' if n == 1 else 'people'} changed. It is no longer "
+                             "in their Skills, and new saves of it go to Private tags too.", r["tag"])
+
+    @app.post("/settings/private-tags/undo")
+    async def private_tags_undo(request: Request):
+        """'Make a skill again' (and Undo after Make private): move it back for everyone and drop it from the list."""
+        form = await request.form()
+        try:
+            r = store.make_tag_skill(str(form.get("tag") or ""))
+        except ValueError as exc:
+            return _private_back(str(exc), error=True)
+        n = r["changed"]
+        return _private_back(f"{r['tag']} is a skill again. {n} {'person' if n == 1 else 'people'} changed.")
+
+    @app.post("/candidates/{candidate_id}/private-tags")
+    async def candidate_private_tag(request: Request, candidate_id: int):
+        """'Make private' on one person's skill: moves it for this person only."""
+        cand_or_404(candidate_id)
+        form = await request.form()
+        tag = str(form.get("tag") or "")
+        try:
+            store.make_private_for(candidate_id, tag, private=str(form.get("to") or "private") != "skill")
+        except ValueError as exc:
+            return back(request, default=f"/candidates/{candidate_id}?edit=1", error=str(exc))
+        word = "skill" if str(form.get("to") or "") == "skill" else "private tag"
+        return back(request, default=f"/candidates/{candidate_id}?edit=1", notice=f"{tag} is now one of their {word}s.")
+
     @app.post("/settings/skill-names/merge")
     async def skill_names_merge(request: Request):
         """'Treat as one': alias and kept are two skill names; saved skills on profiles are not changed. From
@@ -4347,7 +4396,10 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     backup_list=backups.list_backups(), typesense=env_status(), ai_apps=trust.apps(store),
                     new_apps_level=trust.new_apps_level(store), trust_levels=trust.LABELS, trust_explain=trust.EXPLAIN,
                     skill_rows=store.skill_lookalike_groups(30), skill_groups=store.skill_alias_groups(),
-                    skill_hidden=store.hidden_skill_pairs())
+                    skill_hidden=store.hidden_skill_pairs(),
+                    private=private_tags.settings_view(store, request.query_params.get("private_q", ""),
+                                                       int(request.query_params.get("private_page", "1") or 1)
+                                                       if request.query_params.get("private_page", "1").isdigit() else 1))
 
     def _backup_files() -> list[Path]:
         return [f for f in backups_dir().iterdir() if f.is_file() and f.name.endswith(".db")]

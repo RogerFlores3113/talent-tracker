@@ -509,7 +509,7 @@ def writeup(store: Store, candidate_id: int, job_id: int, why_fit: str | None = 
         ("current role", bool(cand.get("current_title") or cand.get("current_company"))),
         ("location", bool(cand.get("location"))),
         ("earlier jobs", bool(hist)),
-        ("skills (the whole tag list, including tags you added yourself)", bool(tags)),
+        ("skills (never your private tags)", bool(tags)),
         ("About", bool(about)),
         (" and ".join(", ".join(contact).rsplit(", ", 1)) if contact else "", bool(contact)),
         ("your newest notes on this job", bool(notes)),

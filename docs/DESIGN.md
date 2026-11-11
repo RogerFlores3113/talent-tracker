@@ -100,6 +100,11 @@ written here automatically. Replaces v1's `activity` (copied over by the migrati
 **suggestions** (AI follow-ups), **snoozes** (Today items hidden until a date),
 **settings** (dashboard toggles and thresholds, pipeline view).
 
+**Private tags** (v14): `candidates.private_tags` (mirrored in `candidate_private_tags`, not in FTS) holds the
+recruiter's own labels, kept apart from skills. They never leave this computer: shares, exports, write-ups,
+reports and every MCP result leave them out (`mcp_guard.strip_private` drops the key). The `private_tag_names`
+setting remembers names so later writes of them (imports, AI apps) land there too.
+
 Dedupe: `save_candidate` merges into an existing row when email or LinkedIn
 matches, and only non-empty incoming fields overwrite. An AI re-saving a sparse
 profile can't blank out what the recruiter filled in.

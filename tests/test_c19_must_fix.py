@@ -212,12 +212,12 @@ def test_log_form_error_is_an_alert_and_keeps_what_was_typed(store):
 
 
 # ------------------------------------------------------------------ F. skills and tags are one list
-def test_share_and_writeup_say_skills_are_the_whole_tag_list(store):
+def test_share_and_writeup_say_private_tags_are_never_included(store):
     job, ana = _contact_world(store)
     store.update_candidate(ana["id"], tags="go, sourced-nov")
     c = local_client(store)
-    assert "your whole tag list" in c.get(f"/candidates/share?ids={ana['id']}").text
-    assert "whole tag list" in c.get(f"/jobs/{job['id']}/submit/{ana['id']}").text
+    assert "never your private tags" in c.get(f"/candidates/share?ids={ana['id']}").text
+    assert "never your private tags" in c.get(f"/jobs/{job['id']}/submit/{ana['id']}").text
 
 
 def test_strip_contact_does_not_swallow_a_year_next_to_a_phone():

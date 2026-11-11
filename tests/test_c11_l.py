@@ -116,6 +116,8 @@ def test_old_database_gets_the_column(tmp_path):
     s.close()
     con = sqlite3.connect(path)
     con.execute("ALTER TABLE candidates DROP COLUMN links")
+    con.execute("DROP TABLE candidate_private_tags")  # v14, after this step, is rewound too
+    con.execute("ALTER TABLE candidates DROP COLUMN private_tags")
     from talent.store import _MIGRATIONS  # the step that added links, wherever later steps have put it
     at = next(i for i, m in enumerate(_MIGRATIONS, start=1) if isinstance(m, str) and "ADD COLUMN links" in m)
     con.execute(f"PRAGMA user_version = {at - 1}")

@@ -28,6 +28,18 @@ _NOTE_WORDS = re.compile(r"not instructions|data, not instruction|never instruct
 _CAUTIOUS_WORDS = re.compile(r"Cautious mode is on|Cautious mode holds")
 
 
+def strip_private(data: Any) -> Any:
+    """The recruiter's private tags never reach an AI app: the key is dropped wherever it sits in a structured result
+    (a candidate, a timeline entry's old and new values, a card)."""
+    if isinstance(data, dict):
+        return {k: strip_private(v) for k, v in data.items() if k != "private_tags"}
+    if isinstance(data, list):
+        return [strip_private(v) for v in data]
+    if isinstance(data, tuple):
+        return tuple(strip_private(v) for v in data)
+    return data
+
+
 def guard(name: str, res: Any, *, read_only: bool, session: str | None) -> tuple[Any, bool]:
     """(the result to hand the AI app, whether flagged text was in it)."""
     if isinstance(res, CallToolResult):
@@ -40,7 +52,7 @@ def guard(name: str, res: Any, *, read_only: bool, session: str | None) -> tuple
         return res, False
     content = [TextContent(type="text", text=injection.clean(c.text), annotations=getattr(c, "annotations", None))
                if isinstance(c, TextContent) else c for c in content]
-    data = injection.clean_deep(data)
+    data = strip_private(injection.clean_deep(data))
     items = injection.scan_result(data) if data is not None else []
     # Only a read tool's text is scanned when it has no structured result: what a write or a refusal says is the
     # app's own words (and the AI's), never another person's.

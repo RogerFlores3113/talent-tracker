@@ -25,7 +25,7 @@ EXPORT_FIELDS = (
 )
 EXPORT_HEADERS = {
     "name": "Name", "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn", "website": "Website",
-    "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills",
+    "current_title": "Title", "current_company": "Company", "location": "Location", "tags": "Skills", "private_tags": "Private tags",
     "about": "About", "source": "Source", "last_contacted_at": "Last contacted", "created_at": "Added",
     "updated_at": "Last updated", "color": "Color", "jobs": "Jobs", "notes": "Notes", "work_history": "Work history",
     "other_emails": "Other emails", "stage_dates": "Stage changed", "links": "Other links",
@@ -55,6 +55,7 @@ _HEADER_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
                          "current employer", "company name")),
     ("location", ("location", "city", "based", "based in", "country", "region", "state", "province", "address",
                   "current location", "geography", "metro area")),
+    ("private_tags", ("private tags", "private tag", "my tags", "my labels", "private labels")),
     ("tags", ("skills", "tags", "keywords", "tech", "stack", "tech stack", "labels", "skill set", "top skills")),
     ("note", ("notes", "note", "comments", "comment", "salary", "salary expectation", "notice", "notice period",
               "feedback", "connected on", "date connected", "years of experience", "years experience",
@@ -116,7 +117,8 @@ TARGET_LABELS = {
     "email": "Email", "phone": "Phone", "linkedin_url": "LinkedIn URL", "website": "Website",
     "current_title": "Current title", "current_company": "Current company", "location": "Location",
     "about": "About", "note": "Note on their timeline", "notes": "Notes, split at | (from an export)",
-    "tags": "Skills", "source": "Source", "last_contacted_at": "Last contacted",
+    "tags": "Skills", "private_tags": "Private tags (stay on this computer)", "source": "Source",
+    "last_contacted_at": "Last contacted",
     "job_title": "Job they're up for", "job_company": "Client (the job's company)", "stage": "Stage in that job",
     "jobs": "Jobs, as exported", "tag_column": "A tag, as Column: value (like Owner: Marcus)",
     "other_emails": "Other emails (kept as more addresses for them)",
@@ -129,7 +131,7 @@ TARGET_LABELS = {
 TARGET_GROUPS = (
     ("Contact", ("name", "first_name", "last_name", "email", "other_emails", "phone", "linkedin_url", "website",
                  "links", "location")),
-    ("Work", ("current_title", "current_company", "about", "tags", "work_history")),
+    ("Work", ("current_title", "current_company", "about", "tags", "private_tags", "work_history")),
     ("Pipeline", ("job_title", "job_company", "stage", "stage_changed_at", "jobs", "stage_dates")),
 )
 
@@ -538,6 +540,8 @@ def _records(header: list[str], rows: Iterable[list[str]], mapping: list[str]) -
                 last = v
             elif target == "tags":
                 data["tags"] = split_tags((data.get("tags") or []) + _clean_skills(split_tags(v), col_name, warnings))  # , ; | (never / as in ci/cd)
+            elif target == "private_tags":  # the recruiter's own labels: kept on this computer (see private_tags.py)
+                data["private_tags"] = split_tags((data.get("private_tags") or []) + split_tags(v))
             elif target == "tag_column":
                 data["tags"] = split_tags((data.get("tags") or []) + [f"{col_name}: {v}"])
             elif target == "color":  # red, orange, yellow, green, blue, purple; anything else is skipped with a note
@@ -749,7 +753,7 @@ def _merge_records(a: dict[str, Any], b: dict[str, Any]) -> None:
         if k == "email" and cur and cur.lower() != v.lower():
             a["other_emails"] = list(dict.fromkeys([*a.get("other_emails", []), v.lower()]))
             continue  # matched by another address: both stay, the first row's is the main one
-        if k == "tags":
+        if k in ("tags", "private_tags"):
             a["data"][k] = split_tags((cur or []) + v)
         elif k == "last_contacted_at":
             a["data"][k] = max(cur or "", v)
@@ -1114,8 +1118,8 @@ def _merge_fields(store: Store, candidate_id: int, data: dict[str, Any]) -> dict
     for k, v in data.items():
         if v in (None, "", []):
             continue
-        if k == "tags":
-            out[k] = split_tags(cur["tags"] + split_tags(v))
+        if k in ("tags", "private_tags"):
+            out[k] = split_tags((cur.get(k) or []) + split_tags(v))
         elif k == "links":  # added to the saved ones, none dropped
             both = merge_links(cur.get("links"), v, exclude=(cur.get("linkedin_url"), cur.get("website")))
             if both != cur.get("links"):
@@ -2456,10 +2460,10 @@ def _stage_dates_text(store: Store, candidate_id: int) -> str:
     return "; ".join(p["stage_changed_at"] or "" for p in store.candidate_pipelines(candidate_id))
 
 
-def export_csv_bytes(store: Store, ids: Iterable[int] | None = None) -> bytes:
+def export_csv_bytes(store: Store, ids: Iterable[int] | None = None, include_private: bool = False) -> bytes:
     """The export as UTF-8 with a byte-order mark, so Excel reads names like Søren and Łukasz right.
     Importing accepts a file with or without the mark (decode). `ids` limits it to those people."""
-    return b"\xef\xbb\xbf" + export_csv(store, ids).encode("utf-8")
+    return b"\xef\xbb\xbf" + export_csv(store, ids, include_private).encode("utf-8")
 
 
 def _notes_text(store: Store, candidate_id: int) -> str:
@@ -2480,12 +2484,15 @@ def _notes_text(store: Store, candidate_id: int) -> str:
     return " | ".join(out)
 
 
-def export_csv(store: Store, ids: Iterable[int] | None = None) -> str:
-    """Everyone as CSV, or only the people with these ids (the ticked rows of the Candidates table)."""
+def export_csv(store: Store, ids: Iterable[int] | None = None, include_private: bool = False) -> str:
+    """Everyone as CSV, or only the people with these ids (the ticked rows of the Candidates table). Private tags
+    are in it only when include_private is set: the full export in Settings is the recruiter's own backup, which
+    stays on this computer. Every file that may be sent on (the table export, shares) leaves them out."""
+    fields = EXPORT_FIELDS[:9] + ("private_tags",) + EXPORT_FIELDS[9:] if include_private else EXPORT_FIELDS
     only = None if ids is None else set(ids)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow([EXPORT_HEADERS[f] for f in EXPORT_FIELDS]
+    w.writerow([EXPORT_HEADERS[f] for f in fields]
                + [EXPORT_HEADERS["other_emails"], EXPORT_HEADERS["jobs"], EXPORT_HEADERS["stage_dates"],
                   EXPORT_HEADERS["notes"], EXPORT_HEADERS["work_history"]])
     others = store.other_emails_by_id()
@@ -2497,8 +2504,8 @@ def export_csv(store: Store, ids: Iterable[int] | None = None) -> str:
             + (f" ({h['start'] or ''}-{h['end'] or 'now'})" if h["start"] or h["end"] else "")
             for h in store.work_history(c["id"])
         )
-        row = [", ".join(c[f]) if f == "tags" else " ".join(c[f]) if f == "links" else (c.get(f) or "")
-               for f in EXPORT_FIELDS]
+        row = [", ".join(c[f]) if f in ("tags", "private_tags") else " ".join(c[f]) if f == "links" else (c.get(f) or "")
+               for f in fields]
         row += [", ".join(others.get(c["id"], [])), _jobs_text(store, c["id"]), _stage_dates_text(store, c["id"]),
                 _notes_text(store, c["id"]), history]
         w.writerow([_safe_cell(v) for v in row])

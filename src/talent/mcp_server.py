@@ -325,7 +325,7 @@ def split_headline(headline: str) -> tuple[str, str | None]:
 
 def _slim(c: dict[str, Any]) -> dict[str, Any]:
     """Drop empty fields so results stay short in the model's context."""
-    return {k: v for k, v in c.items() if v not in (None, "", [])}
+    return {k: v for k, v in c.items() if v not in (None, "", []) and k != "private_tags"}
 
 
 CARDS_PER_CALL = 20
@@ -1518,6 +1518,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     def candidate_view(candidate_id: int) -> dict[str, Any]:
         """One candidate as get_candidate and save_candidate show it (and the in-chat candidate view reads)."""
         c = store.candidate_detail(candidate_id, timeline_limit=15)
+        c.pop("private_tags", None)  # the recruiter's private tags never go to an AI app
         c["pipelines"] = [_slim({"job_id": a["job_id"], "job_title": a["job_title"], "job_company": a.get("job_company"),
                                  "stage": a["stage"], "stage_changed_at": a["stage_changed_at"]}) for a in c["pipelines"]]
         c["timeline"] = [_slim({"kind": t["kind"], "body": t["body"], "at": t["at"], "at_local": _local(t["at"]),
@@ -1747,7 +1748,10 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
         if created and guarded:
             site_guard.record(store)
         changed, kept = cand.pop("_changed", []), cand.pop("_kept", [])
-        status = "Saved" if created else ("Updated: " + _labels(changed) if changed else "Already saved, nothing new")
+        cand.pop("private_tags", None)  # a skill on the recruiter's private list was saved there; it is never named
+        quiet_save = bool(cand.pop("_private_changed", None))
+        status = ("Saved" if created else "Updated: " + _labels(changed) if changed
+                  else "Updated" if quiet_save else "Already saved, nothing new")
         view = candidate_view(cand["id"])
         out: dict[str, Any] = {**view, "created": created, "saved_status": status, "data_note": DATA_NOTE,
                                "candidate": _slim(cand)}
@@ -1893,6 +1897,8 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ValueError(_cap_text())
         cand = store.update_candidate(candidate_id, work_history=history, by="ai", **data)
         changed = cand.pop("_changed", [])
+        cand.pop("private_tags", None)  # a skill that is on the recruiter's private list was saved there; not named
+        cand.pop("_private_changed", None)
         links_skipped: list[str] = []
         if link_list:  # links only ever get added; not a replaced value, so no edit budget is used
             more_links = store.add_links(candidate_id, link_list, by="ai")

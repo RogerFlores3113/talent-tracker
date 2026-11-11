@@ -12,6 +12,7 @@
       <div class="namerow">{{ color_bubble(c, True) }}<h1>{{ c.name }}</h1></div>
       <p class="sub">{% if c.current_title and title_pick(c) %}{{ title_cell(c, hl, {}, add_only=True) }}{{ sub_rest(c) }}{% else %}{{ sub(c) }}{% endif %}</p>
       {{ chips(c.tags, hl=hl, base={}, pos_of=hl_pos, add_only=True) }}
+      {% if c.private_tags %}<p class="fine private-tags" id="private-tags"><strong>Private tags</strong> (only on this computer): {% for t in c.private_tags %}<a class="chip" href="/candidates?tag={{ t | urlencode }}" title="Show everyone with this private tag">{{ t }}</a>{% endfor %}</p>{% endif %}
     </div>
     <a class="btn" href="/candidates/{{ c.id }}?edit=1">Edit</a>
   </div>

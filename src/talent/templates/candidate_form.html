@@ -52,10 +52,16 @@
   {% set links_err = (field_errors or {}).get('links') %}
   <label class="wide">Other links (one per line: GitHub, portfolio, Google Scholar...)<textarea name="links" rows="3" placeholder="https://github.com/their-name" spellcheck="false" autocomplete="off"{% if links_err %} aria-invalid="true" aria-describedby="err-links"{% endif %}>{{ c.links | join('\n') if c.links is iterable and c.links is not string else (c.links or '') }}</textarea>{% if links_err %}<span class="error" id="err-links">{{ links_err }}</span>{% endif %}</label>
   <label class="wide">Skills (comma separated)<input type="text" name="tags" value="{{ c.tags | join(', ') if c.tags is not string else c.tags }}" placeholder="python, sql, leadership"></label>
+  {% if c.id and c.tags and c.tags is not string %}<div class="wide make-private" role="group" aria-label="Move a skill to this person's private tags">
+    <span class="fine">Skills go into shares and exports. Move a label of your own to private tags:</span>
+    {% for t in c.tags %}<button class="btn small" type="submit" form="private-move" name="tag" value="{{ t }}" aria-label="Make {{ t }} private for this person">Make private: {{ t }}</button>{% endfor %}
+  </div>{% endif %}
+  <label class="wide">Private tags (only on this computer, comma separated)<input type="text" name="private_tags" value="{{ c.private_tags | join(', ') if c.private_tags is iterable and c.private_tags is not string else (c.private_tags or '') }}" placeholder="Recruiter: Priya, sourced-nov" aria-describedby="private-tags-help"><span class="fine" id="private-tags-help">Private tags never go into shares, exports, client write-ups or anything sent to an AI app.</span></label>
   <label class="wide">About (search looks here first)<textarea name="about" rows="6">{{ c.about or '' }}</textarea></label>
   <label class="wide">Work history, one role per line: Title | Company | Start | End
     <textarea name="work_history" rows="4" placeholder="Senior Engineer | Stripe | 2021 | now">{{ history_text }}</textarea></label>
   <div class="actions">{% if same_name %}<button class="btn primary" type="submit" name="create_anyway" value="1">Create anyway</button>{% else %}<button class="btn primary" type="submit">Save</button>{% endif %}
     <a class="btn" href="{{ '/candidates/' ~ c.id if c.id else '/' }}">Cancel</a></div>
 </form>
+{% if c.id %}<form id="private-move" method="post" action="/candidates/{{ c.id }}/private-tags"></form>{% endif %}
 {% endblock %}

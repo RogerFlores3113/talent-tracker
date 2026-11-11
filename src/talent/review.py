@@ -236,12 +236,14 @@ def queue_profile(store: Store, candidate_id: int, fields: dict[str, Any], work_
                   keys: list[str], session: str | None) -> dict[str, Any]:
     """Hold the AI app's overwrites of these saved fields (and work history) on one person."""
     row = store._row("SELECT * FROM candidates WHERE id = ?", (candidate_id,)) or {}
-    prepared = store._prepare({k: v for k, v in fields.items() if k in keys and k != "work_history"})
+    prepared = store._prepare({k: v for k, v in fields.items() if k in keys and k != "work_history"}, row)
     payload: dict[str, Any] = {"fields": prepared, "old": {k: row.get(k) for k in prepared}}
     if "work_history" in keys and work_history is not None:
         payload["work_history"] = work_history
         payload["old"]["work_history"] = store.work_history(candidate_id)
-    labels = _labels(list(prepared) + (["work_history"] if "work_history" in payload else []))
+    # private tags are never named to the AI app (this text is what it reads back), so they are left out of the label
+    labels = _labels([k for k in prepared if k != "private_tags"] + (["work_history"] if "work_history" in payload else [])
+                     or ["tags"])
     return _queue(store, "profile", f"Change {quoted(row.get('name'))}'s {labels}", payload,
                   candidate_id=candidate_id, session=session)
 
@@ -587,7 +589,8 @@ def ai_lines(store: Store, candidate_id: int | None = None, job_id: int | None =
     """What waits for review, as the AI app reads it back: "Change "Ana Ruiz"'s title (to 'Staff Engineer')"."""
     out = []
     for r in pending(store, candidate_id=candidate_id, job_id=job_id):
-        bits = [f"{x['label']} to {x['new']!r}" for x in field_lines(r)] if r["kind"] in ("profile", "job_edit") else []
+        bits = ([f"{x['label']} to {x['new']!r}" for x in field_lines(r) if x["label"] != FIELD_LABELS["private_tags"]]
+                if r["kind"] in ("profile", "job_edit") else [])
         if r["kind"] == "note" and r["payload"].get("body"):
             bits.append(_short(r["payload"]["body"], 60))
         out.append(r["summary"] + (f" ({'; '.join(bits)})" if bits else "") + f" (review id {r['id']})")

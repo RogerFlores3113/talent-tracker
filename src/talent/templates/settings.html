@@ -78,6 +78,39 @@
   </form>
 </section>
 
+<section class="panel" id="private-tags">
+  <h2>Private tags</h2>
+  <p class="fine">Private tags stay on this computer. They never go into shares, exports, client write-ups or anything sent to an AI app. Use them for your own labels, like who sourced someone or a do not call mark. Making a tag private moves it out of Skills for everyone who has it, and a tag on this list stays private when it is saved again, from an import or from your AI app.</p>
+  {% set pv_msg = (request.state.flash or {}).get('private_notice') %}
+  <div id="private-result" role="status" tabindex="-1">{% if pv_msg %}<p class="flash private-result">{{ pv_msg }}</p>
+    {% if request.query_params.get('private_undo') %}<form method="post" action="/settings/private-tags/undo" class="inline"><input type="hidden" name="tag" value="{{ request.query_params.get('private_undo') }}"><button class="btn small" type="submit" aria-label="Undo: make {{ request.query_params.get('private_undo') }} a skill again">Undo</button></form>{% endif %}{% endif %}</div>
+  <h3 id="private-suggested-h">These look like your own labels</h3>
+  {% if private.suggested %}<ul class="items private-suggested" aria-labelledby="private-suggested-h">
+  {% for t in private.suggested %}<li><strong>{{ t.tag }}</strong> <span class="fine">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</span>
+    <form method="post" action="/settings/private-tags/make" class="inline"><input type="hidden" name="tag" value="{{ t.tag }}"><button class="btn small" type="submit" aria-label="Make {{ t.tag }} private for {{ t.count }} {{ 'person' if t.count == 1 else 'people' }}">Make private</button></form></li>{% endfor %}
+  </ul>{% if private.suggested_more %}<p class="fine">{{ private.suggested_more }} more look like labels. Find them below.</p>{% endif %}
+  {% else %}<p class="fine">No skill looks like a label right now. Labels often have a colon or an at sign, or words like recruiter, sourced, referral or dnc.</p>{% endif %}
+  <h3 id="private-others-h">Any other tag</h3>
+  <form method="get" action="/settings#private-others-h" class="inline-form" role="search">
+    <label class="inline-label">Find a tag <input type="search" name="private_q" value="{{ private.q }}" autocomplete="off"></label>
+    <button class="btn small" type="submit">Search tags</button>
+  </form>
+  {% if private.others %}<ul class="items private-others" aria-labelledby="private-others-h">
+  {% for t in private.others %}<li><strong>{{ t.tag }}</strong> <span class="fine">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</span>
+    <form method="post" action="/settings/private-tags/make" class="inline"><input type="hidden" name="tag" value="{{ t.tag }}"><button class="btn small" type="submit" aria-label="Make {{ t.tag }} private for {{ t.count }} {{ 'person' if t.count == 1 else 'people' }}">Make private</button></form></li>{% endfor %}
+  </ul>
+  {% if private.pages > 1 %}<p class="fine" role="navigation" aria-label="Tag pages">Page {{ private.page }} of {{ private.pages }} ({{ private.others_total }} tags).
+    {% if private.page > 1 %}<a href="/settings?private_q={{ private.q | urlencode }}&amp;private_page={{ private.page - 1 }}#private-others-h">Previous page</a>{% endif %}
+    {% if private.page < private.pages %}<a href="/settings?private_q={{ private.q | urlencode }}&amp;private_page={{ private.page + 1 }}#private-others-h">Next page</a>{% endif %}</p>{% endif %}
+  {% else %}<p class="fine">{{ 'No tag matches that.' if private.q else 'No other tags.' }}</p>{% endif %}
+  <h3 id="private-mine-h">Your private tags</h3>
+  {% if private.mine %}<ul class="items private-mine" aria-labelledby="private-mine-h">
+  {% for t in private.mine %}<li><strong>{{ t.tag }}</strong> <span class="fine">{{ t.count }} {{ 'person' if t.count == 1 else 'people' }}</span>
+    <form method="post" action="/settings/private-tags/undo" class="inline"><input type="hidden" name="tag" value="{{ t.tag }}"><button class="btn small" type="submit" aria-label="Make {{ t.tag }} a skill again">Make a skill again</button></form></li>{% endfor %}
+  </ul>
+  {% else %}<p class="fine">Nothing is private yet.</p>{% endif %}
+</section>
+
 <section class="panel" id="skill-names">
   <h2>Skill names</h2>
   {% set sk_msg = (request.state.flash or {}).get('skill_notice') %}
