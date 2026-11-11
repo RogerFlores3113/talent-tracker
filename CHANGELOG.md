@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-11
+
 ## [0.1.5] - 2026-11-10
 
 ### Install and connect
