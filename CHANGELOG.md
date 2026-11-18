@@ -4,6 +4,12 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
+### Release
+- Version 0.2.0. Rolls up everything through 0.1.6 (private tags, safer sharing and client write-ups, one-step install and Connect) into the 0.2 line. No new features since 0.1.6.
+- The Mac app bundle now carries the real version number instead of 0.1.0.
+
 ## [0.1.6] - 2026-11-11
 
 ### Private tags
