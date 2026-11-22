@@ -4,53 +4,62 @@ Where the user is (active, mode, step, whether the tour loaded the demo people, 
 ever ended) lives in the settings table, so the tour survives moving between pages and restarting
 the app. The browser draws it from the steps this module renders (static/app.js).
 
-Two modes. "full" runs on first use: it loads the demo people, walks the real pages, then clears
-the demo data. "short" is the replay: the same walk on the user's own pages, and it never loads or
-clears anything.
+Two modes. "full" runs on first use: it offers the demo people, walks the real pages, then leaves the
+user to explore them. The demo people stay until the user presses Clear demo data at the top right of
+every page. "short" is the replay: the same walk on the user's own pages, and it never loads anything.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from .sample_data import _touched_people, load_sample_data, remove_sample_data, sample_ids
-from .store import NotFound, Store, now_iso
+from .sample_data import load_sample_data, sample_ids
+from .store import Store, now_iso
 
 FULL, SHORT = "full", "short"
 MODES = (FULL, SHORT)
 
-# Each step: id, title, body, path, target, modes, and optionally needs, pulse, action.
+# Each step: id, title, body, path, target, modes, and optionally needs, pulse, action, choices.
 #   path: where the step lives. "/x" is a page, "person" and "job" are filled in with a candidate or a
 #   job (the demo ones in the full tour, the user's own in the short one), None means wherever the user is.
 #   target: CSS selectors. The first one found is lit up; none found means the popover sits in the middle.
 #   pulse: a button inside the target to draw the eye to (a disabled one is left alone: the lit panel is the cue).
 #   reach: a second element to leave clickable beside the target (the color bubble in the first row), so the recruiter
 #   can really try it during the tour.
+#   choices: a menu in the popover (the AI app the user has). Each choice has its own target, pulse and line, and
+#   "open" names a <details> to open so its button shows.
 STEPS: list[dict[str, Any]] = [
     {"id": "welcome", "title": "Welcome to Talent Search", "path": None, "target": [], "modes": (FULL,),
      "body": "This is your own candidate list, kept on this computer. Your AI app can do the typing: ask it "
              "in plain words and it saves, searches and updates people here. The tour takes about two minutes."},
     {"id": "today", "title": "Today", "path": "/", "target": ["section.today", "main h1"], "modes": (SHORT,),
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
-    {"id": "claude", "title": "Connect Claude Desktop", "path": "/connect", "target": ["#claude-panel"],
+    {"id": "connect", "title": "Connect your AI app", "path": "/connect", "target": ["#claude-panel"],
      "pulse": "#claude-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "This panel connects Claude Desktop with one click. It adds Talent Search to Claude's "
-             "settings and does nothing else. The tour will not press its button for you. If Claude is not "
-             "connected yet, press Connect Claude now or later, then press Next. Already connected? The panel "
-             "offers Test connection instead. Don't have it? Press Next, you can connect later."},
-    {"id": "codex", "title": "Connect Codex or another app", "path": "/connect", "target": ["#codex-panel"],
-     "pulse": "#codex-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "Using Codex instead? One click here connects it the same way. LM Studio has its own button just below, "
-             "and any other app that runs local tools (Cursor, Windsurf and others) has its own setup steps on the Connect page. "
-             "Don't have it? Press Next, you can connect later."},
-    {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
-     "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "A skill is a short page of instructions that teaches your AI app to work well here. Press Add skills "
-             "to add them. It copies them in right away and tells you where they went. A skill file you edited yourself "
-             "is never overwritten. Don't have one? Press Next, you can add them later."},
+     "body": "Pick the AI app you use. The tour lights up its panel: connect it there, then press Next. Its "
+             "Talent Search skills come with the connection, so there is nothing else to add. The tour never "
+             "presses a button for you. Don't have one yet? Press Next, you can connect later.",
+     "choices": [
+         {"id": "claude", "label": "Claude Desktop", "target": ["#claude-panel"],
+          "pulse": "#claude-panel .btn.primary:not([disabled])",
+          "line": "One click adds Talent Search to Claude's settings. Already connected? The panel offers Test "
+                  "connection instead."},
+         {"id": "claude-code", "label": "Claude Code", "target": ["#claude-code-panel"], "open": "#claude-code-steps",
+          "pulse": "#claude-code-panel [data-copy-from]",
+          "line": "Copy one command into a terminal. It works in every folder you open Claude Code in."},
+         {"id": "codex", "label": "Codex or the ChatGPT desktop app", "target": ["#codex-panel"],
+          "pulse": "#codex-panel .btn.primary:not([disabled])",
+          "line": "One click connects the Codex app, the codex command and the ChatGPT desktop app."},
+         {"id": "lmstudio", "label": "LM Studio (a model on this computer)", "target": ["#lmstudio-panel"],
+          "pulse": "#lmstudio-panel .btn.primary:not([disabled])",
+          "line": "One click connects LM Studio. Pick a model that supports tool use, like Qwen 3 or Llama 3.1."},
+         {"id": "other", "label": "Another app (Cursor, Windsurf, Jan...)", "target": ["#by-hand"],
+          "line": "Copy the settings under Connect by hand into the app's MCP settings."},
+     ]},
     {"id": "load", "title": "Try it with demo people", "path": None, "target": [], "modes": (FULL,),
      "action": "load",
      "body": "Want something to click on? The tour can add 16 made-up people and 2 jobs, all named Example. "
-             "When the tour ends it clears them. Nothing real is touched."},
+             "They stay after the tour so you can click around, until you press Clear demo data at the top right. "
+             "Nothing real is touched."},
     {"id": "search", "title": "Search and filter", "path": "/candidates",
      "target": [".tablebar input[name=q]", "main h1"], "modes": (FULL, SHORT),
      "body": "Type a skill, a company, a title or a name. Try \"rust\" or \"payments\". The menus beside it filter by "
@@ -77,8 +86,9 @@ STEPS: list[dict[str, Any]] = [
      "modes": (FULL,),
      "body": "Today is where you will start each day. Each item has a button to act on it, and you choose what "
              "shows in Settings."},
-    {"id": "finish", "title": "That is the tour", "path": None, "target": [], "modes": (FULL, SHORT),
-     "action": "finish", "body": "You can replay the tour any time from the footer or Settings."},
+    {"id": "finish", "title": "Explore on your own", "path": None, "target": [], "modes": (FULL, SHORT),
+     "action": "finish", "body": "That is the tour. Look around as you like. You can replay it any time from the "
+                                 "footer or Settings."},
 ]
 
 
@@ -116,8 +126,8 @@ def start(store: Store, mode: str = FULL) -> dict[str, Any]:
 
 
 def restart(store: Store, mode: str = FULL) -> dict[str, Any]:
-    """A replay link while a tour is running: go back to its first step. Demo people the tour loaded stay
-    accounted for, so a tour that loaded them keeps its mode (the full tour is the one that clears them)."""
+    """A replay link while a tour is running: go back to its first step. A tour that loaded the demo people
+    keeps its mode, so the steps that walk them stay in."""
     st = state(store)
     if not st["active"]:
         return start(store, mode)
@@ -148,27 +158,6 @@ def _pick_job(store: Store, mode: str) -> int | None:
     return (own or [j["id"] for j in demo] or [None])[0]
 
 
-def demo_searches(store: Store) -> list[dict[str, Any]]:
-    """Saved searches the recruiter made since the tour loaded the demo people: id and name. They match the demo
-    people, so when those are cleared they would open on nothing."""
-    since = store.setting("tour_loaded_at") or ""
-    if not since or not state(store)["loaded"]:
-        return []
-    return [{"id": r["id"], "name": r["name"]} for r in store.list_saved_searches()
-            if r["created_at"] >= since and r.get("created_by") != "ai"]
-
-
-def worked_with(store: Store) -> list[dict[str, Any]]:
-    """Demo people the recruiter has worked with (a note, an edit, a stage move): clearing the demo keeps them."""
-    st = state(store)
-    if not st["loaded"]:
-        return []
-    people, jobs = sample_ids(store)
-    if not people:
-        return []
-    return [{"id": cid, "name": name} for cid, name in sorted(_touched_people(store, people, jobs).items())]
-
-
 def steps_for(store: Store, mode: str, at: int | None = None) -> list[dict[str, Any]]:
     """The steps of this mode, each with its page resolved.
 
@@ -188,7 +177,6 @@ def steps_for(store: Store, mode: str, at: int | None = None) -> list[dict[str, 
     load_at = mode_ids.index("load") if "load" in mode_ids else None
     here = st["step"] if at is None else at
     declined = mode == FULL and load_at is not None and here > load_at and not present and nobody
-    touched = worked_with(store) if mode == FULL and loaded else []
     out = []
     for s in STEPS:
         if mode not in s["modes"]:
@@ -203,27 +191,23 @@ def steps_for(store: Store, mode: str, at: int | None = None) -> list[dict[str, 
                 continue
             path = f"/jobs/{job}" if job else "/jobs"
         step = {"id": s["id"], "title": s["title"], "body": s["body"], "path": path, "target": list(s["target"]),
-                "pulse": s.get("pulse", ""), "reach": s.get("reach", ""), "action": s.get("action", ""), "cta": ""}
+                "pulse": s.get("pulse", ""), "reach": s.get("reach", ""), "action": s.get("action", ""), "cta": "",
+                "choices": [dict(c) for c in s.get("choices", [])]}
         if s["id"] == "colors" and nobody:
             step["body"] = ("Give people a color to sort them your way: each row has a round bubble you click to "
                             "change its color. Add a person and try it.")
             step["reach"] = step["pulse"] = ""
         if s["id"] == "load" and present:
             step["action"] = ""
-            step["body"] = ("The demo people are loaded: made-up people and jobs, all named Example. The tour clears "
-                            "them at the end." if loaded else
-                            "Demo people are already here, because you loaded them yourself. The tour will leave "
-                            "them alone, and you can remove them any time in Settings.")
+            step["body"] = ("The demo people are loaded: made-up people and jobs, all named Example. They stay "
+                            "after the tour until you press Clear demo data at the top right.")
         if s["id"] == "finish":
-            if mode == FULL and loaded:
-                body = ("That is the tour. Clearing the demo data removes the made-up people and jobs, and also any "
-                        "demo person you only gave a color to. A backup is saved first.")
-                if touched:
-                    names = ", ".join(t["name"] for t in touched)
-                    body += (f" You worked with {names}, so the tour keeps them "
-                             "as your own unless you tick the box to delete.")
-                step["body"] = body
-                step["cta"] = "Clear the demo data and start"
+            if present:
+                step["body"] = ("That is the tour. The demo people stay, so click around as you like: open someone, "
+                                "move a card, add a note. When you are done, press Clear demo data at the top right. "
+                                "It removes every made-up person and job, saves a backup first, and never touches "
+                                "your own.")
+                step["cta"] = "Start exploring"
             else:
                 step["cta"] = "Finish the tour" if mode == FULL else "Done"
         out.append(step)
@@ -237,9 +221,7 @@ def payload(store: Store) -> dict[str, Any] | None:
         return None
     steps = steps_for(store, st["mode"])
     people, jobs = sample_ids(store)
-    demo = bool(st["loaded"] and (people or jobs))
-    return {"mode": st["mode"], "step": min(st["step"], len(steps) - 1), "steps": steps, "demo": demo,
-            "extras": {"people": worked_with(store) if demo else [], "searches": demo_searches(store) if demo else []}}
+    return {"mode": st["mode"], "step": min(st["step"], len(steps) - 1), "steps": steps, "demo": bool(people or jobs)}
 
 
 def set_step(store: Store, step: int) -> int | None:
@@ -271,40 +253,9 @@ def load_demo(store: Store) -> int | None:
     return added
 
 
-def end(store: Store, delete_people: set[int] | None = None,
-        delete_searches: set[int] | None = None) -> dict[str, Any] | None:
-    """Finish or skip: clear the demo people the tour loaded (full tour only), then close the tour for good.
-
-    Never clears demo data the tour didn't load, and remove_sample_data keeps anything the user worked with.
-    The recruiter may also ask to delete the demo people they worked with (delete_people) and the saved searches
-    they made during the demo (delete_searches). Only ids the tour itself offered are honoured. The backup that
-    remove_sample_data takes comes first, so a deleted person is in it.
-    Returns remove_sample_data's result plus "deleted_people" and "deleted_searches" (names), or None when
-    nothing was cleared. If the backup before clearing fails this raises ValueError and the tour stays open, so
-    the user can try again.
-    """
-    st = state(store)
-    removed = None
-    if st["active"] and st["mode"] == FULL and st["loaded"]:
-        offered_people = {w["id"]: w["name"] for w in worked_with(store)}
-        offered_searches = {x["id"]: x["name"] for x in demo_searches(store)}
-        removed = remove_sample_data(store)
-        removed["deleted_people"] = []
-        for cid in sorted((delete_people or set()) & set(offered_people)):
-            try:
-                store.delete_candidate(cid)
-                removed["deleted_people"].append(offered_people[cid])
-            except NotFound:
-                pass
-        removed["deleted_searches"] = list(removed.get("deleted_searches") or [])  # made on the demo people
-        for sid in sorted((delete_searches or set()) & set(offered_searches)):
-            try:
-                store.delete_saved_search(sid)
-                removed["deleted_searches"].append(offered_searches[sid])
-            except NotFound:
-                pass
+def end(store: Store) -> None:
+    """Finish or skip: close the tour for good. Demo people stay until the user clears them (Clear demo data)."""
     store.set_settings(tour_active="0", tour_loaded="0", tour_step="0", tour_seen="1", tour_loaded_at="")
-    return removed
 
 
 def reset(store: Store) -> None:

@@ -225,12 +225,14 @@ def _searches_on_sample(store: Store, people: set[int]) -> list[dict[str, Any]]:
             if row.get("created_by") != "ai" and row["created_at"] >= since and store.saved_search_counts(row)[0]]
 
 
-def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
+def remove_sample_data(store: Store, *, backup: bool = True, everything: bool = False) -> dict[str, Any]:
     """Remove the sample people and jobs the recruiter never worked with, after a backup.
 
     A sample person with anything of the recruiter's own (a note or call, an edit, a merge, an
     import, a stage move, a to-do, a place in one of their own jobs) is kept and stops being marked
     Sample, and so is a sample job that was edited or has any real or kept person in its pipeline.
+    everything=True (Clear demo data) keeps none of them: every sample person and job goes, and the
+    recruiter's own people stay, only leaving the sample jobs' pipelines.
     Returns {"people", "jobs"} removed, {"kept_people", "kept_jobs"} names, and "backup" (a path).
     """
     people, jobs = sample_ids(store)
@@ -241,7 +243,7 @@ def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
         return out
     if backup:
         out["backup"] = str(backup_before_import(store, reason="sample removal"))
-    kept = _touched_people(store, people, jobs)
+    kept = {} if everything else _touched_people(store, people, jobs)
     made = _searches_on_sample(store, people)  # saved while the sample people were here, matching someone
     kept_jobs: dict[int, str] = {}
     for jid in jobs:
@@ -250,7 +252,7 @@ def remove_sample_data(store: Store, *, backup: bool = True) -> dict[str, Any]:
         in_pipeline = {a["candidate_id"] for a in store.pipeline(jid)}
         own_todo = store._row("SELECT 1 AS x FROM suggestions WHERE job_id = ? AND coalesce(source, '') <> ?",
                               (jid, SAMPLE_SOURCE))
-        if (in_pipeline - (people - set(kept))) or job["updated_at"] != job["created_at"] or own_todo:
+        if not everything and ((in_pipeline - (people - set(kept))) or job["updated_at"] != job["created_at"] or own_todo):
             kept_jobs[jid] = label
     for cid in people - set(kept):
         try:

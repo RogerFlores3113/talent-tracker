@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from talent import integrations, skills
+from talent import integrations
 
 from conftest import local_client
 
@@ -150,31 +150,23 @@ def test_connect_button_says_it_restarts_claude(store, monkeypatch):
 
 
 # ------------------------------------------------------------------ Add skills
-def test_add_skills_installs_saves_reveals_opens_and_is_idempotent(store, env, monkeypatch):
-    shown, opened = [], []
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: shown.append(path) or True)
-    monkeypatch.setattr(skills, "claude_app_command", lambda *a, **k: ["open", "-a", "Claude"])
-    monkeypatch.setattr(skills, "open_claude_app", lambda: opened.append(1) or True)
+def test_add_skill_files_installs_where_found_and_is_idempotent(store, env):
     c = local_client(store)
     r = c.post("/connect/skills/add")
     assert r.status_code == 200
     assert (env["home"] / ".claude" / "skills" / "talent-search-write-outreach" / "SKILL.md").is_file()
     assert not (env["home"] / ".agents").exists()  # Codex isn't here, so nothing was made for it
-    assert (env["dl"] / "talent-search.plugin").is_file() and len(shown) == 1 and opened == [1]
+    assert not any(env["dl"].iterdir())  # nothing saved to Downloads: there is nothing to upload
     t = r.text
     assert "Claude Code</strong>: added 6 skills to your Claude Code skills folder (~/.claude/skills)" in t
     shown_text = t.split('id="skills-found"', 1)[0]
     assert "Codex" not in shown_text and "not found" not in shown_text  # an app that isn't here is left out
-    assert "Last step in Claude: Customize &gt; Plugins &gt; Add &gt; Upload plugin, then pick talent-search.plugin" in t
-    assert "Show in folder" in t and "Already up to date" not in t and "Done." not in t
+    assert "Already up to date" not in t and "Done." not in t
     again = c.post("/connect/skills/add").text
-    assert "Already up to date" in again and "is already saved in" in again and "is still in" not in again
-    assert "selected in the window" not in again
-    assert len(shown) == 1 and opened == [1]  # a repeat press shows and opens nothing again
+    assert "Already up to date" in again
 
 
-def test_add_skills_keeps_files_the_person_edited(store, env, monkeypatch):
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
+def test_add_skills_keeps_files_the_person_edited(store, env):
     c = local_client(store)
     c.post("/connect/skills/add")
     f = env["home"] / ".claude" / "skills" / "talent-search-write-outreach" / "SKILL.md"
@@ -183,22 +175,15 @@ def test_add_skills_keeps_files_the_person_edited(store, env, monkeypatch):
     assert f.read_text(encoding="utf-8") == "my own words\n"
 
 
-def test_show_in_folder_route(store, env, monkeypatch):
-    shown = []
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: shown.append(path) or True)
-    r = local_client(store).post("/connect/skills/plugin/reveal")
-    assert r.status_code == 200 and "Shown" in r.text and shown and (env["dl"] / "talent-search.plugin").is_file()
-
-
 # ------------------------------------------------------------------ the page
 def test_page_order_connect_then_skills_then_try_asking_then_other_apps(store):
     page = local_client(store).get("/connect").text
-    order = [page.index(x) for x in ('id="step-connect"', 'id="claude-panel"', 'id="step-skills"', 'id="skills-panel"',
+    order = [page.index(x) for x in ('id="step-connect"', 'id="claude-panel"', 'id="skills-panel"',
                                      'id="try-asking"', 'id="other-apps"', 'id="by-hand"')]
     assert order == sorted(order)
     assert "Other apps (Claude Code, Codex, ChatGPT desktop, LM Studio, Cursor...)" in page
     for hook in ("claude-panel", "codex-panel", "claude-code-panel", "lmstudio-panel", "skills-panel",
-                 "install-skills-btn", "claude-plugin", "where-cards-show", "plugin-steps", "by-hand"):
+                 "install-skills-btn", "where-cards-show", "skill-list", "by-hand"):
         assert f'id="{hook}"' in page, hook
     assert page.count('id="claude-panel"') == 1 and page.count('id="codex-panel"') == 1
 

@@ -59,9 +59,9 @@ def test_esc_on_a_menu_does_not_close_the_tour():
     assert m and m.start() < JS.index('if (e.key === "Escape") { e.preventDefault(); if (confirming)')
 
 
-def test_tour_finish_offers_one_box_for_the_saved_searches():
-    # One short line for all of them (they go with the demo people), not a box per search.
-    assert "only find demo people are removed with them" in JS and "Also remove my saved search" not in JS
+def test_saved_searches_made_on_the_demo_go_with_it_without_a_box():
+    # Clear demo data takes the saved searches that only find demo people; nothing to tick, in the tour or out of it.
+    assert "Also remove my saved search" not in JS and "delete_searches" not in JS
 
 
 # ------------------------------------------------------------------ 4. names and zones

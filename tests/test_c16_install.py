@@ -82,7 +82,7 @@ def test_install_sh_installs(tmp_path):
     exe = _installed_exe(target)
     assert exe.is_file() and os.access(exe, os.X_OK)
     assert subprocess.run([str(exe)], capture_output=True, text=True).stdout.strip() == "talent-search fake"
-    assert "Connect Claude" in r.stdout and "Add skills" in r.stdout
+    assert "Connect Claude" in r.stdout and "skills come with the connection" in r.stdout
 
 
 @posix_only
@@ -150,4 +150,4 @@ def test_install_files_have_no_em_dash(name):
 def test_install_md_forbids_security_changes():
     text = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
     assert "Gatekeeper" in text and "SmartScreen" in text
-    assert "Connect Claude" in text and "Add skills" in text
+    assert "Connect Claude" in text and "skills come with the connection" in " ".join(text.split())

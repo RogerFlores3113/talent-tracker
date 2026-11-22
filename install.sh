@@ -208,9 +208,9 @@ fi
 if [ "$UPGRADE" = "1" ] && [ -f "$CLAUDE_CFG" ] && grep -q "talent-search" "$CLAUDE_CFG" 2>/dev/null; then
   say "Already connected. Restart Claude Desktop to use the new version."
 elif [ "$OPEN_APP" = "1" ]; then
-  say "Next: press \"Connect Claude\", then press \"Add skills\"."
+  say "Next: press \"Connect Claude\". Its skills come with the connection."
 else
-  say "Next: open Talent Search, then press \"Connect Claude\" and \"Add skills\"."
+  say "Next: open Talent Search, then press \"Connect Claude\". Its skills come with the connection."
 fi
 if [ "$OS" = "Darwin" ]; then
   say "Connect Claude quits and reopens Claude Desktop (never by force), so save anything you are typing there first."

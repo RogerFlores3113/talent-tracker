@@ -2494,6 +2494,18 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     f"{', and more' if len(empty) > 3 else ''}). Delete what you don't need under Manage saved searches.")
         return msg + " A backup was saved first."
 
+    @app.post("/sample-data/clear")
+    def sample_data_clear(request: Request):
+        """Clear demo data (top right of every page while there is some): every demo person and job, also those the
+        recruiter worked with. A backup comes first and the recruiter's own people are never touched."""
+        try:
+            r = remove_sample_data(store, everything=True)
+        except ValueError as exc:  # the backup failed, so nothing was removed
+            return back(request, error=str(exc))
+        if not (r["people"] or r["jobs"]):
+            return back(request, notice="There was no demo data to clear.")
+        return RedirectResponse("/?" + urlencode({"notice": removal_notice(r, "the demo data")}), status_code=303)
+
     @app.post("/sample-data/remove")
     def sample_data_remove(request: Request):
         try:
@@ -2521,6 +2533,8 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                 elif tour.should_autostart(store):
                     tour.start(store, tour.FULL)
             payload = tour.payload(store)
+            if payload and request.url.path == "/connect":
+                payload["app"] = fit_app()  # the tour's app menu starts on the app this computer has
             if payload and request.url.path == "/connect" and request.query_params.get("tour") not in tour.MODES:
                 if payload["steps"][payload["step"]].get("path") != "/connect":
                     return None  # a tour running elsewhere doesn't cover the install buttons
@@ -2561,29 +2575,17 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             return back(request, error="The demo people are only added by the full tour.")
         return RedirectResponse(tour_start_path(), status_code=303)
 
-    def _id_set(raw: Any) -> set[int]:
-        return {int(x) for x in str(raw or "").split(",") if x.strip().isdigit()}
-
-    async def tour_end(request: Request):
-        mode = tour.state(store)["mode"]
-        form = await request.form()
-        try:
-            removed = tour.end(store, _id_set(form.get("delete_people")), _id_set(form.get("delete_searches")))
-        except ValueError as exc:  # the backup failed, so nothing was removed and the tour stays open
-            return back(request, error=str(exc))
-        if removed and (removed["people"] or removed["jobs"] or removed["kept_people"] or removed["kept_jobs"]):
-            return RedirectResponse("/?" + urlencode({"notice": removal_notice(removed, "the demo data")}), status_code=303)
+    @app.post("/tour/skip")
+    def tour_skip(request: Request):
+        """End the tour now. Demo people stay until Clear demo data; nothing else is touched."""
+        tour.end(store)
         return back(request)  # stay on the page the tour was ended from
 
-    @app.post("/tour/skip")
-    async def tour_skip(request: Request):
-        """End the tour now. Demo people the tour added are cleared; nothing else is touched."""
-        return await tour_end(request)
-
     @app.post("/tour/finish")
-    async def tour_finish(request: Request):
-        """The last step: clear the demo people the tour added and close the tour for good."""
-        return await tour_end(request)
+    def tour_finish(request: Request):
+        """The last step: close the tour and leave the demo people to explore."""
+        tour.end(store)
+        return back(request)
 
     # ------------------------------------------------------------ jobs
     @app.get("/jobs", response_class=HTMLResponse)
@@ -4552,10 +4554,11 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
     # ----------------------------------------------------- AI app setup
-    def _plugin_where() -> str:
-        """Where the plugin file goes: the Downloads folder, or (with none) the folder it really goes to."""
-        folder = skills.downloads_dir()
-        return "your Downloads folder" if folder.name.lower() == "downloads" else f"the folder {folder} (there is no Downloads folder here)"
+    def fit_app(status: dict[str, Any] | None = None) -> str:
+        """The AI app this computer has, for the Connect page's first panel and the tour's app menu."""
+        status = status or integrations.claude_status()
+        return ("claude" if status["installed"] else "codex" if integrations.codex_config_path().parent.is_dir()
+                else "lmstudio" if integrations.lmstudio_config_path().parent.is_dir() else "claude")
 
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
@@ -4579,93 +4582,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             claude_code_command=integrations.claude_code_command(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),
-            desktop_steps=skills.DESKTOP_STEPS[0],
             skills_source=str(skills.source_dir()),
             detected=skills.detected_targets(),
             skill_plan_missing=[{"target": t, "label": skills.TARGET_LABELS[t]} for t in skills.TARGETS
                                 if not skills.detect(t)],
-            plugin_file=skills.PLUGIN_FILE,
-            plugin_saved=(skills.downloads_dir() / skills.PLUGIN_FILE).is_file(),
             skill_info=skills.skill_info(),
-            plugin_steps=skills.PLUGIN_STEPS,
             plugin_commands=skills.CLAUDE_CODE_SLASH_COMMANDS,
-            plugin_where=_plugin_where(),
-            marketplace_repo=skills.REPO,
-            can_open_claude=skills.claude_app_command() is not None,
             restarts=integrations.restart_supported(),
-            fit_app=("claude" if status["installed"] else "codex" if integrations.codex_config_path().parent.is_dir()
-                     else "lmstudio" if integrations.lmstudio_config_path().parent.is_dir() else "claude"),
-            skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
-                        for n in skills.skill_names()],
+            fit_app=fit_app(status),
         )
 
     def _found_ctx() -> dict[str, Any]:
         """What the 'Claude Code: found. No skills yet.' list needs, so an install can refresh it in place."""
         return {"skill_status": [skills.status(t) for t in skills.TARGETS], "detected": skills.detected_targets()}
 
-    @app.get("/connect/skills/{name}.zip")
-    def skill_zip(name: str):
-        """One skill as its own zip, for Claude Desktop's Customize > Skills."""
-        if name not in skills.skill_names():
-            raise HTTPException(404)
-        return Response(skills.build_skill_zip(name), media_type="application/zip",
-                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
-
-    @app.get("/connect/skills.zip")
-    def skills_zip():
-        """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
-        return Response(skills.build_zip(), media_type="application/zip",
-                        headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
-
-    @app.get("/connect/skills.plugin")
-    def skills_plugin():
-        """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
-        return Response(skills.build_plugin(), media_type="application/octet-stream",
-                        headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
-
     @app.post("/connect/skills/add", response_class=HTMLResponse)
     def skills_add(request: Request):
-        """One click: skills into every app found here, the Claude plugin saved and shown, Claude opened."""
+        """The optional one click: the skills as files into Claude Code and Codex where they are found."""
         try:
             r = skills.add_everywhere()
         except Exception as exc:  # never a 500 or a traceback in the window
             integrations.log_failure(exc)
             return page(request, "_skills_add_result.html", error=integrations.friendly_error(exc))
-        return page(request, "_skills_add_result.html", r=r, plugin_where=_plugin_where(),
-                    marketplace_repo=skills.REPO, **_found_ctx())
-
-    @app.post("/connect/skills/plugin/reveal", response_class=HTMLResponse)
-    def skills_plugin_reveal(request: Request):
-        """'Show in folder' for the saved plugin file (saves it first if it isn't there)."""
-        path = skills.downloads_dir() / skills.PLUGIN_FILE
-        try:
-            if not path.is_file():
-                path = skills.write_plugin()
-            shown = skills.reveal(path)
-        except Exception as exc:
-            integrations.log_failure(exc)
-            return HTMLResponse(f'<span class="error" role="alert">{html_escape(integrations.friendly_error(exc))}</span>')
-        return HTMLResponse('<span class="ok" role="status">Shown in your file manager.</span>' if shown else
-                            f'<span class="fine" role="status">The file is in {html_escape(str(path.parent))}.</span>')
-
-    @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
-    def skills_plugin_save(request: Request):
-        """Write talent-search.plugin to Downloads and show it in the file manager (best effort)."""
-        try:
-            path = skills.write_plugin()
-        except Exception as exc:  # never a 500 or a traceback in the window
-            integrations.log_failure(exc)
-            return page(request, "_skills_plugin_result.html", error=integrations.friendly_error(exc))
-        shown = skills.reveal(path)
-        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown,
-                    can_open_claude=skills.claude_app_command() is not None, plugin_file=skills.PLUGIN_FILE)
-
-    @app.post("/connect/skills/claude-app/open", response_class=HTMLResponse)
-    def skills_open_claude(request: Request):
-        """Start the Claude desktop app (best effort)."""
-        ok = skills.open_claude_app()
-        return HTMLResponse('<span class="fine" role="status">' + (
-            "Opening Claude..." if ok else "Couldn't open Claude. Open it yourself.") + "</span>")
+        return page(request, "_skills_add_result.html", r=r, **_found_ctx())
 
     @app.post("/connect/skills/all/{action}", response_class=HTMLResponse)
     async def connect_skills_all(request: Request, action: str):

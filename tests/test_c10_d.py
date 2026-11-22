@@ -217,7 +217,7 @@ def test_connect_page_leads_with_the_plain_question_and_folds_the_jargon(store, 
     _connect_env(tmp_path, monkeypatch)
     page = local_client(store).get("/connect").text
     fold = page.index("Details for technical users")
-    assert page.index("Step 1. Connect your AI app") < page.index('id="claude-panel"') < fold
+    assert page.index("Connect your AI app</h2>") < page.index('id="claude-panel"') < fold
     plain = page[:fold]
     for jargon in ("MCP", "mcpServers", "config.toml", "JSON", "Show full report"):
         assert jargon not in plain, jargon

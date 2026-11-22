@@ -306,6 +306,8 @@ def _args_for(tool, ids):
             base[k] = "x"
         elif k == "name_or_id":
             base[k] = str(ids["saved"])
+        elif k == "name" and tool.name == "get_playbook":
+            base[k] = "write-outreach"
         else:
             pytest.fail(f"read tool {tool.name} needs {k}: teach _args_for / VARIANTS how to call it")
     out = []

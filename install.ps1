@@ -128,9 +128,9 @@ function Install-TalentSearch {
         if ($connected) {
             Write-Host 'Already connected. Restart Claude Desktop to use the new version.'
         } elseif (-not $NoOpen) {
-            Write-Host 'Next: press "Connect Claude", then press "Add skills".'
+            Write-Host 'Next: press "Connect Claude". Its skills come with the connection.'
         } else {
-            Write-Host 'Next: open Talent Search, then press "Connect Claude" and "Add skills".'
+            Write-Host 'Next: open Talent Search, then press "Connect Claude". Its skills come with the connection.'
         }
         Write-Host 'Connect Claude quits and reopens Claude Desktop (never by force), so save anything you are typing there first.'
     }

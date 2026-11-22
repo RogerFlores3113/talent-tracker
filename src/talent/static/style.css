@@ -161,6 +161,7 @@ body.wide main { max-width: 1280px; }
 .top nav a:hover { background: var(--nav-hover); box-shadow: 0 0 0 3px color-mix(in oklab, var(--header-text) 16%, transparent); color: var(--header-text); }
 .top nav a.on { background: var(--nav-on); font-weight: 600; }
 .top :focus-visible { outline-color: var(--header-text); }
+.demo-clear { margin: 0; }
 .foot { text-align: center; color: var(--muted); font-size: var(--fs-sm); line-height: 1.8; padding: var(--space-5) var(--space-5) var(--space-6);
         border-top: 1px solid var(--line); max-width: 940px; margin: 0 auto; }
 
@@ -618,7 +619,9 @@ main:focus { outline: none; }
 .tour-note { margin: 0 0 var(--space-2); color: var(--muted); font-size: var(--fs-sm); }
 .tour-extras { margin: 0 0 var(--space-3); }
 .tour-extras:empty { display: none; }
-.tour-extras .check { margin: 0; padding: var(--space-1) 0; font-size: var(--fs-sm); }
+.tour-choice { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--fs-sm); font-weight: 600; }
+.tour-choice select { width: 100%; font-weight: 400; }
+.tour-choice-line { margin: var(--space-2) 0 0; font-size: var(--fs-sm); color: var(--muted); }
 .tour-note:empty { display: none; }
 .tour-acts { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; justify-content: space-between; }
 .tour-nav { display: flex; flex-wrap: wrap; gap: var(--space-2); }

@@ -5,7 +5,6 @@ import html
 import io
 import json
 import re
-import zipfile
 from pathlib import Path
 
 import anyio
@@ -111,10 +110,10 @@ def test_a_symlinked_skill_folder_is_skipped(home, tmp_path):
 
 def test_panel_leads_with_what_skills_are_and_names_the_real_folder(store, home):
     page = local_client(store).get("/connect").text
-    assert "A skill is a short page of written instructions" in page
+    assert "Skills come with the connection" in page and "short written guides" in page
     assert "talent install-skills" in page and html.escape(str(skills.source_dir())) in page
     assert "skills/INSTALL-SKILLS.md" not in page and "marker file" not in page
-    assert "Download all skills as one .zip" in page and "/connect/skills/talent-search-write-outreach.zip" in page
+    assert ".zip" not in page  # no zips to upload by hand
 
 
 def test_panel_says_how_many_were_left_alone(store, home):
@@ -136,16 +135,6 @@ def test_preview_lists_edited_files_and_moves_focus_to_the_add_button(store, hom
     assert re.search(r'<button class="btn primary" autofocus', r.text)
     r = c.post("/connect/skills/claude-code/preview-remove")
     assert "edited by you, kept" in r.text
-
-
-def test_per_skill_zips(store):
-    c = local_client(store)
-    r = c.get("/connect/skills/talent-search-write-outreach.zip")
-    assert r.status_code == 200
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    assert z.namelist() == ["talent-search-write-outreach/SKILL.md"]
-    assert c.get("/connect/skills/not-a-skill.zip").status_code == 404
-    assert zipfile.is_zipfile(io.BytesIO(c.get("/connect/skills.zip").content))
 
 
 def test_install_doc_has_no_hardcoded_version_and_covers_symlinks_and_no_one_to_ask():
@@ -204,11 +193,11 @@ def test_tour_shows_colors_saved_searches_and_skills(store):
     c = local_client(store)
     data = tour_data(c.get("/"))
     ids = [s["id"] for s in data["steps"]]
-    assert ids.index("claude") < ids.index("skills") < ids.index("load") < ids.index("colors") < ids.index("saved")
-    assert len(ids) == 13 and ids[4] == "load"
+    assert ids.index("connect") < ids.index("load") < ids.index("colors") < ids.index("saved")
+    assert "skills" not in ids and len(ids) == 11 and ids[2] == "load"  # skills come with the connection
     colors = step_of(data, "colors")
     assert colors["target"] == [".colorbar"]
-    assert step_of(data, "skills")["target"] == ["#skills-panel"] and step_of(data, "saved")["path"] == "/candidates"
+    assert "nothing else to add" in step_of(data, "connect")["body"] and step_of(data, "saved")["path"] == "/candidates"
     store.add_candidate(name="Ana Ruiz")  # an empty list hides the color chips
     page = c.get("/candidates").text
     assert 'class="colorbar"' in page and 'class="savedbar"' in page and 'id="skills-panel"' in c.get("/connect").text
@@ -216,10 +205,10 @@ def test_tour_shows_colors_saved_searches_and_skills(store):
 
 def test_connect_steps_say_you_can_connect_later_and_fall_back_when_the_button_is_disabled(store):
     data = tour_data(local_client(store).get("/"))
-    for sid in ("claude", "codex", "skills"):
-        s = step_of(data, sid)
-        assert "Don't have it? Press Next, you can" in s["body"] or "Don't have one? Press Next, you can" in s["body"]
-        assert ":not([disabled])" in s["pulse"]
+    s = step_of(data, "connect")
+    assert "Press Next, you can" in s["body"] and ":not([disabled])" in s["pulse"]
+    for c in step_of(data, "connect")["choices"]:  # a Connect button that can't be pressed isn't pulsed
+        assert not c.get("pulse") or ".btn.primary" not in c["pulse"] or ":not([disabled])" in c["pulse"]
     js = (REPO / "src" / "talent" / "static" / "app.js").read_text(encoding="utf-8")
     assert "pulsed.disabled" in js
 
@@ -235,12 +224,12 @@ def test_the_colors_step_does_not_promise_bubbles_when_nobody_is_saved(store):
 def test_person_and_pipeline_steps_are_skipped_after_not_now(store):
     c = local_client(store)
     c.get("/")
-    c.post("/tour/step", data={"step": "4"})  # on the load question
+    c.post("/tour/step", data={"step": "2"})  # on the load question
     assert "person" in [s["id"] for s in tour_data(c.get("/"))["steps"]]
-    c.post("/tour/step", data={"step": "5"})  # "Not now": the next step, with nothing loaded
+    c.post("/tour/step", data={"step": "3"})  # "Not now": the next step, with nothing loaded
     ids = [s["id"] for s in tour_data(c.get("/candidates"))["steps"]]
     assert "person" not in ids and "pipeline" not in ids and "search" in ids and ids[-1] == "finish"
-    assert tour.state(store)["step"] == 5
+    assert tour.state(store)["step"] == 3
 
 
 def test_welcome_and_today_explain_sample_data_loaded_by_hand(store):
@@ -250,42 +239,30 @@ def test_welcome_and_today_explain_sample_data_loaded_by_hand(store):
     assert "never clears" not in c.get("/").text
 
 
-def test_finish_names_the_demo_person_they_worked_with_and_offers_to_delete_them(store):
+def test_clear_demo_data_also_takes_the_demo_person_they_worked_with(store):
     c = local_client(store)
     start_and_load(c)
     store.log(maya(store), "call", "Real call", source="App")
     data = tour_data(c.get("/"))
-    assert data["extras"]["people"] == [{"id": maya(store), "name": "Maya Example"}]
-    finish = data["steps"][-1]
-    assert "Maya Example" in finish["body"] and "only gave a color to" in finish["body"]
+    assert "extras" not in data  # no "also delete" boxes: the tour itself clears nothing
+    msg = flash_of(c.post("/sample-data/clear", follow_redirects=False))
+    assert "Kept" not in msg and store.count_candidates() == 0
 
 
-def test_finish_can_delete_the_person_too_and_says_so(store):
-    c = local_client(store)
-    start_and_load(c)
-    mid = maya(store)
-    store.log(mid, "call", "Real call", source="App")
-    r = c.post("/tour/finish", data={"delete_people": str(mid)}, follow_redirects=False)
-    msg = flash_of(r)
-    assert "Also deleted Maya Example" in msg and "sample person you worked with" not in msg
-    assert store.count_candidates() == 0
-
-
-def test_finish_without_the_box_keeps_them(store):
+def test_remove_sample_data_in_settings_still_keeps_who_they_worked_with(store):
     c = local_client(store)
     start_and_load(c)
     store.log(maya(store), "call", "Real call", source="App")
-    msg = flash_of(c.post("/tour/finish", follow_redirects=False))
+    msg = flash_of(c.post("/sample-data/remove", follow_redirects=False))
     assert "Kept 1 sample person you worked with (Maya Example)" in msg
     assert [x["name"] for x in store.all_candidates()] == ["Maya Example"]
 
 
-def test_a_recolored_only_demo_person_is_removed_and_the_tour_says_so(store):
+def test_a_recolored_demo_person_is_cleared_too(store):
     c = local_client(store)
     start_and_load(c)
     store.set_color(maya(store), "red")
-    assert tour_data(c.get("/"))["extras"]["people"] == []
-    c.post("/tour/finish", follow_redirects=False)
+    c.post("/sample-data/clear", follow_redirects=False)
     assert store.count_candidates() == 0
 
 
@@ -297,21 +274,13 @@ def test_only_offered_ids_can_be_deleted_by_the_tour(store):
     assert store.get_candidate(mine["id"])["name"] == "Jordan Pierce"
 
 
-def test_saved_searches_made_during_the_demo_are_offered_and_removed(store):
+def test_saved_searches_made_on_the_demo_people_go_with_them(store):
     c = local_client(store)
-    store.save_search("Before the tour", {"q": "zzz-nobody"}, by="app")  # before the demo: not offered
-    c.post("/tour/start", data={"mode": "full"})
-    c.post("/tour/load", follow_redirects=False)
-    store.set_settings(tour_loaded_at="2999-01-01T00:00:00+00:00")  # the demo "loaded" after the first search
-    store.set_settings(tour_loaded_at="1970-01-01T00:00:00+00:00")
-    store._conn.execute("UPDATE saved_searches SET created_at = '1969-01-01T00:00:00+00:00' WHERE name = 'Before the tour'")
-    store._conn.commit()
-    demo = store.save_search("Rust folks", {"q": "rust"}, by="app")
+    start_and_load(c)
+    store.save_search("Rust folks", {"q": "rust"}, by="app")
     store.save_search("From my AI", {"q": "go"}, by="ai")
-    extras = tour_data(c.get("/"))["extras"]
-    assert extras["searches"] == [{"id": demo["id"], "name": "Rust folks"}]
-    msg = flash_of(c.post("/tour/finish", data={"delete_searches": str(demo["id"])}, follow_redirects=False))
-    assert "Also removed the saved search Rust folks" in msg  # (c10 w2: it now goes even without the tick)
+    msg = flash_of(c.post("/sample-data/clear", follow_redirects=False))
+    assert "Also removed the saved search Rust folks" in msg
     names = [x["name"] for x in store.list_saved_searches()]
     assert "Rust folks" not in names and "From my AI" in names
 
@@ -320,7 +289,7 @@ def test_a_search_left_behind_that_now_matches_nobody_is_mentioned(store):
     c = local_client(store)
     start_and_load(c)
     store.save_search("Rust folks", {"q": "rust"}, by="app")
-    msg = flash_of(c.post("/tour/finish", follow_redirects=False))
+    c.post("/sample-data/clear", follow_redirects=False)
     assert "Rust folks" not in [x["name"] for x in store.list_saved_searches()]  # it only found demo people: removed (c10 w2)
     load_sample_data(store)
     store.save_search("Go folks", {"q": "golang"}, by="app")

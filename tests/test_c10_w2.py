@@ -139,13 +139,13 @@ def test_removing_sample_data_removes_only_the_searches_it_made(store):
     assert names == {"Real rust", "Rust both", "Nobody", "AI made"}
 
 
-def test_tour_finish_is_one_line_and_leaves_no_dead_chip(store):
+def test_clear_demo_is_one_line_and_leaves_no_dead_chip(store):
     c = local_client(store)
     c.post("/tour/start", data={"mode": "full"})
     c.post("/tour/load", follow_redirects=False)
     for i, w in enumerate(("rust", "python", "kafka")):
         store.save_search(f"Demo {i}", {"q": w})
-    msg = flash_of(c.post("/tour/finish", follow_redirects=False))
+    msg = flash_of(c.post("/sample-data/clear", follow_redirects=False))
     assert "Also removed 3 saved searches that only matched sample people" in msg
     assert store.list_saved_searches() == []
     js = (__import__("pathlib").Path(__file__).resolve().parents[1] / "src/talent/static/app.js").read_text()
