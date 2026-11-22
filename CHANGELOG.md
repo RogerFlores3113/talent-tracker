@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-21
+
 ### Skills come with the connection
 - Connecting an AI app (Claude Desktop, Claude Code, Codex, LM Studio and others) now gives it the six Talent Search skills as playbooks: it sees the list when it connects, reads the one a request needs, and can offer each as a prompt. Nothing to add, upload or download, and they update with the app. Ask it "What Talent Search playbooks do you have?" to check.
 - The Add skills step and its Claude plugin upload instructions are gone. Copying the skills as files into Claude Code and Codex is an optional extra under Connect AI, and the app brings those files up to date each time it starts (a skill file you edited is kept).
