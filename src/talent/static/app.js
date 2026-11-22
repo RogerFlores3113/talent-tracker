@@ -483,7 +483,6 @@
     const steps = data.steps;
     let idx = Math.max(0, Math.min(data.step || 0, steps.length - 1));
     let target = null, reach = null, pulsed = null, confirming = false, shown = -1;
-    const picks = [];  // the finish step's "also delete" boxes: {input, field, id}
     const calm = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
 
@@ -514,6 +513,17 @@
       const b = el("button", "btn " + (cls || ""), label); b.type = "button"; b.addEventListener("click", fn); return b;
     }
     const here = s => !s.path || s.path === window.location.pathname;
+    // A step with choices (the AI app menu) aims at the picked choice's panel. The pick is kept for this visit.
+    let app = "";
+    try { app = window.sessionStorage.getItem("ts-tour-app") || ""; } catch (e) { /* no storage: use the default */ }
+    function picked(s) {
+      const cs = s.choices || [];
+      return cs.find(c => c.id === app) || cs.find(c => c.id === data.app) || cs[0] || null;
+    }
+    function aim(s) {  // the step as it is drawn: a choice's target, pulse and details to open replace the step's
+      const c = picked(s);
+      return c ? Object.assign({}, s, {target: c.target || s.target, pulse: c.pulse || "", open: c.open || ""}) : s;
+    }
 
     function go(n) {
       n = Math.max(0, Math.min(n, steps.length - 1));
@@ -526,29 +536,8 @@
         else render();
       });
     }
-    // "Skip tour" ends it in one click, unless the tour loaded demo people: then it asks first, because ending clears them.
-    function skip() { if (data.demo) askToEnd(); else postForm("/tour/skip", {}); }
+    function skip() { postForm("/tour/skip", {}); }  // ends it in one click: nothing is cleared
     function askToEnd() { confirming = true; render(); }  // Esc asks first, so a stray key doesn't end it
-    // The finish step and the "End the tour?" question offer to delete the demo people the recruiter worked with and
-    // the saved searches they made during the demo. What they tick is posted with Finish or Skip.
-    function addPicks() {
-      picks.length = 0; extras.textContent = "";
-      if (!data.demo) return;
-      const ex = data.extras || {};
-      const add = (text, field, id) => {
-        const lab = el("label", "check"), inp = el("input"); inp.type = "checkbox";
-        lab.append(inp, el("span", "", text)); extras.appendChild(lab); picks.push({input: inp, field, id});
-      };
-      (ex.people || []).forEach(p => add("Also delete " + p.name + " (you worked with them)", "delete_people", p.id));
-      // Saved searches made on the demo people go with them on their own: one short line, not a box for each.
-      if ((ex.searches || []).length) extras.appendChild(el("p", "fine",
-        "Saved searches you made that only find demo people are removed with them."));
-    }
-    function chosen() {
-      const out = {};
-      picks.forEach(p => { if (p.input.checked) out[p.field] = out[p.field] ? out[p.field] + "," + p.id : String(p.id); });
-      return out;
-    }
 
     // While the popover is open, the page behind it can't be reached (inert), except the lit-up part.
     function clearInert() {
@@ -630,14 +619,15 @@
       if (queued) return;
       queued = true;
       window.requestAnimationFrame(() => {
-        queued = false; target = here(steps[idx]) ? findTarget(steps[idx]) : null;
-        reach = target ? findReach(steps[idx]) : null; place();
+        queued = false; const a = aim(steps[idx]); target = here(a) ? findTarget(a) : null;
+        reach = target ? findReach(a) : null; place();
       });
     }
 
     function render() {
-      const s = steps[idx];
+      const s = aim(steps[idx]);
       if (pulsed) { pulsed.classList.remove("tour-pulse"); pulsed = null; }
+      if (s.open && here(s)) { try { const d = document.querySelector(s.open); if (d) d.open = true; } catch (e) { /* a bad selector just misses */ } }
       target = here(s) ? findTarget(s) : null;
       reach = target ? findReach(s) : null;
       if (target && target.tagName === "DETAILS") target.open = true;
@@ -656,18 +646,30 @@
         if (pulsed && pulsed.disabled) pulsed = null;  // a button that can't be pressed: the lit-up panel is the cue
         if (pulsed) pulsed.classList.add("tour-pulse");
       }
-      acts.textContent = ""; note.textContent = ""; extras.textContent = ""; picks.length = 0;
+      acts.textContent = ""; note.textContent = ""; extras.textContent = "";
       if (confirming) {
         count.textContent = "Before you go"; title.textContent = "End the tour?";
-        body.textContent = data.demo
-          ? "The demo people the tour added will be cleared, and so will anyone you only gave a color to. A backup is saved first. Anyone else you worked with is kept as yours, unless you tick Also delete for them."
-          : "The tour closes. You can start it again any time from Take the tour in the footer or in Settings.";
-        addPicks();
+        body.textContent = "The tour closes. You can start it again any time from Take the tour in the footer or in Settings."
+          + (data.demo ? " The demo people stay until you press Clear demo data at the top right." : "");
         acts.append(btn("Keep going", "primary", () => { confirming = false; render(); }),
-                    btn(data.demo ? "End tour and clear demo data" : "End the tour", "", () => postForm("/tour/skip", chosen())));
+                    btn("End the tour", "", () => postForm("/tour/skip")));
       } else {
         count.textContent = "Step " + (idx + 1);  // no total: skipped steps would change it between pages
         title.textContent = s.title; body.textContent = s.body;
+        const choice = picked(s);
+        if (choice) {  // the AI app menu: picking one lights up that app's panel
+          const lab = el("label", "tour-choice"), sel = el("select");
+          sel.id = "tour-app";
+          lab.append(el("span", "", "Your AI app"), sel);
+          s.choices.forEach(c => { const o = el("option", "", c.label); o.value = c.id; o.selected = c.id === choice.id; sel.appendChild(o); });
+          sel.addEventListener("change", () => {
+            app = sel.value;
+            try { window.sessionStorage.setItem("ts-tour-app", app); } catch (e) { /* no storage: kept until the page changes */ }
+            shown = -1; render();
+            const again = document.getElementById("tour-app"); if (again) again.focus();
+          });
+          extras.append(lab, el("p", "tour-choice-line", choice.line || ""));
+        }
         if (!here(s)) {
           note.textContent = "This step is on another page.";
           acts.append(btn("Go to this page", "small", () => window.location.assign(s.path)));
@@ -675,7 +677,7 @@
         const nav = el("div", "tour-nav");
         if (idx > 0) nav.append(btn("Back", "", () => go(idx - 1)));
         if (s.action === "load") nav.append(btn("Load the demo people", "primary", () => postForm("/tour/load")), btn("Not now", "", () => go(idx + 1)));
-        else if (s.action === "finish") { addPicks(); nav.append(btn(s.cta || "Finish the tour", "primary", () => postForm("/tour/finish", chosen()))); }
+        else if (s.action === "finish") nav.append(btn(s.cta || "Finish the tour", "primary", () => postForm("/tour/finish")));
         else nav.append(btn("Next", "primary", () => go(idx + 1)));
         acts.append(nav);
         acts.append(btn("Skip tour", "ghost small tour-skip", skip));

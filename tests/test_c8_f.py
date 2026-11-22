@@ -41,7 +41,7 @@ def test_fresh_database_starts_the_full_tour_on_any_page(store):
     c = local_client(store)
     data = tour_data(c.get("/"))
     assert data and data["mode"] == "full" and data["step"] == 0 and data["demo"] is False
-    assert [s["id"] for s in data["steps"]][:2] == ["welcome", "claude"]
+    assert [s["id"] for s in data["steps"]][:2] == ["welcome", "connect"]
     assert store.settings()["tour_active"] == "1"
     assert tour_data(c.get("/jobs"))["step"] == 0  # the same tour on another page, not a new one
 
@@ -93,15 +93,15 @@ def test_reset_lets_a_fresh_first_run_start_it_again(store):
 def test_full_tour_loads_the_demo_people_and_moves_on(store):
     c = local_client(store)
     c.get("/")
-    c.post("/tour/step", data={"step": "4"})  # the load step
+    c.post("/tour/step", data={"step": "3"})  # the load step
     steps = tour_data(c.get("/"))["steps"]
-    assert steps[4]["id"] == "load" and steps[4]["action"] == "load"
+    assert steps[3]["id"] == "load" and steps[3]["action"] == "load"
     r = run_load(c)
     assert store.count_candidates() == 16 and sample_ids(store)[1]
-    assert tour.state(store)["loaded"] is True and tour.state(store)["step"] == 5
+    assert tour.state(store)["loaded"] is True and tour.state(store)["step"] == 4
     assert r.headers["location"] == "/candidates"  # the next step lives on the candidates page
     after = tour_data(c.get("/candidates"))
-    assert after["demo"] is True and after["step"] == 5
+    assert after["demo"] is True and after["step"] == 4
     ids = {s["id"]: s["path"] for s in after["steps"]}
     assert re.fullmatch(r"/candidates/\d+", ids["person"]) and re.fullmatch(r"/jobs/\d+", ids["pipeline"])
     assert ids["person"] == f"/candidates/{_maya(store)}"
@@ -119,40 +119,44 @@ def test_loading_twice_does_not_duplicate(store):
     assert store.count_candidates() == 16
 
 
-def test_finish_removes_only_demo_data_and_keeps_what_the_user_worked_with(store):
+def test_finish_keeps_the_demo_people_to_explore(store):
     real = store.add_candidate(name="Jordan Pierce")  # added mid-tour, so the user's own
     c = local_client(store)
     start_full(c)
     run_load(c)
-    maya = _maya(store)
-    store.log(maya, "call", "Real call about the Austin role", source="App")  # the user worked with her
     r = c.post("/tour/finish", follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/"  # the message travels in the flash cookie
-    msg = flash_of(r)
-    assert "Removed the demo data: 15 candidates and 1 job." in msg and "Maya Example" in msg and "Kept" in msg
-    assert "backup" in msg
-    assert names(store) == ["Jordan Pierce", "Maya Example"]
-    assert store.get_candidate(real["id"])["name"] == "Jordan Pierce"
-    assert sample_ids(store) == (set(), set()) and not tour.state(store)["active"]
+    assert r.status_code == 303
+    assert store.count_candidates() == 17 and len(store.list_jobs()) == 2
+    assert sample_ids(store)[0] and store.get_candidate(real["id"])["name"] == "Jordan Pierce"
+    assert not tour.state(store)["active"]
+    assert 'action="/sample-data/clear"' in c.get("/candidates").text  # the corner button to clear them
 
 
-def test_finish_says_nothing_was_kept_when_nothing_was(store):
+def test_clear_demo_data_removes_every_demo_person_and_job(store):
+    store.add_candidate(name="Jordan Pierce")
     c = local_client(store)
     start_full(c)
     run_load(c)
-    msg = flash_of(c.post("/tour/finish", follow_redirects=False))
-    assert "Removed the demo data: 16 candidates and 2 jobs." in msg and "Kept" not in msg
-    assert store.count_candidates() == 0
+    store.log(_maya(store), "call", "Real call about the Austin role", source="App")  # worked with: still demo data
+    c.post("/tour/finish", follow_redirects=False)
+    r = c.post("/sample-data/clear", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    msg = flash_of(r)
+    assert "Removed the demo data: 16 candidates and 2 jobs." in msg and "Kept" not in msg and "backup" in msg
+    assert names(store) == ["Jordan Pierce"] and not store.list_jobs()
+    assert sample_ids(store) == (set(), set())
+    assert 'action="/sample-data/clear"' not in c.get("/candidates").text  # nothing left to clear: no button
+    assert "no demo data" in flash_of(c.post("/sample-data/clear", follow_redirects=False))
 
 
-def test_skip_mid_tour_clears_what_the_tour_loaded(store):
+def test_skip_mid_tour_keeps_what_the_tour_loaded(store):
     c = local_client(store)
     start_full(c)
     run_load(c)
     c.post("/tour/step", data={"step": "8"})
-    assert tour_data(c.get("/"))["demo"] is True  # the page knows to ask "End the tour?" first
+    assert tour_data(c.get("/"))["demo"] is True  # the end question mentions Clear demo data
     c.post("/tour/skip", follow_redirects=False)
-    assert store.count_candidates() == 0 and not store.list_jobs()
+    assert store.count_candidates() == 16 and len(store.list_jobs()) == 2
     assert tour.state(store) == {"active": False, "mode": "full", "step": 0, "loaded": False, "seen": True}
 
 
@@ -168,11 +172,11 @@ def test_skip_before_loading_removes_nothing_and_asks_nothing(store):
 def test_skip_never_removes_sample_data_the_user_loaded_themselves(store):
     local_client(store).post("/sample-data")
     c = local_client(store)
-    assert tour_data(c.get("/"))["demo"] is False  # theirs, not the tour's
+    assert tour_data(c.get("/"))["demo"] is True  # demo people are here, so ending mentions Clear demo data
     run_load(c)  # the tour has nothing to add and takes no credit for what is there
     assert tour.state(store)["loaded"] is False
     step = {s["id"]: s for s in tour_data(c.get("/"))["steps"]}["load"]
-    assert step["action"] == "" and "loaded them yourself" in step["body"]
+    assert step["action"] == "" and "Clear demo data" in step["body"]
     c.post("/tour/skip", follow_redirects=False)
     assert store.count_candidates() == 16 and sample_ids(store)[1]
     # and finishing the tour doesn't clear them either
@@ -189,7 +193,8 @@ def test_finish_step_names_what_it_will_do(store):
     assert last["action"] == "finish" and last["cta"] == "Finish the tour"
     run_load(c)
     last = tour_data(c.get("/"))["steps"][-1]
-    assert last["cta"] == "Clear the demo data and start" and "backup" in last["body"]
+    assert last["title"] == "Explore on your own" and last["cta"] == "Start exploring"
+    assert "Clear demo data at the top right" in last["body"] and "backup" in last["body"]
 
 
 # ---------------------------------------------------------------- the short replay
@@ -228,7 +233,7 @@ def test_short_replay_with_no_data_skips_the_steps_that_need_it(store):
     c.post("/tour/skip", follow_redirects=False)  # the full tour is done
     data = tour_data(c.get("/?tour=short"))
     ids = [s["id"] for s in data["steps"]]
-    assert "person" not in ids and "pipeline" not in ids and "claude" in ids and "interviews" in ids
+    assert "person" not in ids and "pipeline" not in ids and "connect" in ids and "interviews" in ids
     assert store.count_candidates() == 0
 
 
@@ -311,7 +316,7 @@ def test_rendered_step_data_is_valid_json_and_cannot_break_out_of_the_page(store
     c = local_client(store)
     r = c.get("/")
     data = tour_data(r)
-    assert len(data["steps"]) == 13 and all({"id", "title", "body", "path", "target"} <= set(s) for s in data["steps"])
+    assert len(data["steps"]) == 12 and all({"id", "title", "body", "path", "target"} <= set(s) for s in data["steps"])
     raw = re.search(r'data-tour="([^"]*)"', r.text).group(1)  # what is really in the page
     assert "<" not in raw and ">" not in raw and '"' not in raw  # quotes and brackets are escaped
     assert r.text.count('id="tour-data"') == 1 and "<script>" not in r.text

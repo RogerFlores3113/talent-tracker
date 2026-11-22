@@ -25,6 +25,8 @@
       {% for href, label, on in nav_items %}<a href="{{ href }}" class="{{ 'on' if on }}"{{ cur(on) }}>{{ label }}</a>
       {% endfor %}
     </nav>
+    {% set demo_people, demo_jobs = sample_ids() %}{% if demo_people or demo_jobs %}<form method="post" action="/sample-data/clear" class="demo-clear"
+      data-confirm="Clear all demo data? Every made-up person and job goes, also ones you changed. Your own people stay. A backup is saved first."><button class="btn small" type="submit">Clear demo data</button></form>{% endif %}
   </header>{% elif hm_head %}<header class="top hm-head"><p class="brand">{{ hm_head }}</p></header>{% endif %}
   <main id="main" tabindex="-1">
     {% set fq = request.state.flash or {} %}

@@ -390,7 +390,7 @@ def test_plan_loop_says_when_it_skips_an_interviewer_for_working_hours(store):
 # ------------------------------------------------------------------ 14, 18. the tour
 def test_skip_tour_ends_in_one_click_and_never_covers_a_field():
     js = (STATIC / "app.js").read_text()
-    assert 'else postForm("/tour/skip", {}); }' in js and "function skip()" in js
+    assert 'function skip() { postForm("/tour/skip", {}); }' in js
     assert "clearInert(); root.remove();" in js and "ts-tour-ended" in js
     assert "never start over a box that has focus" in js and "focusin" in js and "focusout" in js
     assert 'main h1' in js  # after the tour ends, focus goes to the page's h1

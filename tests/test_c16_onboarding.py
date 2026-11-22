@@ -88,8 +88,9 @@ def test_bulk_bar_folds_until_someone_is_ticked(store):
 
 def test_tour_text_uses_the_connect_page_button_names():
     body = {s["id"]: s["body"] for s in tour.STEPS}
-    assert "Connect Claude" in body["claude"] and "Add skills" in body["skills"]
-    assert "technical" not in body["codex"]
+    assert "Add skills" in body["skills"]
+    lines = " ".join(c["line"] for c in {s["id"]: s for s in tour.STEPS}["connect"]["choices"])
+    assert "Test connection" in lines and "technical" not in lines
 
 
 def test_import_result_has_no_command_line_hint(store):

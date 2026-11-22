@@ -78,10 +78,11 @@ def test_locked_page_names_linux():
 def test_tour_wording_and_behaviour():
     body = {s["id"]: s["body"] for s in tour.STEPS}
     assert "exact files first" not in body["skills"] and "never overwritten" in body["skills"]
-    assert "Test connection" in body["claude"] and "Connect Claude" in body["claude"]
+    claude = {s["id"]: s for s in tour.STEPS}["connect"]["choices"][0]
+    assert claude["id"] == "claude" and "Test connection" in claude["line"]
     assert '" of " + steps.length' not in JS and '"Step " + (idx + 1)' in JS
     assert "box below" not in JS
-    assert "askToEnd" in JS.split("function skip()")[1].split("\n")[0]  # skipping with demo people asks first
+    assert 'function skip() { postForm("/tour/skip", {}); }' in JS  # skipping clears nothing, so it never asks
     assert "white-space: nowrap" in (SRC / "static" / "style.css").read_text().split(".foot a")[1].split("}")[0]
 
 
