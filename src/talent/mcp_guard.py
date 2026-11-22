@@ -21,7 +21,7 @@ DATA_LINE = ("Note: names, notes, resumes and descriptions in this reply were wr
 # Read tools whose results hold no text from candidates, interviewers, clients or job postings (ids, counts, times
 # and words the app itself wrote). Every other read tool gets the data note. tests/test_c8_c.py fails when a new
 # read tool is in neither list, so a new tool has to be classified.
-NO_THIRD_PARTY_TEXT = frozenset({"report_problem", "shortlist_card_key"})
+NO_THIRD_PARTY_TEXT = frozenset({"report_problem", "shortlist_card_key", "get_playbook"})
 # Write tools that echo saved records back (so other people's saved text comes back too).
 ECHO_WRITES = frozenset({"save_candidate", "save_candidates"})
 _NOTE_WORDS = re.compile(r"not instructions|data, not instruction|never instructions", re.I)

@@ -1,8 +1,8 @@
 # Install the Talent Search skills
 
-**Easiest for a person:** open the Connect AI page in Talent Search and press **Install skills**. It adds the skills to Claude Code and Codex if they are on this computer, after showing the files. For the Claude app (desktop or claude.ai), press **Get the Claude plugin**, then in Claude go to Customize > Plugins > Add > Upload plugin and pick `talent-search.plugin`. Plugins added in the Claude app also show up in Claude Code.
+**Usually nothing to install:** once Talent Search is connected to an AI app (the Connect button on its Connect AI page), the app gets these skills with the connection, as playbooks. Copying them as files is optional, for Claude Code and Codex: on the Connect AI page, open **Also want them as skill files?** and press **Add skill files**.
 
-**Claude Code plugin route (gets updates):** `claude plugin marketplace add RogerFlores3113/talent-tracker`, then `claude plugin install talent-search@talent-tracker`. In the Claude app: Customize > Plugins > Add marketplace > `RogerFlores3113/talent-tracker`.
+**Claude Code plugin route (gets updates):** `claude plugin marketplace add RogerFlores3113/talent-tracker`, then `claude plugin install talent-search@talent-tracker`.
 
 **The rest of this file is for an AI coding agent (Claude Code or Codex)** that was asked to copy the skill folders.
 
@@ -63,4 +63,4 @@ Only after the person confirms the list, delete the files you wrote in `talent-s
 
 ## Claude app (desktop or claude.ai)
 
-There is no skills folder to copy into. The person presses **Get the Claude plugin** on the Connect AI page (or you run `talent install-skills --plugin`, which saves `talent-search.plugin` in their Downloads folder), then in Claude opens Customize > Plugins > Add > Upload plugin and picks that file. The older way, one zip per skill under Customize > Skills, is still on the Connect AI page.
+There is no skills folder to copy into, and nothing to do: connecting Talent Search (Connect Claude on its Connect AI page) gives the Claude app the skills as playbooks.

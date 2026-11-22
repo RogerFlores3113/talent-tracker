@@ -1,7 +1,6 @@
 """Talent Search skills for Claude Code, Codex and Claude Desktop."""
 from __future__ import annotations
 
-import io
 import re
 import zipfile
 from pathlib import Path
@@ -144,18 +143,6 @@ def test_remove_keeps_users_extra_files(home):
     assert res["kept"] and (d / "my-notes.md").exists() and not (d / "SKILL.md").exists()
 
 
-def test_zip_layout():
-    z = zipfile.ZipFile(io.BytesIO(skills.build_zip()))
-    names = z.namelist()
-    assert "READ-ME.txt" in names
-    inners = [n for n in names if n.endswith(".zip")]
-    assert sorted(inners) == sorted(f"{n}.zip" for n in skills.skill_names())
-    for n in inners:
-        inner = zipfile.ZipFile(io.BytesIO(z.read(n)))
-        stem = n[:-4]
-        assert inner.namelist() == [f"{stem}/SKILL.md"]
-
-
 def test_cli_install_and_zip(home, tmp_path, capsys):
     from talent.cli import main
     main(["install-skills", "--codex", "--yes", "--zip", str(tmp_path / "s.zip")])
@@ -169,7 +156,6 @@ def test_connect_page_and_routes(store, home):
     c = local_client(store)
     page = c.get("/connect").text
     assert "Add Talent Search skills for Claude Code" in page and "Add Talent Search skills for Codex" in page
-    assert "/connect/skills.zip" in page
     # preview lists the exact paths and writes nothing
     r = c.post("/connect/skills/claude-code/preview-install")
     assert r.status_code == 200
@@ -185,8 +171,7 @@ def test_connect_page_and_routes(store, home):
     assert not any((home / ".claude" / "skills").iterdir())
     assert c.post("/connect/skills/nope/install").status_code == 404
     assert c.post("/connect/skills/codex/bogus").status_code == 404
-    z = c.get("/connect/skills.zip")
-    assert z.status_code == 200 and zipfile.is_zipfile(io.BytesIO(z.content))
+    assert c.get("/connect/skills.zip").status_code in (404, 405)  # no zips to upload by hand
 
 
 def test_routes_are_origin_checked(store, home):

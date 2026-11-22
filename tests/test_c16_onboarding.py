@@ -88,7 +88,7 @@ def test_bulk_bar_folds_until_someone_is_ticked(store):
 
 def test_tour_text_uses_the_connect_page_button_names():
     body = {s["id"]: s["body"] for s in tour.STEPS}
-    assert "Add skills" in body["skills"]
+    assert "skills" not in body  # they come with the connection: no step of their own
     lines = " ".join(c["line"] for c in {s["id"]: s for s in tour.STEPS}["connect"]["choices"])
     assert "Test connection" in lines and "technical" not in lines
 

@@ -34,9 +34,8 @@
 <section class="welcome panel">
   <div class="sec-head">
     <h2>Add your first real candidate</h2>
-    {% if has_sample %}<form method="post" action="/sample-data/remove" data-confirm="Remove the sample candidates and jobs you haven't worked with? A backup is saved first, and anything you added or changed is kept."><button class="btn small" type="submit">Remove sample data</button></form>{% endif %}
   </div>
-  {% if has_sample %}<p class="fine">You're looking at made-up sample data, marked Sample. Remove it when you're ready.</p>{% endif %}
+  {% if has_sample %}<p class="fine">You're looking at made-up demo data, marked Sample. Click around as you like, then press Clear demo data at the top right.</p>{% endif %}
   {{ start_options(False) }}
 </section>
 {% endif %}

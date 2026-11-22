@@ -1,14 +1,18 @@
-"""Add skills, honest and as close to one click as Claude allows (panel 18 notes)."""
+"""Skills come with the connection: the MCP server serves them as playbooks, so there is nothing to add or upload.
+Skill files for Claude Code and Codex are an optional extra that the app keeps up to date (cycle 19)."""
 from __future__ import annotations
 
-import re
-import subprocess
+from pathlib import Path
 
+import anyio
 import pytest
 
 from talent import skills
+from talent.mcp_server import build_server
 
 from conftest import local_client
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -19,8 +23,6 @@ def env(tmp_path, monkeypatch):
     dl = tmp_path / "Downloads"
     dl.mkdir()
     monkeypatch.setenv("TALENT_DOWNLOADS_DIR", str(dl))
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
-    monkeypatch.setattr(skills, "claude_app_command", lambda *a, **k: None)
     return {"home": home, "dl": dl}
 
 
@@ -29,79 +31,78 @@ def _add(store):
     return local_client(store).post("/connect/skills/add").text.split('<ul class="plain" id="skills-found"', 1)[0]
 
 
-def test_no_app_found_hides_not_found_and_never_says_done(store):
+def test_every_skill_is_a_playbook_with_its_when_to_use_line():
+    books = skills.playbooks()
+    assert [b["name"] for b in books] == [n.removeprefix(skills.PREFIX) for n in skills.skill_names()]
+    assert len(books) == 6 and all(b["description"] and b["title"] and b["body"].startswith("# ") for b in books)
+    assert all("---" not in b["body"].split("\n", 1)[0] for b in books)  # the frontmatter is not in the text
+
+
+def test_the_connection_lists_the_playbooks_and_serves_each_one(store):
+    server = build_server(store)
+    assert "call get_playbook" in server.instructions
+    assert all(f"  - {b['name']}: " in server.instructions for b in skills.playbooks())
+    tools = {t.name: t for t in anyio.run(server.list_tools)}
+    assert "write-outreach" in tools["get_playbook"].description and tools["get_playbook"].annotations.readOnlyHint
+    r = anyio.run(server.call_tool, "get_playbook", {"name": "talent-search-write-outreach"})
+    assert r.content[0].text.startswith("# Write outreach")
+    prompts = {p.name for p in anyio.run(server.list_prompts)}
+    assert {"write_outreach", "schedule_interviews"} <= prompts
+
+
+def test_an_unknown_playbook_names_the_real_ones(store):
+    server = build_server(store)
+    with pytest.raises(Exception) as err:
+        anyio.run(server.call_tool, "get_playbook", {"name": "make-coffee"})
+    assert "pipeline-review" in str(err.value)
+
+
+def test_no_app_found_says_the_connected_app_already_has_them(store):
     t = _add(store)
-    assert "not found" not in t and "Claude Code</strong>" not in t and "Codex</strong>" not in t
-    assert "Done." not in t
-    assert "Saved <code>talent-search.plugin</code> to your Downloads folder" in t
-    assert "Last step in Claude: Customize &gt; Plugins &gt; Add &gt; Upload plugin, then pick talent-search.plugin" in t
+    assert "nowhere to add skill files" in t and "already has the skills" in t
+    assert "plugin" not in t.lower() and "Done." not in t
 
 
-def test_only_found_apps_are_listed_and_pending_step_stays(store, env):
+def test_only_found_apps_are_listed(store, env):
     (env["home"] / ".claude").mkdir()
     t = _add(store)
     assert "Claude Code</strong>: added 6 skills" in t and "Codex" not in t
-    assert "Done." not in t and "Last step in Claude" in t
+    assert "Already up to date." in _add(store)
 
 
-def test_first_run_is_saved_not_still_and_repeat_is_already_saved(store):
-    c = local_client(store)
-    first = c.post("/connect/skills/add").text
-    assert "is still in" not in first and "is already saved in" not in first
-    again = c.post("/connect/skills/add").text
-    assert "is already saved in your Downloads folder" in again and "is still in" not in again
-    assert "Done." not in again and "Upload plugin" in again  # we can't know it was uploaded
+def test_starting_the_app_brings_installed_skill_files_up_to_date(env):
+    (env["home"] / ".claude").mkdir()
+    skills.install("claude-code")
+    base = skills.target_dir("claude-code")
+    missing = base / "talent-search-write-outreach"
+    for f in missing.iterdir():  # an older version had one skill fewer
+        f.unlink()
+    missing.rmdir()
+    edited = base / "talent-search-pipeline-review" / "SKILL.md"
+    edited.write_text("my own version\n", encoding="utf-8")
+    assert skills.refresh_installed() == ["Claude Code"]
+    assert (missing / "SKILL.md").is_file() and edited.read_text(encoding="utf-8") == "my own version\n"
+    assert skills.refresh_installed() == []  # nothing left to do
+    assert not skills.target_dir("codex").exists()  # an app it never installed into is left alone
 
 
-def test_the_click_saves_reveals_opens_and_offers_the_path(store, env, monkeypatch):
-    shown, opened = [], []
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: shown.append(path) or True)
-    monkeypatch.setattr(skills, "claude_app_command", lambda *a, **k: ["open", "-a", "Claude"])
-    monkeypatch.setattr(skills, "open_claude_app", lambda: opened.append(1) or True)
-    t = _add(store)
-    assert shown == [env["dl"] / "talent-search.plugin"] and opened == [1]
-    assert "Claude is opening" in t and "Open Claude" in t
-    assert f'data-copy-text="{env["dl"] / "talent-search.plugin"}"' in t and "Copy file path" in t
-
-
-def test_open_claude_never_kills_anything(monkeypatch):
-    calls = []
-    monkeypatch.setattr(skills, "claude_app_command", lambda *a, **k: ["open", "-a", "Claude"])
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: calls.append(cmd))
-    assert skills.open_claude_app() and calls == [["open", "-a", "Claude"]]
-
-
-def test_page_says_it_honestly_with_visible_steps_and_marketplace(store):
+def test_no_page_or_script_tells_people_to_upload_a_plugin(store):
     page = local_client(store).get("/connect").text
-    assert "Two steps, one click each" not in page
-    assert "one click here, then one upload in Claude" in page
-    folded = page.split('id="skills-other-ways"', 1)[1]
-    assert page.index('id="plugin-steps"') < page.index('id="skills-other-ways"')
-    assert 'id="plugin-steps"' not in folded
-    steps = page.split('id="plugin-steps"', 1)[1].split("</ol>", 1)[0]
-    assert "Customize, then Plugins" in steps and "Add, then Upload plugin" in steps and "Pick talent-search.plugin" in steps
-    assert "Or add the marketplace (gets updates)" in page
-    pre = re.search(r'<pre class="code wrap" id="marketplace-text">([^<]*)</pre>', page)
-    assert pre and pre.group(1) == "RogerFlores3113/talent-tracker"
-    assert 'data-copy-from="marketplace-text"' in page
-
-
-def test_results_are_announced_once(store):
-    c = local_client(store)
-    page = c.get("/connect").text
-    assert 'aria-live="polite"' not in page.split('id="step-skills"', 1)[1].split('id="try-asking"', 1)[0]
-    for t in (_add(store), c.post("/connect/skills/plugin/save").text):
-        assert 'aria-live' not in t
-    assert t.count('role="status"') == 1
-    assert 'role="status"' in c.post("/connect/skills/plugin/reveal").text
+    assert "Upload plugin" not in page and "Customize" not in page and "Add marketplace" not in page
+    assert "Skills come with the connection" in page and "nothing to add or upload" in page
+    for name in ("install.sh", "install.ps1", "INSTALL.md", "README.md", "skills/INSTALL-SKILLS.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "Upload plugin" not in text and "Add skills" not in text, name
 
 
 def test_installer_closing_text_mentions_the_restart():
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    assert "quits and reopens Claude Desktop" in (root / "install.sh").read_text(encoding="utf-8")
-    assert "quits and reopens Claude Desktop" in (root / "install.ps1").read_text(encoding="utf-8")
-    assert "quits and reopens Claude Desktop" in (root / "INSTALL.md").read_text(encoding="utf-8")
+    for name in ("install.sh", "install.ps1", "INSTALL.md"):
+        assert "quits and reopens Claude Desktop" in (ROOT / name).read_text(encoding="utf-8"), name
+
+
+def test_results_are_announced_once(store):
+    t = _add(store)
+    assert "aria-live" not in t and t.count('role="status"') == 1
 
 
 def test_no_dashes_in_new_text(store):

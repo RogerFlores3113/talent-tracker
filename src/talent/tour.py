@@ -35,8 +35,9 @@ STEPS: list[dict[str, Any]] = [
      "body": "Today lists what needs you: interviews coming up, people stuck in a stage and follow-ups that are due."},
     {"id": "connect", "title": "Connect your AI app", "path": "/connect", "target": ["#claude-panel"],
      "pulse": "#claude-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "Pick the AI app you use. The tour lights up its panel: connect it there, then press Next. The tour "
-             "never presses a button for you. Don't have one yet? Press Next, you can connect later.",
+     "body": "Pick the AI app you use. The tour lights up its panel: connect it there, then press Next. Its "
+             "Talent Search skills come with the connection, so there is nothing else to add. The tour never "
+             "presses a button for you. Don't have one yet? Press Next, you can connect later.",
      "choices": [
          {"id": "claude", "label": "Claude Desktop", "target": ["#claude-panel"],
           "pulse": "#claude-panel .btn.primary:not([disabled])",
@@ -54,11 +55,6 @@ STEPS: list[dict[str, Any]] = [
          {"id": "other", "label": "Another app (Cursor, Windsurf, Jan...)", "target": ["#by-hand"],
           "line": "Copy the settings under Connect by hand into the app's MCP settings."},
      ]},
-    {"id": "skills", "title": "Skills for your AI app", "path": "/connect", "target": ["#skills-panel"],
-     "pulse": "#skills-panel .btn.primary:not([disabled])", "modes": (FULL, SHORT),
-     "body": "A skill is a short page of instructions that teaches your AI app to work well here. Press Add skills "
-             "to add them. It copies them in right away and tells you where they went. A skill file you edited yourself "
-             "is never overwritten. Don't have one? Press Next, you can add them later."},
     {"id": "load", "title": "Try it with demo people", "path": None, "target": [], "modes": (FULL,),
      "action": "load",
      "body": "Want something to click on? The tour can add 16 made-up people and 2 jobs, all named Example. "

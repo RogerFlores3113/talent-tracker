@@ -34,7 +34,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 from . import __version__, actions, recipes, review, shortlist, reports
 from . import chase, compare, desk, duplicates, opsreview
 from . import ai_caps, site_guard, decide, interviews, loops, offers, sessions, trust
-from . import injection, mcp_guard, outreach, plan, wording, xlsx_export
+from . import injection, mcp_guard, outreach, plan, skills, wording, xlsx_export
 from .store import INTERVIEW_OUTCOME_CHOICES, interview_label, interview_note
 from .store import AI_SESSION, AI_SOURCE, CHANGE_KIND, as_local, saved_theme, stage_outcome
 from .mcp_views import LEGACY_TEMPLATE, MIME, RESOURCE_META, legacy_name, tool_meta, versioned_uris, view_html
@@ -109,6 +109,16 @@ except what you read.
 - If a tool fails or the app misbehaves, tell the recruiter, and if they have a GitHub account offer them the
   link from report_problem (it opens a prefilled issue they review; never include candidate details).
 """
+
+def playbook_lines() -> str:
+    """The skills, as playbooks every connected app gets with the connection (nothing to add or upload)."""
+    books = skills.playbooks()
+    if not books:
+        return ""
+    return ("- Playbooks: step-by-step guides for the recruiter's common jobs. When a request matches one, call "
+            "get_playbook with its name first and follow it:\n"
+            + "".join(f"  - {b['name']}: {b['description']}\n" for b in books))
+
 
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -1144,7 +1154,7 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
     search = search or SearchService(store, TypesenseIndex.from_env())
     # The site-guard line is added only while the switch is on (read when the server starts; save and propose
     # replies carry it too, so a session that began before the switch learns it).
-    mcp = FastMCP("talent-search", instructions=INSTRUCTIONS + (
+    mcp = FastMCP("talent-search", instructions=INSTRUCTIONS + playbook_lines() + (
         "- " + site_guard.instruction_line() + "\n" if site_guard.enabled(store) else ""))
     session = review.new_session()  # one AI session: this server's lifetime, for Keep all / Pass all on Review
     started = now_iso()  # and for its ledger and Roll back (sessions.py)
@@ -1419,6 +1429,25 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
                   + (f". Last opened in the app {_local(i['last_opened'])}" if i.get("last_opened") else ". Not opened in the app yet")
                   + f". Open it: {i['app_url']}" for i in items]
         return _result("\n".join(lines), {"saved_searches": items, "app_url": app_url("/candidates")})
+
+    # ---------------------------------------------------------- playbooks (the skills, served with the connection)
+    books = {b["name"]: b for b in skills.playbooks()}
+
+    @mcp.tool(annotations=READ, description=(
+        "Read a Talent Search playbook: the step-by-step guide for one of the recruiter's common jobs. Call it "
+        "first when a request matches one, then follow it. Playbooks: "
+        + "; ".join(f"{b['name']} ({b['description']})" for b in books.values())))
+    def get_playbook(name: str) -> CallToolResult:
+        key = str(name or "").strip().lower().removeprefix(skills.PREFIX)
+        book = books.get(key)
+        if not book:
+            raise ToolError(f"No playbook named {quoted(str(name))}. Playbooks: {', '.join(books)}.")
+        return _result(book["body"], {"name": key, "title": book["title"], "description": book["description"]})
+
+    for book in books.values():  # also offered as prompts, which chat apps list in their prompt menu
+        def make_prompt(b: dict[str, str] = book):
+            return lambda: b["body"]
+        mcp.prompt(name=book["name"].replace("-", "_"), title=f"Talent Search: {book['title']}", description=book["description"])(make_prompt())
 
     @mcp.tool(annotations=READ)
     def list_skill_lookalikes(limit: int = 20) -> CallToolResult:

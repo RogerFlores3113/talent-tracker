@@ -93,15 +93,15 @@ def test_reset_lets_a_fresh_first_run_start_it_again(store):
 def test_full_tour_loads_the_demo_people_and_moves_on(store):
     c = local_client(store)
     c.get("/")
-    c.post("/tour/step", data={"step": "3"})  # the load step
+    c.post("/tour/step", data={"step": "2"})  # the load step
     steps = tour_data(c.get("/"))["steps"]
-    assert steps[3]["id"] == "load" and steps[3]["action"] == "load"
+    assert steps[2]["id"] == "load" and steps[2]["action"] == "load"
     r = run_load(c)
     assert store.count_candidates() == 16 and sample_ids(store)[1]
-    assert tour.state(store)["loaded"] is True and tour.state(store)["step"] == 4
+    assert tour.state(store)["loaded"] is True and tour.state(store)["step"] == 3
     assert r.headers["location"] == "/candidates"  # the next step lives on the candidates page
     after = tour_data(c.get("/candidates"))
-    assert after["demo"] is True and after["step"] == 4
+    assert after["demo"] is True and after["step"] == 3
     ids = {s["id"]: s["path"] for s in after["steps"]}
     assert re.fullmatch(r"/candidates/\d+", ids["person"]) and re.fullmatch(r"/jobs/\d+", ids["pipeline"])
     assert ids["person"] == f"/candidates/{_maya(store)}"
@@ -316,7 +316,7 @@ def test_rendered_step_data_is_valid_json_and_cannot_break_out_of_the_page(store
     c = local_client(store)
     r = c.get("/")
     data = tour_data(r)
-    assert len(data["steps"]) == 12 and all({"id", "title", "body", "path", "target"} <= set(s) for s in data["steps"])
+    assert len(data["steps"]) == 11 and all({"id", "title", "body", "path", "target"} <= set(s) for s in data["steps"])
     raw = re.search(r'data-tour="([^"]*)"', r.text).group(1)  # what is really in the page
     assert "<" not in raw and ">" not in raw and '"' not in raw  # quotes and brackets are escaped
     assert r.text.count('id="tour-data"') == 1 and "<script>" not in r.text

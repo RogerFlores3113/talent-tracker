@@ -142,7 +142,7 @@ def test_welcome_stays_until_a_real_candidate_and_search_hidden_when_empty(store
     assert "Welcome to Talent Search" in empty and 'role="search"' not in empty
     load_sample_data(store)
     with_sample = c.get("/").text
-    assert "Add your first real candidate" in with_sample and "Remove sample data" in with_sample
+    assert "Add your first real candidate" in with_sample and "Clear demo data" in with_sample  # the corner button
     assert 'role="search"' in with_sample
     store.add_candidate(name="First Real")
     assert "Add your first real candidate" not in c.get("/").text

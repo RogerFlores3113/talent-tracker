@@ -21,7 +21,7 @@
   <button class="btn primary" autofocus aria-describedby="skills-all-sum" hx-post="/connect/skills/all/install" hx-vals='{"targets": "{{ targets_csv }}"}' hx-target="#skills-all-result">Add the skills</button>
   </div>
   {% else %}
-  <p tabindex="-1" autofocus>No AI app was found on this computer to add skills to. Use Install anyway below, or get the Claude plugin.</p>
+  <p tabindex="-1" autofocus>No AI app was found on this computer to add skill files to. Use Install anyway below. A connected AI app already has the skills.</p>
   {% endif %}
 {% elif action == 'install' %}
   <p class="ok" role="status" tabindex="-1" autofocus>Skills added for {% for r in result['results'] %}{{ r['label'] }}{{ ' and ' if not loop.last }}{% endfor %}.</p>

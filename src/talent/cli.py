@@ -156,6 +156,13 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             say.info("Pointed %s's Talent Search entry at this copy of the app, because the old path was gone.", target)
     except Exception:
         pass
+    try:  # skills this app installed before follow it to the new version; never stop the app starting
+        from . import skills
+
+        for label in skills.refresh_installed():
+            say.info("Updated the Talent Search skills in %s to this version.", label)
+    except Exception:
+        pass
     app = create_app(Store(db_path()))
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
@@ -310,7 +317,8 @@ def _install_skills(args: argparse.Namespace) -> None:
             print("Start a new chat (or restart Claude Code) so it picks up the skills.")
     if plugin is not None:
         path = skills.write_plugin(Path(plugin) if plugin else None)
-        print(f"Wrote {path}. In Claude: Customize > Plugins > Add > Upload plugin, then pick that file.")
+        print(f"Wrote {path}. Connected AI apps already get these skills with the connection; this file is only "
+              "for apps that install Claude plugins from a file.")
 
 
 def _remove_skills(args: argparse.Namespace) -> None:
@@ -369,7 +377,7 @@ def main(argv: list[str] | None = None) -> None:
     inst.add_argument("--codex", action="store_true", help="install into ~/.agents/skills")
     inst.add_argument("--yes", action="store_true", help="don't ask first (needed when no one can be asked)")
     inst.add_argument("--plugin", nargs="?", const="", default=None, metavar="PATH",
-                      help="write talent-search.plugin for the Claude app (default: your Downloads folder)")
+                      help="write talent-search.plugin, the skills as a Claude plugin file (default: your Downloads folder)")
     inst.add_argument("--zip", metavar="PATH", help=argparse.SUPPRESS)  # old name for --plugin
     rem = sub.add_parser("remove-skills", help="remove the Talent Search skills this app installed (only those)")
     rem.add_argument("--claude-code", action="store_true", help="only from ~/.claude/skills")

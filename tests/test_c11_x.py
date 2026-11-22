@@ -186,30 +186,19 @@ def test_in_the_pipeline_wording_and_jobs_without_a_client(store):
 
 
 # ------------------------------------------------------------------ 6. Connect page
-def test_connect_plugin_steps_show_once_and_connect_comes_before_skills(store):
+def test_connect_comes_before_skills_and_the_plugin_route_is_folded(store):
     page = local_client(store).get("/connect").text
-    assert page.count('id="plugin-steps"') == 1 and page.count('id="plugin-check"') == 1
     assert page.index('id="claude-panel"') < page.index('id="skills-panel"') < page.index('id="try-asking"')
-    assert "/plugin install talent-search@talent-tracker" in page
-    assert "Check it worked" in page
-    assert "Which one should I pick?" not in page and 'id="skills-other-ways"' in page
-    assert "still needs the connection from Step 1" in page
+    folded = page.split('id="skills-other-ways"', 1)[1]
+    assert "/plugin install talent-search@talent-tracker" in folded and "Check it worked" in page
+    assert "Which one should I pick?" not in page and 'id="plugin-steps"' not in page
     assert "works in every app" not in page and "every AI app" not in page
 
 
 def test_connect_claude_code_steps_are_in_one_fold(store):
     page = local_client(store).get("/connect").text
     block = page.split('<details id="claude-code-steps">', 1)[1].split("</details>", 1)[0]
-    assert "Step 1" in block or "1." in block
-    assert "Step 2" in block or "2." in block
-
-
-def test_saving_the_plugin_does_not_repeat_the_steps(store, monkeypatch):
-    from talent import skills
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
-    r = local_client(store).post("/connect/skills/plugin/save")
-    assert r.status_code == 200 and "talent-search.plugin" in r.text
-    assert 'id="plugin-steps"' not in r.text and "<ol" not in r.text
+    assert 'id="claude-code-cmd"' in block and "skills come with the connection" in block
 
 
 def test_install_refreshes_the_found_line(store, _env):

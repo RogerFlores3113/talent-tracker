@@ -77,7 +77,7 @@ def test_locked_page_names_linux():
 
 def test_tour_wording_and_behaviour():
     body = {s["id"]: s["body"] for s in tour.STEPS}
-    assert "exact files first" not in body["skills"] and "never overwritten" in body["skills"]
+    assert "skills" not in body and "nothing else to add" in body["connect"]
     claude = {s["id"]: s for s in tour.STEPS}["connect"]["choices"][0]
     assert claude["id"] == "claude" and "Test connection" in claude["line"]
     assert '" of " + steps.length' not in JS and '"Step " + (idx + 1)' in JS

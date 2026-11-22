@@ -5,7 +5,6 @@ import html
 import io
 import json
 import re
-import zipfile
 from pathlib import Path
 
 import anyio
@@ -111,10 +110,10 @@ def test_a_symlinked_skill_folder_is_skipped(home, tmp_path):
 
 def test_panel_leads_with_what_skills_are_and_names_the_real_folder(store, home):
     page = local_client(store).get("/connect").text
-    assert "A skill is a short page of written instructions" in page
+    assert "Skills come with the connection" in page and "short written guides" in page
     assert "talent install-skills" in page and html.escape(str(skills.source_dir())) in page
     assert "skills/INSTALL-SKILLS.md" not in page and "marker file" not in page
-    assert "Download all skills as one .zip" in page and "/connect/skills/talent-search-write-outreach.zip" in page
+    assert ".zip" not in page  # no zips to upload by hand
 
 
 def test_panel_says_how_many_were_left_alone(store, home):
@@ -136,16 +135,6 @@ def test_preview_lists_edited_files_and_moves_focus_to_the_add_button(store, hom
     assert re.search(r'<button class="btn primary" autofocus', r.text)
     r = c.post("/connect/skills/claude-code/preview-remove")
     assert "edited by you, kept" in r.text
-
-
-def test_per_skill_zips(store):
-    c = local_client(store)
-    r = c.get("/connect/skills/talent-search-write-outreach.zip")
-    assert r.status_code == 200
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    assert z.namelist() == ["talent-search-write-outreach/SKILL.md"]
-    assert c.get("/connect/skills/not-a-skill.zip").status_code == 404
-    assert zipfile.is_zipfile(io.BytesIO(c.get("/connect/skills.zip").content))
 
 
 def test_install_doc_has_no_hardcoded_version_and_covers_symlinks_and_no_one_to_ask():
@@ -204,11 +193,11 @@ def test_tour_shows_colors_saved_searches_and_skills(store):
     c = local_client(store)
     data = tour_data(c.get("/"))
     ids = [s["id"] for s in data["steps"]]
-    assert ids.index("connect") < ids.index("skills") < ids.index("load") < ids.index("colors") < ids.index("saved")
-    assert len(ids) == 12 and ids[3] == "load"
+    assert ids.index("connect") < ids.index("load") < ids.index("colors") < ids.index("saved")
+    assert "skills" not in ids and len(ids) == 11 and ids[2] == "load"  # skills come with the connection
     colors = step_of(data, "colors")
     assert colors["target"] == [".colorbar"]
-    assert step_of(data, "skills")["target"] == ["#skills-panel"] and step_of(data, "saved")["path"] == "/candidates"
+    assert "nothing else to add" in step_of(data, "connect")["body"] and step_of(data, "saved")["path"] == "/candidates"
     store.add_candidate(name="Ana Ruiz")  # an empty list hides the color chips
     page = c.get("/candidates").text
     assert 'class="colorbar"' in page and 'class="savedbar"' in page and 'id="skills-panel"' in c.get("/connect").text
@@ -216,9 +205,8 @@ def test_tour_shows_colors_saved_searches_and_skills(store):
 
 def test_connect_steps_say_you_can_connect_later_and_fall_back_when_the_button_is_disabled(store):
     data = tour_data(local_client(store).get("/"))
-    for sid in ("connect", "skills"):
-        s = step_of(data, sid)
-        assert "Press Next, you can" in s["body"] and ":not([disabled])" in s["pulse"]
+    s = step_of(data, "connect")
+    assert "Press Next, you can" in s["body"] and ":not([disabled])" in s["pulse"]
     for c in step_of(data, "connect")["choices"]:  # a Connect button that can't be pressed isn't pulsed
         assert not c.get("pulse") or ".btn.primary" not in c["pulse"] or ":not([disabled])" in c["pulse"]
     js = (REPO / "src" / "talent" / "static" / "app.js").read_text(encoding="utf-8")
@@ -236,12 +224,12 @@ def test_the_colors_step_does_not_promise_bubbles_when_nobody_is_saved(store):
 def test_person_and_pipeline_steps_are_skipped_after_not_now(store):
     c = local_client(store)
     c.get("/")
-    c.post("/tour/step", data={"step": "3"})  # on the load question
+    c.post("/tour/step", data={"step": "2"})  # on the load question
     assert "person" in [s["id"] for s in tour_data(c.get("/"))["steps"]]
-    c.post("/tour/step", data={"step": "4"})  # "Not now": the next step, with nothing loaded
+    c.post("/tour/step", data={"step": "3"})  # "Not now": the next step, with nothing loaded
     ids = [s["id"] for s in tour_data(c.get("/candidates"))["steps"]]
     assert "person" not in ids and "pipeline" not in ids and "search" in ids and ids[-1] == "finish"
-    assert tour.state(store)["step"] == 4
+    assert tour.state(store)["step"] == 3
 
 
 def test_welcome_and_today_explain_sample_data_loaded_by_hand(store):

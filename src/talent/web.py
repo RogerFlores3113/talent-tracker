@@ -4554,11 +4554,6 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
                     where=str(form.get("where") or ""), preview_title=title, preview_body=body)
 
     # ----------------------------------------------------- AI app setup
-    def _plugin_where() -> str:
-        """Where the plugin file goes: the Downloads folder, or (with none) the folder it really goes to."""
-        folder = skills.downloads_dir()
-        return "your Downloads folder" if folder.name.lower() == "downloads" else f"the folder {folder} (there is no Downloads folder here)"
-
     def fit_app(status: dict[str, Any] | None = None) -> str:
         """The AI app this computer has, for the Connect page's first panel and the tour's app menu."""
         status = status or integrations.claude_status()
@@ -4587,92 +4582,29 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             claude_code_command=integrations.claude_code_command(),
             skill_status=[skills.status(t) for t in skills.TARGETS],
             skill_names=skills.skill_names(),
-            desktop_steps=skills.DESKTOP_STEPS[0],
             skills_source=str(skills.source_dir()),
             detected=skills.detected_targets(),
             skill_plan_missing=[{"target": t, "label": skills.TARGET_LABELS[t]} for t in skills.TARGETS
                                 if not skills.detect(t)],
-            plugin_file=skills.PLUGIN_FILE,
-            plugin_saved=(skills.downloads_dir() / skills.PLUGIN_FILE).is_file(),
             skill_info=skills.skill_info(),
-            plugin_steps=skills.PLUGIN_STEPS,
             plugin_commands=skills.CLAUDE_CODE_SLASH_COMMANDS,
-            plugin_where=_plugin_where(),
-            marketplace_repo=skills.REPO,
-            can_open_claude=skills.claude_app_command() is not None,
             restarts=integrations.restart_supported(),
             fit_app=fit_app(status),
-            skill_zips=[{"name": n, "label": n.removeprefix(skills.PREFIX).replace("-", " ").capitalize()}
-                        for n in skills.skill_names()],
         )
 
     def _found_ctx() -> dict[str, Any]:
         """What the 'Claude Code: found. No skills yet.' list needs, so an install can refresh it in place."""
         return {"skill_status": [skills.status(t) for t in skills.TARGETS], "detected": skills.detected_targets()}
 
-    @app.get("/connect/skills/{name}.zip")
-    def skill_zip(name: str):
-        """One skill as its own zip, for Claude Desktop's Customize > Skills."""
-        if name not in skills.skill_names():
-            raise HTTPException(404)
-        return Response(skills.build_skill_zip(name), media_type="application/zip",
-                        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
-
-    @app.get("/connect/skills.zip")
-    def skills_zip():
-        """The skills as a zip for Claude Desktop (Customize > Skills). Same files the app installs elsewhere."""
-        return Response(skills.build_zip(), media_type="application/zip",
-                        headers={"Content-Disposition": f'attachment; filename="{skills.ZIP_NAME}"'})
-
-    @app.get("/connect/skills.plugin")
-    def skills_plugin():
-        """The Claude app plugin (Customize > Plugins > Add > Upload plugin). A fallback for the save button."""
-        return Response(skills.build_plugin(), media_type="application/octet-stream",
-                        headers={"Content-Disposition": f'attachment; filename="{skills.PLUGIN_FILE}"'})
-
     @app.post("/connect/skills/add", response_class=HTMLResponse)
     def skills_add(request: Request):
-        """One click: skills into every app found here, the Claude plugin saved and shown, Claude opened."""
+        """The optional one click: the skills as files into Claude Code and Codex where they are found."""
         try:
             r = skills.add_everywhere()
         except Exception as exc:  # never a 500 or a traceback in the window
             integrations.log_failure(exc)
             return page(request, "_skills_add_result.html", error=integrations.friendly_error(exc))
-        return page(request, "_skills_add_result.html", r=r, plugin_where=_plugin_where(),
-                    marketplace_repo=skills.REPO, **_found_ctx())
-
-    @app.post("/connect/skills/plugin/reveal", response_class=HTMLResponse)
-    def skills_plugin_reveal(request: Request):
-        """'Show in folder' for the saved plugin file (saves it first if it isn't there)."""
-        path = skills.downloads_dir() / skills.PLUGIN_FILE
-        try:
-            if not path.is_file():
-                path = skills.write_plugin()
-            shown = skills.reveal(path)
-        except Exception as exc:
-            integrations.log_failure(exc)
-            return HTMLResponse(f'<span class="error" role="alert">{html_escape(integrations.friendly_error(exc))}</span>')
-        return HTMLResponse('<span class="ok" role="status">Shown in your file manager.</span>' if shown else
-                            f'<span class="fine" role="status">The file is in {html_escape(str(path.parent))}.</span>')
-
-    @app.post("/connect/skills/plugin/save", response_class=HTMLResponse)
-    def skills_plugin_save(request: Request):
-        """Write talent-search.plugin to Downloads and show it in the file manager (best effort)."""
-        try:
-            path = skills.write_plugin()
-        except Exception as exc:  # never a 500 or a traceback in the window
-            integrations.log_failure(exc)
-            return page(request, "_skills_plugin_result.html", error=integrations.friendly_error(exc))
-        shown = skills.reveal(path)
-        return page(request, "_skills_plugin_result.html", path=str(path), shown=shown,
-                    can_open_claude=skills.claude_app_command() is not None, plugin_file=skills.PLUGIN_FILE)
-
-    @app.post("/connect/skills/claude-app/open", response_class=HTMLResponse)
-    def skills_open_claude(request: Request):
-        """Start the Claude desktop app (best effort)."""
-        ok = skills.open_claude_app()
-        return HTMLResponse('<span class="fine" role="status">' + (
-            "Opening Claude..." if ok else "Couldn't open Claude. Open it yourself.") + "</span>")
+        return page(request, "_skills_add_result.html", r=r, **_found_ctx())
 
     @app.post("/connect/skills/all/{action}", response_class=HTMLResponse)
     async def connect_skills_all(request: Request, action: str):

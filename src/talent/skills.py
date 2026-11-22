@@ -2,14 +2,17 @@
 
 A "skill" is a folder with a SKILL.md (YAML frontmatter with name and description, then instructions) that an
 AI app reads to learn how to do a job well. We ship a small set in the repo's skills/ folder (bundled into the
-packaged app) and can copy them where the apps look:
+packaged app).
+
+Every connected app gets them with the connection: the MCP server lists them as playbooks in its instructions,
+serves each one with get_playbook and offers each as a prompt (playbooks()). Nothing to add or upload, and they
+follow the app to each new version. Copying them as files is an optional extra, where the apps look:
 
   Claude Code   ~/.claude/skills/<name>/SKILL.md      (personal skills)
   Codex         ~/.agents/skills/<name>/SKILL.md      (user skills)
-  The Claude app (desktop and claude.ai) has no skills folder on disk. It installs a plugin: one .plugin (zip)
-  file holding .claude-plugin/plugin.json and skills/<name>/SKILL.md, added under Customize > Plugins > Add >
-  Upload plugin. build_plugin() makes that file. The repo also carries the same plugin and a marketplace file at its
-  root (.claude-plugin/), so `claude plugin marketplace add RogerFlores3113/talent-tracker` works too.
+  Folders the app installed are brought up to date when it starts (refresh_installed()). build_plugin() makes the
+  same skills as a Claude plugin file for `talent install-skills --plugin`, and the repo carries a marketplace file
+  at its root (.claude-plugin/), so `claude plugin marketplace add RogerFlores3113/talent-tracker` works too.
 
 Formats checked against the apps' own docs:
   https://code.claude.com/docs/en/skills
@@ -33,7 +36,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -45,7 +47,6 @@ PREFIX = "talent-search-"
 MARKER = ".installed-by-talent-search"
 TARGETS = ("claude-code", "codex")
 TARGET_LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
-ZIP_NAME = "talent-search-skills.zip"
 PLUGIN_NAME = "talent-search"
 PLUGIN_FILE = "talent-search.plugin"
 MARKETPLACE_NAME = "talent-tracker"
@@ -119,6 +120,22 @@ def skill_info() -> list[dict[str, str]]:
     for n in skill_names():
         title, line = FRIENDLY.get(n, (n.removeprefix(PREFIX).replace("-", " ").capitalize(), ""))
         out.append({"folder": n, "title": title, "line": line})
+    return out
+
+
+def playbooks(src: Path | None = None) -> list[dict[str, str]]:
+    """The skills as the MCP server hands them out: name, title, description (when to use it) and the instructions.
+    Every connected app gets them this way, so nothing has to be added or uploaded."""
+    src = src or source_dir()
+    out = []
+    for n in skill_names(src):
+        text = (src / n / "SKILL.md").read_text(encoding="utf-8")
+        head, body = "", text
+        if text.startswith("---"):
+            head, _, body = text[3:].partition("\n---")
+        desc = next((ln.split(":", 1)[1].strip() for ln in head.splitlines() if ln.startswith("description:")), "")
+        title = FRIENDLY.get(n, (n.removeprefix(PREFIX).replace("-", " ").capitalize(), ""))[0]
+        out.append({"name": n.removeprefix(PREFIX), "title": title, "description": desc, "body": body.strip()})
     return out
 
 
@@ -254,6 +271,23 @@ def install(target: str) -> dict[str, Any]:
                                       "files": fingerprints}, sort_keys=True) + "\n", encoding="utf-8")
         written.append(display_path(marker))
     return {**plan, "written": written}
+
+
+def refresh_installed() -> list[str]:
+    """When the app starts: bring the skill folders it installed before up to this version (new skills added,
+    files the user edited kept), so an update never leaves old skills behind. Apps it never installed into are
+    left alone. Returns the labels of the apps it updated."""
+    done = []
+    for t in TARGETS:
+        if not _our_folders(t):
+            continue
+        plan = plan_install(t)
+        stale = any(v != "unchanged" for k, v in plan["labels"].items() if not k.endswith(MARKER)) or any(
+            (_read_marker(target_dir(t) / i["folder"]) or {}).get("version") != __version__ for i in plan["items"])
+        if stale:  # a file to add or update, or a marker from an older version (an edited file alone is not stale)
+            install(t)
+            done.append(TARGET_LABELS[t])
+    return done
 
 
 def _our_folders(target: str) -> list[Path]:
@@ -400,22 +434,6 @@ def write_plugin(path: Path | None = None) -> Path:
     return path
 
 
-def reveal(path: Path, platform: str | None = None) -> bool:
-    """Show the file in the system file manager. Best effort: never raises, False when it could not."""
-    platform = platform or sys.platform
-    try:
-        if platform == "darwin":
-            cmd = ["open", "-R", str(path)]
-        elif platform == "win32":
-            cmd = ["explorer", f"/select,{path}"]
-        else:
-            cmd = ["xdg-open", str(Path(path).parent)]
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except Exception:
-        return False
-
-
 def claude_app_command(platform: str | None = None, env: dict[str, str] | None = None) -> list[str] | None:
     """How to start the Claude desktop app, or None when it isn't found (or on Linux, which has none)."""
     platform = platform or sys.platform
@@ -433,18 +451,6 @@ def claude_app_command(platform: str | None = None, env: dict[str, str] | None =
     return None
 
 
-def open_claude_app() -> bool:
-    cmd = claude_app_command()
-    if not cmd:
-        return False
-    try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except Exception:
-        return False
-
-
-# ------------------------------------------------------------------ which apps are here, and all at once
 def detect(target: str) -> bool:
     """Is that app on this computer? Its settings folder exists or its command is on the PATH. With
     TALENT_SKILLS_HOME set (tests) only the folder counts, so a real install on the machine can't leak in."""
@@ -479,14 +485,9 @@ def install_all(targets: list[str]) -> dict[str, Any]:
             "skipped": [s for r in results for s in r["skipped"]], "edited": [e for r in results for e in r["edited"]]}
 
 
-def add_everywhere(*, reveal_fn=None, open_fn=None, platform: str | None = None) -> dict[str, Any]:
-    """The one-click 'Add skills': install into every app found here (only talent-search-* folders we made, files
-    the person edited are kept), save talent-search.plugin to Downloads, show it, and open the Claude app.
-    reveal_fn and open_fn are injectable so tests start nothing. On a repeat press (everything current and the
-    plugin file already in place) nothing is opened or shown again."""
-    platform = platform or sys.platform
-    reveal_fn = reveal_fn or reveal
-    open_fn = open_fn or open_claude_app
+def add_everywhere() -> dict[str, Any]:
+    """The optional 'Add skills': also install the skills as files into every app found here (only talent-search-*
+    folders we made, files the person edited are kept). Connected apps already get them as playbooks."""
     found = detected_targets()
     plan = plan_all(found)
     current = bool(plan["plans"]) and plan["counts"]["new"] == 0 and plan["counts"]["updated"] == 0
@@ -499,88 +500,8 @@ def add_everywhere(*, reveal_fn=None, open_fn=None, platform: str | None = None)
             continue
         p = next(x for x in plan["plans"] if x["target"] == t)
         n = sum(1 for v in p["labels"].values() if v != "unchanged")
-        if n == 0:
-            line = "already up to date."
-        else:
-            line = (f"added {len(p['items'])} skills to your {TARGET_LABELS[t]} skills folder "
-                    f"({display_path(target_dir(t))}).")
+        line = ("already up to date." if n == 0 else
+                f"added {len(p['items'])} skills to your {TARGET_LABELS[t]} skills folder ({display_path(target_dir(t))}).")
         apps.append({"target": t, "label": TARGET_LABELS[t], "state": "current" if n == 0 else "added", "line": line})
-    path = downloads_dir() / PLUGIN_FILE
-    try:
-        repeat = path.is_file() and path.read_bytes() == build_plugin()
-    except OSError:
-        repeat = False
-    can_open = claude_app_command() is not None
-    if repeat:
-        shown = opened = False
-    else:
-        path = write_plugin()
-        shown = bool(reveal_fn(path))
-        opened = bool(open_fn()) if can_open else False
-    return {"apps": apps, "up_to_date": current, "skipped": done["skipped"], "edited": done["edited"],
-            "plugin_path": str(path), "plugin_file": PLUGIN_FILE, "shown": shown, "can_open_claude": can_open,
-            "opened": opened, "last_step": PLUGIN_LAST_STEP, "plugin_dir": str(path.parent), "plugin_repeat": repeat,
-            # Mac and Windows select the file in the window; Linux can only open the folder
-            "selected": shown and platform in ("darwin", "win32")}
-
-
-# ------------------------------------------------------------------ zip for Claude Desktop (the older way)
-def build_zip() -> bytes:
-    """One zip holding one zip per skill. Claude's Customize > Skills takes one skill per zip, and each zip has
-    the skill folder as its root (talent-search-x/SKILL.md)."""
-    src = source_dir()
-    outer = io.BytesIO()
-    with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
-        for name in skill_names():
-            inner = io.BytesIO()
-            with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zi:
-                for rel in _files_of(name):
-                    zi.write(src / name / rel, f"{name}/{rel.as_posix()}")
-            z.writestr(f"{name}.zip", inner.getvalue())
-        z.writestr("READ-ME.txt", ZIP_README)
-    return outer.getvalue()
-
-
-def build_skill_zip(name: str) -> bytes:
-    """One skill as its own zip (the skill folder is the root), for Claude Desktop's Customize > Skills."""
-    if name not in skill_names():
-        raise KeyError(name)
-    src = source_dir()
-    inner = io.BytesIO()
-    with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zi:
-        for rel in _files_of(name):
-            zi.write(src / name / rel, f"{name}/{rel.as_posix()}")
-    return inner.getvalue()
-
-
-ZIP_README = """Talent Search skills for Claude Desktop (the older way)
-
-1. Unzip this file. You get one zip per skill.
-2. In Claude, open Customize > Skills and add each of the zip files (do not unzip them again).
-3. Make sure each skill is switched on.
-
-Easier: use talent-search.plugin instead. One upload under Customize > Plugins > Add > Upload plugin.
-"""
-
-PLUGIN_STEPS = (
-    "In Claude, open Customize, then Plugins.",
-    "Press Add, then Upload plugin.",
-    f"Pick {PLUGIN_FILE}.",
-)
-
-# What is left in Claude after Add skills. Claude has no link, folder or double-click that installs a plugin for
-# another app, so this one upload is always the person's.
-PLUGIN_LAST_STEP = f"Customize > Plugins > Add > Upload plugin, then pick {PLUGIN_FILE}."
-
-DESKTOP_STEPS = (
-    "Claude Desktop reads skills from an upload, not from a folder on this computer. Download the zip, unzip it "
-    "once, then in Claude open Customize > Skills and add each small zip inside. Switch each one on. Or download "
-    "just the skills you want, one zip each, and add those.",
-)
-
-
-def write_zip(path: Path) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(build_zip())
-    return path
+    return {"apps": apps, "up_to_date": current, "found": bool(found), "skipped": done["skipped"],
+            "edited": done["edited"]}

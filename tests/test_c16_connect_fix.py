@@ -120,31 +120,20 @@ def test_install_skills_up_to_date_in_a_script_exits_zero(env, monkeypatch, caps
 
 
 # ---------------------------------------------------------------- E: Add skills wording
-def test_add_skills_names_the_codex_folder_and_only_mentions_a_window_that_opened(store, env, monkeypatch):
+def test_add_skills_names_the_codex_folder(store, env):
     (env["home"] / ".codex").mkdir()
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: False)  # Linux with no file manager
-    monkeypatch.setattr(sys, "platform", "linux")
     t = local_client(store).post("/connect/skills/add").text
     assert "added 6 skills to your Codex skills folder (~/.agents/skills)" in t and "Folder:" not in t
-    assert "window that just opened" not in t and "opened that folder" not in t
-    (env["dl"] / skills.PLUGIN_FILE).unlink()
-    r = skills.add_everywhere(reveal_fn=lambda p: True, platform="linux")
-    assert r["shown"] and not r["selected"]
-    r = skills.add_everywhere(reveal_fn=lambda p: True, platform="darwin")
-    assert r["plugin_repeat"] and not r["shown"]  # a repeat opens nothing
-    (env["dl"] / skills.PLUGIN_FILE).unlink()
-    r = skills.add_everywhere(reveal_fn=lambda p: True, platform="darwin")
-    assert r["shown"] and r["selected"]
+    r = skills.add_everywhere()
+    assert r["found"] and r["up_to_date"] and "plugin_path" not in r
 
 
 # ---------------------------------------------------------------- F: the page
 def test_connect_page_folds_and_wording(store):
     page = local_client(store).get("/connect").text
-    assert "Step 2 above adds them to Codex too" in page and "Step 2 below" not in page
-    assert page.count('id="skills-other-ways"') == 1
-    ask = page.index('id="skills-ask-ai"')
-    assert page.index("INSTALL-SKILLS.md") > ask and "Ask Claude Code to install the Talent Search skills" in page
-    assert page.index('id="install-skills-btn"') < page.index('id="skills-other-ways"') < ask
+    assert "Step 2" not in page and page.count('id="skills-other-ways"') == 1
+    fold = page.index('id="skills-other-ways"')
+    assert page.index("INSTALL-SKILLS.md") > fold and page.index('id="install-skills-btn"') > fold
     assert "There is no restart step on Linux" in page or "no restart" in page.lower()
 
 

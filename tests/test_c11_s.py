@@ -102,20 +102,6 @@ def test_write_plugin_to_downloads(tmp_path):
     assert p2.name == "talent-search.plugin" or p2.name == "x"
 
 
-def test_reveal_is_best_effort(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(skills.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd))
-    f = tmp_path / "a.plugin"
-    assert skills.reveal(f, "darwin") and calls[-1][:2] == ["open", "-R"]
-    assert skills.reveal(f, "win32") and calls[-1][0] == "explorer" and calls[-1][1].startswith("/select,")
-    assert skills.reveal(f, "linux") and calls[-1][0] == "xdg-open" and calls[-1][1] == str(tmp_path)
-
-    def boom(*a, **k):
-        raise OSError("no")
-    monkeypatch.setattr(skills.subprocess, "Popen", boom)
-    assert skills.reveal(f, "linux") is False
-
-
 def test_claude_app_command(tmp_path):
     assert skills.claude_app_command("linux") is None
     exe = tmp_path / "AnthropicClaude" / "Claude.exe"
@@ -126,15 +112,13 @@ def test_claude_app_command(tmp_path):
 
 
 def test_routes(store, home, tmp_path, monkeypatch):
-    monkeypatch.setattr(skills, "reveal", lambda path, platform=None: True)
     c = local_client(store)
     page = c.get("/connect").text
-    assert "Add skills" in page and "Save the Claude plugin file" in page and "Not on this computer" in page
-    assert " anyway</button>" in page and "Older way: upload skills one at a time" in page
+    assert "Add skill files" in page and "Not on this computer" in page and " anyway</button>" in page
     assert "/plugin marketplace add RogerFlores3113/talent-tracker" in page and "/plugin install talent-search@talent-tracker" in page
-    assert "talent-search@talent-tracker" in page and "Customize" in page
-    r = c.get("/connect/skills.plugin")
-    assert r.status_code == 200 and zipfile.is_zipfile(io.BytesIO(r.content))
+    assert "Customize" not in page
+    for gone in ("/connect/skills.plugin", "/connect/skills.zip"):
+        assert c.get(gone).status_code in (404, 405)  # nothing is served there any more
     # nothing found: honest message, and nothing written
     r = c.post("/connect/skills/all/preview-install")
     assert r.status_code == 200 and "No AI app was found" in r.text
@@ -148,13 +132,7 @@ def test_routes(store, home, tmp_path, monkeypatch):
     r = c.post("/connect/skills/all/preview-install", data={"targets": "codex"})
     assert "Codex" in r.text and not (home / ".agents").exists()
     assert c.post("/connect/skills/all/nope").status_code == 404
-    r = c.post("/connect/skills/plugin/save")
-    assert r.status_code == 200 and "talent-search.plugin" in r.text
-    assert (tmp_path / "Downloads" / "talent-search.plugin").is_file()
-    assert c.post("/connect/skills/claude-app/open").status_code == 200
-    # the old routes still work
     assert c.post("/connect/skills/codex/preview-install").status_code == 200
-    assert c.get("/connect/skills.zip").status_code == 200
 
 
 def test_tour_does_not_autostart_on_connect(store):
@@ -179,8 +157,8 @@ def test_page_details_labels_and_friendly_names(store):
     page = c.get("/connect").text
     for label in ("Copy Claude Code command", "Copy Claude Code plugin command 1"):
         assert f'aria-label="{label}"' in page
-    assert "Find people for a role" in page and "talent-search-source-for-a-role" in page
-    assert page.index("Step 1. Connect your AI app") < page.index("Step 2. Add skills")
+    assert "Find people for a role" in page
+    assert page.index("Connect your AI app</h2>") < page.index("Skills come with the connection")
     assert "<details id=\"claude-code-steps\">" in page
     assert len(skills.skill_info()) == 6 and all(k["line"] for k in skills.skill_info())
 
