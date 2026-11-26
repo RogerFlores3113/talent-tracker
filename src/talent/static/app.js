@@ -26,6 +26,9 @@
 //   data-stage-pick           on a stage menu: a mouse pick moves at once (or asks for a reason first for an out stage);
 //                             with the keyboard it waits for Enter or blur. After a move, focus returns to that person.
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
+//   data-settings-form        on each Settings form: a change brings up the save bar (#save-bar) at the bottom right,
+//                             whose Save sends every changed form and whose Discard reloads the page as it was
+//   .settings-index           the Settings section list: the section in view is marked aria-current
 //   data-color-bubble         on a colour bubble button (data-cid, data-color, data-next, data-prev): a click saves the
 //                             next colour at once and updates the bubble in place; Right-click or Shift-click goes to
 //                             the colour before. Without script the bubble's own form posts and the page reloads.
@@ -34,8 +37,8 @@
 //                             (reason options with data-like="a|b" hide when the stage is named a or b)
 //   <div id="tour-data" data-tour="{json}">   the first-run tour's steps (see tour.py): drawn as a spotlight and a popover.
 //                             While it shows, the page behind it is inert (except the lit part); a step may also light
-//                             a second element ("reach") so the recruiter can click it, and the finish step offers
-//                             check boxes (delete_people) that are posted with Finish or Skip.
+//                             a second element ("reach") so the recruiter can click it, and a step may offer a menu
+//                             of choices (the AI app) that moves the lit part.
 (function () {
   "use strict";
 
@@ -723,6 +726,59 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startTour);
   else startTour();
+
+  // ---- Settings: one save bar for every settings form, and the section index that follows the scroll.
+  function startSettings() {
+    const forms = Array.from(document.querySelectorAll("form[data-settings-form]"));
+    const bar = document.getElementById("save-bar");
+    if (forms.length && bar) {
+      const snap = f => new URLSearchParams(new FormData(f)).toString();
+      const start = new Map(forms.map(f => [f, snap(f)]));
+      const changed = () => forms.filter(f => snap(f) !== start.get(f));
+      const update = () => { bar.hidden = changed().length === 0; };
+      forms.forEach(f => { f.addEventListener("input", update); f.addEventListener("change", update); });
+      bar.querySelector("[data-save-discard]").addEventListener("click", () => window.location.reload());
+      bar.querySelector("[data-save-all]").addEventListener("click", async e => {
+        const todo = changed();
+        if (!todo.length) { bar.hidden = true; return; }
+        e.currentTarget.disabled = true;
+        // The main form goes last and is really submitted, so a number it refuses comes back highlighted and its
+        // message shows; the others are sent first in the background.
+        todo.sort((a, b) => (a.id === "settings-main") - (b.id === "settings-main"));
+        const last = todo.pop();
+        for (const f of todo) {
+          try {
+            const r = await fetch(f.action, {method: "POST", credentials: "same-origin", body: new URLSearchParams(new FormData(f))});
+            if (!r.ok) { f.submit(); return; }  // shows what went wrong on that form's own page
+          } catch (err) { f.submit(); return; }
+        }
+        last.submit();
+      });
+      // Enter in a field saves like the bar's Save, so nothing typed elsewhere is lost.
+      forms.forEach(f => f.addEventListener("submit", ev => {
+        if (changed().length > 1) { ev.preventDefault(); bar.querySelector("[data-save-all]").click(); }
+      }));
+    }
+
+    const index = document.querySelector(".settings-index");
+    if (!index) return;
+    const links = Array.from(index.querySelectorAll('a[href^="#"]'));
+    const targets = links.map(a => document.getElementById(a.getAttribute("href").slice(1)));
+    let queued = false;
+    function mark() {
+      queued = false;
+      let at = 0;  // the last section whose top has reached the upper part of the window
+      targets.forEach((t, i) => { if (t && t.getBoundingClientRect().top <= window.innerHeight * 0.3) at = i; });
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) at = targets.length - 1;
+      links.forEach((a, i) => { if (i === at) a.setAttribute("aria-current", "location"); else a.removeAttribute("aria-current"); });
+    }
+    const later = () => { if (!queued) { queued = true; window.requestAnimationFrame(mark); } };
+    window.addEventListener("scroll", later, {passive: true});
+    window.addEventListener("resize", later);
+    mark();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startSettings);
+  else startSettings();
 })();
 
 // Candidates table, skill highlights: after a pick or a remove the page reloads, so put keyboard focus back on the

@@ -124,7 +124,7 @@ def test_a_web_save_leaves_no_ai_timeline_line(ready):
 def test_settings_jump_bar_has_private_tags(ready):
     store, job, ana, c = ready
     page = c.get("/settings").text
-    nav = page.split('aria-label="Jump to"')[1].split("</nav>")[0]
+    nav = page.split('aria-label="Settings sections"')[1].split("</nav>")[0]
     assert 'href="#private-tags"' in nav and "Private tags" in nav
 
 
