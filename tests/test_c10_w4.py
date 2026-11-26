@@ -215,7 +215,7 @@ def test_welcome_wording_is_short_and_the_footer_is_clear(store):
 
 def test_settings_uses_plain_words_and_a_jump_list(store):
     html = local_client(store).get("/settings").text
-    assert 'aria-label="Jump to"' in html and 'href="#cautious"' in html and 'href="#ai-apps"' in html
+    assert 'aria-label="Settings sections"' in html and 'href="#cautious"' in html and 'href="#ai-apps"' in html
     tpl = (SRC / "templates" / "settings.html").read_text()  # the AI apps table only shows once an app has connected
     assert "Changes made" in tpl and "What it may do" in tpl and "<th>Writes</th>" not in tpl
     assert "it can't move someone to Hired until you press Keep" in html

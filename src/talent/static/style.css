@@ -165,6 +165,26 @@ body.wide main { max-width: 1280px; }
 .update-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); margin: 0 0 var(--space-3);
                font-size: var(--fs-sm); color: var(--muted); }
 .update-note form { display: inline; margin: 0; }
+
+/* ---- Settings: a section index on the left (the one in view bright, the rest faded) and the save bar ---- */
+.settings-layout { display: grid; grid-template-columns: 11rem minmax(0, 940px); gap: var(--space-6); align-items: start; }
+.settings-index { position: sticky; top: var(--space-5); }
+.settings-index ul { list-style: none; margin: 0; padding: 0; }
+.settings-index a { display: block; padding: var(--space-1) var(--space-3); border-left: 2px solid transparent; color: var(--text);
+                    text-decoration: none; font-size: var(--fs-sm); opacity: .5; transition: opacity var(--ease); }
+.settings-index a:hover, .settings-index a:focus-visible { opacity: 1; }
+.settings-index a[aria-current] { opacity: 1; font-weight: 600; border-left-color: var(--accent); }
+@media (max-width: 900px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+  .settings-index { position: static; }
+  .settings-index ul { display: flex; flex-wrap: wrap; gap: 0 var(--space-1); }
+  .settings-index a { border-left: 0; padding: var(--space-1) var(--space-2); }
+}
+.save-bar { position: fixed; right: var(--space-5); bottom: var(--space-5); z-index: 800; display: flex; align-items: center;
+            gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface); color: var(--text);
+            border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-up); }
+.save-bar[hidden] { display: none; }
+.save-bar p { margin: 0; font-size: var(--fs-sm); }
 .foot { text-align: center; color: var(--muted); font-size: var(--fs-sm); line-height: 1.8; padding: var(--space-5) var(--space-5) var(--space-6);
         border-top: 1px solid var(--line); max-width: 940px; margin: 0 auto; }
 
@@ -296,6 +316,7 @@ select { padding: var(--space-2) var(--space-2); }
   .logform { flex-direction: column; align-items: stretch; }
   .filters { flex-direction: column; }
   .top { padding: var(--space-3) var(--space-4); background: var(--head-grad-narrow); }
+  .save-bar { left: var(--space-4); right: var(--space-4); bottom: var(--space-4); justify-content: flex-end; }
   .top nav { margin: 0 calc(var(--space-2) * -1); }
   main { padding: var(--space-5) var(--space-4) var(--space-6); }
   .panel { padding: var(--space-4); }

@@ -4,6 +4,10 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Settings
+- Settings has a section index on the left: the section you are on is bright and the rest are faded; hover brightens one and a click jumps there. On a narrow window it sits above the page.
+- One save bar instead of a Save button in each section: change anything and a bar at the bottom right offers Save and Discard. Save keeps every section you changed at once; undo your change and the bar goes away.
+
 ## [0.2.3] - 2026-11-26
 
 ### Update check
