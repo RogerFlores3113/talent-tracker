@@ -30,6 +30,8 @@ a = Analysis(
         (os.path.join(SRC, "talent", "static"), os.path.join("talent", "static")),
         # Skills the Connect page installs for Claude Code / Codex (read by talent.skills.source_dir)
         (os.path.join(HERE, "..", "skills"), "skills"),
+        # Starter slash commands (read by talent.skills.commands_dir)
+        (os.path.join(HERE, "..", "commands"), "commands"),
     ],
     hiddenimports=hidden,
     excludes=["tkinter", "pytest", "mcp.cli", "typer"],

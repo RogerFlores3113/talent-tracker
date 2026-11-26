@@ -1,5 +1,19 @@
 # Install the Talent Search skills
 
+## Starter commands
+
+Talent Search also ships seven starter commands:
+
+- `/find-talent`: find new people for an open job and put them on its Shortlist.
+- `/match-job`: rank the people you already have against one job.
+- `/add-candidate`: save one person from a link, a resume or pasted text.
+- `/pipeline-review`: a short status update, ready to paste.
+- `/follow-ups`: what is due, with drafts ready to send.
+- `/today`: plan your recruiting day.
+- `/write-outreach`: draft a message to a candidate.
+
+Claude Code plugin users get them as `/find-talent` (or `/talent-search:find-talent` if another command has the same name). Any connected app that shows MCP prompts gets them as prompts. In Claude Code that is `/mcp__talent-search__find_talent`. In Claude desktop, open the + menu and look under the Talent Search connection. Codex has no slash commands for them, so ask for the job in words, or mention a skill with `$`.
+
 **Usually nothing to install:** once Talent Search is connected to an AI app (the Connect button on its Connect AI page), the app gets these skills with the connection, as playbooks. Copying them as files is optional, for Claude Code and Codex: on the Connect AI page, open **Also want them as skill files?** and press **Add skill files**.
 
 **Claude Code plugin route (gets updates):** `claude plugin marketplace add RogerFlores3113/talent-tracker`, then `claude plugin install talent-search@talent-tracker`.

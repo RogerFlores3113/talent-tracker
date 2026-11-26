@@ -11,7 +11,7 @@ follow the app to each new version. Copying them as files is an optional extra, 
   Claude Code   ~/.claude/skills/<name>/SKILL.md      (personal skills)
   Codex         ~/.agents/skills/<name>/SKILL.md      (user skills)
   Folders the app installed are brought up to date when it starts (refresh_installed()). build_plugin() makes the
-  same skills as a Claude plugin file for `talent install-skills --plugin`, and the repo carries a marketplace file
+  same skills (and the starter slash commands from commands/) as a Claude plugin file for `talent install-skills --plugin`, and the repo carries a marketplace file
   at its root (.claude-plugin/), so `claude plugin marketplace add RogerFlores3113/talent-tracker` works too.
 
 Formats checked against the apps' own docs:
@@ -75,6 +75,14 @@ def source_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "skills"
 
 
+def commands_dir() -> Path:
+    """The bundled commands/ folder (starter slash commands), found the same way as skills/."""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", None) or Path(sys.executable).parent)
+        return base / "commands"
+    return Path(__file__).resolve().parents[2] / "commands"
+
+
 def home_dir() -> Path:
     """The user's home folder. TALENT_SKILLS_HOME overrides it (tests use this so they never touch the real one)."""
     override = os.environ.get("TALENT_SKILLS_HOME")
@@ -136,6 +144,27 @@ def playbooks(src: Path | None = None) -> list[dict[str, str]]:
         desc = next((ln.split(":", 1)[1].strip() for ln in head.splitlines() if ln.startswith("description:")), "")
         title = FRIENDLY.get(n, (n.removeprefix(PREFIX).replace("-", " ").capitalize(), ""))[0]
         out.append({"name": n.removeprefix(PREFIX), "title": title, "description": desc, "body": body.strip()})
+    return out
+
+
+def starter_commands(src: Path | None = None) -> list[dict[str, str]]:
+    """The starter slash commands, sorted by name: name (file stem), description, argument_hint and body."""
+    src = src or commands_dir()
+    if not src.is_dir():
+        return []
+    out = []
+    for path in sorted(src.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        head, body = "", text
+        if text.startswith("---"):
+            head, _, body = text[3:].partition("\n---")
+        fields = {}
+        for ln in head.splitlines():
+            key, sep, val = ln.partition(":")
+            if sep and key.strip() in ("description", "argument-hint"):
+                fields[key.strip()] = val.strip().strip("\"'")
+        out.append({"name": path.stem, "description": fields.get("description", ""),
+                    "argument_hint": fields.get("argument-hint", ""), "body": body.strip()})
     return out
 
 
@@ -393,7 +422,8 @@ def _zip_add(z: zipfile.ZipFile, name: str, data: bytes) -> None:
 
 
 def build_plugin() -> bytes:
-    """The Claude app plugin: one zip with .claude-plugin/plugin.json and skills/<name>/... for every skill.
+    """The Claude app plugin: one zip with .claude-plugin/plugin.json, skills/<name>/... for every skill and
+    commands/<name>.md for every starter command.
     The same bytes every time (fixed dates, sorted names). No version field, so versions are kept elsewhere."""
     src = source_dir()
     buf = io.BytesIO()
@@ -403,6 +433,9 @@ def build_plugin() -> bytes:
         for name in skill_names():
             for rel in _files_of(name):
                 _zip_add(z, f"skills/{name}/{rel.as_posix()}", (src / name / rel).read_bytes())
+        cmds = commands_dir()
+        for c in starter_commands(cmds):
+            _zip_add(z, f"commands/{c['name']}.md", (cmds / f"{c['name']}.md").read_bytes())
     return buf.getvalue()
 
 
