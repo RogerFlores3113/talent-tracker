@@ -4,6 +4,10 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Update check
+- When a newer version is out, Today and Settings show one quiet line: What's new, Update and Not now. Update installs it and reopens the app (for the copy the installer put in its usual place); Not now hides the line until the next version.
+- Talent Search asks GitHub for its newest version number once a day and sends nothing about you or your candidates. Turn it off under Updates in Settings, and the app contacts nothing at all. Check now is there too.
+
 ## [0.2.2] - 2026-11-25
 
 ### Starter commands

@@ -35,7 +35,7 @@ from . import ai_caps, site_guard, trust
 from . import injection, outreach
 from .sample_data import load_sample_data, remove_sample_data, sample_ids
 from . import decide, interviews, loops, offers, plan
-from . import bulkmove, chase, compare, desk, duplicates, opsreview, tour
+from . import bulkmove, chase, compare, desk, duplicates, opsreview, tour, updates
 from . import picks, private_tags, searchquery, xlsx, xlsx_export
 from .paths import backups_dir, data_dir, db_path, imports_dir, resource_dir
 from .store import (CANDIDATE_FIELDS, CHANGE_KIND, CHANGE_SOURCES, DEFAULT_SETTINGS, FIELD_LABELS, DuplicateValue,
@@ -389,6 +389,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["guarded_sites"] = [d for d, _ in site_guard.GUARDED_SITES]  # listed under Stricter site guards
     env.globals["guard_cap"] = site_guard.CAP
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
+    env.globals["update_banner"] = lambda: updates.banner(store)  # Today and Settings show a newer version
     env.globals["tour_payload"] = lambda request: tour_for_page(request)  # base.html draws the tour from this
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
@@ -2515,6 +2516,50 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
         if not (r["people"] or r["jobs"] or r["kept_people"] or r["kept_jobs"]):
             return back(request, notice="There was no sample data to remove.")
         return back(request, notice=removal_notice(r))
+
+    # ------------------------------------------------------------ updates (updates.py)
+    @app.post("/update/now")
+    async def update_now(request: Request):
+        """Run the installer for the newest version: it closes this copy, replaces it and opens the new one."""
+        b = updates.banner(store)
+        if not b:
+            return back(request, notice="You have the newest version.")
+        if not b["can_update"]:
+            return back(request, error="This copy can't update itself. Download the new version from the release "
+                                       "page, or run the install command again.")
+        try:
+            updates.start_update(log_path=data_dir() / "update.log")
+        except OSError as exc:
+            return back(request, error=f"The update could not start: {exc}")
+        return back(request, notice=f"Updating to {b['version']}. Talent Search closes and opens again in about a "
+                                    "minute, in a new browser tab. Your data is kept.")
+
+    @app.post("/update/dismiss")
+    async def update_dismiss(request: Request):
+        """Not now: hide the update line until the next version."""
+        updates.dismiss(store, str((await request.form()).get("version") or ""))
+        return back(request)
+
+    @app.post("/update/check")
+    def update_check(request: Request):
+        """Check now, from Settings."""
+        latest = updates.check(store)
+        if latest is None:
+            msg = "Could not reach GitHub to check. Try again later."
+        elif updates.newer(latest):
+            store.set_settings(update_dismissed="")  # asked on purpose: show it even if Not now hid it
+            msg = f"Talent Search {latest} is out. You have {__version__}."
+        else:
+            msg = f"You have the newest version ({__version__})."
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#updates", status_code=303)
+
+    @app.post("/settings/updates")
+    async def set_updates(request: Request):
+        on = (await request.form()).get("update_check") == "1"
+        store.set_settings(update_check="1" if on else "0")
+        msg = ("Talent Search checks for new versions once a day." if on else
+               "Talent Search no longer checks for new versions. It contacts nothing at all.")
+        return RedirectResponse("/settings?" + urlencode({"notice": msg}) + "#updates", status_code=303)
 
     # ------------------------------------------------------------ first-run tour
     def tour_for_page(request: Request) -> dict[str, Any] | None:
