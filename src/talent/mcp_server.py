@@ -1444,7 +1444,20 @@ def build_server(store: Store, search: SearchService | None = None) -> FastMCP:
             raise ToolError(f"No playbook named {quoted(str(name))}. Playbooks: {', '.join(books)}.")
         return _result(book["body"], {"name": key, "title": book["title"], "description": book["description"]})
 
+    def make_command_prompt(c: dict[str, str]):
+        def command_prompt(request: str = "") -> str:
+            return c["body"].replace("$ARGUMENTS", (request or "").strip() or "(nothing given)")
+        return command_prompt
+
+    taken: set[str] = set()
+    for cmd in skills.starter_commands():  # starter slash commands, also offered as prompts (/mcp__talent-search__find_talent)
+        pname = cmd["name"].replace("-", "_")
+        taken.add(pname)
+        mcp.prompt(name=pname, title=f"Talent Search: /{cmd['name']}", description=cmd["description"])(make_command_prompt(cmd))
+
     for book in books.values():  # also offered as prompts, which chat apps list in their prompt menu
+        if book["name"].replace("-", "_") in taken:  # a starter command of the same name reads this playbook itself
+            continue
         def make_prompt(b: dict[str, str] = book):
             return lambda: b["body"]
         mcp.prompt(name=book["name"].replace("-", "_"), title=f"Talent Search: {book['title']}", description=book["description"])(make_prompt())

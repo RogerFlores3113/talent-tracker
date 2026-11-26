@@ -167,6 +167,19 @@ From a terminal: `talent install-skills [--claude-code] [--codex] [--plugin [PAT
 Ask Claude Code or Codex: "install the skills in skills/ by following
 skills/INSTALL-SKILLS.md".
 
+**Starter commands.** The same plugin also brings seven slash commands. In Claude Code
+they are `/find-talent` and so on. Other connected apps list them as prompts (in Claude
+desktop, the + menu under the Talent Search connection). Codex has no slash commands for
+them, so ask for the job in words.
+
+- `/find-talent`: find new people for an open job and put them on its Shortlist.
+- `/match-job`: rank the people you already have against one job.
+- `/add-candidate`: save one person from a link, a resume or pasted text.
+- `/pipeline-review`: a short status update, ready to paste.
+- `/follow-ups`: what is due, with drafts ready to send.
+- `/today`: plan your recruiting day.
+- `/write-outreach`: draft a message to a candidate.
+
 ## Troubleshooting
 
 **Claude Desktop doesn't show Talent Search.**
