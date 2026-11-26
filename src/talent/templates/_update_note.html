@@ -1,0 +1,9 @@
+{# A newer version is out: one quiet line on Today and Settings (updates.py). Off with the Settings switch. #}
+{% set up = update_banner() %}{% if up %}
+<div class="update-note" id="update-note" role="status">Talent Search {{ up.version }} is out (you have {{ up.current }}).
+  <a href="{{ up.notes_url }}" target="_blank" rel="noopener noreferrer">What's new<span class="sr-only"> (opens in a new tab)</span></a>
+  {% if up.can_update %}<form method="post" action="/update/now" data-confirm="Update to {{ up.version }}? Talent Search closes, installs the new version and opens again in about a minute. Your data is kept."><button class="btn link" type="submit">Update</button></form>
+  {% else %}<span>To update, run the install command again.</span>{% endif %}
+  <form method="post" action="/update/dismiss"><input type="hidden" name="version" value="{{ up.version }}"><button class="btn link" type="submit">Not now</button></form>
+</div>
+{% endif %}

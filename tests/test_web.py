@@ -96,7 +96,7 @@ def test_every_page_renders_with_sample_data(store):
         assert r.status_code == 200, path
         assert "—" not in r.text, f"em-dash on {path}"
     home = c.get("/").text
-    assert "Interview with Maya Example" in home and "Stuck" in home and "Nothing is sent anywhere" in home
+    assert "Interview with Maya Example" in home and "Stuck" in home and "Your data is never sent anywhere" in home
     assert c.get("/nope").status_code == 404 and c.get("/candidates/9999").status_code == 404
 
 

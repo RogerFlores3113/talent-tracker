@@ -131,6 +131,7 @@ def open_window() -> bool:
 def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     import uvicorn
 
+    from . import updates
     from .store import Store
     from .web import create_app
 
@@ -163,7 +164,9 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             say.info("Updated the Talent Search skills in %s to this version.", label)
     except Exception:
         pass
-    app = create_app(Store(db_path()))
+    store = Store(db_path())
+    app = create_app(store)
+    updates.run_checks(store)  # once a day, in the background, unless turned off in Settings
     _write_port_file(port)
     url = f"http://127.0.0.1:{port}/"
     if open_browser:

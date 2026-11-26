@@ -2037,6 +2037,11 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "tour_loaded_at": "",  # when the tour added the demo people: saved searches made after it are offered for removal
     "tour_seen": "0",
     "private_tag_names": "",  # tags that always go to Private tags, whoever writes them (stored like candidates.tags)
+    # Update check (updates.py): "0" turns it off. The newest version GitHub named, when, and the one Not now hid.
+    "update_check": "1",
+    "update_latest": "",
+    "update_checked_at": "",
+    "update_dismissed": "",
 }
 
 # The color themes on the Settings page: (value, name, one-line description). The first is the default.

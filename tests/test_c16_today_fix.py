@@ -96,7 +96,7 @@ def test_replay_link_restarts_a_running_tour(store):
 
 def test_footer_and_job_header_wording(store):
     html = local_client(store).get("/").text
-    assert "Runs on this computer. Nothing is sent anywhere." in html and "uses none of your data" not in html
+    assert "Runs on this computer. Your data is never sent anywhere." in html and "uses none of your data" not in html
     job = store.add_job("Backend Engineer", company="Acme")
     jid = job["id"] if isinstance(job, dict) else job
     assert "in the running" in local_client(store).get(f"/jobs/{jid}").text
