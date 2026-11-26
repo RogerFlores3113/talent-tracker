@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
 ### Starter commands
 - The Claude plugin now includes seven starter slash commands: /find-talent, /match-job, /add-candidate, /pipeline-review, /follow-ups, /today and /write-outreach.
 - Every connected app also gets them as prompts (in Claude Code, /mcp__talent-search__find_talent; in Claude desktop, the + menu), each with one optional request box.
