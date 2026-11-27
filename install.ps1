@@ -91,7 +91,19 @@ function Install-TalentSearch {
             }
             $upgrade = $true
             Write-Host 'Replacing the existing copy. Your candidates and settings are kept.'
-            try { Remove-Item -LiteralPath $Target -Recurse -Force } catch {
+            # Windows can't delete a folder a process is standing in, and the app's Update button starts this script
+            # inside the app's folder: step out (both PowerShell's location and the process's) while replacing it.
+            $wasLocation = (Get-Location).Path
+            $wasDirectory = [Environment]::CurrentDirectory
+            Set-Location -LiteralPath $env:TEMP
+            [Environment]::CurrentDirectory = $env:TEMP
+            $removed = $false
+            for ($try = 0; $try -lt 10 -and -not $removed; $try++) {  # a just-closed app can hold its files a moment
+                try { Remove-Item -LiteralPath $Target -Recurse -Force; $removed = $true } catch { Start-Sleep -Seconds 1 }
+            }
+            if (Test-Path -LiteralPath $wasLocation) { Set-Location -LiteralPath $wasLocation }
+            if (Test-Path -LiteralPath $wasDirectory) { [Environment]::CurrentDirectory = $wasDirectory }
+            if (-not $removed) {
                 Stop-Install "Could not replace $Target. Please close Talent Search and try again. Your data is safe."
             }
         }
