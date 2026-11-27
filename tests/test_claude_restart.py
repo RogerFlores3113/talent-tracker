@@ -134,6 +134,8 @@ def test_config_newer_than_the_server_log_needs_a_restart(tmp_path, monkeypatch)
 # ------------------------------------------------------------ connecting at startup
 def _json_app(tmp_path, monkeypatch):
     monkeypatch.setattr(integrations, "is_frozen", lambda: True)
+    # where the app runs from is checked elsewhere; on Windows it wants talent-search-mcp.exe beside python.exe
+    monkeypatch.setattr(integrations, "launch_problem", lambda *a, **k: None)
     claude, codex = tmp_path / "claude", tmp_path / "codex"
     monkeypatch.setattr(integrations, "claude_config_path", lambda *a, **k: claude / "claude_desktop_config.json")
     monkeypatch.setattr(integrations, "codex_config_path", lambda *a, **k: codex / "config.toml")
