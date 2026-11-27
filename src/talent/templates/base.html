@@ -38,7 +38,7 @@
     <p>Talent Search v{{ version }}</p>
     <p><a href="/changes">History</a> · <a href="/privacy">Privacy</a> · <a href="/?tour=short">Take a short tour</a> · <a href="/?tour=full">Take the full tour with made-up people</a> · <a href="/report?where={{ path | urlencode }}">Report a problem</a></p>
   </footer>{% elif hm_head %}<footer class="foot hm-foot"><p>Made with Talent Search.</p></footer>{% endif %}
-  {% if not hide_chrome %}{% include "_update_note.html" %}{% endif %}
+  {% if not hide_chrome %}<div class="dock">{% include "_restart_note.html" %}{% include "_update_note.html" %}{% block dock %}{% endblock %}</div>{% endif %}
   {% set tour = tour_payload(request) %}{% if tour %}<div id="tour-data" hidden data-tour="{{ tour | tojson | forceescape }}"></div>{% endif %}
   {% block scripts %}{% endblock %}
 </body>

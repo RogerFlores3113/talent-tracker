@@ -390,6 +390,7 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
     env.globals["guard_cap"] = site_guard.CAP
     env.globals["sample_ids"] = lambda: sample_ids(store)  # templates badge sample people and jobs
     env.globals["update_banner"] = lambda: updates.banner(store)  # Today and Settings show a newer version
+    env.globals["claude_needs_restart"] = lambda: integrations.claude_needs_restart()  # the restart toast on every page
     env.globals["tour_payload"] = lambda request: tour_for_page(request)  # base.html draws the tour from this
     env.globals["ai_status_note"] = lambda job_id: ai_status_note(store, job_id)
     env.globals["ai_contacts_change"] = lambda key: review.contacts_change(store, key)  # "Contacts changed by your AI app"
@@ -4699,6 +4700,14 @@ def create_app(store: Store, search: SearchService | None = None, key: str | Non
             integrations.log_failure(exc)
             text = "We couldn't put the report together: " + integrations.friendly_error(exc)
         return page(request, "_connect_report.html", report=text)
+
+    @app.post("/connect/claude/restart")
+    def connect_claude_restart(request: Request):
+        """The restart toast: quit Claude Desktop and open it again so it loads Talent Search."""
+        result = integrations.restart_claude()
+        if result["ok"]:
+            return back(request, notice=result["message"])
+        return back(request, error=result["message"] or integrations.quit_instruction())
 
     @app.post("/connect/{target}", response_class=HTMLResponse)
     def connect(request: Request, target: str):

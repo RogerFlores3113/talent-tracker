@@ -95,6 +95,7 @@ def test_windows_logs_dir_prefers_the_new_local_folder(tmp_path, monkeypatch):
 
 def _connected(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(integrations, "restart_supported", lambda platform=None: True)
     cfg = tmp_path / "claude_desktop_config.json"
     assert integrations.connect_claude(cfg)["ok"]
     logs = tmp_path / "Logs"
@@ -128,3 +129,74 @@ def test_config_newer_than_the_server_log_needs_a_restart(tmp_path, monkeypatch)
     os.utime(log, (1000, 1000))
     os.utime(cfg, (2000, 2000))
     assert integrations.claude_needs_restart(cfg, logs) is True
+
+
+# ------------------------------------------------------------ connecting at startup
+def _json_app(tmp_path, monkeypatch):
+    monkeypatch.setattr(integrations, "is_frozen", lambda: True)
+    claude, codex = tmp_path / "claude", tmp_path / "codex"
+    monkeypatch.setattr(integrations, "claude_config_path", lambda *a, **k: claude / "claude_desktop_config.json")
+    monkeypatch.setattr(integrations, "codex_config_path", lambda *a, **k: codex / "config.toml")
+    return claude, codex
+
+
+def test_connect_if_missing_writes_entries_for_installed_apps(tmp_path, monkeypatch):
+    claude, codex = _json_app(tmp_path, monkeypatch)
+    claude.mkdir()
+    codex.mkdir()
+    assert integrations.connect_if_missing() == ["Claude Desktop", "Codex"]
+    assert integrations.entry_for("claude") is not None and integrations.entry_for("codex") is not None
+
+
+def test_connect_if_missing_skips_an_app_that_is_not_installed(tmp_path, monkeypatch):
+    claude, codex = _json_app(tmp_path, monkeypatch)
+    codex.mkdir()
+    assert integrations.connect_if_missing() == ["Codex"]
+    assert not claude.exists()
+
+
+def test_connect_if_missing_leaves_an_existing_entry_alone(tmp_path, monkeypatch):
+    claude, codex = _json_app(tmp_path, monkeypatch)
+    claude.mkdir()
+    codex.mkdir()
+    old = '{"mcpServers": {"talent-search": {"command": "/gone/talent"}}}'
+    (claude / "claude_desktop_config.json").write_text(old)
+    toml = '[mcp_servers.talent-search]\ncommand = "/gone/talent"\n'
+    (codex / "config.toml").write_text(toml)
+    assert integrations.connect_if_missing() == []
+    assert (claude / "claude_desktop_config.json").read_text() == old
+    assert (codex / "config.toml").read_text() == toml
+
+
+def test_connect_if_missing_does_nothing_in_a_developer_run(tmp_path, monkeypatch):
+    claude, _ = _json_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(integrations, "is_frozen", lambda: False)
+    claude.mkdir()
+    assert integrations.connect_if_missing() == []
+    assert not (claude / "claude_desktop_config.json").exists()
+
+
+# ------------------------------------------------------------ the restart toast and route
+def test_restart_toast_shows_only_when_claude_needs_a_restart(store, monkeypatch):
+    from conftest import local_client
+
+    c = local_client(store)
+    monkeypatch.setattr(integrations, "claude_needs_restart", lambda *a, **k: False)
+    assert 'id="restart-toast"' not in c.get("/").text
+    monkeypatch.setattr(integrations, "claude_needs_restart", lambda *a, **k: True)
+    page = c.get("/").text
+    assert 'id="restart-toast"' in page and "Claude Desktop doesn&#39;t see Talent Search yet." in page.replace("'", "&#39;")
+    assert 'action="/connect/claude/restart"' in page and "Restart Claude</button>" in page
+
+
+def test_restart_route_restarts_and_flashes_the_message(store, monkeypatch):
+    from conftest import flash_of, local_client
+
+    monkeypatch.setattr(integrations, "restart_claude",
+                        lambda **k: {"supported": True, "ok": True, "message": integrations.CLAUDE_DONE})
+    r = local_client(store).post("/connect/claude/restart", follow_redirects=False)
+    assert r.status_code == 303 and flash_of(r) == integrations.CLAUDE_DONE
+    monkeypatch.setattr(integrations, "restart_claude",
+                        lambda **k: {"supported": True, "ok": False, "message": "Connected, but Claude is still open."})
+    r = local_client(store).post("/connect/claude/restart", follow_redirects=False)
+    assert flash_of(r, "flash_error") == "Connected, but Claude is still open."

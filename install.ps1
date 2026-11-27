@@ -144,7 +144,7 @@ function Install-TalentSearch {
         } else {
             Write-Host 'Next: open Talent Search, then press "Connect Claude". Its skills come with the connection.'
         }
-        Write-Host 'Connect Claude quits and reopens Claude Desktop (never by force), so save anything you are typing there first.'
+        Write-Host 'Connect Claude quits and reopens Claude Desktop, so save anything you are typing there first.'
     }
     catch {
         if ($_.Exception.Message -ne 'TALENT_INSTALL_STOPPED') {
