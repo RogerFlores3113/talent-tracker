@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -136,13 +137,14 @@ def start_update(platform: str | None = None, popen: Callable[..., Any] = subpro
     """Run the installer in its own process, so it outlives this copy when the installer closes it."""
     platform = platform or sys.platform
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL  # the child process writes to it
+    outside = tempfile.gettempdir()  # never the app's own folder: Windows can't replace a folder a process stands in
     if platform == "win32":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", install_command(platform)],
-              stdin=subprocess.DEVNULL, stdout=out, stderr=out, creationflags=flags, close_fds=True)
+              stdin=subprocess.DEVNULL, stdout=out, stderr=out, creationflags=flags, close_fds=True, cwd=outside)
     else:
         popen(["/bin/sh", "-c", install_command(platform)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-              start_new_session=True, close_fds=True)
+              start_new_session=True, close_fds=True, cwd=outside)
 
 
 def dismiss(store: Store, version: str) -> None:

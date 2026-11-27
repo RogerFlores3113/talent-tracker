@@ -4,6 +4,9 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Fixes
+- Update in the app works on Windows. The installer it starts tried to replace the app's folder while standing in it, which Windows refuses ("Could not replace ... Please close Talent Search"). It now steps out of the folder first and retries for a few seconds while the closed app lets go of its files.
+
 ## [0.2.4] - 2026-11-26
 
 ### Settings

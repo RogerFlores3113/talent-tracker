@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def test_update_runs_the_readme_installer_in_its_own_process(tmp_path):
     cmd, kw = calls[-1]
     assert cmd[:2] == ["powershell", "-NoProfile"] and cmd[-1].startswith("irm https://raw.githubusercontent.com/")
     assert cmd[-1].endswith("/install.ps1 | iex") and kw["stdin"] == subprocess.DEVNULL
+    assert kw["cwd"] == tempfile.gettempdir()  # not the app's folder, which the installer replaces
     updates.start_update("darwin", popen=lambda cmd, **kw: calls.append((cmd, kw)))
     cmd, kw = calls[-1]
     assert cmd[:2] == ["/bin/sh", "-c"] and "install.sh" in cmd[2] and kw["start_new_session"]
@@ -114,3 +116,11 @@ def test_privacy_page_names_the_update_check(store):
     page = local_client(store).get("/privacy").text
     assert "The update check is the one thing it fetches" in page and "stays offline" not in page
     assert "Your data is never sent anywhere." in page  # the footer
+
+
+def test_the_windows_installer_steps_out_of_the_folder_it_replaces():
+    ps1 = (Path(__file__).resolve().parents[1] / "install.ps1").read_text(encoding="utf-8")
+    block = ps1.split("Replacing the existing copy", 1)[1].split("New-Item -ItemType Directory -Path $Target", 1)[0]
+    assert block.index("Set-Location -LiteralPath $env:TEMP") < block.index("Remove-Item -LiteralPath $Target")
+    assert "[Environment]::CurrentDirectory = $env:TEMP" in block  # PowerShell's location alone isn't enough
+    assert "$try -lt 10" in block and "Set-Location -LiteralPath $wasLocation" in block
