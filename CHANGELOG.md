@@ -4,6 +4,8 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-27
+
 ### Update notice and footer
 - A new version shows as a small notice in the bottom right of every page, with What's new, Update and Not now. The X hides it until you close the browser; Not now hides it until the next version.
 - The footer is two lines: "Talent Search" and the version, then the links. "AI changes" is now History and opens the full change history.
