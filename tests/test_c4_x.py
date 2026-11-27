@@ -74,9 +74,9 @@ def test_welcome_stops_asking_hiring_for_once_answered(store):
     r = client.post("/jobs/wording", data={"inhouse": "0", "next": "/"}, follow_redirects=False)
     assert r.status_code == 303
     page = client.get("/").text
-    assert question not in page and "Set up for hiring for clients." in page
+    assert question not in page and "Set up for hiring for" not in page
     client.post("/settings", data={"hiring_for": "own"})
-    assert "Set up for hiring for your own company." in client.get("/").text
+    assert "Set up for hiring for" not in client.get("/").text
 
 
 # ------------------------------------------------------- 4. data note scope

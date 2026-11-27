@@ -28,6 +28,8 @@
 //   data-theme-pick           on a theme radio on Settings: preview the theme at once (Save keeps it)
 //   data-settings-form        on each Settings form: a change brings up the save bar (#save-bar) at the bottom right,
 //                             whose Save sends every changed form and whose Discard reloads the page as it was
+//   data-update-toast="1.2.3"   on the update toast (#update-toast): its close button (data-update-close) hides it for
+//                             this browser session only (sessionStorage ts-update-hidden holds the version closed)
 //   .settings-index           the Settings section list: the section in view is marked aria-current
 //   data-color-bubble         on a colour bubble button (data-cid, data-color, data-next, data-prev): a click saves the
 //                             next colour at once and updates the bubble in place; Right-click or Shift-click goes to
@@ -735,7 +737,11 @@
       const snap = f => new URLSearchParams(new FormData(f)).toString();
       const start = new Map(forms.map(f => [f, snap(f)]));
       const changed = () => forms.filter(f => snap(f) !== start.get(f));
-      const update = () => { bar.hidden = changed().length === 0; };
+      const update = () => {
+        bar.hidden = changed().length === 0;
+        // the update toast stands above the bar, whatever height the bar wraps to
+        document.documentElement.style.setProperty("--save-bar-h", bar.hidden ? "0px" : bar.offsetHeight + "px");
+      };
       forms.forEach(f => { f.addEventListener("input", update); f.addEventListener("change", update); });
       bar.querySelector("[data-save-discard]").addEventListener("click", () => window.location.reload());
       bar.querySelector("[data-save-all]").addEventListener("click", async e => {
@@ -779,6 +785,20 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startSettings);
   else startSettings();
+
+  // ---- Update toast: the X hides it until the browser session ends; a newer version shows it again.
+  function startUpdateToast() {
+    const toast = document.querySelector("[data-update-toast]");
+    if (!toast) return;
+    const version = toast.getAttribute("data-update-toast");
+    try { if (window.sessionStorage.getItem("ts-update-hidden") === version) toast.hidden = true; } catch (e) { /* no storage: show it */ }
+    toast.querySelector("[data-update-close]").addEventListener("click", () => {
+      toast.hidden = true;
+      try { window.sessionStorage.setItem("ts-update-hidden", version); } catch (e) { /* no storage: hidden until the page changes */ }
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startUpdateToast);
+  else startUpdateToast();
 })();
 
 // Candidates table, skill highlights: after a pick or a remove the page reloads, so put keyboard focus back on the

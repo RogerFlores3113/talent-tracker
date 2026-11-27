@@ -1,4 +1,4 @@
-"""Cycle 20: a quiet line when a newer version is out, a Settings switch to stop checking, and Update now."""
+"""Cycle 20: a toast when a newer version is out, a Settings switch to stop checking, and Update now."""
 from __future__ import annotations
 
 import subprocess
@@ -20,26 +20,28 @@ def test_versions_compare_as_numbers():
     assert updates.newer("0.10.0", "0.9.9") and not updates.newer("0.2.2", "0.2.2") and not updates.newer(None)
 
 
-def test_no_line_until_github_names_a_newer_version(store):
+def test_no_toast_until_github_names_a_newer_version(store):
     c = local_client(store)
-    assert 'id="update-note"' not in c.get("/").text
+    assert 'id="update-toast"' not in c.get("/").text
     store.set_settings(update_latest=__version__)
-    assert 'id="update-note"' not in c.get("/").text
+    assert 'id="update-toast"' not in c.get("/").text
     store.set_settings(update_latest=_newer())
     today = c.get("/").text
-    assert 'id="update-note"' in today and f"Talent Search {_newer()} is out (you have {__version__})" in today
-    assert updates.notes_url(_newer()) in today
-    assert 'id="update-note"' not in c.get("/candidates").text  # Today and Settings only
+    assert 'id="update-toast"' in today and f"Version {_newer()} is available (you have {__version__})." in today
+    assert updates.notes_url(_newer()) in today and 'aria-label="Close"' in today
+    assert 'action="/update/dismiss"' in today
+    for page in ("/candidates", "/jobs", "/settings"):  # every page, not only Today
+        assert f"Version {_newer()} is available" in c.get(page).text, page
 
 
 def test_not_now_hides_it_until_the_next_version(store):
     c = local_client(store)
     store.set_settings(update_latest=_newer())
     c.post("/update/dismiss", data={"version": _newer()}, follow_redirects=False)
-    assert 'id="update-note"' not in c.get("/").text
+    assert 'id="update-toast"' not in c.get("/").text
     major, minor, patch = updates.parse(_newer())
     store.set_settings(update_latest=f"{major}.{minor}.{patch + 1}")
-    assert 'id="update-note"' in c.get("/").text
+    assert 'id="update-toast"' in c.get("/").text
 
 
 def test_the_switch_turns_it_off_and_says_nothing_is_contacted(store):
@@ -48,7 +50,7 @@ def test_the_switch_turns_it_off_and_says_nothing_is_contacted(store):
     assert 'name="update_check" value="1" checked' in c.get("/settings").text  # on by default
     msg = flash_of(c.post("/settings/updates", data={}, follow_redirects=False))
     assert "contacts nothing at all" in msg and store.setting("update_check") == "0"
-    assert 'id="update-note"' not in c.get("/").text and not updates.enabled(store)
+    assert 'id="update-toast"' not in c.get("/").text and not updates.enabled(store)
     c.post("/settings/updates", data={"update_check": "1"}, follow_redirects=False)
     assert updates.enabled(store)
 
@@ -63,7 +65,7 @@ def test_check_now_reports_what_github_said(store, monkeypatch):
     store.set_settings(update_dismissed=_newer())
     monkeypatch.setattr(updates, "fetch_latest", lambda timeout=5.0: _newer())
     assert f"Talent Search {_newer()} is out" in flash_of(c.post("/update/check", follow_redirects=False))
-    assert 'id="update-note"' in c.get("/").text  # asked on purpose, so Not now no longer hides it
+    assert 'id="update-toast"' in c.get("/").text  # asked on purpose, so Not now no longer hides it
 
 
 def test_a_check_is_due_once_a_day(store):
@@ -104,7 +106,9 @@ def test_update_now_starts_it_only_where_it_can(store, monkeypatch):
     started = []
     monkeypatch.setattr(updates, "start_update", lambda **kw: started.append(kw))
     monkeypatch.setattr(updates, "can_update_here", lambda *a, **k: False)
-    assert "To update, run the install command again" in c.get("/").text
+    page = c.get("/").text
+    assert 'action="/update/now"' not in page and "To update, run the install command again" not in page
+    assert 'href="https://github.com/RogerFlores3113/talent-tracker/releases/latest"' in page
     assert "can't update itself" in flash_of(c.post("/update/now", follow_redirects=False), "flash_error")
     monkeypatch.setattr(updates, "can_update_here", lambda *a, **k: True)
     assert 'action="/update/now"' in c.get("/").text
@@ -115,7 +119,7 @@ def test_update_now_starts_it_only_where_it_can(store, monkeypatch):
 def test_privacy_page_names_the_update_check(store):
     page = local_client(store).get("/privacy").text
     assert "The update check is the one thing it fetches" in page and "stays offline" not in page
-    assert "Your data is never sent anywhere." in page  # the footer
+    assert "never sent anywhere" not in page and f"<p>Talent Search v{__version__}</p>" in page  # the footer
 
 
 def test_the_windows_installer_steps_out_of_the_folder_it_replaces():

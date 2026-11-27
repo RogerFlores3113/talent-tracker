@@ -1,9 +1,13 @@
-{# A newer version is out: one quiet line on Today and Settings (updates.py). Off with the Settings switch. #}
+{# A newer version is out: a toast at the bottom right of every page (updates.py). Off with the Settings switch. #}
 {% set up = update_banner() %}{% if up %}
-<div class="update-note" id="update-note" role="status">Talent Search {{ up.version }} is out (you have {{ up.current }}).
-  <a href="{{ up.notes_url }}" target="_blank" rel="noopener noreferrer">What's new<span class="sr-only"> (opens in a new tab)</span></a>
-  {% if up.can_update %}<form method="post" action="/update/now" data-confirm="Update to {{ up.version }}? Talent Search closes, installs the new version and opens again in about a minute. Your data is kept."><button class="btn link" type="submit">Update</button></form>
-  {% else %}<span>To update, run the install command again.</span>{% endif %}
-  <form method="post" action="/update/dismiss"><input type="hidden" name="version" value="{{ up.version }}"><button class="btn link" type="submit">Not now</button></form>
+<div class="update-toast" id="update-toast" role="status" data-update-toast="{{ up.version }}">
+  <button class="btn ghost small update-toast-close" type="button" aria-label="Close" data-update-close>&times;</button>
+  <p>Version {{ up.version }} is available (you have {{ up.current }}).</p>
+  <div class="update-toast-acts">
+    <a class="btn ghost small" href="{{ up.notes_url }}" target="_blank" rel="noopener noreferrer">What's new<span class="sr-only"> (opens in a new tab)</span></a>
+    {% if up.can_update %}<form method="post" action="/update/now" data-confirm="Update to {{ up.version }}? Talent Search closes, installs the new version and opens again in about a minute. Your data is kept."><button class="btn small" type="submit">Update</button></form>
+    {% else %}<a class="btn small" href="https://github.com/RogerFlores3113/talent-tracker/releases/latest" target="_blank" rel="noopener noreferrer">Update<span class="sr-only"> (opens in a new tab)</span></a>{% endif %}
+    <form method="post" action="/update/dismiss"><input type="hidden" name="version" value="{{ up.version }}"><button class="btn ghost small" type="submit">Not now</button></form>
+  </div>
 </div>
 {% endif %}
