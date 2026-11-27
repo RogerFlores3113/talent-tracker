@@ -280,9 +280,9 @@
 </section>
 </div>
 </div>
-<div class="save-bar" id="save-bar" role="region" aria-label="Unsaved changes" hidden>
+{% endblock %}
+{% block dock %}<div class="save-bar" id="save-bar" role="region" aria-label="Unsaved changes" hidden>
   <p>You have unsaved changes.</p>
   <button class="btn ghost" type="button" data-save-discard>Discard</button>
   <button class="btn primary" type="button" data-save-all>Save</button>
-</div>
-{% endblock %}
+</div>{% endblock %}

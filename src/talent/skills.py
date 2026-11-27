@@ -36,6 +36,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -467,8 +468,14 @@ def write_plugin(path: Path | None = None) -> Path:
     return path
 
 
-def claude_app_command(platform: str | None = None, env: dict[str, str] | None = None) -> list[str] | None:
-    """How to start the Claude desktop app, or None when it isn't found (or on Linux, which has none)."""
+def _powershell_store_family(name: str) -> str:
+    cmd = ["powershell", "-NoProfile", "-Command", f"(Get-AppxPackage -Name {name}).PackageFamilyName"]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+
+
+def claude_app_command(platform: str | None = None, env: dict[str, str] | None = None, run=None) -> list[str] | None:
+    """How to start the Claude desktop app, or None when it isn't found (or on Linux, which has none).
+    run(name) returns PowerShell's text for the Store package family; injectable for tests."""
     platform = platform or sys.platform
     env = os.environ if env is None else env
     if platform == "darwin":
@@ -481,6 +488,12 @@ def claude_app_command(platform: str | None = None, env: dict[str, str] | None =
             for exe in (Path(local) / "AnthropicClaude" / "Claude.exe", Path(local) / "Programs" / "Claude" / "Claude.exe"):
                 if exe.is_file():
                     return [str(exe)]
+        try:  # the Microsoft Store build has no fixed exe path, but it opens by its package family and app id
+            family = (run or _powershell_store_family)("Claude").strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if family:
+            return ["explorer.exe", f"shell:AppsFolder\\{family}!Claude"]
     return None
 
 

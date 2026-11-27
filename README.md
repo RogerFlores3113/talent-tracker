@@ -96,7 +96,7 @@ cd "Talent Search"
 Talent Search opens in your web browser. One button there finishes the setup: press
 **Connect Claude** (Codex, LM Studio and other apps have their own button on the same
 page). On Mac and Windows it quits and reopens Claude Desktop for you so the link takes
-effect (never by force, so save your work there first). Linux has no restart: reopen
+effect (save your work there first). Linux has no restart: reopen
 Claude Desktop yourself. The skills come with the connection, so there is nothing else
 to add.
 

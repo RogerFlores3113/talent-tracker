@@ -81,11 +81,11 @@ def test_windows_running_is_asked_to_close_then_started():
     assert f.launched == [[r"C:\Claude\Claude.exe"]] and r["ok"]
 
 
-def test_windows_that_will_not_close_is_never_force_killed():
+def test_windows_that_will_not_close_even_when_forced_is_reported():
     f = Fake(quits=False)
     r = f.go("win32", [r"C:\Claude\Claude.exe"])
-    assert f.calls == [["taskkill", "/PID", "4242"]]  # asked once, politely
-    assert f.launched == [] and not r["ok"] and f.t >= 10
+    assert f.calls == [["taskkill", "/PID", "4242"], ["taskkill", "/F", "/T", "/PID", "4242"]]
+    assert f.launched == [] and not r["ok"] and f.t >= 15
     assert r["message"].startswith("Connected") and integrations.quit_instruction("win32") in r["message"]
 
 

@@ -1,0 +1,10 @@
+{# Claude Desktop has our entry but hasn't started the server yet: a toast above the update toast, on every page. #}
+{% if claude_needs_restart() %}
+<div class="restart-toast" id="restart-toast" role="status" data-restart-toast>
+  <button class="btn ghost small update-toast-close" type="button" aria-label="Close" data-restart-close>&times;</button>
+  <p>Claude Desktop doesn't see Talent Search yet.</p>
+  <div class="update-toast-acts">
+    <form method="post" action="/connect/claude/restart" data-confirm="Restart Claude Desktop? It closes and opens again. Save anything you are typing there first."><button class="btn small" type="submit">Restart Claude</button></form>
+  </div>
+</div>
+{% endif %}

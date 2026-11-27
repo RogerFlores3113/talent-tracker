@@ -157,6 +157,13 @@ def run_app(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             say.info("Pointed %s's Talent Search entry at this copy of the app, because the old path was gone.", target)
     except Exception:
         pass
+    try:  # first run: an installed Claude Desktop or Codex gets our entry without a click; never stop the app starting
+        from . import integrations
+
+        for label in integrations.connect_if_missing():
+            say.info("Connected %s to Talent Search, because it had no entry yet.", label)
+    except Exception:
+        pass
     try:  # skills this app installed before follow it to the new version; never stop the app starting
         from . import skills
 

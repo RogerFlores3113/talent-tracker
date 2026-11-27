@@ -213,5 +213,5 @@ else
   say "Next: open Talent Search, then press \"Connect Claude\". Its skills come with the connection."
 fi
 if [ "$OS" = "Darwin" ]; then
-  say "Connect Claude quits and reopens Claude Desktop (never by force), so save anything you are typing there first."
+  say "Connect Claude quits and reopens Claude Desktop, so save anything you are typing there first."
 fi

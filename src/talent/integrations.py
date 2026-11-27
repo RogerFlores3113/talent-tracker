@@ -234,7 +234,9 @@ def _launch_detached(cmd: list[str]) -> None:
 
 def restart_claude(*, platform: str | None = None, running=None, run=None, launch=None, command: list[str] | None = None,
                    sleep=None, clock=None, wait: float | None = None, pids=None) -> dict[str, Any]:
-    """Quit Claude Desktop gracefully (never forced) so it rereads its settings, then open it. Never raises.
+    """Quit Claude Desktop so it rereads its settings, then open it. Never raises. Mac quits it gracefully only.
+    On Windows closing the window just hides Claude in the tray, so if it is still running after the graceful
+    quit its own processes are force-closed (an unsaved draft there is lost, which the Connect button warns about).
 
     Returns {supported, ok, was_running, quit, opened, message}. ok means Claude is open again. message is the one
     line to show: CLAUDE_DONE on success, otherwise what to do by hand. Everything that touches a process is
@@ -261,17 +263,25 @@ def restart_claude(*, platform: str | None = None, running=None, run=None, launc
         if was:
             if platform == "darwin":
                 quit_cmds = [["osascript", "-e", 'tell application "Claude" to quit']]
-            else:  # by process id, only Claude Desktop's (never the Claude Code command line); no /F: it could lose a draft
+            else:  # by process id, only Claude Desktop's (never the Claude Code command line)
                 quit_cmds = [["taskkill", "/PID", str(pid)] for pid in ((pids or windows_desktop_pids)() or [])]
-            for quit_cmd in quit_cmds:
-                try:
-                    run(quit_cmd)
-                except Exception:
-                    pass
-            deadline = clock() + limit
-            while running("claude") and clock() < deadline:
-                sleep(0.5)
-            if running("claude"):
+
+            def close_and_wait(cmds: list[list[str]], seconds: float) -> bool:
+                for quit_cmd in cmds:
+                    try:
+                        run(quit_cmd)
+                    except Exception:
+                        pass
+                deadline = clock() + seconds
+                while running("claude") and clock() < deadline:
+                    sleep(0.5)
+                return not running("claude")
+
+            gone = close_and_wait(quit_cmds, limit)
+            if not gone and platform == "win32":  # the tray keeps Claude alive after a polite quit
+                force = [["taskkill", "/F", "/T", "/PID", str(pid)] for pid in ((pids or windows_desktop_pids)() or [])]
+                gone = close_and_wait(force, 5.0)
+            if not gone:
                 out["message"] = "Connected, but Claude is still open. " + quit_instruction(platform)
                 return out
             out["quit"] = True
@@ -434,6 +444,22 @@ def claude_connected(path: Path | None = None) -> bool:
     """Our entry is there and its command exists and looks right."""
     entry = _json_entry(path or claude_config_path())
     return entry is not None and not check_entry(entry)
+
+
+def claude_needs_restart(path: Path | None = None, logs: Path | None = None) -> bool:
+    """Our entry is in Claude's settings but Claude hasn't started our server since they were written, judged
+    by its own log for the server being missing or older than the settings file. File stats only: it runs on
+    every page."""
+    if not restart_supported():
+        return False
+    path = path or claude_config_path()
+    if not claude_connected(path):
+        return False
+    try:
+        log = (logs or claude_logs_dir()) / f"mcp-server-{SERVER_KEY}.log"
+        return not log.is_file() or log.stat().st_mtime < path.stat().st_mtime
+    except OSError:
+        return False
 
 
 # -------------------------------------------------------------- LM Studio
@@ -763,6 +789,9 @@ def result_line(result: dict[str, Any]) -> str:
 def claude_logs_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Logs" / "Claude"
+    if sys.platform == "win32" and (local := os.environ.get("LOCALAPPDATA")):
+        if (current := Path(local) / "Claude" / "Logs").is_dir():  # where Claude Desktop writes them now
+            return current
     return claude_config_dir() / "logs"  # Windows (Store copy included) and Linux keep logs beside the settings
 
 
@@ -893,3 +922,20 @@ def repair_if_packaged() -> list[str]:
     """Startup self-repair, only for the packaged app: a developer run must never point an installed app's
     entry at a dev environment."""
     return repair_stale_entries() if is_frozen() else []
+
+
+def connect_if_missing() -> list[str]:
+    """Startup, packaged app only: add our entry to Claude Desktop and Codex when the app is installed and has
+    none. An existing entry is never touched and nothing is restarted. Returns the apps connected."""
+    if not is_frozen():
+        return []
+    done: list[str] = []
+    for label, path_fn, entry_fn, writer in (("Claude Desktop", claude_config_path, _json_entry, connect_claude),
+                                             ("Codex", codex_config_path, _codex_entry, connect_codex)):
+        try:
+            path = path_fn()
+            if path.parent.is_dir() and entry_fn(path) is None and writer(path).get("ok"):
+                done.append(label)
+        except Exception:  # starting the app must never fail because of this
+            continue
+    return done

@@ -74,7 +74,7 @@ configuration files yourself. The installer's closing text says that **Connect C
 quits and reopens Claude Desktop on Mac and Windows.
 
 Before they press **Connect Claude**, warn them: on Mac and Windows it quits and reopens
-Claude Desktop (it never forces it), so this chat may close, and they can come back to
+Claude Desktop, so this chat may close, and they can come back to
 it afterwards. Linux has no restart. Save anything they are typing in Claude first.
 
 If the installer ends with "Already connected. Restart Claude Desktop to use the new
