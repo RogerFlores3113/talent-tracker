@@ -4,6 +4,11 @@ All notable changes to Talent Search. Newest first.
 
 ## [Unreleased]
 
+### Update notice and footer
+- A new version shows as a small notice in the bottom right of every page, with What's new, Update and Not now. The X hides it until you close the browser; Not now hides it until the next version.
+- The footer is two lines: "Talent Search" and the version, then the links. "AI changes" is now History and opens the full change history.
+- The welcome page and the footer drop their extra lines of text.
+
 ### Fixes
 - Update in the app works on Windows. The installer it starts tried to replace the app's folder while standing in it, which Windows refuses ("Could not replace ... Please close Talent Search"). It now steps out of the folder first and retries for a few seconds while the closed app lets go of its files.
 

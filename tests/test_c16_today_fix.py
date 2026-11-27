@@ -1,7 +1,7 @@
 """Review fixes: Today time zone prompt, next steps, locked page, tour wording, Candidates line, job header, footer."""
 from pathlib import Path
 
-from talent import integrations, reports, tour
+from talent import __version__, integrations, reports, tour
 
 from conftest import local_client
 
@@ -96,7 +96,10 @@ def test_replay_link_restarts_a_running_tour(store):
 
 def test_footer_and_job_header_wording(store):
     html = local_client(store).get("/").text
-    assert "Runs on this computer. Your data is never sent anywhere." in html and "uses none of your data" not in html
+    assert "never sent anywhere" not in html and "uses none of your data" not in html
+    foot = html.split('<footer class="foot">', 1)[1].split("</footer>", 1)[0]
+    assert foot.strip().startswith(f"<p>Talent Search v{__version__}</p>")
+    assert '<a href="/changes">History</a>' in foot and "AI changes" not in foot and f"· v{__version__}" not in foot
     job = store.add_job("Backend Engineer", company="Acme")
     jid = job["id"] if isinstance(job, dict) else job
     assert "in the running" in local_client(store).get(f"/jobs/{jid}").text

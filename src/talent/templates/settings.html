@@ -251,8 +251,7 @@
 
 <section class="panel" id="updates">
   <h2>Updates</h2>
-  {% include "_update_note.html" %}
-  <p>Once a day, Talent Search asks GitHub for the number of its newest version and shows a short line on Today when there is one. It sends nothing about you or your candidates. GitHub sees this computer's internet address, as any website does.</p>
+  <p>Once a day, Talent Search asks GitHub for the number of its newest version and shows a small notice at the bottom right when there is one. It sends nothing about you or your candidates. GitHub sees this computer's internet address, as any website does.</p>
   <form method="post" action="/settings/updates" class="stack" id="settings-updates" data-settings-form>
     <label class="check"><input type="checkbox" name="update_check" value="1" {{ 'checked' if s.update_check != '0' }}>
       <span><strong>Check for new versions</strong> <span class="fine">On by default. Off: Talent Search contacts nothing at all.</span></span></label>

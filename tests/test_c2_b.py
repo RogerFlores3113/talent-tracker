@@ -185,7 +185,7 @@ def test_changes_page_lists_and_filters(store):
     assert "harvest@evil.example" in ai and "CTO" not in ai
     assert "Undo all AI changes since" in ai
     assert "harvest@evil.example" in c.get("/changes?since=1").text
-    assert 'href="/changes?who=ai"' in c.get("/settings").text and 'href="/changes?who=ai"' in c.get("/").text
+    assert 'href="/changes">History</a>' in c.get("/settings").text and 'href="/changes">History</a>' in c.get("/").text  # footer
 
 
 def test_undo_one_change_from_the_changes_page(store):

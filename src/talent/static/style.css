@@ -162,9 +162,14 @@ body.wide main { max-width: 1280px; }
 .top nav a.on { background: var(--nav-on); font-weight: 600; }
 .top :focus-visible { outline-color: var(--header-text); }
 .demo-clear { margin: 0; }
-.update-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); margin: 0 0 var(--space-3);
-               font-size: var(--fs-sm); color: var(--muted); }
-.update-note form { display: inline; margin: 0; }
+.update-toast { position: fixed; right: var(--space-5); bottom: var(--space-5); z-index: 799; max-width: 26rem; padding: var(--space-3) var(--space-5) var(--space-3) var(--space-4);
+                background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-up); }
+.update-toast[hidden] { display: none; }
+body:has(#save-bar:not([hidden])) .update-toast { bottom: calc(var(--space-5) + var(--save-bar-h, 0px) + var(--space-3)); }
+.update-toast p { margin: 0 0 var(--space-3); font-size: var(--fs-sm); }
+.update-toast-acts { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.update-toast-acts form { margin: 0; }
+.update-toast-close { position: absolute; top: var(--space-1); right: var(--space-1); font-size: 1.25rem; line-height: 1; }
 
 /* ---- Settings: a section index on the left (the one in view bright, the rest faded) and the save bar ---- */
 .settings-layout { display: grid; grid-template-columns: 11rem minmax(0, 940px); gap: var(--space-6); align-items: start; }
@@ -188,6 +193,7 @@ body.wide main { max-width: 1280px; }
 .foot { text-align: center; color: var(--muted); font-size: var(--fs-sm); line-height: 1.8; padding: var(--space-5) var(--space-5) var(--space-6);
         border-top: 1px solid var(--line); max-width: 940px; margin: 0 auto; }
 
+.foot p { margin: 0; }
 .foot a { white-space: nowrap; }  /* a link that wraps between lines gets a hit area as wide as the whole footer */
 
 /* ==== Search and lists ==== */
@@ -317,6 +323,8 @@ select { padding: var(--space-2) var(--space-2); }
   .filters { flex-direction: column; }
   .top { padding: var(--space-3) var(--space-4); background: var(--head-grad-narrow); }
   .save-bar { left: var(--space-4); right: var(--space-4); bottom: var(--space-4); justify-content: flex-end; }
+  .update-toast { left: var(--space-4); right: var(--space-4); bottom: var(--space-4); max-width: none; }
+  body:has(#save-bar:not([hidden])) .update-toast { bottom: calc(var(--space-4) + var(--save-bar-h, 0px) + var(--space-3)); }
   .top nav { margin: 0 calc(var(--space-2) * -1); }
   main { padding: var(--space-5) var(--space-4) var(--space-6); }
   .panel { padding: var(--space-4); }

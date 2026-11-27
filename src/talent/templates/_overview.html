@@ -24,10 +24,8 @@
 {% if total_all == 0 and not jobs %}
 <div class="welcome">
   <h1>Welcome to Talent Search</h1>
-  <p class="lead">Your own candidate database, on this computer. Pick a way to start.</p>
   {{ start_options(True) }}
-  {% if hiring_for_answered() %}<p class="fine hiring-for">Set up for hiring for {{ 'your own company' if inhouse() else 'clients' }}. You can change it in <a href="/settings">Settings</a>.</p>
-  {% else %}{{ hiring_for_form("/") }}{% endif %}
+  {% if not hiring_for_answered() %}{{ hiring_for_form("/") }}{% endif %}
 </div>
 {% else %}
 {% if real_count == 0 %}
